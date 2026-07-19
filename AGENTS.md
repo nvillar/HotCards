@@ -1,0 +1,89 @@
+# AGENTS.md
+
+Durable coding and repository guidance for HyperGen. For what the project is
+and how to run it, see `README.md`. For planned work and acceptance criteria,
+see GitHub Issues and the
+[**HyperGen POC** milestone](https://github.com/nvillar/HyperGen/milestone/1).
+Do not duplicate that material here.
+
+## Environment and commands
+
+Use `uv` only; do not add ad hoc `pip` instructions.
+
+```sh
+uv sync
+uv run hypergen
+uv run pytest
+uv run ruff check .
+uv run ruff format .
+uv run hypergen-eval smoke
+uv run hypergen-eval hotspots
+uv run hypergen-eval images
+uv run hypergen-eval e2e
+```
+
+Ordinary automated tests must not require live model calls. Use recorded
+responses and fakes in `pytest`; use `hypergen-eval` or explicit smoke commands
+for live Ollama and MFLUX runs.
+
+## Repository layout
+
+- `src/hypergen/domain/` — stack models, geometry, validation.
+- `src/hypergen/storage/` — bundle persistence and migrations.
+- `src/hypergen/generation/` — prompt builders and model adapters.
+- `src/hypergen/application/` — document controller, commands, workers.
+- `src/hypergen/ui/` — PySide6 widgets.
+- `src/hypergen/evaluation/` — evaluation harness implementation.
+- `tests/` — focused unit tests.
+- `evals/cases/` — version-controlled cases, rubrics, and permitted frozen inputs.
+- `evals/runs/` — generated immutable run output; keep it out of Git.
+
+## Architectural constraints
+
+- Keep one authoritative in-memory stack document. UI widgets render state and
+  issue commands; they do not own independent domain truth.
+- Use Pydantic at serialized and model-response boundaries.
+- Keep image actions, model actions, and storage out of widgets.
+- Reuse production prompt builders, schemas, adapters, and geometry validation
+  in the evaluation harness. Do not fork generation behavior.
+- Store each hotspot set under exactly one image revision. Never silently reuse
+  hotspots against another image revision.
+- Represent an image revision's applied hotspot set as `HotspotSet | None`.
+  `None` means no set has been applied; an empty `HotspotSet` means an applied
+  set currently contains no interactions.
+- Applied hotspot presence is acceptance. Do not add workflow flags such as
+  `unreviewed`, `accepted`, `manually_edited`, or `stale`.
+- Use discriminated resolved/unresolved types for persisted references, not a
+  nullable UUID plus status boolean. Store resolved runtime targets by UUID
+  after Apply. If a destination card is deleted, convert inbound references to
+  unresolved while retaining the former target name; do not delete inbound
+  hotspots. Candidate-only `existing`/`new`/`unresolved` variants and
+  request-local tokens must not enter stack JSON.
+- Expose and execute only the `navigate` action initially. Keep the stored action
+  representation typed and forward-compatible, and reject unknown action types.
+- Do not add a database, web server, browser UI, plugin system,
+  dependency-injection framework, event bus, arbitrary scripting engine, model
+  downloader, or hosted experiment platform.
+
+## Editing and verification
+
+- Python 3.12.
+- Prefer small, single-issue commits.
+- Validate model responses strictly. No arbitrary model output may become
+  executable.
+- Treat paths in stack JSON as untrusted relative data. Prevent path traversal
+  outside the stack directory and never allow image imports to overwrite
+  arbitrary files.
+- Keep stack-owned settings limited to portable document behavior. Store
+  machine-local model/service settings through Qt settings and evaluation
+  settings in versioned case files or explicit CLI arguments.
+- Keep Hugging Face authentication external. Never store model tokens or other
+  credentials in stack bundles, repository files, or Qt settings.
+- Track only project-generated or permissively licensed evaluation inputs, with
+  source and reuse provenance recorded alongside each case.
+- If a change alters the concise overview, supported behavior, setup, or
+  architecture summary, update `README.md` in the same change.
+- If a change alters durable coding workflow or repository constraints, update
+  this file in the same change.
+- Track progress through issue state and the milestone. Do not add a maintained
+  `PLAN.md`, `ROADMAP.md`, product spec, or duplicated checklist document.
