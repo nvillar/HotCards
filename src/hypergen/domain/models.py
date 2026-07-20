@@ -95,6 +95,17 @@ class Polygon(DomainModel):
 
     points: tuple[Point, ...] = Field(min_length=3)
 
+    @model_validator(mode="after")
+    def require_valid_geometry(self) -> Polygon:
+        """Reject invalid polygons at the document boundary."""
+        from hypergen.domain.geometry import validate_polygon
+
+        issues = validate_polygon(self.points)
+        if issues:
+            messages = "; ".join(issue.message for issue in issues)
+            raise ValueError(messages)
+        return self
+
 
 class ResolvedCardReference(DomainModel):
     """A runtime reference to an existing card."""
@@ -270,10 +281,13 @@ class Stack(DomainModel):
     @model_validator(mode="after")
     def require_known_start_card(self) -> Stack:
         """Reject start-card IDs that do not belong to this stack."""
+        from hypergen.domain.validation import require_unique_card_names
+
         card_ids = [card.id for card in self.cards]
         known_card_ids = set(card_ids)
         if len(card_ids) != len(known_card_ids):
             raise ValueError("card IDs must be unique within a stack")
+        require_unique_card_names(self.cards)
         if self.start_card_id is not None and self.start_card_id not in known_card_ids:
             raise ValueError("start_card_id must identify a card in this stack")
         revision_ids = [revision.id for card in self.cards for revision in card.image_revisions]

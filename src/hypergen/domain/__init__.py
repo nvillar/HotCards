@@ -20,6 +20,7 @@ from hypergen.domain.models import (
     Stack,
     UnresolvedCardReference,
 )
+from hypergen.domain.validation import normalize_card_name, require_unique_card_names
 
 __all__ = [
     "CURRENT_SCHEMA_VERSION",
@@ -40,4 +41,6 @@ __all__ = [
     "RunOverlayMode",
     "Stack",
     "UnresolvedCardReference",
+    "normalize_card_name",
+    "require_unique_card_names",
 ]
