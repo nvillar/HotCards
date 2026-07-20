@@ -1,1 +1,43 @@
 """Stack domain models and validation."""
+
+from hypergen.domain.models import (
+    CURRENT_SCHEMA_VERSION,
+    CanvasSize,
+    Card,
+    CardReference,
+    HotspotGenerationProvenance,
+    HotspotSet,
+    ImageGenerationInputs,
+    ImageGenerationMetadata,
+    ImageOrigin,
+    ImageRevision,
+    Interaction,
+    NavigateAction,
+    Point,
+    Polygon,
+    ResolvedCardReference,
+    RunOverlayMode,
+    Stack,
+    UnresolvedCardReference,
+)
+
+__all__ = [
+    "CURRENT_SCHEMA_VERSION",
+    "CanvasSize",
+    "Card",
+    "CardReference",
+    "HotspotGenerationProvenance",
+    "HotspotSet",
+    "ImageGenerationInputs",
+    "ImageGenerationMetadata",
+    "ImageOrigin",
+    "ImageRevision",
+    "Interaction",
+    "NavigateAction",
+    "Point",
+    "Polygon",
+    "ResolvedCardReference",
+    "RunOverlayMode",
+    "Stack",
+    "UnresolvedCardReference",
+]
