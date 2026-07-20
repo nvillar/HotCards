@@ -1,0 +1,38 @@
+[project]
+name = "hypergen"
+version = "0.1.0"
+description = "Local-first AI-assisted authoring for illustrated interactive card stacks"
+authors = [
+    { name = "Nicolas Villar" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "mflux>=0.18.0",
+    "ollama>=0.6.2",
+    "pydantic>=2",
+    "pyside6>=6.11.1",
+]
+
+[project.scripts]
+hypergen = "hypergen.main:main"
+hypergen-eval = "hypergen.evaluation.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.10.3,<0.11.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.15.22",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["B", "E", "F", "I", "UP"]

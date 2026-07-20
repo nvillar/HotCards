@@ -209,6 +209,9 @@ tempCodeRunnerFile.py
 # PyPI configuration file
 .pypirc
 
+# HyperGen evaluation outputs
+evals/runs/
+
 # Marimo
 marimo/_static/
 marimo/_lsp/
