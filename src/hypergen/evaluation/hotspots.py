@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import re
+import shutil
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import asdict
@@ -19,6 +21,15 @@ from hypergen.domain.geometry import validate_polygon
 from hypergen.domain.models import DomainModel, NonEmptyString, PositiveInt
 from hypergen.evaluation.contracts import SafeCaseId
 from hypergen.evaluation.images import DEFAULT_OLLAMA_MODELS
+from hypergen.evaluation.manifest import (
+    EnvironmentProvider,
+    RunLifecycle,
+    atomic_write_json,
+    classify_failure,
+    contract_digest,
+    default_environment,
+)
+from hypergen.evaluation.reports import render_reports, render_reports_checked
 from hypergen.generation.errors import GenerationError, ModelResponseError
 from hypergen.generation.hotspot_prompts import (
     HOTSPOT_PROMPT_VERSION,
@@ -33,6 +44,7 @@ from hypergen.generation.hotspot_prompts import (
     HotspotModelOutput,
     HotspotProposal,
     OllamaHotspotGenerator,
+    build_hotspot_prompt,
     normalize_hotspot_response,
 )
 from hypergen.generation.ollama_client import (
@@ -265,6 +277,33 @@ def _is_timeout(error: GenerationError) -> bool:
     return False
 
 
+def _failure_record(error: BaseException) -> dict[str, object]:
+    raw_response = error.raw_response if isinstance(error, ModelResponseError) else None
+    response_metadata = error.response_metadata if isinstance(error, ModelResponseError) else {}
+    return {
+        "status": "failed",
+        "structured_valid": False,
+        "error_type": type(error).__name__,
+        "message": str(error),
+        "timeout": _is_timeout(error) if isinstance(error, GenerationError) else False,
+        "failure": {
+            "classification": classify_failure(error),
+            "error_type": type(error).__name__,
+            "message": str(error),
+        },
+        "raw_response_retained": raw_response is not None,
+        "response_metadata": response_metadata,
+        "token_usage": {
+            "prompt_tokens": response_metadata.get("prompt_eval_count"),
+            "output_tokens": response_metadata.get("eval_count"),
+        },
+        "schema_limits": {
+            "token_limit_reached": response_metadata.get("done_reason") == "length",
+        },
+        "human_rubric": {field: None for field in HUMAN_RUBRIC_FIELDS},
+    }
+
+
 def _run_phase(
     *,
     generator: OllamaHotspotGenerator,
@@ -277,26 +316,9 @@ def _run_phase(
         result = generator.generate(request)
     except GenerationError as error:
         raw_response = error.raw_response if isinstance(error, ModelResponseError) else None
-        response_metadata = error.response_metadata if isinstance(error, ModelResponseError) else {}
         if raw_response is not None:
             raw_path.write_text(raw_response, encoding="utf-8")
-        return {
-            "status": "failed",
-            "structured_valid": False,
-            "error_type": type(error).__name__,
-            "message": str(error),
-            "timeout": _is_timeout(error),
-            "raw_response_retained": raw_response is not None,
-            "response_metadata": response_metadata,
-            "token_usage": {
-                "prompt_tokens": response_metadata.get("prompt_eval_count"),
-                "output_tokens": response_metadata.get("eval_count"),
-            },
-            "schema_limits": {
-                "token_limit_reached": response_metadata.get("done_reason") == "length",
-            },
-            "human_rubric": {field: None for field in HUMAN_RUBRIC_FIELDS},
-        }
+        return _failure_record(error)
     raw_path.write_text(result.raw_response, encoding="utf-8")
     return _success_record(case, result, extent=extent)
 
@@ -417,19 +439,92 @@ def _recorded_regressions(
     return rows
 
 
-def run_hotspot_evaluation(
+def _write_result(output_dir: Path, result: dict[str, object]) -> Path:
+    result_path = output_dir / "hotspot-results.json"
+    atomic_write_json(result_path, result)
+    return result_path
+
+
+def _collect_result_warnings(result: dict[str, object]) -> list[str]:
+    warnings = [
+        f"{row['case_id']}:{row['model']}:{phase}: {warning}"
+        for row in result.get("models", [])  # type: ignore[union-attr]
+        for phase in ("cold", "warm")
+        for warning in row[phase].get("warnings", [])
+    ]
+    warnings.extend(
+        f"ablation:{item['name']}:{item['model']}: {warning}"
+        for item in result.get("ablations", [])  # type: ignore[union-attr]
+        for warning in item["result"].get("warnings", [])
+    )
+    warnings.extend(
+        f"recorded_regression:{item['name']}: {warning}"
+        for item in result.get("recorded_regressions", [])  # type: ignore[union-attr]
+        for warning in item.get("warnings", [])
+    )
+    return sorted(set(warnings))
+
+
+def _execute_hotspot_evaluation(
     settings: HotspotEvaluationSettings,
     *,
-    runtime_factory: OllamaRuntimeFactory = OllamaRuntime,
+    runtime_factory: OllamaRuntimeFactory,
+    lifecycle: RunLifecycle,
 ) -> Path:
-    """Run identical frozen cases across candidates and retain diagnostics."""
+    """Execute identical frozen cases inside an initialized run."""
     cases = load_hotspot_cases(settings.case_dir, fixture_root=settings.fixture_root)
-    settings.output_dir.mkdir(parents=True, exist_ok=False)
+    lifecycle.update_contract(
+        "hotspot_case",
+        {
+            "version": HOTSPOT_CASE_VERSION,
+            "sha256": contract_digest([case.model_dump(mode="json") for case in cases]),
+        },
+    )
     raw_dir = settings.output_dir / "raw"
     raw_dir.mkdir()
+    source_dir = settings.output_dir / "artifacts" / "sources"
+    source_dir.mkdir(parents=True)
+    serialized_cases: list[dict[str, object]] = []
+    for case in cases:
+        source_path = source_dir / f"{case.case_id}{_image_path(case, settings).suffix}"
+        shutil.copyfile(_image_path(case, settings), source_path)
+        serialized_case = case.model_dump(mode="json")
+        serialized_case["artifact_image_path"] = source_path.relative_to(
+            settings.output_dir
+        ).as_posix()
+        serialized_cases.append(serialized_case)
     rows: list[dict[str, object]] = []
     ollama_settings: dict[str, object] = {}
+    ablations: list[dict[str, object]] = []
+    result: dict[str, object] = {
+        "result_version": HOTSPOT_RESULT_VERSION,
+        "suite": "hotspots",
+        "status": "running",
+        "created_at": datetime.now(UTC).isoformat(),
+        "settings": settings.model_dump(mode="json"),
+        "contract": {
+            "prompt_version": HOTSPOT_PROMPT_VERSION,
+            "schema_version": HOTSPOT_SCHEMA_VERSION,
+            "selected_limits": {
+                "interactions": MAX_INTERACTIONS,
+                "components_per_interaction": MAX_COMPONENTS_PER_INTERACTION,
+                "points_per_component": MAX_POINTS_PER_COMPONENT,
+                "output_tokens": settings.ollama_num_predict,
+                "context_tokens": settings.ollama_context_length,
+                "timeout_seconds": settings.ollama_timeout_seconds,
+            },
+        },
+        "ollama_effective_settings": ollama_settings,
+        "cases": serialized_cases,
+        "models": rows,
+        "summaries": [],
+        "ablations": ablations,
+        "recorded_regressions": [],
+        "warnings": [],
+    }
+    _write_result(settings.output_dir, result)
     for model in settings.ollama_models:
+        lifecycle.set_stage(f"models:{model}:setup")
         runtime = runtime_factory(
             OllamaSettings(
                 endpoint=settings.ollama_endpoint,
@@ -442,21 +537,40 @@ def run_hotspot_evaluation(
             )
         )
         ollama_settings[model] = asdict(runtime.settings)
-        runtime.require_model(capabilities=frozenset({"vision"}))
+        try:
+            runtime.require_model(capabilities=frozenset({"vision"}))
+        except Exception as error:
+            failure = _failure_record(error)
+            for case in cases:
+                rows.append(
+                    {
+                        "case_id": case.case_id,
+                        "model": model,
+                        "cold": failure,
+                        "warm": failure,
+                    }
+                )
+            _write_result(settings.output_dir, result)
+            continue
         generator = OllamaHotspotGenerator(runtime)
         for case in cases:
-            runtime.unload_model()
+            lifecycle.set_stage(f"models:{case.case_id}:{model}")
             case_raw_dir = raw_dir / case.case_id
             case_raw_dir.mkdir(exist_ok=True)
             request = _request(case, settings)
             model_name = _safe_name(model)
-            cold = _run_phase(
-                generator=generator,
-                request=request,
-                case=case,
-                extent=settings.coordinate_extent,
-                raw_path=case_raw_dir / f"{model_name}-cold.json",
-            )
+            try:
+                runtime.unload_model()
+            except Exception as error:
+                cold = _failure_record(error)
+            else:
+                cold = _run_phase(
+                    generator=generator,
+                    request=request,
+                    case=case,
+                    extent=settings.coordinate_extent,
+                    raw_path=case_raw_dir / f"{model_name}-cold.json",
+                )
             warm = _run_phase(
                 generator=generator,
                 request=request,
@@ -472,9 +586,12 @@ def run_hotspot_evaluation(
                     "warm": warm,
                 }
             )
+            _write_result(settings.output_dir, result)
+            if cold["status"] == "success" and warm["status"] == "success":
+                lifecycle.complete_stage(f"models:{case.case_id}:{model}")
 
-    ablations: list[dict[str, object]] = []
     if settings.include_ablations:
+        lifecycle.set_stage("ablations")
         case = cases[0]
         wording_case = case.model_copy(
             update={
@@ -485,7 +602,7 @@ def run_hotspot_evaluation(
             }
         )
         grid_dir = settings.output_dir / "artifacts"
-        grid_dir.mkdir()
+        grid_dir.mkdir(exist_ok=True)
         grid_path = _grid_image(
             _image_path(case, settings),
             grid_dir / f"{case.case_id}-grid.png",
@@ -506,63 +623,166 @@ def run_hotspot_evaluation(
                     context_length=settings.ollama_context_length,
                 )
             )
-            runtime.require_model(capabilities=frozenset({"vision"}))
-            runtime.unload_model()
+            try:
+                runtime.require_model(capabilities=frozenset({"vision"}))
+                runtime.unload_model()
+            except Exception as error:
+                ablation_result = _failure_record(error)
+            else:
+                ablation_result = _run_phase(
+                    generator=OllamaHotspotGenerator(runtime),
+                    request=_request(request_case, settings, image_path=image_path),
+                    case=case,
+                    extent=settings.coordinate_extent,
+                    raw_path=raw_dir / f"ablation-{name}.json",
+                )
             ablations.append(
                 {
                     "name": name,
                     "model": settings.ablation_model,
                     "think": think,
                     "image_variant": "grid" if name == "grid" else "original",
-                    "result": _run_phase(
-                        generator=OllamaHotspotGenerator(runtime),
-                        request=_request(request_case, settings, image_path=image_path),
-                        case=case,
-                        extent=settings.coordinate_extent,
-                        raw_path=raw_dir / f"ablation-{name}.json",
-                    ),
+                    "result": ablation_result,
                 }
             )
+            _write_result(settings.output_dir, result)
+        if all(item["result"]["status"] == "success" for item in ablations):
+            lifecycle.complete_stage("ablations")
 
-    result = {
-        "result_version": HOTSPOT_RESULT_VERSION,
-        "created_at": datetime.now(UTC).isoformat(),
-        "settings": settings.model_dump(mode="json"),
-        "contract": {
-            "prompt_version": HOTSPOT_PROMPT_VERSION,
-            "schema_version": HOTSPOT_SCHEMA_VERSION,
-            "selected_limits": {
-                "interactions": MAX_INTERACTIONS,
-                "components_per_interaction": MAX_COMPONENTS_PER_INTERACTION,
-                "points_per_component": MAX_POINTS_PER_COMPONENT,
-                "output_tokens": settings.ollama_num_predict,
-                "context_tokens": settings.ollama_context_length,
-                "timeout_seconds": settings.ollama_timeout_seconds,
+    result.update(
+        {
+            "status": (
+                "completed_with_failures"
+                if any(
+                    row[phase]["status"] == "failed" for row in rows for phase in ("cold", "warm")
+                )
+                or any(
+                    item["result"]["status"] == "failed"  # type: ignore[index]
+                    for item in ablations
+                )
+                else "success"
+            ),
+            "summaries": [_model_summary(rows, model) for model in settings.ollama_models],
+            "recorded_regressions": _recorded_regressions(
+                case=cases[0],
+                settings=settings,
+            ),
+            "contract_comparisons": {
+                "image_input": "original model rows versus grid ablation",
+                "thinking": "production false versus thinking ablation",
+                "prompt_wording": "production prose versus explicit numbered wording ablation",
+                "schema_and_token_behavior": (
+                    "schema-saturation and supplied-token recorded regressions"
+                ),
+                "polygon_complexity": "selected limits plus invalid-geometry recorded regression",
+                "geometry_cleanup": (
+                    "validity before versus after deterministic coordinate clamping"
+                ),
             },
         },
-        "ollama_effective_settings": ollama_settings,
-        "cases": [case.model_dump(mode="json") for case in cases],
-        "models": rows,
-        "summaries": [_model_summary(rows, model) for model in settings.ollama_models],
-        "ablations": ablations,
-        "recorded_regressions": _recorded_regressions(
-            case=cases[0],
-            settings=settings,
-        ),
-        "contract_comparisons": {
-            "image_input": "original model rows versus grid ablation",
-            "thinking": "production false versus thinking ablation",
-            "prompt_wording": "production prose versus explicit numbered wording ablation",
-            "schema_and_token_behavior": (
-                "schema-saturation and supplied-token recorded regressions"
-            ),
-            "polygon_complexity": "selected limits plus invalid-geometry recorded regression",
-            "geometry_cleanup": "validity before versus after deterministic coordinate clamping",
+    )
+    result["warnings"] = _collect_result_warnings(result)
+    result_path = _write_result(settings.output_dir, result)
+    lifecycle.set_stage("reports")
+    render_reports_checked(result_path)
+    lifecycle.complete_stage("reports")
+    return result_path
+
+
+def run_hotspot_evaluation(
+    settings: HotspotEvaluationSettings,
+    *,
+    runtime_factory: OllamaRuntimeFactory = OllamaRuntime,
+    environment_provider: EnvironmentProvider = default_environment,
+) -> Path:
+    """Run hotspot evaluation with a retained exception-safe manifest."""
+    lifecycle = RunLifecycle.create(
+        run_dir=settings.output_dir,
+        suite="hotspots",
+        settings=settings.model_dump(mode="json"),
+        models={"ollama_candidates": list(settings.ollama_models), "mflux": None},
+        contracts={
+            "hotspot_prompt": {
+                "version": HOTSPOT_PROMPT_VERSION,
+                "sha256": contract_digest(
+                    HOTSPOT_PROMPT_VERSION,
+                    inspect.getsource(build_hotspot_prompt),
+                    HotspotModelOutput.model_json_schema(),
+                ),
+            },
+            "hotspot_schema": {
+                "version": HOTSPOT_SCHEMA_VERSION,
+                "sha256": contract_digest(HotspotModelOutput.model_json_schema()),
+            },
+            "hotspot_case": {"version": HOTSPOT_CASE_VERSION},
         },
-    }
-    result_path = settings.output_dir / "hotspot-results.json"
-    result_path.write_text(
-        json.dumps(result, indent=2, ensure_ascii=False, sort_keys=True),
-        encoding="utf-8",
+        environment_provider=environment_provider,
+    )
+    try:
+        result_path = _execute_hotspot_evaluation(
+            settings,
+            runtime_factory=runtime_factory,
+            lifecycle=lifecycle,
+        )
+    except Exception as error:
+        result_path = settings.output_dir / "hotspot-results.json"
+        report_failure = lifecycle.manifest["stage"] == "reports"
+        failure = {
+            "stage": lifecycle.manifest["stage"],
+            "classification": ("report_rendering" if report_failure else classify_failure(error)),
+            "error_type": type(error).__name__,
+            "message": str(error),
+        }
+        final_status = "completed_with_report_failure" if report_failure else "failed"
+        warnings: list[str] = []
+        if result_path.is_file():
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            result["status"] = final_status
+            result["failure"] = failure
+            warnings = _collect_result_warnings(result)
+            result["warnings"] = warnings
+            _write_result(settings.output_dir, result)
+            if not report_failure:
+                try:
+                    render_reports(result_path)
+                except Exception as report_error:
+                    lifecycle.add_warning(f"failure report could not be rendered: {report_error}")
+        lifecycle.finalize(
+            status=final_status,
+            failure=failure,
+            warnings=warnings,
+        )
+        raise
+    completed_result = json.loads(result_path.read_text(encoding="utf-8"))
+    status = completed_result["status"]
+    stage_failures = [
+        {
+            "case_id": row["case_id"],
+            "model": row["model"],
+            "phase": phase,
+            **row[phase]["failure"],
+        }
+        for row in completed_result["models"]
+        for phase in ("cold", "warm")
+        if row[phase]["status"] == "failed"
+    ]
+    stage_failures.extend(
+        {
+            "case_id": completed_result["cases"][0]["case_id"],
+            "model": item["model"],
+            "phase": f"ablation:{item['name']}",
+            **item["result"]["failure"],
+        }
+        for item in completed_result["ablations"]
+        if item["result"]["status"] == "failed"
+    )
+    lifecycle.finalize(
+        status=status,
+        failure=(
+            {"classification": "stage_failures", "stages": stage_failures}
+            if stage_failures
+            else None
+        ),
+        warnings=completed_result["warnings"],
     )
     return result_path

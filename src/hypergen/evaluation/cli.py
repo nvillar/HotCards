@@ -6,6 +6,11 @@ from collections.abc import Sequence
 from math import isfinite
 from pathlib import Path
 
+from hypergen.evaluation.e2e import (
+    E2EEvaluationSettings,
+    default_e2e_output_dir,
+    run_e2e_evaluation,
+)
 from hypergen.evaluation.hotspots import (
     HotspotEvaluationSettings,
     default_hotspot_output_dir,
@@ -18,6 +23,7 @@ from hypergen.evaluation.images import (
     default_image_output_dir,
     run_image_evaluation,
 )
+from hypergen.evaluation.reports import ReportRenderingError
 from hypergen.evaluation.smoke import (
     SmokeSettings,
     default_smoke_fixture,
@@ -106,6 +112,18 @@ def build_parser() -> argparse.ArgumentParser:
     hotspots.add_argument("--ollama-context-length", type=_positive_int, default=8192)
     hotspots.add_argument("--no-ablations", action="store_true")
     hotspots.add_argument("--ablation-model", default="qwen3.5:9b")
+    e2e = subparsers.add_parser(
+        "e2e",
+        help="compare exact Ollama candidates through one fixed MFLUX model",
+    )
+    e2e.add_argument("--output-dir", type=Path)
+    e2e.add_argument("--case-dir", type=Path, default=Path("evals/cases/e2e"))
+    e2e.add_argument("--ollama-endpoint", default="http://localhost:11434")
+    e2e.add_argument("--seed", type=int, default=42)
+    e2e.add_argument("--quantization", type=int)
+    e2e.add_argument("--ollama-timeout", type=_positive_float, default=120.0)
+    e2e.add_argument("--ollama-num-predict", type=_positive_int, default=1024)
+    e2e.add_argument("--ollama-context-length", type=_positive_int, default=8192)
     return parser
 
 
@@ -159,10 +177,25 @@ def run_cli(arguments: Sequence[str] | None = None) -> int:
                     ablation_model=args.ablation_model,
                 )
             )
+        elif args.command == "e2e":
+            result_path = run_e2e_evaluation(
+                E2EEvaluationSettings(
+                    output_dir=args.output_dir or default_e2e_output_dir(),
+                    case_dir=args.case_dir,
+                    ollama_endpoint=args.ollama_endpoint,
+                    seed=args.seed,
+                    quantization=args.quantization,
+                    ollama_timeout_seconds=args.ollama_timeout,
+                    ollama_num_predict=args.ollama_num_predict,
+                    ollama_context_length=args.ollama_context_length,
+                )
+            )
         else:
             build_parser().error(f"unsupported command: {args.command}")
     except (GenerationError, OSError, ValueError) as error:
         print(f"hypergen-eval {args.command} failed: {error}", file=sys.stderr)
+        if isinstance(error, ReportRenderingError):
+            print(error.result_path)
         return 1
     print(result_path)
     return 0

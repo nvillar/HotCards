@@ -2,22 +2,46 @@
 
 from __future__ import annotations
 
-import json
+import inspect
+import shutil
 from dataclasses import asdict
 from datetime import UTC, datetime
+from hashlib import sha256
 from pathlib import Path
 from typing import Annotated
 
 from pydantic import Field, FiniteFloat, PositiveInt
 
 from hypergen.domain.models import DomainModel, ImageGenerationInputs, NonEmptyString
+from hypergen.evaluation.manifest import (
+    EnvironmentProvider,
+    RunLifecycle,
+    atomic_write_json,
+    classify_failure,
+    contract_digest,
+    default_environment,
+)
+from hypergen.evaluation.reports import (
+    ReportRenderingError,
+    render_reports,
+    render_reports_checked,
+)
 from hypergen.generation.errors import GenerationError
 from hypergen.generation.hotspot_prompts import (
+    HOTSPOT_PROMPT_VERSION,
+    HOTSPOT_SCHEMA_VERSION,
     CardCatalogueEntry,
     HotspotGenerationRequest,
+    HotspotModelOutput,
     OllamaHotspotGenerator,
+    build_hotspot_prompt,
 )
-from hypergen.generation.image_prompts import OllamaImagePromptDeriver
+from hypergen.generation.image_prompts import (
+    IMAGE_PROMPT_VERSION,
+    OllamaImagePromptDeriver,
+    RenderPromptModelOutput,
+    build_image_prompt_request,
+)
 from hypergen.generation.mflux_generator import (
     MfluxGenerationRequest,
     MfluxGenerator,
@@ -66,11 +90,23 @@ def default_smoke_fixture() -> Path:
 
 def _write_result(output_dir: Path, result: dict[str, object]) -> Path:
     result_path = output_dir / "smoke-result.json"
-    result_path.write_text(
-        json.dumps(result, indent=2, ensure_ascii=False, sort_keys=True),
-        encoding="utf-8",
-    )
+    atomic_write_json(result_path, result)
     return result_path
+
+
+def _collect_hotspot_warnings(result: dict[str, object]) -> list[str]:
+    stages = result.get("stages")
+    if not isinstance(stages, dict):
+        return []
+    hotspot_generation = stages.get("hotspot_generation")
+    if not isinstance(hotspot_generation, dict):
+        return []
+    warnings: set[str] = set()
+    for phase in ("cold", "warm"):
+        record = hotspot_generation.get(phase)
+        if isinstance(record, dict):
+            warnings.update(record.get("warnings", []))
+    return sorted(warnings)
 
 
 def run_smoke(
@@ -78,25 +114,96 @@ def run_smoke(
     *,
     ollama_runtime: OllamaRuntime | None = None,
     mflux_generator: MfluxGenerator | None = None,
+    environment_provider: EnvironmentProvider = default_environment,
 ) -> Path:
     """Exercise cold and warm production paths and write structured results."""
-    settings.output_dir.mkdir(parents=True, exist_ok=False)
-    runtime = ollama_runtime or OllamaRuntime(
-        OllamaSettings(
-            endpoint=settings.ollama_endpoint,
-            model=settings.ollama_model,
-            think=False,
-            temperature=0.0,
-            request_timeout_seconds=settings.ollama_timeout_seconds,
-            num_predict=settings.ollama_num_predict,
-            context_length=settings.ollama_context_length,
-        )
+    lifecycle = RunLifecycle.create(
+        run_dir=settings.output_dir,
+        suite="smoke",
+        settings=settings.model_dump(mode="json"),
+        models={"ollama": settings.ollama_model, "mflux": settings.mflux_model},
+        contracts={
+            "image_prompt": {
+                "version": IMAGE_PROMPT_VERSION,
+                "sha256": contract_digest(
+                    IMAGE_PROMPT_VERSION,
+                    inspect.getsource(build_image_prompt_request),
+                    RenderPromptModelOutput.model_json_schema(),
+                ),
+            },
+            "hotspot_prompt": {
+                "version": HOTSPOT_PROMPT_VERSION,
+                "schema_version": HOTSPOT_SCHEMA_VERSION,
+                "sha256": contract_digest(
+                    HOTSPOT_PROMPT_VERSION,
+                    inspect.getsource(build_hotspot_prompt),
+                    HotspotModelOutput.model_json_schema(),
+                ),
+            },
+        },
+        environment_provider=environment_provider,
     )
-    mflux = mflux_generator or MfluxGenerator()
+    stage = "initializing"
+    try:
+        runtime = ollama_runtime or OllamaRuntime(
+            OllamaSettings(
+                endpoint=settings.ollama_endpoint,
+                model=settings.ollama_model,
+                think=False,
+                temperature=0.0,
+                request_timeout_seconds=settings.ollama_timeout_seconds,
+                num_predict=settings.ollama_num_predict,
+                context_length=settings.ollama_context_length,
+            )
+        )
+        mflux = mflux_generator or MfluxGenerator()
+        raw_dir = settings.output_dir / "raw"
+        raw_dir.mkdir()
+        fixture_dir = settings.output_dir / "artifacts" / "sources"
+        fixture_dir.mkdir(parents=True)
+        fixture_copy = fixture_dir / settings.fixture_image.name
+        shutil.copyfile(settings.fixture_image, fixture_copy)
+        lifecycle.update_contract(
+            "fixture",
+            {
+                "path": fixture_copy.relative_to(settings.output_dir).as_posix(),
+                "sha256": sha256(fixture_copy.read_bytes()).hexdigest(),
+            },
+        )
+        result: dict[str, object] = {
+            "result_version": "smoke-result-v2",
+            "suite": "smoke",
+            "status": "running",
+            "ollama_model": settings.ollama_model,
+            "mflux_model": settings.mflux_model,
+            "settings": {
+                "smoke": settings.model_dump(mode="json"),
+                "ollama": asdict(runtime.settings),
+            },
+            "stages": {},
+            "warnings": [],
+        }
+        _write_result(settings.output_dir, result)
+    except Exception as error:
+        lifecycle.finalize(
+            status="failed",
+            failure={
+                "stage": stage,
+                "classification": classify_failure(error),
+                "error_type": type(error).__name__,
+                "message": str(error),
+            },
+        )
+        raise
     stage = "ollama_diagnostics"
     try:
+        lifecycle.set_stage(stage)
         runtime.require_model(capabilities=frozenset({"vision"}))
+        lifecycle.complete_stage(stage)
+        stage = "ollama_unload"
+        lifecycle.set_stage(stage)
         runtime.unload_model()
+        lifecycle.complete_stage(stage)
         inputs = ImageGenerationInputs(
             scene_description=(
                 "A quiet stone castle courtyard at dusk with an arched wooden gate, "
@@ -110,13 +217,30 @@ def run_smoke(
         )
         prompt_deriver = OllamaImagePromptDeriver(runtime)
         stage = "prompt_derivation_cold"
+        lifecycle.set_stage(stage)
         prompt_cold = prompt_deriver.derive(inputs)
+        (raw_dir / "prompt-cold.json").write_text(prompt_cold.raw_response, encoding="utf-8")
+        result["stages"] = {
+            "prompt_derivation": {
+                "cold": prompt_cold.model_dump(mode="json"),
+            }
+        }
+        _write_result(settings.output_dir, result)
+        lifecycle.complete_stage(stage)
         stage = "prompt_derivation_warm"
+        lifecycle.set_stage(stage)
         prompt_warm = prompt_deriver.derive(inputs)
+        (raw_dir / "prompt-warm.json").write_text(prompt_warm.raw_response, encoding="utf-8")
+        result["stages"]["prompt_derivation"]["warm"] = prompt_warm.model_dump(mode="json")  # type: ignore[index]
+        _write_result(settings.output_dir, result)
+        lifecycle.complete_stage(stage)
         stage = "hotspot_cold_reset"
+        lifecycle.set_stage(stage)
         runtime.unload_model()
+        lifecycle.complete_stage(stage)
 
         stage = "image_generation_cold"
+        lifecycle.set_stage(stage)
         image_cold = mflux.generate(
             MfluxGenerationRequest(
                 inputs=inputs,
@@ -130,7 +254,13 @@ def run_smoke(
                 quantization=settings.quantization,
             )
         )
+        result["stages"]["image_generation"] = {  # type: ignore[index]
+            "cold": image_cold.model_dump(mode="json")
+        }
+        _write_result(settings.output_dir, result)
+        lifecycle.complete_stage(stage)
         stage = "image_generation_warm"
+        lifecycle.set_stage(stage)
         image_warm = mflux.generate(
             MfluxGenerationRequest(
                 inputs=inputs,
@@ -144,10 +274,14 @@ def run_smoke(
                 quantization=settings.quantization,
             )
         )
+        result["stages"]["image_generation"]["warm"] = image_warm.model_dump(mode="json")  # type: ignore[index]
+        _write_result(settings.output_dir, result)
+        lifecycle.complete_stage(stage)
 
         stage = "hotspot_generation_setup"
+        lifecycle.set_stage(stage)
         hotspot_request = HotspotGenerationRequest(
-            image_path=settings.fixture_image,
+            image_path=fixture_copy,
             interaction_description=inputs.interaction_description,
             card_catalogue=(
                 CardCatalogueEntry(
@@ -164,49 +298,84 @@ def run_smoke(
             coordinate_extent=settings.coordinate_extent,
         )
         hotspot_generator = OllamaHotspotGenerator(runtime)
+        lifecycle.complete_stage(stage)
         stage = "hotspot_generation_cold"
+        lifecycle.set_stage(stage)
         hotspots_cold = hotspot_generator.generate(hotspot_request)
+        (raw_dir / "hotspots-cold.json").write_text(hotspots_cold.raw_response, encoding="utf-8")
+        result["stages"]["hotspot_generation"] = {  # type: ignore[index]
+            "cold": hotspots_cold.model_dump(mode="json")
+        }
+        _write_result(settings.output_dir, result)
+        lifecycle.complete_stage(stage)
         stage = "hotspot_generation_warm"
+        lifecycle.set_stage(stage)
         hotspots_warm = hotspot_generator.generate(hotspot_request)
-    except GenerationError as error:
-        _write_result(
-            settings.output_dir,
+        (raw_dir / "hotspots-warm.json").write_text(hotspots_warm.raw_response, encoding="utf-8")
+        result["stages"]["hotspot_generation"]["warm"] = hotspots_warm.model_dump(mode="json")  # type: ignore[index]
+        _write_result(settings.output_dir, result)
+        lifecycle.complete_stage(stage)
+    except Exception as error:
+        raw_response = getattr(error, "raw_response", None)
+        if isinstance(raw_response, str):
+            (raw_dir / f"partial-{stage}.json").write_text(raw_response, encoding="utf-8")
+        warnings = _collect_hotspot_warnings(result)
+        result.update(
             {
                 "status": "failed",
                 "stage": stage,
                 "error_type": type(error).__name__,
                 "message": str(error),
-                "settings": {
-                    "smoke": settings.model_dump(mode="json"),
-                    "ollama": asdict(runtime.settings),
+                "failure": {
+                    "stage": stage,
+                    "classification": classify_failure(error),
+                    "error_type": type(error).__name__,
+                    "message": str(error),
                 },
-            },
+                "warnings": warnings,
+            }
         )
-        raise SmokeStageError(stage, error) from error
+        result_path = _write_result(settings.output_dir, result)
+        try:
+            render_reports(result_path)
+        except Exception as report_error:
+            lifecycle.add_warning(f"failure report could not be rendered: {report_error}")
+        lifecycle.finalize(
+            status="failed",
+            failure=result["failure"],  # type: ignore[arg-type]
+            warnings=warnings,
+        )
+        if isinstance(error, GenerationError):
+            raise SmokeStageError(stage, error) from error
+        raise
 
-    warnings = sorted(set(hotspots_cold.warnings + hotspots_warm.warnings))
-    return _write_result(
-        settings.output_dir,
-        {
-            "status": "success",
-            "settings": {
-                "smoke": settings.model_dump(mode="json"),
-                "ollama": asdict(runtime.settings),
-            },
-            "stages": {
-                "prompt_derivation": {
-                    "cold": prompt_cold.model_dump(mode="json"),
-                    "warm": prompt_warm.model_dump(mode="json"),
+    warnings = _collect_hotspot_warnings(result)
+    result["status"] = "success"
+    result["warnings"] = warnings
+    result_path = _write_result(settings.output_dir, result)
+    try:
+        lifecycle.set_stage("reports")
+        render_reports_checked(result_path)
+    except ReportRenderingError as error:
+        result.update(
+            {
+                "status": "completed_with_report_failure",
+                "stage": "reports",
+                "failure": {
+                    "stage": "reports",
+                    "classification": "report_rendering",
+                    "error_type": type(error).__name__,
+                    "message": str(error),
                 },
-                "image_generation": {
-                    "cold": image_cold.model_dump(mode="json"),
-                    "warm": image_warm.model_dump(mode="json"),
-                },
-                "hotspot_generation": {
-                    "cold": hotspots_cold.model_dump(mode="json"),
-                    "warm": hotspots_warm.model_dump(mode="json"),
-                },
-            },
-            "warnings": warnings,
-        },
-    )
+            }
+        )
+        _write_result(settings.output_dir, result)
+        lifecycle.finalize(
+            status="completed_with_report_failure",
+            failure=result["failure"],  # type: ignore[arg-type]
+            warnings=warnings,
+        )
+        raise
+    lifecycle.complete_stage("reports")
+    lifecycle.finalize(status="success", warnings=warnings)
+    return result_path

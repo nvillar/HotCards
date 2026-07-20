@@ -70,7 +70,7 @@ def prompt_response() -> str:
     )
 
 
-def hotspot_response() -> str:
+def hotspot_response(*, left_edge: int = 100) -> str:
     return json.dumps(
         {
             "interactions": [
@@ -81,10 +81,10 @@ def hotspot_response() -> str:
                     "polygons": [
                         {
                             "points": [
-                                {"x": 100, "y": 100},
+                                {"x": left_edge, "y": 100},
                                 {"x": 400, "y": 100},
                                 {"x": 400, "y": 800},
-                                {"x": 100, "y": 800},
+                                {"x": left_edge, "y": 800},
                             ]
                         }
                     ],
@@ -123,6 +123,9 @@ def test_smoke_runner_writes_cold_and_warm_stage_results(tmp_path: Path) -> None
     assert result["settings"]["ollama"]["keep_alive"] == "10m"
     assert (output_dir / "generated-cold.png").is_file()
     assert (output_dir / "generated-warm.png").is_file()
+    assert (output_dir / "manifest.json").is_file()
+    assert (output_dir / "summary.csv").is_file()
+    assert (output_dir / "report.html").is_file()
 
 
 def test_smoke_runner_records_actionable_expected_failure(tmp_path: Path) -> None:
@@ -147,6 +150,38 @@ def test_smoke_runner_records_actionable_expected_failure(tmp_path: Path) -> Non
     assert result["stage"] == "ollama_diagnostics"
     assert result["error_type"] == "ModelUnavailableError"
     assert "ollama pull" in result["message"]
+    manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["status"] == "failed"
+    assert manifest["failure"]["stage"] == "ollama_diagnostics"
+
+
+def test_smoke_failure_promotes_retained_hotspot_warnings(tmp_path: Path) -> None:
+    fixture = tmp_path / "fixture.png"
+    fixture.write_bytes(b"fixture")
+    output_dir = tmp_path / "run"
+    runtime = OllamaRuntime(
+        OllamaSettings(),
+        client=FakeOllamaClient(
+            [
+                prompt_response(),
+                prompt_response(),
+                hotspot_response(left_edge=-10),
+                '{"interactions":',
+            ]
+        ),
+    )
+
+    with pytest.raises(SmokeStageError, match="hotspot_generation_warm"):
+        run_smoke(
+            SmokeSettings(output_dir=output_dir, fixture_image=fixture),
+            ollama_runtime=runtime,
+            mflux_generator=MfluxGenerator(model_factory=lambda *_: FakeMfluxModel()),
+        )
+
+    result = json.loads((output_dir / "smoke-result.json").read_text(encoding="utf-8"))
+    manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert result["warnings"] == ["model coordinates were clamped to the canvas"]
+    assert manifest["warnings"] == result["warnings"]
 
 
 @pytest.mark.parametrize(

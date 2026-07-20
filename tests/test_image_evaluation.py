@@ -39,11 +39,13 @@ class FakeMfluxModel:
 
 
 class FakeOllamaClient:
-    def __init__(self, model: str) -> None:
+    def __init__(self, model: str, *, available: bool = True) -> None:
         self.model = model
+        self.available = available
 
     def list(self) -> SimpleNamespace:
-        return SimpleNamespace(models=(SimpleNamespace(model=self.model),))
+        models = (SimpleNamespace(model=self.model),) if self.available else ()
+        return SimpleNamespace(models=models)
 
     def generate(self, **kwargs: object) -> SimpleNamespace:
         return SimpleNamespace(done=True)
@@ -140,3 +142,45 @@ def test_image_suite_keeps_model_axes_separate_and_writes_raw_artifacts(
     assert len(list((tmp_path / "run" / "raw" / "prompts").rglob("*.json"))) == 6
     assert len(list((tmp_path / "run" / "images" / "prompt-axis").rglob("*.png"))) == 3
     assert len(list((tmp_path / "run" / "images" / "mflux-axis").rglob("*.png"))) == 4
+    summary = json.loads((tmp_path / "run" / "summary.json").read_text())
+    prompt_row = next(row for row in summary["rows"] if row["axis"] == "ollama_prompt")
+    assert prompt_row["derived_prompt"].startswith("Rendered by qwen3.5:")
+    assert prompt_row["interactive_subjects"] == ["gate", "chest"]
+
+
+def test_image_suite_isolates_candidate_failure_and_runs_mflux_axis(
+    tmp_path: Path,
+) -> None:
+    case_dir = tmp_path / "cases"
+    _write_case(case_dir)
+
+    def runtime_factory(settings: OllamaSettings) -> OllamaRuntime:
+        return OllamaRuntime(
+            settings,
+            client=FakeOllamaClient(
+                settings.model,
+                available=settings.model != "qwen3.5:9b",
+            ),
+        )
+
+    result_path = run_image_evaluation(
+        ImageEvaluationSettings(output_dir=tmp_path / "run", case_dir=case_dir),
+        runtime_factory=runtime_factory,
+        mflux_factory=lambda: MfluxGenerator(model_factory=lambda *_: FakeMfluxModel()),
+        environment_provider=lambda: {"git_sha": "test"},
+    )
+
+    result = json.loads(result_path.read_text())
+    assert result["status"] == "completed_with_failures"
+    assert {row["model"] for row in result["prompt_axis"]} == set(DEFAULT_OLLAMA_MODELS)
+    failed = next(row for row in result["prompt_axis"] if row["model"] == "qwen3.5:9b")
+    assert failed["cold"]["failure"]["classification"] == "transport_or_service"
+    assert len(result["mflux_axis"]) == 2
+    manifest = json.loads((tmp_path / "run" / "manifest.json").read_text())
+    assert manifest["status"] == "completed_with_failures"
+    assert not any("qwen3.5:9b" in stage for stage in manifest["completed_stages"])
+    assert (tmp_path / "run" / "report.html").is_file()
+    assert (tmp_path / "run" / "manifest.json").is_file()
+    assert (tmp_path / "run" / "summary.csv").is_file()
+    assert (tmp_path / "run" / "report.html").is_file()
+    assert (tmp_path / "run" / "contact-sheet.png").is_file()

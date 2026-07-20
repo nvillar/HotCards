@@ -85,7 +85,16 @@ class OllamaImagePromptDeriver:
         except ValidationError as error:
             raise ModelResponseError(
                 "Ollama returned an invalid image-prompt response for "
-                f"{IMAGE_PROMPT_VERSION}: {error}"
+                f"{IMAGE_PROMPT_VERSION}: {error}",
+                raw_response=call.content,
+                response_metadata={
+                    "elapsed_seconds": call.elapsed_seconds,
+                    "total_duration_ns": call.total_duration_ns,
+                    "load_duration_ns": call.load_duration_ns,
+                    "prompt_eval_count": call.prompt_eval_count,
+                    "eval_count": call.eval_count,
+                    "done_reason": call.done_reason,
+                },
             ) from error
         return DerivedRenderPrompt(
             prompt=output.render_prompt,

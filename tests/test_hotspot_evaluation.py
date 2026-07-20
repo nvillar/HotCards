@@ -24,11 +24,13 @@ from hypergen.generation.ollama_client import OllamaRuntime, OllamaSettings
 
 
 class FakeOllamaClient:
-    def __init__(self, model: str) -> None:
+    def __init__(self, model: str, *, available: bool = True) -> None:
         self.model = model
+        self.available = available
 
     def list(self) -> SimpleNamespace:
-        return SimpleNamespace(models=(SimpleNamespace(model=self.model),))
+        models = (SimpleNamespace(model=self.model),) if self.available else ()
+        return SimpleNamespace(models=models)
 
     def show(self, model: str) -> SimpleNamespace:
         return SimpleNamespace(capabilities=("vision", "thinking"))
@@ -114,6 +116,59 @@ def test_hotspot_suite_records_raw_metrics_and_separate_models(tmp_path: Path) -
     assert first["geometry"]["validity_rate_before_cleanup"] == 0.0
     assert first["geometry"]["validity_rate_after_cleanup"] == 1.0
     assert len(list((tmp_path / "run" / "raw").rglob("*.json"))) == 6
+    assert any(warning.startswith("one:qwen3.5:4b:cold:") for warning in result["warnings"])
+    manifest = json.loads((tmp_path / "run" / "manifest.json").read_text())
+    assert manifest["warnings"] == result["warnings"]
+    summary = json.loads((tmp_path / "run" / "summary.json").read_text())
+    hotspot_row = next(row for row in summary["rows"] if row["axis"] == "ollama_hotspot")
+    assert hotspot_row["structured_valid"] is True
+    assert hotspot_row["repetition"]["rate"] == 0
+    assert hotspot_row["geometry"]["validity_rate_after_cleanup"] == 1.0
+    assert hotspot_row["destinations"]["destination_accuracy"] == 1.0
+
+
+def test_hotspot_suite_isolates_unavailable_candidate(tmp_path: Path) -> None:
+    fixture_root = tmp_path / "fixtures"
+    fixture_root.mkdir()
+    case_dir = tmp_path / "cases"
+    _write_case(case_dir, fixture_root)
+
+    def runtime_factory(settings: OllamaSettings) -> OllamaRuntime:
+        return OllamaRuntime(
+            settings,
+            client=FakeOllamaClient(
+                settings.model,
+                available=settings.model != "qwen3.5:9b",
+            ),
+        )
+
+    result_path = run_hotspot_evaluation(
+        HotspotEvaluationSettings(
+            output_dir=tmp_path / "run",
+            case_dir=case_dir,
+            fixture_root=fixture_root,
+            include_ablations=False,
+        ),
+        runtime_factory=runtime_factory,
+        environment_provider=lambda: {"git_sha": "test"},
+    )
+
+    result = json.loads(result_path.read_text())
+    assert result["status"] == "completed_with_failures"
+    assert {row["model"] for row in result["models"]} == {
+        "qwen3.5:4b",
+        "qwen3.5:9b",
+        "qwen3.6:35b",
+    }
+    failed = next(row for row in result["models"] if row["model"] == "qwen3.5:9b")
+    assert failed["cold"]["failure"]["classification"] == "transport_or_service"
+    manifest = json.loads((tmp_path / "run" / "manifest.json").read_text())
+    assert manifest["status"] == "completed_with_failures"
+    assert not any("qwen3.5:9b" in stage for stage in manifest["completed_stages"])
+    assert (tmp_path / "run" / "manifest.json").is_file()
+    assert (tmp_path / "run" / "report.html").is_file()
+    assert (tmp_path / "run" / "contact-sheet.png").is_file()
+    assert len(list((tmp_path / "run" / "annotations").rglob("*.png"))) == 4
 
 
 def test_recorded_regressions_exercise_required_failure_modes(tmp_path: Path) -> None:
@@ -138,6 +193,10 @@ def test_recorded_regressions_exercise_required_failure_modes(tmp_path: Path) ->
     assert regressions["schema-saturation"]["schema_limits"]["interaction_limit_reached"]
     assert regressions["token-limit"]["schema_limits"]["token_limit_reached"]
     assert regressions["token-limit"]["response_metadata"]["eval_count"] == 1024
+    assert any(
+        warning.startswith("recorded_regression:invalid-geometry:")
+        for warning in result["warnings"]
+    )
 
 
 def test_hotspot_case_fixture_cannot_escape_root(tmp_path: Path) -> None:

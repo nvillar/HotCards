@@ -1,0 +1,34 @@
+{
+  "case_version": "e2e-case-v1",
+  "case_id": "courtyard",
+  "inputs": {
+    "scene_description": "A quiet stone castle courtyard at dusk with an arched wooden gate, a red travel chest, and a leafy tree.",
+    "interaction_description": "The gate leads to the moonlit garden. The travel chest opens the treasure room.",
+    "stack_art_direction": "Restrained storybook ink and watercolor illustration.",
+    "card_style": "Cool twilight shadows with warm lantern light."
+  },
+  "card_catalogue": [
+    {
+      "token": "C1",
+      "name": "Moonlit Garden",
+      "description": "A walled garden beneath the moon."
+    },
+    {
+      "token": "C2",
+      "name": "Treasure Room",
+      "description": "A chamber containing old maps and a brass coffer."
+    }
+  ],
+  "expected_hotspots": [
+    {
+      "label": "Arched gate",
+      "target_token": "C1"
+    },
+    {
+      "label": "Red travel chest",
+      "target_token": "C2"
+    }
+  ],
+  "provenance": "HyperGen project-authored synthetic scene; no external input asset.",
+  "reuse_terms": "Project-owned test description, reusable under the repository license."
+}

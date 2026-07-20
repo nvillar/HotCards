@@ -31,8 +31,12 @@ uv run hypergen-eval images
 uv run hypergen-eval e2e
 ```
 
-Evaluation runs produce immutable run directories and HTML reports under
-`evals/`.
+Each command creates one immutable directory under `evals/runs/` with an
+immediate, failure-safe `manifest.json`, retained raw/completed artifacts,
+checksums, JSON/CSV summaries, and a static HTML report. Image and hotspot
+reports include contact sheets or annotated predictions. Report rendering is
+offline and never calls a model. The tracked default decision and evidence
+tradeoffs are in [`evals/DECISION.md`](evals/DECISION.md).
 
 ## Architecture at a glance
 
