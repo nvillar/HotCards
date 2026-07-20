@@ -8,9 +8,9 @@ from collections.abc import Callable
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Literal
 
-from pydantic import Field, StringConstraints
+from pydantic import Field
 
 from hypergen.domain.models import (
     DomainModel,
@@ -18,6 +18,7 @@ from hypergen.domain.models import (
     NonEmptyString,
     PositiveInt,
 )
+from hypergen.evaluation.contracts import SafeCaseId
 from hypergen.generation.image_prompts import (
     IMAGE_PROMPT_VERSION,
     DerivedRenderPrompt,
@@ -42,14 +43,6 @@ HUMAN_RUBRIC_FIELDS = (
     "style_consistency",
     "absence_of_unwanted_text_or_ui",
 )
-SafeCaseId = Annotated[
-    str,
-    StringConstraints(
-        strip_whitespace=True,
-        min_length=1,
-        pattern=r"^[a-z0-9][a-z0-9._-]*$",
-    ),
-]
 PROMPT_RUBRIC_FIELDS = (
     "scene_preservation",
     "interaction_to_visual_translation",

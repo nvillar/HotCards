@@ -75,6 +75,7 @@ def hotspot_response() -> str:
         {
             "interactions": [
                 {
+                    "source_interaction_index": 1,
                     "label": "Gate",
                     "target": {"type": "existing", "card_token": "C1"},
                     "polygons": [

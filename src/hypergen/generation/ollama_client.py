@@ -94,6 +94,9 @@ class OllamaCallResult:
     elapsed_seconds: float
     total_duration_ns: int | None
     load_duration_ns: int | None
+    prompt_eval_count: int | None = None
+    eval_count: int | None = None
+    done_reason: str | None = None
 
 
 class OllamaRuntime:
@@ -198,11 +201,23 @@ class OllamaRuntime:
         content = getattr(getattr(response, "message", None), "content", None)
         if not isinstance(content, str) or not content.strip():
             raise ModelResponseError(
-                f"Ollama model {self.settings.model!r} returned an empty structured response."
+                f"Ollama model {self.settings.model!r} returned an empty structured response.",
+                raw_response=content if isinstance(content, str) else None,
+                response_metadata={
+                    "elapsed_seconds": elapsed_seconds,
+                    "total_duration_ns": getattr(response, "total_duration", None),
+                    "load_duration_ns": getattr(response, "load_duration", None),
+                    "prompt_eval_count": getattr(response, "prompt_eval_count", None),
+                    "eval_count": getattr(response, "eval_count", None),
+                    "done_reason": getattr(response, "done_reason", None),
+                },
             )
         return OllamaCallResult(
             content=content,
             elapsed_seconds=elapsed_seconds,
             total_duration_ns=getattr(response, "total_duration", None),
             load_duration_ns=getattr(response, "load_duration", None),
+            prompt_eval_count=getattr(response, "prompt_eval_count", None),
+            eval_count=getattr(response, "eval_count", None),
+            done_reason=getattr(response, "done_reason", None),
         )

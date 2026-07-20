@@ -39,6 +39,9 @@ class DerivedRenderPrompt(DomainModel):
     duration_seconds: NonNegativeFiniteFloat
     total_duration_ns: int | None = None
     load_duration_ns: int | None = None
+    prompt_eval_count: int | None = None
+    eval_count: int | None = None
+    done_reason: str | None = None
 
 
 def build_image_prompt_request(inputs: ImageGenerationInputs) -> str:
@@ -92,4 +95,7 @@ class OllamaImagePromptDeriver:
             duration_seconds=call.elapsed_seconds,
             total_duration_ns=call.total_duration_ns,
             load_duration_ns=call.load_duration_ns,
+            prompt_eval_count=call.prompt_eval_count,
+            eval_count=call.eval_count,
+            done_reason=call.done_reason,
         )

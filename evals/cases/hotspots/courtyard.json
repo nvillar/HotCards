@@ -1,0 +1,33 @@
+{
+  "case_version": "hotspot-case-v1",
+  "case_id": "courtyard",
+  "image_path": "smoke/courtyard.png",
+  "interaction_description": "The arched gate leads to the moonlit garden. The red travel chest opens the treasure room.",
+  "card_catalogue": [
+    {
+      "token": "C1",
+      "name": "Moonlit Garden",
+      "description": "A walled garden beneath the moon."
+    },
+    {
+      "token": "C2",
+      "name": "Treasure Room",
+      "description": "A chamber containing old maps and a brass coffer."
+    }
+  ],
+  "expected_hotspots": [
+    {
+      "label": "Arched gate",
+      "target_token": "C1"
+    },
+    {
+      "label": "Red travel chest",
+      "target_token": "C2"
+    }
+  ],
+  "regression_tags": [
+    "repeated-interactions",
+    "supplied-token-unresolved",
+    "schema-saturation"
+  ]
+}

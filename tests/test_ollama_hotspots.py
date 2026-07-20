@@ -66,6 +66,7 @@ def hotspot_response(*, card_token: str = "C1") -> str:
         {
             "interactions": [
                 {
+                    "source_interaction_index": 1,
                     "label": "Gate",
                     "target": {"type": "existing", "card_token": card_token},
                     "polygons": [
@@ -89,7 +90,7 @@ def test_hotspot_prompt_uses_tokens_without_uuids(tmp_path: Path) -> None:
     assert '"token": "C1"' in prompt
     assert "Garden" in prompt
     assert "UUID" in prompt
-    assert "at most 12 interactions" in prompt
+    assert "at most\n  4 interactions" in prompt
     assert "00000000-0000-0000-0000-000000000000" not in prompt
 
 
@@ -148,7 +149,7 @@ def test_repeated_hotspot_proposals_are_flagged(tmp_path: Path) -> None:
 
     result = OllamaHotspotGenerator(runtime).generate(request(image_path))
 
-    assert any("repeated hotspot proposal" in warning for warning in result.warnings)
+    assert any("repeated source interaction" in warning for warning in result.warnings)
 
 
 def test_invalid_structured_response_is_rejected(tmp_path: Path) -> None:
@@ -159,8 +160,26 @@ def test_invalid_structured_response_is_rejected(tmp_path: Path) -> None:
         client=FakeOllamaClient(['{"interactions": "not-a-list"}']),
     )
 
-    with pytest.raises(ModelResponseError, match="invalid hotspot response"):
+    with pytest.raises(ModelResponseError, match="invalid hotspot response") as caught:
         OllamaHotspotGenerator(runtime).generate(request(image_path))
+
+    assert caught.value.raw_response == '{"interactions": "not-a-list"}'
+    assert "eval_count" in caught.value.response_metadata
+
+
+def test_empty_response_preserves_call_metadata(tmp_path: Path) -> None:
+    image_path = tmp_path / "fixture.png"
+    image_path.write_bytes(b"fixture")
+    runtime = OllamaRuntime(
+        OllamaSettings(),
+        client=FakeOllamaClient([""]),
+    )
+
+    with pytest.raises(ModelResponseError, match="empty structured response") as caught:
+        OllamaHotspotGenerator(runtime).generate(request(image_path))
+
+    assert caught.value.raw_response == ""
+    assert caught.value.response_metadata["total_duration_ns"] == 3_000_000
 
 
 def test_runtime_reports_missing_model_before_generation() -> None:

@@ -1,0 +1,35 @@
+{
+  "contract_version": "hotspot-production-v1",
+  "prompt_version": "hotspot-prompt-v1",
+  "schema_version": "hotspot-schema-v1",
+  "selected_model": "qwen3.5:4b",
+  "selected_limits": {
+    "interactions": 4,
+    "components_per_interaction": 2,
+    "points_per_component": 12,
+    "output_tokens": 1024,
+    "context_tokens": 8192,
+    "timeout_seconds": 120
+  },
+  "selection_evidence": {
+    "prior_limits": {
+      "interactions": 12,
+      "components_per_interaction": 4,
+      "points_per_component": 16,
+      "output_tokens": 2048,
+      "context_tokens": 8192,
+      "timeout_seconds": 300
+    },
+    "observations": [
+      "The 4B and 9B candidates both saturated the 12-interaction schema on the courtyard case.",
+      "Saturated responses repeated or invented interactions and used up to 1636 output tokens.",
+      "No successful call approached the 300-second timeout.",
+      "The retained contract keeps room above the two expected case interactions while bounding edit cost.",
+      "After adding source-interaction identity, 4B returned exactly the two expected interactions on both cases without repetition or limit saturation.",
+      "All 4B geometry was valid after deterministic coordinate clamping.",
+      "9B matched 4B on structured reliability and post-clamp validity but did not improve destination-token resolution.",
+      "35B had cleaner raw geometry, but did not improve destination-token resolution and is substantially larger."
+    ]
+  },
+  "model_recommendation": "Use qwen3.5:4b as the smallest candidate with reliable structured output, expected interaction counts, and editable post-clamp geometry under the selected contract. Keep destination choices author-reviewable because all candidates returned supplied destinations unresolved in this evaluation."
+}

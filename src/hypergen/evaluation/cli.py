@@ -6,6 +6,11 @@ from collections.abc import Sequence
 from math import isfinite
 from pathlib import Path
 
+from hypergen.evaluation.hotspots import (
+    HotspotEvaluationSettings,
+    default_hotspot_output_dir,
+    run_hotspot_evaluation,
+)
 from hypergen.evaluation.images import (
     DEFAULT_MFLUX_MODELS,
     DEFAULT_OLLAMA_MODELS,
@@ -82,6 +87,25 @@ def build_parser() -> argparse.ArgumentParser:
     images.add_argument("--ollama-timeout", type=_positive_float, default=300.0)
     images.add_argument("--ollama-num-predict", type=_positive_int, default=2048)
     images.add_argument("--ollama-context-length", type=_positive_int, default=8192)
+    hotspots = subparsers.add_parser(
+        "hotspots",
+        help="compare structured hotspot generation across Ollama models",
+    )
+    hotspots.add_argument("--output-dir", type=Path)
+    hotspots.add_argument("--case-dir", type=Path, default=Path("evals/cases/hotspots"))
+    hotspots.add_argument("--fixture-root", type=Path, default=Path("evals/cases"))
+    hotspots.add_argument("--ollama-endpoint", default="http://localhost:11434")
+    hotspots.add_argument(
+        "--ollama-model",
+        action="append",
+        dest="ollama_models",
+        default=None,
+    )
+    hotspots.add_argument("--ollama-timeout", type=_positive_float, default=120.0)
+    hotspots.add_argument("--ollama-num-predict", type=_positive_int, default=1024)
+    hotspots.add_argument("--ollama-context-length", type=_positive_int, default=8192)
+    hotspots.add_argument("--no-ablations", action="store_true")
+    hotspots.add_argument("--ablation-model", default="qwen3.5:9b")
     return parser
 
 
@@ -118,6 +142,21 @@ def run_cli(arguments: Sequence[str] | None = None) -> int:
                     ollama_timeout_seconds=args.ollama_timeout,
                     ollama_num_predict=args.ollama_num_predict,
                     ollama_context_length=args.ollama_context_length,
+                )
+            )
+        elif args.command == "hotspots":
+            result_path = run_hotspot_evaluation(
+                HotspotEvaluationSettings(
+                    output_dir=args.output_dir or default_hotspot_output_dir(),
+                    case_dir=args.case_dir,
+                    fixture_root=args.fixture_root,
+                    ollama_endpoint=args.ollama_endpoint,
+                    ollama_models=tuple(args.ollama_models or DEFAULT_OLLAMA_MODELS),
+                    ollama_timeout_seconds=args.ollama_timeout,
+                    ollama_num_predict=args.ollama_num_predict,
+                    ollama_context_length=args.ollama_context_length,
+                    include_ablations=not args.no_ablations,
+                    ablation_model=args.ablation_model,
                 )
             )
         else:

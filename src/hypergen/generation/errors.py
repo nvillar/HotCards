@@ -16,6 +16,17 @@ class ModelUnavailableError(GenerationError):
 class ModelResponseError(GenerationError):
     """A model response failed the production structured-output contract."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        raw_response: str | None = None,
+        response_metadata: dict[str, int | str | float | None] | None = None,
+    ) -> None:
+        self.raw_response = raw_response
+        self.response_metadata = response_metadata or {}
+        super().__init__(message)
+
 
 class ModelLoadError(GenerationError):
     """An in-process model could not be loaded."""
