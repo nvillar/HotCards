@@ -70,6 +70,7 @@ class MfluxGenerationResult(DomainModel):
     metadata: ImageGenerationMetadata
     load_duration_seconds: float = Field(ge=0.0)
     generation_duration_seconds: float = Field(ge=0.0)
+    serialization_duration_seconds: float = Field(ge=0.0)
 
 
 def _package_version(package: str) -> str:
@@ -140,12 +141,14 @@ class MfluxGenerator:
                 guidance=request.guidance,
                 scheduler=request.scheduler,
             )
+            generation_duration_seconds = perf_counter() - generation_started
+            serialization_started = perf_counter()
             image.save(request.output_path, overwrite=False)
+            serialization_duration_seconds = perf_counter() - serialization_started
         except (AttributeError, MemoryError, OSError, RuntimeError, TypeError, ValueError) as error:
             raise ImageGenerationError(
                 f"MFLUX generation failed for {request.model_identifier!r}: {error}"
             ) from error
-        generation_duration_seconds = perf_counter() - generation_started
         duration_seconds = perf_counter() - started
         if not request.output_path.is_file():
             raise ImageGenerationError(
@@ -193,4 +196,5 @@ class MfluxGenerator:
             metadata=metadata,
             load_duration_seconds=load_duration_seconds,
             generation_duration_seconds=generation_duration_seconds,
+            serialization_duration_seconds=serialization_duration_seconds,
         )

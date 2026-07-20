@@ -1,0 +1,23 @@
+{
+  "case_version": "image-case-v1",
+  "case_id": "workshop",
+  "inputs": {
+    "scene_description": "A clockmaker's workshop with brass gears, a tall blue cabinet, and a round window showing rain.",
+    "interaction_description": "The blue cabinet opens the hidden observatory. The round window reveals the storm tower.",
+    "stack_art_direction": "Detailed cut-paper storybook collage.",
+    "card_style": "Amber lamplight with deep indigo shadows."
+  },
+  "fixed_render_prompt": "Detailed cut-paper storybook collage of a clockmaker's workshop under amber lamplight and deep indigo shadows. Brass gears fill the benches while a tall blue cabinet and a separate unobstructed round window showing rain are prominent focal subjects. No signs, words, captions, labels, interface panels, or buttons.",
+  "required_visual_elements": [
+    "clockmaker workshop",
+    "brass gears",
+    "prominent tall blue cabinet",
+    "separate round rainy window",
+    "cut-paper collage style"
+  ],
+  "unwanted_artifacts": [
+    "written labels or signs",
+    "interface panels or buttons",
+    "cabinet or window hidden by clutter"
+  ]
+}

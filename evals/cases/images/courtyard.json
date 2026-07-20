@@ -1,0 +1,23 @@
+{
+  "case_version": "image-case-v1",
+  "case_id": "courtyard",
+  "inputs": {
+    "scene_description": "A quiet stone castle courtyard at dusk with an arched wooden gate, a red travel chest, and a leafy tree.",
+    "interaction_description": "The gate leads to the moonlit garden. The travel chest opens the treasure room.",
+    "stack_art_direction": "Restrained storybook ink and watercolor illustration.",
+    "card_style": "Cool twilight shadows with warm lantern light."
+  },
+  "fixed_render_prompt": "Restrained storybook ink and watercolor illustration of a quiet stone castle courtyard at dusk. Compose a clearly visible arched wooden gate on the left and a spatially separate red travel chest on the right beneath a leafy tree. Cool twilight shadows and warm lantern light, no signs, captions, labels, typography, interface panels, or buttons.",
+  "required_visual_elements": [
+    "stone castle courtyard at dusk",
+    "clearly visible arched wooden gate",
+    "spatially separate red travel chest",
+    "leafy tree",
+    "ink and watercolor style"
+  ],
+  "unwanted_artifacts": [
+    "written labels or signs",
+    "interface panels or buttons",
+    "gate and chest visually merged"
+  ]
+}

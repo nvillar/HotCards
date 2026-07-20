@@ -77,6 +77,7 @@ def test_mflux_adapter_loads_once_and_records_effective_metadata(tmp_path: Path)
     assert first.metadata.derived_prompt == "Watercolor courtyard with a visible gate"
     assert first.load_duration_seconds >= 0
     assert first.generation_duration_seconds >= 0
+    assert first.serialization_duration_seconds >= 0
 
 
 def test_mflux_adapter_refuses_overwrite(tmp_path: Path) -> None:
