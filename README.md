@@ -9,13 +9,15 @@ interactive experience. All generation runs on-device.
 
 **Status:** early developer proof of concept. Not packaged for end users.
 
-**Platform:** Apple Silicon macOS. Requires a running local
-[Ollama](https://ollama.com) daemon and local MFLUX image models.
+**Platform:** Apple Silicon macOS. Local generation requires a running
+[Ollama](https://ollama.com) daemon and locally cached MFLUX image models; the
+authoring shell remains usable when either service is unavailable.
 
 ## Setup and run
 
-Prerequisites: Python 3.12, [uv](https://docs.astral.sh/uv/), a running Ollama
-daemon with the configured model, and MFLUX models available locally.
+Prerequisites: Python 3.12 and [uv](https://docs.astral.sh/uv/). To enable
+generation, also run Ollama with the configured model and cache the selected
+MFLUX model locally.
 
 ```sh
 uv sync

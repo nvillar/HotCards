@@ -14,6 +14,7 @@ from hypergen.domain.models import (
     NavigateAction,
     Polygon,
     ResolvedCardReference,
+    RunOverlayMode,
     Stack,
     UnresolvedCardReference,
 )
@@ -229,6 +230,16 @@ class SetStartCardCommand:
         if self.card_id is not None:
             _card_index(document, self.card_id)
         return validated_copy(document.model_copy(update={"start_card_id": self.card_id}))
+
+
+@dataclass(frozen=True, slots=True)
+class SetRunOverlayModeCommand:
+    """Set the portable hotspot overlay behavior used in Run mode."""
+
+    mode: RunOverlayMode
+
+    def apply(self, document: Stack) -> Stack:
+        return validated_copy(document.model_copy(update={"run_overlay_mode": self.mode}))
 
 
 @dataclass(frozen=True, slots=True)
@@ -455,5 +466,6 @@ __all__ = [
     "ReplaceHotspotSetCommand",
     "ReplaceInteractionPolygonsCommand",
     "ReplacePolygonCommand",
+    "SetRunOverlayModeCommand",
     "SetStartCardCommand",
 ]

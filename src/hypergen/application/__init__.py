@@ -15,6 +15,7 @@ from hypergen.application.commands import (
     ReplaceHotspotSetCommand,
     ReplaceInteractionPolygonsCommand,
     ReplacePolygonCommand,
+    SetRunOverlayModeCommand,
     SetStartCardCommand,
 )
 from hypergen.application.document_controller import AutosaveHook, DocumentController
@@ -49,6 +50,7 @@ __all__ = [
     "ReplaceHotspotSetCommand",
     "ReplaceInteractionPolygonsCommand",
     "ReplacePolygonCommand",
+    "SetRunOverlayModeCommand",
     "SetStartCardCommand",
     "WorkerFailure",
     "WorkerFailureKind",

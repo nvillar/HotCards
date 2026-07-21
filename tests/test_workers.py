@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator
 from threading import Event, Lock, get_ident
 from time import monotonic, sleep
 
 import pytest
-from PySide6.QtCore import QCoreApplication, QEventLoop, QTimer
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from PySide6.QtCore import QEventLoop, QTimer
+from PySide6.QtWidgets import QApplication
 
 from hypergen.application.workers import (
     AdapterKind,
@@ -20,8 +25,8 @@ from hypergen.generation.errors import ModelResponseError, ServiceUnavailableErr
 
 
 @pytest.fixture(scope="session", autouse=True)
-def qt_application() -> Iterator[QCoreApplication]:
-    application = QCoreApplication.instance() or QCoreApplication([])
+def qt_application() -> Iterator[QApplication]:
+    application = QApplication.instance() or QApplication([])
     yield application
 
 
@@ -279,6 +284,19 @@ def test_availability_diagnostics_are_deduplicated_and_report_recovery() -> None
     assert all(diagnostic.adapter is AdapterKind.OLLAMA for diagnostic in diagnostics)
     assert "Start Ollama" in diagnostics[0].message
     assert "available again" in diagnostics[1].message
+    workers.shutdown(wait_milliseconds=500)
+
+
+def test_availability_check_can_use_operation_result_without_global_diagnostic() -> None:
+    workers = AdapterWorkers(ollama_timeout_seconds=0.5)
+    diagnostics: list[object] = []
+    workers.availability_changed.connect(diagnostics.append)
+
+    operation = workers.check_ollama(lambda: None, emit_diagnostic=False)
+    wait_for(operation)
+
+    assert operation.status is OperationStatus.SUCCEEDED
+    assert diagnostics == []
     workers.shutdown(wait_milliseconds=500)
 
 

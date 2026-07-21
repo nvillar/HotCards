@@ -173,6 +173,7 @@ class _OperationRecord:
     stage: str
     timeout_seconds: float
     availability_check: bool
+    emit_availability: bool
     cancel_event: Event
     start_lock: Lock
     deadline: float
@@ -321,6 +322,7 @@ class AdapterWorkers(QObject):
             stage=stage,
             timeout_seconds=timeout_seconds,
             availability_check=False,
+            emit_availability=True,
         )
 
     def run_mflux(
@@ -337,6 +339,7 @@ class AdapterWorkers(QObject):
             stage=stage,
             timeout_seconds=timeout_seconds,
             availability_check=False,
+            emit_availability=True,
         )
 
     def check_ollama(
@@ -345,6 +348,7 @@ class AdapterWorkers(QObject):
         *,
         stage: str = "checking Ollama model availability",
         timeout_seconds: float | None = None,
+        emit_diagnostic: bool = True,
     ) -> WorkerOperation:
         """Run a bounded list/show-style Ollama availability check."""
         return self._submit(
@@ -353,6 +357,7 @@ class AdapterWorkers(QObject):
             stage=stage,
             timeout_seconds=timeout_seconds,
             availability_check=True,
+            emit_availability=emit_diagnostic,
         )
 
     def check_mflux(
@@ -361,6 +366,7 @@ class AdapterWorkers(QObject):
         *,
         stage: str = "checking MFLUX model availability",
         timeout_seconds: float | None = None,
+        emit_diagnostic: bool = True,
     ) -> WorkerOperation:
         """Run a bounded MFLUX model availability check."""
         return self._submit(
@@ -369,6 +375,7 @@ class AdapterWorkers(QObject):
             stage=stage,
             timeout_seconds=timeout_seconds,
             availability_check=True,
+            emit_availability=emit_diagnostic,
         )
 
     def shutdown(self, *, wait_milliseconds: int = 0) -> None:
@@ -394,6 +401,7 @@ class AdapterWorkers(QObject):
         stage: str,
         timeout_seconds: float | None,
         availability_check: bool,
+        emit_availability: bool,
     ) -> WorkerOperation:
         if not callable(operation):
             raise TypeError("worker operation must be callable")
@@ -419,6 +427,7 @@ class AdapterWorkers(QObject):
                 stage=stage,
                 timeout_seconds=timeout,
                 availability_check=availability_check,
+                emit_availability=emit_availability,
                 cancel_event=cancel_event,
                 start_lock=start_lock,
                 deadline=deadline,
@@ -448,15 +457,20 @@ class AdapterWorkers(QObject):
             return
         if isinstance(outcome, _Success):
             record.handle._succeed(outcome.value)
-            self._mark_available(record)
+            if record.emit_availability:
+                self._mark_available(record)
             return
         failure = _failure_for(record, outcome)
         record.handle._fail(failure)
-        if record.availability_check or failure.kind in {
-            WorkerFailureKind.SERVICE_UNAVAILABLE,
-            WorkerFailureKind.MODEL_UNAVAILABLE,
-            WorkerFailureKind.MODEL_LOAD,
-        }:
+        if record.emit_availability and (
+            record.availability_check
+            or failure.kind
+            in {
+                WorkerFailureKind.SERVICE_UNAVAILABLE,
+                WorkerFailureKind.MODEL_UNAVAILABLE,
+                WorkerFailureKind.MODEL_LOAD,
+            }
+        ):
             self._mark_unavailable(record.adapter, failure)
 
     def _discard(self, operation_id: UUID) -> None:
@@ -478,7 +492,7 @@ class AdapterWorkers(QObject):
                 continue
             failure = _failure_for(record, _Timeout())
             record.handle._fail(failure)
-            if record.availability_check:
+            if record.availability_check and record.emit_availability:
                 self._mark_unavailable(record.adapter, failure)
         self._schedule_deadline()
 
