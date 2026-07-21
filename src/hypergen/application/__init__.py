@@ -18,10 +18,22 @@ from hypergen.application.commands import (
     SetStartCardCommand,
 )
 from hypergen.application.document_controller import AutosaveHook, DocumentController
+from hypergen.application.workers import (
+    AdapterKind,
+    AdapterWorkers,
+    AvailabilityDiagnostic,
+    OperationStatus,
+    WorkerFailure,
+    WorkerFailureKind,
+    WorkerOperation,
+)
 
 __all__ = [
     "ActivateRevisionCommand",
+    "AdapterKind",
+    "AdapterWorkers",
     "AutosaveHook",
+    "AvailabilityDiagnostic",
     "ChangeHotspotDestinationCommand",
     "CommandError",
     "CreateCardAndResolveCommand",
@@ -30,6 +42,7 @@ __all__ = [
     "DocumentCommand",
     "DocumentController",
     "EditCardTextCommand",
+    "OperationStatus",
     "RenameCardCommand",
     "ReorderCardCommand",
     "ReorderHotspotCommand",
@@ -37,4 +50,7 @@ __all__ = [
     "ReplaceInteractionPolygonsCommand",
     "ReplacePolygonCommand",
     "SetStartCardCommand",
+    "WorkerFailure",
+    "WorkerFailureKind",
+    "WorkerOperation",
 ]
