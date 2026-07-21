@@ -14,7 +14,9 @@ from PySide6.QtWidgets import (
     QDialog,
     QLabel,
     QMainWindow,
+    QPushButton,
     QSplitter,
+    QStackedWidget,
     QToolBar,
     QVBoxLayout,
     QWidget,
@@ -95,7 +97,7 @@ class MainWindow(QMainWindow):
         self.mode_selector = QComboBox()
         self.mode_selector.setObjectName("modeSelector")
         self.mode_selector.addItems(["Author", "Run"])
-        self.mode_selector.setToolTip("Run behavior will be implemented in issue #14")
+        self.mode_selector.setToolTip("Switch between authoring and interactive preview")
         toolbar.addWidget(self.mode_selector)
         toolbar.addSeparator()
 
@@ -132,7 +134,7 @@ class MainWindow(QMainWindow):
         )
         for action in self.player_navigation_actions:
             action.setEnabled(False)
-            action.setToolTip("Player navigation is a placeholder for issue #14")
+            action.setToolTip("Available in Run mode")
             toolbar.addAction(action)
 
     def _build_panes(self) -> None:
@@ -140,15 +142,51 @@ class MainWindow(QMainWindow):
         self.card_sidebar.card_selected.connect(self.select_card)
         self.card_sidebar.document_changed.connect(self.render_document)
 
-        canvas = QWidget()
-        canvas.setObjectName("canvasPlaceholder")
-        canvas_layout = QVBoxLayout(canvas)
-        canvas_label = QLabel(
-            "Canvas preview\n\nAuthoring canvas behavior will be added in issue #12."
+        self.canvas_pages = QStackedWidget()
+        self.canvas_pages.setObjectName("canvasPages")
+
+        empty_canvas = QWidget()
+        empty_canvas.setObjectName("emptyCanvas")
+        empty_layout = QVBoxLayout(empty_canvas)
+        empty_layout.addStretch(1)
+        empty_title = QLabel("Create your first card")
+        empty_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        empty_title.setStyleSheet("font-size: 20px; font-weight: 600;")
+        empty_layout.addWidget(empty_title)
+        empty_description = QLabel(
+            "Cards are the scenes readers visit. Start with one, then add its background and links."
         )
-        canvas_label.setObjectName("canvasPlaceholderLabel")
-        canvas_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        canvas_layout.addWidget(canvas_label)
+        empty_description.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        empty_description.setWordWrap(True)
+        empty_layout.addWidget(empty_description)
+        self.create_first_card_button = QPushButton("Create Your First Card")
+        self.create_first_card_button.setObjectName("createFirstCardButton")
+        empty_layout.addWidget(
+            self.create_first_card_button,
+            0,
+            Qt.AlignmentFlag.AlignHCenter,
+        )
+        empty_layout.addStretch(1)
+        self.canvas_pages.addWidget(empty_canvas)
+
+        card_canvas = QWidget()
+        card_canvas.setObjectName("cardCanvas")
+        canvas_layout = QVBoxLayout(card_canvas)
+        canvas_layout.addStretch(1)
+        canvas_title = QLabel("Card Canvas")
+        canvas_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        canvas_title.setStyleSheet("font-size: 18px; font-weight: 600;")
+        canvas_layout.addWidget(canvas_title)
+        self.canvas_card_name = QLabel()
+        self.canvas_card_name.setObjectName("canvasCardName")
+        self.canvas_card_name.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        canvas_layout.addWidget(self.canvas_card_name)
+        canvas_hint = QLabel("Use the generation actions above to add content to this card.")
+        canvas_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        canvas_hint.setWordWrap(True)
+        canvas_layout.addWidget(canvas_hint)
+        canvas_layout.addStretch(1)
+        self.canvas_pages.addWidget(card_canvas)
 
         self.inspector = Inspector(self.controller)
         self.inspector.document_changed.connect(self.render_document)
@@ -156,7 +194,7 @@ class MainWindow(QMainWindow):
         self.pane_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.pane_splitter.setObjectName("threePaneSplitter")
         self.pane_splitter.addWidget(self.card_sidebar)
-        self.pane_splitter.addWidget(canvas)
+        self.pane_splitter.addWidget(self.canvas_pages)
         self.pane_splitter.addWidget(self.inspector)
         self.pane_splitter.setStretchFactor(0, 0)
         self.pane_splitter.setStretchFactor(1, 1)
@@ -166,7 +204,13 @@ class MainWindow(QMainWindow):
 
         self.service_status_label = QLabel("Checking local AI services…")
         self.service_status_label.setObjectName("serviceStatusLabel")
-        self.statusBar().addPermanentWidget(self.service_status_label)
+        self.statusBar().addPermanentWidget(self.service_status_label, 1)
+        self.review_settings_button = QPushButton("Review Settings…")
+        self.review_settings_button.setObjectName("reviewSettingsButton")
+        self.review_settings_button.setVisible(False)
+        self.review_settings_button.clicked.connect(self.open_advanced_settings)
+        self.statusBar().addPermanentWidget(self.review_settings_button)
+        self.create_first_card_button.clicked.connect(self.card_sidebar.add_card)
 
     def _build_menu(self) -> None:
         self.advanced_settings_action = QAction("Advanced Settings…", self)
@@ -184,17 +228,28 @@ class MainWindow(QMainWindow):
         try:
             self.card_sidebar.render(snapshot, self._selected_card_id)
             self.inspector.render(snapshot, self._selected_card_id)
+            selected_card = next(
+                (card for card in snapshot.cards if card.id == self._selected_card_id),
+                None,
+            )
+            if selected_card is None:
+                self.canvas_pages.setCurrentIndex(0)
+                self.canvas_card_name.clear()
+            else:
+                self.canvas_pages.setCurrentIndex(1)
+                self.canvas_card_name.setText(selected_card.name)
             overlay_index = self.overlay_selector.findData(snapshot.run_overlay_mode)
             self.overlay_selector.setCurrentIndex(overlay_index)
             self.setWindowTitle(f"HyperGen — {snapshot.name}")
         finally:
             self._rendering = False
+        self._update_generation_actions()
 
     def select_card(self, card_id: object) -> None:
         self._selected_card_id = card_id if isinstance(card_id, UUID) else None
         if self.card_sidebar.selected_card_id != self._selected_card_id:
             self.card_sidebar.select_card(self._selected_card_id)
-        self.inspector.render(self.controller.document, self._selected_card_id)
+        self.render_document()
 
     def run_availability_checks(self) -> None:
         """Submit injected service checks without blocking the UI thread."""
@@ -272,10 +327,13 @@ class MainWindow(QMainWindow):
         self._update_generation_actions()
 
     def _update_generation_actions(self) -> None:
+        has_card = self._selected_card_id is not None
         mflux_available = self._availability[AdapterKind.MFLUX] is True
         ollama_available = self._availability[AdapterKind.OLLAMA] is True
-        self.generate_background_action.setEnabled(mflux_available and ollama_available)
-        self.generate_hotspots_action.setEnabled(ollama_available)
+        self.generate_background_action.setEnabled(
+            has_card and mflux_available and ollama_available
+        )
+        self.generate_hotspots_action.setEnabled(has_card and ollama_available)
         self.generate_background_action.setToolTip(
             " · ".join(
                 self._action_diagnostic(adapter)
@@ -283,16 +341,34 @@ class MainWindow(QMainWindow):
             )
         )
         self.generate_hotspots_action.setToolTip(self._action_diagnostic(AdapterKind.OLLAMA))
-        unavailable = [
-            self._diagnostic_messages.get(adapter, f"{adapter.value} check pending")
-            for adapter, available in self._availability.items()
-            if available is not True
+        pending = [
+            adapter for adapter, available in self._availability.items() if available is None
         ]
-        self.service_status_label.setText(
-            "Local AI services available"
-            if not unavailable
-            else "Generation unavailable: " + " · ".join(unavailable)
+        unavailable = [
+            adapter for adapter, available in self._availability.items() if available is False
+        ]
+        if pending:
+            summary = "Checking local AI services…"
+        elif unavailable:
+            labels = {
+                AdapterKind.OLLAMA: "Ollama",
+                AdapterKind.MFLUX: "MFLUX",
+            }
+            names = " and ".join(labels[adapter] for adapter in unavailable)
+            summary = f"{names} unavailable"
+        else:
+            summary = "Local AI services ready"
+        self.service_status_label.setText(summary)
+        self.service_status_label.setToolTip(
+            "\n".join(
+                self._diagnostic_messages.get(
+                    adapter,
+                    f"{adapter.value} availability check pending",
+                )
+                for adapter in AdapterKind
+            )
         )
+        self.review_settings_button.setVisible(bool(unavailable))
 
     def _action_diagnostic(self, adapter: AdapterKind) -> str:
         if self._availability[adapter] is True:

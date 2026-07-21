@@ -36,6 +36,9 @@ def build_availability_checks(
         from huggingface_hub import snapshot_download
         from huggingface_hub.errors import LocalEntryNotFoundError
         from mflux.models.common.config import ModelConfig
+        from mflux.models.flux2.weights.flux2_weight_definition import (
+            Flux2KleinWeightDefinition,
+        )
 
         configurations = {
             "flux2-klein-4b": ModelConfig.flux2_klein_4b,
@@ -49,7 +52,11 @@ def build_availability_checks(
             )
         repository = configuration_factory().model_name
         try:
-            snapshot_download(repo_id=repository, local_files_only=True)
+            snapshot_download(
+                repo_id=repository,
+                allow_patterns=Flux2KleinWeightDefinition.get_download_patterns(),
+                local_files_only=True,
+            )
         except LocalEntryNotFoundError as error:
             raise ModelUnavailableError(
                 f"MFLUX model {values.mflux_model!r} is not available in the local "

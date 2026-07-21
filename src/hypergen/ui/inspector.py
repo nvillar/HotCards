@@ -5,7 +5,7 @@ from __future__ import annotations
 from uuid import UUID
 
 from pydantic import ValidationError
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFocusEvent
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QPlainTextEdit,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -93,12 +94,30 @@ class Inspector(QWidget):
         self.hotspot_list.setObjectName("hotspotList")
         hotspots_layout.addWidget(self.hotspot_list)
 
+        self.pages = QStackedWidget()
+        empty_page = QWidget()
+        empty_layout = QVBoxLayout(empty_page)
+        empty_layout.addStretch(1)
+        self.empty_state_label = QLabel("Select or create a card to inspect its details")
+        self.empty_state_label.setObjectName("emptyInspectorLabel")
+        self.empty_state_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.empty_state_label.setWordWrap(True)
+        empty_layout.addWidget(self.empty_state_label)
+        empty_layout.addStretch(1)
+        self.pages.addWidget(empty_page)
+
+        form_page = QWidget()
+        form_layout = QVBoxLayout(form_page)
+        form_layout.addWidget(heading)
+        form_layout.addWidget(self.card_section)
+        form_layout.addWidget(self.background_section)
+        form_layout.addWidget(self.hotspots_section)
+        form_layout.addStretch(1)
+        self.pages.addWidget(form_page)
+
         layout = QVBoxLayout(self)
-        layout.addWidget(heading)
-        layout.addWidget(self.card_section)
-        layout.addWidget(self.background_section)
-        layout.addWidget(self.hotspots_section)
-        layout.addStretch(1)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.pages)
 
         self.card_name_edit.editingFinished.connect(self.commit_card_metadata)
         self.scene_edit.editing_finished.connect(self.commit_card_metadata)
@@ -129,8 +148,8 @@ class Inspector(QWidget):
                 None,
             )
             self.selected_card_id = card.id if card is not None else None
-            self.setEnabled(card is not None)
             if card is None:
+                self.pages.setCurrentIndex(0)
                 self.card_name_edit.clear()
                 self.scene_edit.clear()
                 self.interactions_edit.clear()
@@ -139,6 +158,7 @@ class Inspector(QWidget):
                 self.background_value.setText("No card selected")
                 self.hotspot_list.clear()
                 return
+            self.pages.setCurrentIndex(1)
             self.card_name_edit.setText(card.name)
             self.scene_edit.setPlainText(card.scene_description)
             self.interactions_edit.setPlainText(card.interaction_description)

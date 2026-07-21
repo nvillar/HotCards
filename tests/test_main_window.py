@@ -10,7 +10,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtCore import QModelIndex, QObject, Signal
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLabel
 
 from hypergen.application.document_controller import DocumentController
 from hypergen.application.workers import (
@@ -30,6 +30,7 @@ from hypergen.domain.models import (
     Stack,
     UnresolvedCardReference,
 )
+from hypergen.generation.errors import ModelUnavailableError
 from hypergen.main import build_availability_checks, build_main_window
 from hypergen.ui.main_window import MainWindow
 from hypergen.ui.settings_dialog import (
@@ -167,6 +168,53 @@ def test_three_panes_render_loaded_stack_in_sidebar_and_inspector(
     assert window.inspector.background_value.text().endswith("background.png")
     assert window.inspector.hotspot_list.item(0).text() == "Door"
     assert window.card_sidebar.findChild(QObject, "addCardButton") is not None
+    window.close()
+
+
+def test_empty_document_presents_first_card_path(
+    application: QApplication,
+) -> None:
+    window, controller, workers, _settings = make_window(
+        Stack(name="Empty"),
+        start_diagnostics=True,
+    )
+    window.show()
+    application.processEvents()
+
+    assert window.canvas_pages.currentIndex() == 0
+    assert window.inspector.pages.currentIndex() == 0
+    assert window.card_sidebar.empty_label.isVisible()
+    workers.ollama_operations[0].succeeded.emit(None)
+    workers.mflux_operations[0].succeeded.emit(None)
+    assert not window.generate_background_action.isEnabled()
+    assert not window.generate_hotspots_action.isEnabled()
+    window.create_first_card_button.click()
+
+    assert [card.name for card in controller.document.cards] == ["Card 1"]
+    assert window.card_sidebar.selected_card_id == controller.document.cards[0].id
+    assert window.inspector.selected_card_id == controller.document.cards[0].id
+    assert window.inspector.pages.currentIndex() == 1
+    assert window.canvas_pages.currentIndex() == 1
+    assert window.generate_background_action.isEnabled()
+    assert window.generate_hotspots_action.isEnabled()
+    window.close()
+
+
+def test_sidebar_actions_fit_at_minimum_width(application: QApplication) -> None:
+    window, _controller, _workers, _settings = make_window()
+    window.show()
+    window.pane_splitter.setSizes([180, 760, 240])
+    application.processEvents()
+
+    sidebar_right = window.card_sidebar.contentsRect().right()
+    for button in (
+        window.card_sidebar.add_button,
+        window.card_sidebar.start_button,
+        window.card_sidebar.move_up_button,
+        window.card_sidebar.move_down_button,
+    ):
+        assert button.width() > 0
+        assert button.geometry().right() <= sidebar_right
     window.close()
 
 
@@ -331,7 +379,7 @@ def test_service_rechecks_use_latest_completion_and_reenable_actions(
 
     window.run_availability_checks()
     assert not window.generate_background_action.isEnabled()
-    assert "check pending" in window.service_status_label.text()
+    assert window.service_status_label.text() == "Checking local AI services…"
     assert "is available" not in window.service_status_label.text()
     workers.ollama_operations[1].succeeded.emit(None)
     workers.mflux_operations[1].succeeded.emit(None)
@@ -348,6 +396,43 @@ def test_service_rechecks_use_latest_completion_and_reenable_actions(
     window.close()
 
 
+def test_status_summary_is_bounded_and_preserves_full_diagnostic(
+    application: QApplication,
+) -> None:
+    window, _controller, workers, _settings = make_window(start_diagnostics=True)
+    detail = "MFLUX model is unavailable because " + ("a runtime artifact is missing; " * 20)
+    failure = WorkerFailure(
+        adapter=AdapterKind.MFLUX,
+        stage="checking MFLUX model availability",
+        kind=WorkerFailureKind.MODEL_UNAVAILABLE,
+        message=detail,
+    )
+    workers.mflux_operations[0].failed.emit(failure)
+    workers.ollama_operations[0].succeeded.emit(None)
+
+    assert window.service_status_label.text() == "MFLUX unavailable"
+    assert len(window.service_status_label.text()) < 40
+    assert detail in window.service_status_label.toolTip()
+    assert not window.review_settings_button.isHidden()
+    window.close()
+
+
+def test_shell_copy_does_not_expose_issue_roadmap(application: QApplication) -> None:
+    window, _controller, _workers, _settings = make_window()
+
+    visible_copy = " ".join(label.text() for label in window.findChildren(QLabel))
+    action_tooltips = " ".join(
+        action.toolTip()
+        for action in (
+            *window.player_navigation_actions,
+            window.generate_background_action,
+            window.generate_hotspots_action,
+        )
+    )
+    assert "issue #" not in f"{visible_copy} {action_tooltips}".casefold()
+    window.close()
+
+
 def test_availability_checks_capture_settings_before_worker_execution() -> None:
     settings = FakeSettings()
     settings.values["services/ollama_endpoint"] = "http://localhost:11434"
@@ -361,6 +446,48 @@ def test_availability_checks_capture_settings_before_worker_execution() -> None:
         if isinstance(cell.cell_contents, MachineSettings)
     ]
     assert captured[0].ollama_endpoint == "http://localhost:11434"
+
+
+def test_mflux_check_uses_runtime_artifact_patterns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import huggingface_hub
+
+    calls: list[dict[str, Any]] = []
+
+    def incomplete_but_usable_snapshot(**kwargs: Any) -> str:
+        calls.append(kwargs)
+        if "allow_patterns" not in kwargs:
+            raise AssertionError("A full repository snapshot would reject optional missing files")
+        return "/cached/flux2-klein"
+
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", incomplete_but_usable_snapshot)
+    checks = build_availability_checks(FakeSettings())
+    checks[AdapterKind.MFLUX]()
+
+    assert calls[0]["local_files_only"] is True
+    assert set(calls[0]["allow_patterns"]) >= {
+        "vae/*.safetensors",
+        "transformer/*.safetensors",
+        "text_encoder/*.safetensors",
+        "tokenizer/**",
+    }
+
+
+def test_mflux_check_reports_missing_runtime_artifacts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import huggingface_hub
+    from huggingface_hub.errors import LocalEntryNotFoundError
+
+    def missing_snapshot(**_kwargs: Any) -> str:
+        raise LocalEntryNotFoundError("required model files are missing")
+
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", missing_snapshot)
+    checks = build_availability_checks(FakeSettings())
+
+    with pytest.raises(ModelUnavailableError, match="not available in the local"):
+        checks[AdapterKind.MFLUX]()
 
 
 def test_bootstrap_construction_uses_injected_services_without_live_clients(

@@ -8,7 +8,7 @@ from PySide6.QtCore import QSignalBlocker, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
-    QHBoxLayout,
+    QGridLayout,
     QLabel,
     QListWidget,
     QListWidgetItem,
@@ -67,15 +67,20 @@ class CardSidebar(QWidget):
         self.move_down_button.setToolTip("Move card down")
         self.move_down_button.clicked.connect(lambda: self._move_selected(1))
 
-        buttons = QHBoxLayout()
-        buttons.addWidget(self.add_button)
-        buttons.addWidget(self.start_button)
-        buttons.addWidget(self.move_up_button)
-        buttons.addWidget(self.move_down_button)
+        self.empty_label = QLabel("No cards yet")
+        self.empty_label.setObjectName("emptyCardListLabel")
+        self.empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        buttons = QGridLayout()
+        buttons.addWidget(self.add_button, 0, 0)
+        buttons.addWidget(self.start_button, 0, 1)
+        buttons.addWidget(self.move_up_button, 1, 0)
+        buttons.addWidget(self.move_down_button, 1, 1)
 
         layout = QVBoxLayout(self)
         layout.addWidget(heading)
         layout.addWidget(self.card_list, 1)
+        layout.addWidget(self.empty_label)
         layout.addLayout(buttons)
         self.render(controller.document)
 
@@ -100,6 +105,7 @@ class CardSidebar(QWidget):
             if selected_row < 0 and self.card_list.count():
                 selected_row = 0
             self.card_list.setCurrentRow(selected_row)
+        self.empty_label.setVisible(not document.cards)
         self._update_buttons()
 
     def select_card(self, card_id: UUID | None) -> None:
