@@ -42,6 +42,7 @@ from hypergen.generation.hotspot_prompts import (
     HotspotModelOutput,
     OllamaHotspotGenerator,
     build_hotspot_prompt,
+    build_hotspot_response_schema,
 )
 from hypergen.generation.image_prompts import (
     IMAGE_PROMPT_VERSION,
@@ -405,10 +406,15 @@ def run_e2e_evaluation(
                 "sha256": contract_digest(
                     HOTSPOT_PROMPT_VERSION,
                     inspect.getsource(build_hotspot_prompt),
-                    HotspotModelOutput.model_json_schema(),
                 ),
             },
-            "hotspot_schema": {"version": HOTSPOT_SCHEMA_VERSION},
+            "hotspot_schema": {
+                "version": HOTSPOT_SCHEMA_VERSION,
+                "sha256": contract_digest(
+                    HotspotModelOutput.model_json_schema(),
+                    inspect.getsource(build_hotspot_response_schema),
+                ),
+            },
             "case": {
                 "version": E2E_CASE_VERSION,
                 "sha256": None,

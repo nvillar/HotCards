@@ -35,6 +35,7 @@ from hypergen.generation.hotspot_prompts import (
     HotspotModelOutput,
     OllamaHotspotGenerator,
     build_hotspot_prompt,
+    build_hotspot_response_schema,
 )
 from hypergen.generation.image_prompts import (
     IMAGE_PROMPT_VERSION,
@@ -138,6 +139,7 @@ def run_smoke(
                     HOTSPOT_PROMPT_VERSION,
                     inspect.getsource(build_hotspot_prompt),
                     HotspotModelOutput.model_json_schema(),
+                    inspect.getsource(build_hotspot_response_schema),
                 ),
             },
         },

@@ -7,8 +7,9 @@ diagnostics; geometry quality and edit cost remain human rubric inputs.
 
 `recorded/` contains synthetic model responses for deterministic regressions:
 repetition, a supplied destination returned unresolved, invalid geometry, and
-schema saturation. `contracts/production-v1.json` records the bounded contract
-selected from the initial live comparison.
+schema saturation. `contracts/production-v1.json` retains the initial union
+target contract; `contracts/production-v2.json` records the current flat,
+request-constrained destination-token contract.
 
 - `../smoke/courtyard.png` SHA-256:
   `4ddf55edf2b938c854e4e2e196e261eba845199f7571f5ceacceb87bfebe95b1`

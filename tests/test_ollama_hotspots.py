@@ -15,6 +15,7 @@ from hypergen.generation.hotspot_prompts import (
     OllamaHotspotGenerator,
     UnresolvedCandidateTarget,
     build_hotspot_prompt,
+    build_hotspot_response_schema,
 )
 from hypergen.generation.ollama_client import OllamaRuntime, OllamaSettings
 
@@ -68,7 +69,7 @@ def hotspot_response(*, card_token: str = "C1") -> str:
                 {
                     "source_interaction_index": 1,
                     "label": "Gate",
-                    "target": {"type": "existing", "card_token": card_token},
+                    "destination_token": card_token,
                     "polygons": [
                         {
                             "points": [
@@ -90,6 +91,7 @@ def test_hotspot_prompt_uses_tokens_without_uuids(tmp_path: Path) -> None:
     assert '"token": "C1"' in prompt
     assert "Garden" in prompt
     assert "UUID" in prompt
+    assert "UNRESOLVED" in prompt
     assert "at most\n  4 interactions" in prompt
     assert "00000000-0000-0000-0000-000000000000" not in prompt
 
@@ -104,6 +106,13 @@ def test_hotspot_request_rejects_duplicate_catalogue_tokens(tmp_path: Path) -> N
                 CardCatalogueEntry(token="C1", name="South Garden"),
             ),
         )
+
+
+def test_hotspot_schema_constrains_destination_to_request_tokens(tmp_path: Path) -> None:
+    schema = build_hotspot_response_schema(request(tmp_path / "fixture.png"))
+
+    destination = schema["$defs"]["ModelInteractionOutput"]["properties"]["destination_token"]
+    assert destination["enum"] == ["C1", "UNRESOLVED"]
 
 
 def test_hotspot_adapter_clamps_coordinates_and_preserves_warnings(tmp_path: Path) -> None:
@@ -121,6 +130,10 @@ def test_hotspot_adapter_clamps_coordinates_and_preserves_warnings(tmp_path: Pat
     assert result.proposals[0].target.type == "existing"
     message = client.chat_calls[0]["messages"][0]  # type: ignore[index]
     assert message["images"] == [image_path]  # type: ignore[index]
+    destination = client.chat_calls[0]["format"]["$defs"]["ModelInteractionOutput"][  # type: ignore[index]
+        "properties"
+    ]["destination_token"]
+    assert destination["enum"] == ["C1", "UNRESOLVED"]
 
 
 def test_unknown_request_token_becomes_unresolved_warning(tmp_path: Path) -> None:
@@ -135,6 +148,20 @@ def test_unknown_request_token_becomes_unresolved_warning(tmp_path: Path) -> Non
 
     assert isinstance(result.proposals[0].target, UnresolvedCandidateTarget)
     assert "unknown card token" in result.warnings[0]
+
+
+def test_unresolved_destination_remains_reviewable(tmp_path: Path) -> None:
+    image_path = tmp_path / "fixture.png"
+    image_path.write_bytes(b"fixture")
+    runtime = OllamaRuntime(
+        OllamaSettings(),
+        client=FakeOllamaClient([hotspot_response(card_token="UNRESOLVED")]),
+    )
+
+    result = OllamaHotspotGenerator(runtime).generate(request(image_path))
+
+    assert isinstance(result.proposals[0].target, UnresolvedCandidateTarget)
+    assert not any("unknown card token" in warning for warning in result.warnings)
 
 
 def test_repeated_hotspot_proposals_are_flagged(tmp_path: Path) -> None:

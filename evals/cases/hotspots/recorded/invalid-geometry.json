@@ -3,7 +3,7 @@
     {
       "source_interaction_index": 1,
       "label": "Arched gate",
-      "target": {"type": "existing", "card_token": "C1"},
+      "destination_token": "C1",
       "polygons": [
         {
           "points": [

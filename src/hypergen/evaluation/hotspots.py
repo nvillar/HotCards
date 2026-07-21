@@ -45,6 +45,7 @@ from hypergen.generation.hotspot_prompts import (
     HotspotProposal,
     OllamaHotspotGenerator,
     build_hotspot_prompt,
+    build_hotspot_response_schema,
     normalize_hotspot_response,
 )
 from hypergen.generation.ollama_client import (
@@ -707,12 +708,14 @@ def run_hotspot_evaluation(
                 "sha256": contract_digest(
                     HOTSPOT_PROMPT_VERSION,
                     inspect.getsource(build_hotspot_prompt),
-                    HotspotModelOutput.model_json_schema(),
                 ),
             },
             "hotspot_schema": {
                 "version": HOTSPOT_SCHEMA_VERSION,
-                "sha256": contract_digest(HotspotModelOutput.model_json_schema()),
+                "sha256": contract_digest(
+                    HotspotModelOutput.model_json_schema(),
+                    inspect.getsource(build_hotspot_response_schema),
+                ),
             },
             "hotspot_case": {"version": HOTSPOT_CASE_VERSION},
         },

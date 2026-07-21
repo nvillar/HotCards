@@ -3,7 +3,7 @@
     {
       "source_interaction_index": 1,
       "label": "Arched gate",
-      "target": {"type": "unresolved", "description": "moonlit garden"},
+      "destination_token": "UNRESOLVED",
       "polygons": [
         {
           "points": [

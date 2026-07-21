@@ -1,0 +1,30 @@
+{
+  "contract_version": "hotspot-production-v2",
+  "prompt_version": "hotspot-prompt-v2",
+  "schema_version": "hotspot-schema-v2",
+  "selected_model": "qwen3.5:9b",
+  "selected_limits": {
+    "interactions": 4,
+    "components_per_interaction": 2,
+    "points_per_component": 12,
+    "output_tokens": 1024,
+    "context_tokens": 8192,
+    "timeout_seconds": 120
+  },
+  "destination_contract": {
+    "field": "destination_token",
+    "allowed_values": "Exact request-local card tokens plus UNRESOLVED",
+    "new_target_generation": false,
+    "apply_behavior": "Existing tokens map to UUIDs only after author review; UNRESOLVED remains unresolved."
+  },
+  "selection_evidence": {
+    "observations": [
+      "The v1 existing/new/unresolved object union produced zero supplied-destination accuracy in the combined vision and geometry evaluation.",
+      "A focused text-only ablation resolved all six expected destinations across the three selected Ollama models when one flat field was constrained to the request tokens plus UNRESOLVED.",
+      "Opaque C1/C2 tokens and descriptive slugs both resolved all six destinations under the flat enum, so descriptive identifiers added no measured benefit.",
+      "The flat contract preserves one multimodal call, safe abstention, request-local identifiers, and the existing author review boundary.",
+      "The live v2 multimodal comparison resolved all 24 expected cold/warm destinations across both cases and all three selected Ollama models."
+    ]
+  },
+  "model_recommendation": "Retain qwen3.5:9b for end-to-end interaction and geometry reliability. The v2 flat enum removes the observed destination-resolution blocker, while destination choices remain visibly author-reviewable because the live evidence covers only two cases."
+}

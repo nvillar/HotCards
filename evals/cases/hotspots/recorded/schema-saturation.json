@@ -3,7 +3,7 @@
     {
       "source_interaction_index": 1,
       "label": "Gate one",
-      "target": {"type": "existing", "card_token": "C1"},
+      "destination_token": "C1",
       "polygons": [
         {
           "points": [
@@ -18,7 +18,7 @@
     {
       "source_interaction_index": 2,
       "label": "Chest one",
-      "target": {"type": "existing", "card_token": "C2"},
+      "destination_token": "C2",
       "polygons": [
         {
           "points": [
@@ -33,7 +33,7 @@
     {
       "source_interaction_index": 1,
       "label": "Gate duplicate",
-      "target": {"type": "existing", "card_token": "C1"},
+      "destination_token": "C1",
       "polygons": [
         {
           "points": [
@@ -48,7 +48,7 @@
     {
       "source_interaction_index": 2,
       "label": "Chest duplicate",
-      "target": {"type": "existing", "card_token": "C2"},
+      "destination_token": "C2",
       "polygons": [
         {
           "points": [

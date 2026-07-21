@@ -77,7 +77,7 @@ def hotspot_response(*, left_edge: int = 100) -> str:
                 {
                     "source_interaction_index": 1,
                     "label": "Gate",
-                    "target": {"type": "existing", "card_token": "C1"},
+                    "destination_token": "C1",
                     "polygons": [
                         {
                             "points": [

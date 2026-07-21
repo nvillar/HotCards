@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from pydantic import Field, StringConstraints, ValidationError, model_validator
@@ -29,8 +29,9 @@ from hypergen.domain.models import (
 from hypergen.generation.errors import ModelResponseError
 from hypergen.generation.ollama_client import OllamaCallResult, OllamaRuntime
 
-HOTSPOT_PROMPT_VERSION = "hotspot-prompt-v1"
-HOTSPOT_SCHEMA_VERSION = "hotspot-schema-v1"
+HOTSPOT_PROMPT_VERSION = "hotspot-prompt-v2"
+HOTSPOT_SCHEMA_VERSION = "hotspot-schema-v2"
+UNRESOLVED_DESTINATION_TOKEN = "UNRESOLVED"
 MAX_INTERACTIONS = 4
 MAX_COMPONENTS_PER_INTERACTION = 2
 MAX_POINTS_PER_COMPONENT = 12
@@ -80,39 +81,12 @@ class ModelPolygon(DomainModel):
     )
 
 
-class ExistingTargetOutput(DomainModel):
-    """Model selected one supplied request-local token."""
-
-    type: Literal["existing"] = "existing"
-    card_token: CardToken
-
-
-class NewTargetOutput(DomainModel):
-    """Model found no existing fit and proposed a card name."""
-
-    type: Literal["new"] = "new"
-    proposed_name: NonEmptyString
-
-
-class UnresolvedTargetOutput(DomainModel):
-    """Model could not resolve the intended destination."""
-
-    type: Literal["unresolved"] = "unresolved"
-    description: str = ""
-
-
-ModelTargetOutput = Annotated[
-    ExistingTargetOutput | NewTargetOutput | UnresolvedTargetOutput,
-    Field(discriminator="type"),
-]
-
-
 class ModelInteractionOutput(DomainModel):
     """One structured interaction emitted by Ollama."""
 
     source_interaction_index: int = Field(ge=1, le=MAX_INTERACTIONS)
     label: NonEmptyString
-    target: ModelTargetOutput
+    destination_token: CardToken | Literal["UNRESOLVED"]
     polygons: tuple[ModelPolygon, ...] = Field(
         min_length=1,
         max_length=MAX_COMPONENTS_PER_INTERACTION,
@@ -126,6 +100,21 @@ class HotspotModelOutput(DomainModel):
         default_factory=tuple,
         max_length=MAX_INTERACTIONS,
     )
+
+
+def build_hotspot_response_schema(request: HotspotGenerationRequest) -> dict[str, Any]:
+    """Constrain destination output to this request's tokens plus safe abstention."""
+    schema = HotspotModelOutput.model_json_schema()
+    interaction_properties = schema["$defs"]["ModelInteractionOutput"]["properties"]
+    interaction_properties["destination_token"] = {
+        "title": "Destination Token",
+        "type": "string",
+        "enum": [
+            *(card.token for card in request.card_catalogue),
+            UNRESOLVED_DESTINATION_TOKEN,
+        ],
+    }
+    return schema
 
 
 class ExistingCandidateTarget(DomainModel):
@@ -219,10 +208,9 @@ Return JSON matching the supplied schema.
   {MAX_INTERACTIONS} interactions, {MAX_COMPONENTS_PER_INTERACTION} polygon components per
   interaction, and {MAX_POINTS_PER_COMPONENT} points per component.
 - Keep polygons simple and reasonably editable; do not create holes.
-- Match destination names in the interaction description to the supplied card catalogue. When a
-  supplied card is the intended destination, you MUST return its opaque token with type "existing".
-  Use "new" only when the author names a destination absent from the catalogue, and "unresolved"
-  only when no destination can be inferred.
+- Match destination names in the interaction description to the supplied card catalogue. Return the
+  exact opaque token of the intended supplied card as destination_token. Return "UNRESOLVED" only
+  when no supplied destination can be inferred.
 - Destination resolution comes from the author's text and catalogue, not from visible image
   content. Do not mark a destination unresolved merely because the destination card is not pictured.
 - Never invent or return UUIDs.
@@ -236,20 +224,18 @@ Request:
 
 
 def _candidate_target(
-    output: ModelTargetOutput,
+    destination_token: CardToken | Literal["UNRESOLVED"],
     catalogue: dict[str, CardCatalogueEntry],
     warnings: list[str],
 ) -> CandidateTarget:
-    if isinstance(output, ExistingTargetOutput):
-        card = catalogue.get(output.card_token)
-        if card is None:
-            warning = f"model selected unknown card token {output.card_token!r}"
-            warnings.append(warning)
-            return UnresolvedCandidateTarget(description=warning)
-        return ExistingCandidateTarget(card_token=card.token, card_name=card.name)
-    if isinstance(output, NewTargetOutput):
-        return NewCandidateTarget(proposed_name=output.proposed_name)
-    return UnresolvedCandidateTarget(description=output.description)
+    if destination_token == UNRESOLVED_DESTINATION_TOKEN:
+        return UnresolvedCandidateTarget()
+    card = catalogue.get(destination_token)
+    if card is None:
+        warning = f"model selected unknown card token {destination_token!r}"
+        warnings.append(warning)
+        return UnresolvedCandidateTarget(description=warning)
+    return ExistingCandidateTarget(card_token=card.token, card_name=card.name)
 
 
 def _candidate_polygon(
@@ -318,7 +304,7 @@ class OllamaHotspotGenerator:
             raise ModelResponseError(f"hotspot input image does not exist: {request.image_path}")
         call = self._runtime.chat_structured(
             prompt=build_hotspot_prompt(request),
-            schema=HotspotModelOutput.model_json_schema(),
+            schema=build_hotspot_response_schema(request),
             image_path=request.image_path,
         )
         return normalize_hotspot_response(
@@ -357,7 +343,7 @@ def normalize_hotspot_response(
         HotspotProposal(
             source_interaction_index=interaction.source_interaction_index,
             label=interaction.label,
-            target=_candidate_target(interaction.target, catalogue, warnings),
+            target=_candidate_target(interaction.destination_token, catalogue, warnings),
             polygons=tuple(
                 _candidate_polygon(
                     polygon,
