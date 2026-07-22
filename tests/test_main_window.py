@@ -640,6 +640,8 @@ def test_manual_hotspot_properties_and_destination_actions(
         destination.id
     )
     window.inspector.hotspot_destination_combo.setCurrentIndex(destination_index)
+    window.inspector.hotspot_destination_combo.activated.emit(destination_index)
+    application.processEvents()
     hotspot_set = controller.document.cards[0].image_revisions[0].hotspot_set
     assert hotspot_set is not None
     assert hotspot_set.interactions[0].action.target == ResolvedCardReference(
@@ -647,6 +649,8 @@ def test_manual_hotspot_properties_and_destination_actions(
     )
 
     window.inspector.hotspot_destination_combo.setCurrentIndex(0)
+    window.inspector.hotspot_destination_combo.activated.emit(0)
+    application.processEvents()
     hotspot_set = controller.document.cards[0].image_revisions[0].hotspot_set
     assert hotspot_set is not None
     assert hotspot_set.interactions[0].action.target == UnresolvedCardReference()
@@ -658,6 +662,8 @@ def test_manual_hotspot_properties_and_destination_actions(
     )
     create_index = window.inspector.hotspot_destination_combo.findData("create")
     window.inspector.hotspot_destination_combo.setCurrentIndex(create_index)
+    window.inspector.hotspot_destination_combo.activated.emit(create_index)
+    application.processEvents()
     assert len(controller.document.cards) == 2
 
     monkeypatch.setattr(
@@ -667,6 +673,8 @@ def test_manual_hotspot_properties_and_destination_actions(
     )
     create_index = window.inspector.hotspot_destination_combo.findData("create")
     window.inspector.hotspot_destination_combo.setCurrentIndex(create_index)
+    window.inspector.hotspot_destination_combo.activated.emit(create_index)
+    application.processEvents()
 
     assert [card.name for card in controller.document.cards] == [
         source.name,
@@ -680,6 +688,121 @@ def test_manual_hotspot_properties_and_destination_actions(
     assert target.target_card_id == controller.document.cards[-1].id
     assert controller.undo()
     assert len(controller.document.cards) == 2
+    window.close()
+
+
+def test_existing_destination_survives_card_and_hotspot_reselection(
+    application: QApplication,
+) -> None:
+    window, controller, _workers, _settings = make_window()
+    source = controller.document.cards[0]
+    destination = controller.document.cards[1]
+    destination_index = window.inspector.hotspot_destination_combo.findData(
+        destination.id
+    )
+
+    window.inspector.hotspot_destination_combo.showPopup()
+    window.inspector.hotspot_destination_combo.setCurrentIndex(destination_index)
+    window.inspector.hotspot_destination_combo.activated.emit(destination_index)
+    window.inspector.hotspot_destination_combo.hidePopup()
+    application.processEvents()
+    window.select_card(destination.id)
+    window.select_card(source.id)
+
+    assert window._selected_card_id == source.id
+    assert window.inspector.hotspot_list.count() == 1
+    hotspot_set = controller.document.cards[0].image_revisions[0].hotspot_set
+    assert hotspot_set is not None
+    assert hotspot_set.interactions[0].action.target == ResolvedCardReference(
+        target_card_id=destination.id
+    )
+    assert (
+        window.inspector.hotspot_destination_combo.currentData()
+        == destination.id
+    )
+    window.close()
+
+
+def test_existing_destination_survives_bundle_flush_and_reopen(
+    application: QApplication,
+    tmp_path: Path,
+) -> None:
+    source_image = tmp_path / "source.png"
+    Image.new("RGB", (1024, 768), "green").save(source_image)
+    source = Card(name="Source")
+    destination = Card(name="Destination")
+    revision_id = uuid4()
+    bundle = tmp_path / "Destination.hypergen"
+    store = StackStore(bundle)
+    image_path = store.import_image(
+        source_image,
+        card_id=source.id,
+        revision_id=revision_id,
+    )
+    hotspot = Interaction(
+        label="Door",
+        action=NavigateAction(target=UnresolvedCardReference()),
+        polygons=(
+            Polygon(
+                points=(
+                    Point(x=0.1, y=0.1),
+                    Point(x=0.4, y=0.1),
+                    Point(x=0.2, y=0.5),
+                )
+            ),
+        ),
+    )
+    revision = ImageRevision(
+        id=revision_id,
+        image_path=image_path,
+        origin=ImageOrigin.IMPORTED,
+        hotspot_set=HotspotSet(interactions=(hotspot,)),
+        created_at=datetime.now(UTC),
+    )
+    source = source.model_copy(
+        update={
+            "image_revisions": (revision,),
+            "active_revision_id": revision.id,
+        }
+    )
+    stack = Stack(name="Saved", cards=(source, destination))
+    store.save(stack)
+    controller = DocumentController(Stack(name="Bootstrap"))
+    session = DocumentSession(controller)
+    session.open(bundle)
+    window = MainWindow(
+        controller,
+        FakeWorkers(),  # type: ignore[arg-type]
+        FakeSettings(),
+        document_session=session,
+        background_workflow=FakeBackgroundWorkflow(),  # type: ignore[arg-type]
+        start_diagnostics=False,
+    )
+    destination_index = next(
+        index
+        for index in range(window.inspector.hotspot_destination_combo.count())
+        if window.inspector.hotspot_destination_combo.itemData(index)
+        == destination.id
+    )
+
+    window.inspector.hotspot_destination_combo.setCurrentIndex(destination_index)
+    window.inspector.hotspot_destination_combo.activated.emit(destination_index)
+    application.processEvents()
+    assert session.state.dirty
+    assert session.flush()
+    session.open(bundle)
+    window.select_card(source.id)
+
+    saved = StackStore(bundle).load()
+    saved_hotspots = saved.cards[0].image_revisions[0].hotspot_set
+    assert saved_hotspots is not None
+    assert saved_hotspots.interactions[0].action.target == ResolvedCardReference(
+        target_card_id=destination.id
+    )
+    assert (
+        window.inspector.hotspot_destination_combo.currentData()
+        == destination.id
+    )
     window.close()
 
 

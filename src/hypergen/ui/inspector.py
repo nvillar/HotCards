@@ -5,7 +5,7 @@ from __future__ import annotations
 from uuid import UUID
 
 from pydantic import ValidationError
-from PySide6.QtCore import QSignalBlocker, Qt, Signal
+from PySide6.QtCore import QSignalBlocker, Qt, QTimer, Signal
 from PySide6.QtGui import QFocusEvent
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -291,7 +291,7 @@ class Inspector(QWidget):
         self.hotspot_label_edit.editingFinished.connect(
             self._commit_hotspot_label
         )
-        self.hotspot_destination_combo.currentIndexChanged.connect(
+        self.hotspot_destination_combo.activated.connect(
             self._destination_changed
         )
         self.move_hotspot_up_button.clicked.connect(
@@ -455,7 +455,10 @@ class Inspector(QWidget):
             for index, revision in enumerate(card.image_revisions, start=1):
                 origin = "Generated" if revision.origin.value == "generated" else "Imported"
                 self.revision_combo.addItem(f"{index}. {origin}", revision.id)
-            active_index = self.revision_combo.findData(card.active_revision_id)
+            active_index = self._combo_index_for_data(
+                self.revision_combo,
+                card.active_revision_id,
+            )
             self.revision_combo.setCurrentIndex(active_index)
         self.revision_combo.setEnabled(bool(card.image_revisions))
         self.delete_revision_button.setEnabled(active_revision is not None)
@@ -524,14 +527,7 @@ class Inspector(QWidget):
                 0 if interactions else -1,
             )
             self.hotspot_list.setCurrentRow(selected_row)
-        selected = next(
-            (
-                interaction
-                for interaction in interactions
-                if interaction.id == self.selected_interaction_id
-            ),
-            None,
-        )
+        selected = interactions[selected_row] if selected_row >= 0 else None
         self._render_hotspot_properties(document, revision, selected)
 
     def _revision_selected(self, index: int) -> None:
@@ -608,7 +604,8 @@ class Inspector(QWidget):
                 ResolvedCardReference,
             ):
                 self.hotspot_destination_combo.setCurrentIndex(
-                    self.hotspot_destination_combo.findData(
+                    self._combo_index_for_data(
+                        self.hotspot_destination_combo,
                         interaction.action.target.target_card_id
                     )
                 )
@@ -656,6 +653,32 @@ class Inspector(QWidget):
         if interaction is None or revision_id is None or card_id is None:
             return
         destination = self.hotspot_destination_combo.itemData(index)
+        QTimer.singleShot(
+            0,
+            lambda: self._apply_destination_change(
+                card_id,
+                revision_id,
+                interaction.id,
+                destination,
+            ),
+        )
+
+    def _apply_destination_change(
+        self,
+        card_id: UUID,
+        revision_id: UUID,
+        interaction_id: UUID,
+        destination: object,
+    ) -> None:
+        interaction = self._interaction_by_id(
+            card_id,
+            revision_id,
+            interaction_id,
+        )
+        if interaction is None:
+            self.set_hotspot_error("The selected hotspot no longer exists.")
+            self.render(self.controller.document, self.selected_card_id)
+            return
         if destination == "create":
             name, accepted = QInputDialog.getText(
                 self,
@@ -663,12 +686,12 @@ class Inspector(QWidget):
                 "Card name",
             )
             if not accepted:
-                self.render(self.controller.document, card_id)
+                self.render(self.controller.document, self.selected_card_id)
                 return
             command = CreateCardAndResolveCommand(
                 source_card_id=card_id,
                 revision_id=revision_id,
-                interaction_id=interaction.id,
+                interaction_id=interaction_id,
                 card_name=name,
             )
         else:
@@ -682,7 +705,7 @@ class Inspector(QWidget):
             command = ChangeHotspotDestinationCommand(
                 card_id=card_id,
                 revision_id=revision_id,
-                interaction_id=interaction.id,
+                interaction_id=interaction_id,
                 destination=target,
             )
         self._execute_hotspot_command(command)
@@ -764,6 +787,41 @@ class Inspector(QWidget):
             None,
         )
 
+    def _interaction_by_id(
+        self,
+        card_id: UUID,
+        revision_id: UUID,
+        interaction_id: UUID,
+    ) -> Interaction | None:
+        card = next(
+            (
+                card
+                for card in self.controller.document.cards
+                if card.id == card_id
+            ),
+            None,
+        )
+        if card is None:
+            return None
+        revision = next(
+            (
+                revision
+                for revision in card.image_revisions
+                if revision.id == revision_id
+            ),
+            None,
+        )
+        if revision is None or revision.hotspot_set is None:
+            return None
+        return next(
+            (
+                interaction
+                for interaction in revision.hotspot_set.interactions
+                if interaction.id == interaction_id
+            ),
+            None,
+        )
+
     def _active_revision_id(self) -> UUID | None:
         revision = self._active_revision_for_selected_card()
         return revision.id if revision is not None else None
@@ -778,6 +836,17 @@ class Inspector(QWidget):
             None,
         )
         return self._active_revision(card) if card is not None else None
+
+    @staticmethod
+    def _combo_index_for_data(combo: QComboBox, value: object) -> int:
+        return next(
+            (
+                index
+                for index in range(combo.count())
+                if combo.itemData(index) == value
+            ),
+            -1,
+        )
 
     @staticmethod
     def _active_revision(card: Card) -> ImageRevision | None:
