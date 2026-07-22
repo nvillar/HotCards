@@ -13,6 +13,9 @@ interactive experience. All generation runs on-device.
 [Ollama](https://ollama.com) daemon and locally cached MFLUX image models; the
 authoring shell remains usable when either service is unavailable.
 
+Stacks are stored as self-contained `.hypergen` directory bundles and
+autosaved atomically after creation or opening.
+
 ## Setup and run
 
 Prerequisites: Python 3.12 and [uv](https://docs.astral.sh/uv/). To enable

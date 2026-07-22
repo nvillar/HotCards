@@ -1,0 +1,84 @@
+"""Small metadata dialog for creating a bound HyperGen stack."""
+
+from __future__ import annotations
+
+from PySide6.QtWidgets import (
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
+    QLineEdit,
+    QPlainTextEdit,
+    QSpinBox,
+    QVBoxLayout,
+    QWidget,
+)
+
+from hypergen.domain.models import CanvasSize, Card, Stack
+
+
+class NewStackDialog(QDialog):
+    """Collect portable stack metadata without turning creation into a wizard."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("New Stack")
+        self.setModal(True)
+
+        self.name_edit = QLineEdit("Untitled Stack")
+        self.name_edit.setObjectName("newStackNameEdit")
+        self.art_direction_edit = QPlainTextEdit()
+        self.art_direction_edit.setObjectName("newStackArtDirectionEdit")
+        self.art_direction_edit.setPlaceholderText(
+            "Visual style shared by generated backgrounds"
+        )
+        self.art_direction_edit.setMaximumHeight(90)
+        self.width_spin = QSpinBox()
+        self.width_spin.setObjectName("newStackWidthSpin")
+        self.width_spin.setRange(64, 8192)
+        self.width_spin.setValue(1024)
+        self.height_spin = QSpinBox()
+        self.height_spin.setObjectName("newStackHeightSpin")
+        self.height_spin.setRange(64, 8192)
+        self.height_spin.setValue(768)
+
+        form = QFormLayout()
+        form.addRow("Name", self.name_edit)
+        form.addRow("Art direction", self.art_direction_edit)
+        form.addRow("Canvas width", self.width_spin)
+        form.addRow("Canvas height", self.height_spin)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Cancel
+            | QDialogButtonBox.StandardButton.Ok
+        )
+        buttons.accepted.connect(self._accept_if_valid)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+
+    def stack(self) -> Stack:
+        """Build the initial saved document with one selected start card."""
+        first_card = Card(name="Card 1")
+        return Stack(
+            name=self.name_edit.text(),
+            art_direction=self.art_direction_edit.toPlainText(),
+            canvas=CanvasSize(
+                width=self.width_spin.value(),
+                height=self.height_spin.value(),
+            ),
+            cards=(first_card,),
+            start_card_id=first_card.id,
+        )
+
+    def _accept_if_valid(self) -> None:
+        try:
+            self.stack()
+        except ValueError:
+            self.name_edit.setFocus()
+            return
+        self.accept()
+
+
+__all__ = ["NewStackDialog"]

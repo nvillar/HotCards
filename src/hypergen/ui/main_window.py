@@ -4,16 +4,19 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from functools import partial
+from pathlib import Path
 from typing import Any
 from uuid import UUID
 
 from PySide6.QtCore import QSettings, Qt
-from PySide6.QtGui import QAction, QCloseEvent
+from PySide6.QtGui import QAction, QCloseEvent, QKeySequence
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
+    QFileDialog,
     QLabel,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QSplitter,
     QStackedWidget,
@@ -24,6 +27,11 @@ from PySide6.QtWidgets import (
 
 from hypergen.application.commands import SetRunOverlayModeCommand
 from hypergen.application.document_controller import DocumentController
+from hypergen.application.document_session import (
+    DocumentSession,
+    DocumentSessionError,
+    DocumentSessionState,
+)
 from hypergen.application.workers import (
     AdapterKind,
     AdapterWorkers,
@@ -33,6 +41,7 @@ from hypergen.application.workers import (
 from hypergen.domain.models import RunOverlayMode, Stack
 from hypergen.ui.card_sidebar import CardSidebar
 from hypergen.ui.inspector import Inspector
+from hypergen.ui.new_stack_dialog import NewStackDialog
 from hypergen.ui.settings_dialog import SettingsDialog, SettingsStore
 
 AvailabilityChecks = Mapping[AdapterKind, Callable[[], Any]]
@@ -52,6 +61,7 @@ class MainWindow(QMainWindow):
         availability_checks: AvailabilityChecks | None = None,
         availability_checks_factory: AvailabilityChecksFactory | None = None,
         settings_dialog_factory: SettingsDialogFactory = SettingsDialog,
+        document_session: DocumentSession | None = None,
         start_diagnostics: bool = True,
         owns_workers: bool = False,
     ) -> None:
@@ -59,6 +69,7 @@ class MainWindow(QMainWindow):
         self.controller = controller
         self.workers = workers
         self.settings = settings if settings is not None else QSettings()
+        self.document_session = document_session
         self._availability_checks = dict(availability_checks or {})
         self._availability_checks_factory = availability_checks_factory
         self._settings_dialog_factory = settings_dialog_factory
@@ -82,7 +93,15 @@ class MainWindow(QMainWindow):
         self._build_panes()
         self._build_menu()
         self.workers.availability_changed.connect(self.apply_availability_diagnostic)
+        if self.document_session is not None:
+            self.document_session.document_replaced.connect(self._document_replaced)
+            self.document_session.state_changed.connect(self._session_state_changed)
         self.render_document(controller.document)
+        self._session_state_changed(
+            self.document_session.state
+            if self.document_session is not None
+            else DocumentSessionState(bundle_path=None, dirty=False, error=None)
+        )
         self._update_generation_actions()
         if start_diagnostics:
             self.run_availability_checks()
@@ -141,6 +160,7 @@ class MainWindow(QMainWindow):
         self.card_sidebar = CardSidebar(self.controller)
         self.card_sidebar.card_selected.connect(self.select_card)
         self.card_sidebar.document_changed.connect(self.render_document)
+        self.card_sidebar.delete_requested.connect(self._confirm_delete_card)
 
         self.canvas_pages = QStackedWidget()
         self.canvas_pages.setObjectName("canvasPages")
@@ -210,9 +230,48 @@ class MainWindow(QMainWindow):
         self.review_settings_button.setVisible(False)
         self.review_settings_button.clicked.connect(self.open_advanced_settings)
         self.statusBar().addPermanentWidget(self.review_settings_button)
-        self.create_first_card_button.clicked.connect(self.card_sidebar.add_card)
+        self.create_first_card_button.clicked.connect(self._primary_empty_action)
+
+        self.document_status_label = QLabel()
+        self.document_status_label.setObjectName("documentStatusLabel")
+        self.statusBar().addWidget(self.document_status_label, 1)
 
     def _build_menu(self) -> None:
+        file_menu = self.menuBar().addMenu("File")
+        self.new_stack_action = QAction("New Stack…", self)
+        self.new_stack_action.setObjectName("newStackAction")
+        self.new_stack_action.setShortcut(QKeySequence.StandardKey.New)
+        self.new_stack_action.triggered.connect(self.new_stack)
+        file_menu.addAction(self.new_stack_action)
+        self.open_stack_action = QAction("Open Stack…", self)
+        self.open_stack_action.setObjectName("openStackAction")
+        self.open_stack_action.setShortcut(QKeySequence.StandardKey.Open)
+        self.open_stack_action.triggered.connect(self.open_stack)
+        file_menu.addAction(self.open_stack_action)
+        file_menu.addSeparator()
+        self.save_action = QAction("Save", self)
+        self.save_action.setObjectName("saveStackAction")
+        self.save_action.setShortcut(QKeySequence.StandardKey.Save)
+        self.save_action.triggered.connect(self.save_document)
+        file_menu.addAction(self.save_action)
+        self.save_as_action = QAction("Save As…", self)
+        self.save_as_action.setObjectName("saveStackAsAction")
+        self.save_as_action.setShortcut(QKeySequence.StandardKey.SaveAs)
+        self.save_as_action.triggered.connect(self.save_as)
+        file_menu.addAction(self.save_as_action)
+
+        edit_menu = self.menuBar().addMenu("Edit")
+        self.undo_action = QAction("Undo", self)
+        self.undo_action.setObjectName("undoAction")
+        self.undo_action.setShortcut(QKeySequence.StandardKey.Undo)
+        self.undo_action.triggered.connect(self.undo)
+        edit_menu.addAction(self.undo_action)
+        self.redo_action = QAction("Redo", self)
+        self.redo_action.setObjectName("redoAction")
+        self.redo_action.setShortcut(QKeySequence.StandardKey.Redo)
+        self.redo_action.triggered.connect(self.redo)
+        edit_menu.addAction(self.redo_action)
+
         self.advanced_settings_action = QAction("Advanced Settings…", self)
         self.advanced_settings_action.setObjectName("advancedSettingsAction")
         self.advanced_settings_action.triggered.connect(self.open_advanced_settings)
@@ -240,9 +299,10 @@ class MainWindow(QMainWindow):
                 self.canvas_card_name.setText(selected_card.name)
             overlay_index = self.overlay_selector.findData(snapshot.run_overlay_mode)
             self.overlay_selector.setCurrentIndex(overlay_index)
-            self.setWindowTitle(f"HyperGen — {snapshot.name}")
         finally:
             self._rendering = False
+        self._update_document_actions()
+        self._update_window_title()
         self._update_generation_actions()
 
     def select_card(self, card_id: object) -> None:
@@ -250,6 +310,190 @@ class MainWindow(QMainWindow):
         if self.card_sidebar.selected_card_id != self._selected_card_id:
             self.card_sidebar.select_card(self._selected_card_id)
         self.render_document()
+
+    def new_stack(self) -> None:
+        """Create and bind a new stack before exposing its initial card."""
+        if self.document_session is None:
+            return
+        self.inspector.commit_card_metadata()
+        dialog = NewStackDialog(self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        stack = dialog.stack()
+        suggested_name = f"{stack.name}.hypergen"
+        selected_path, _filter = QFileDialog.getSaveFileName(
+            self,
+            "Create HyperGen Stack",
+            suggested_name,
+            "HyperGen Stack (*.hypergen)",
+        )
+        if not selected_path:
+            return
+        try:
+            self.document_session.create(stack, self._bundle_path(selected_path))
+        except DocumentSessionError as error:
+            self._show_document_error("Could Not Create Stack", str(error))
+
+    def open_stack(self) -> None:
+        """Open a validated bundle without replacing the current session on failure."""
+        if self.document_session is None:
+            return
+        self.inspector.commit_card_metadata()
+        selected_path = QFileDialog.getExistingDirectory(
+            self,
+            "Open HyperGen Stack",
+        )
+        if not selected_path:
+            return
+        try:
+            self.document_session.open(Path(selected_path))
+        except DocumentSessionError as error:
+            self._show_document_error("Could Not Open Stack", str(error))
+
+    def save_document(self) -> bool:
+        """Flush accepted mutations and keep a failed save visible."""
+        if self.document_session is None:
+            return True
+        self.inspector.commit_card_metadata()
+        saved = self.document_session.flush()
+        if not saved:
+            self._show_document_error(
+                "Could Not Save Stack",
+                self.document_session.state.error or "The document could not be saved.",
+            )
+        return saved
+
+    def save_as(self) -> None:
+        """Clone the current bound bundle and rebind future autosaves."""
+        if self.document_session is None or self.document_session.store is None:
+            return
+        self.inspector.commit_card_metadata()
+        selected_path, _filter = QFileDialog.getSaveFileName(
+            self,
+            "Save HyperGen Stack As",
+            f"{self.controller.document.name}.hypergen",
+            "HyperGen Stack (*.hypergen)",
+        )
+        if not selected_path:
+            return
+        try:
+            self.document_session.save_as(self._bundle_path(selected_path))
+        except DocumentSessionError as error:
+            self._show_document_error("Could Not Save Stack As", str(error))
+
+    def undo(self) -> None:
+        if self.controller.undo():
+            self.render_document()
+
+    def redo(self) -> None:
+        if self.controller.redo():
+            self.render_document()
+
+    def _primary_empty_action(self) -> None:
+        if self.document_session is not None and self.document_session.store is None:
+            self.new_stack()
+        else:
+            self.card_sidebar.add_card()
+
+    def _confirm_delete_card(self, card_id: object) -> None:
+        if not isinstance(card_id, UUID):
+            return
+        card = next(
+            (candidate for candidate in self.controller.document.cards if candidate.id == card_id),
+            None,
+        )
+        if card is None:
+            return
+        start_warning = (
+            "\n\nThis is the start card; the stack will no longer have a start card."
+            if self.controller.document.start_card_id == card.id
+            else ""
+        )
+        message = (
+            f'Delete "{card.name}"? Inbound links will be kept as unresolved references.'
+            f"{start_warning}"
+        )
+        if self._ask_delete_card(message):
+            self.card_sidebar.delete_card(card.id)
+
+    def _ask_delete_card(self, message: str) -> bool:
+        dialog = QMessageBox(
+            QMessageBox.Icon.Warning,
+            "Delete Card",
+            message,
+            parent=self,
+        )
+        delete_button = dialog.addButton(
+            "Delete Card",
+            QMessageBox.ButtonRole.DestructiveRole,
+        )
+        dialog.addButton(QMessageBox.StandardButton.Cancel)
+        dialog.exec()
+        return dialog.clickedButton() is delete_button
+
+    def _document_replaced(self, _document: object) -> None:
+        self._selected_card_id = None
+        self.render_document()
+
+    def _session_state_changed(self, state: object) -> None:
+        if not isinstance(state, DocumentSessionState):
+            return
+        bound = state.bundle_path is not None
+        self.card_sidebar.set_document_editable(
+            self.document_session is None or bound
+        )
+        if self.document_session is not None and not bound:
+            self.create_first_card_button.setText("Create New Stack")
+            self.document_status_label.setText("Create or open a stack")
+            self.document_status_label.setToolTip("")
+        elif state.error is not None:
+            self.create_first_card_button.setText("Create Your First Card")
+            self.document_status_label.setText("Save failed")
+            self.document_status_label.setToolTip(state.error)
+        elif state.dirty:
+            self.create_first_card_button.setText("Create Your First Card")
+            self.document_status_label.setText("Unsaved changes")
+            self.document_status_label.setToolTip("Autosave is pending")
+        else:
+            self.create_first_card_button.setText("Create Your First Card")
+            label = (
+                state.bundle_path.name
+                if state.bundle_path is not None
+                else "In-memory document"
+            )
+            self.document_status_label.setText(label)
+            self.document_status_label.setToolTip(
+                str(state.bundle_path) if state.bundle_path is not None else ""
+            )
+        self._update_document_actions()
+        self._update_window_title()
+        self._update_generation_actions()
+
+    def _update_document_actions(self) -> None:
+        bound = self.document_session is None or self.document_session.store is not None
+        self.save_action.setEnabled(
+            self.document_session is not None and self.document_session.store is not None
+        )
+        self.save_as_action.setEnabled(
+            self.document_session is not None and self.document_session.store is not None
+        )
+        self.undo_action.setEnabled(bound and self.controller.can_undo)
+        self.redo_action.setEnabled(bound and self.controller.can_redo)
+        self.mode_selector.setEnabled(bound)
+        self.overlay_selector.setEnabled(bound)
+
+    def _update_window_title(self) -> None:
+        dirty = self.document_session is not None and self.document_session.state.dirty
+        suffix = " *" if dirty else ""
+        self.setWindowTitle(f"HyperGen — {self.controller.document.name}{suffix}")
+
+    @staticmethod
+    def _bundle_path(selected_path: str) -> Path:
+        path = Path(selected_path)
+        return path if path.suffix == ".hypergen" else path.with_suffix(".hypergen")
+
+    def _show_document_error(self, title: str, message: str) -> None:
+        QMessageBox.critical(self, title, message)
 
     def run_availability_checks(self) -> None:
         """Submit injected service checks without blocking the UI thread."""
@@ -327,7 +571,8 @@ class MainWindow(QMainWindow):
         self._update_generation_actions()
 
     def _update_generation_actions(self) -> None:
-        has_card = self._selected_card_id is not None
+        bound = self.document_session is None or self.document_session.store is not None
+        has_card = bound and self._selected_card_id is not None
         mflux_available = self._availability[AdapterKind.MFLUX] is True
         ollama_available = self._availability[AdapterKind.OLLAMA] is True
         self.generate_background_action.setEnabled(
@@ -395,6 +640,23 @@ class MainWindow(QMainWindow):
             self.run_availability_checks()
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        self.inspector.commit_card_metadata()
+        if self.document_session is not None and not self.document_session.flush():
+            answer = QMessageBox.warning(
+                self,
+                "Stack Not Saved",
+                (self.document_session.state.error or "The stack could not be saved.")
+                + "\n\nRetry saving before closing?",
+                QMessageBox.StandardButton.Retry | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Retry,
+            )
+            if answer == QMessageBox.StandardButton.Retry:
+                if not self.document_session.flush():
+                    event.ignore()
+                    return
+            else:
+                event.ignore()
+                return
         if self._owns_workers:
             self.workers.shutdown(wait_milliseconds=100)
         super().closeEvent(event)

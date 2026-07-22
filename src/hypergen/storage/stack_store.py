@@ -84,6 +84,10 @@ class StackStore:
             ) from error
         return candidate
 
+    def asset_path(self, relative_path: str) -> Path:
+        """Resolve one validated bundle-relative asset path."""
+        return self._resolved_asset(_relative_asset_path(relative_path))
+
     def _validate_assets(self, stack: Stack) -> None:
         for card in stack.cards:
             for revision in card.image_revisions:
@@ -216,3 +220,36 @@ class StackStore:
     def autosave_hook(self) -> Callable[[Stack], None]:
         """Return the synchronous save boundary for a later debouncer/controller."""
         return self.save
+
+    def clone_to(self, destination: Path, stack: Stack) -> StackStore:
+        """Create an independent bundle containing exactly the referenced assets."""
+        if destination.exists():
+            raise StackStoreError(f"refusing to overwrite existing bundle: {destination}")
+        temporary_bundle: Path | None = None
+        try:
+            _mkdir_durable(destination.parent)
+            temporary_bundle = Path(
+                tempfile.mkdtemp(
+                    prefix=f".{destination.name}-",
+                    suffix=".tmp",
+                    dir=destination.parent,
+                )
+            )
+            temporary_store = StackStore(temporary_bundle)
+            for card in stack.cards:
+                for revision in card.image_revisions:
+                    temporary_store.import_image(
+                        self.asset_path(revision.image_path),
+                        card_id=card.id,
+                        revision_id=revision.id,
+                    )
+            temporary_store.save(stack)
+            os.rename(temporary_bundle, destination)
+            _fsync_directory(destination.parent)
+        except (OSError, StackStoreError) as error:
+            if temporary_bundle is not None:
+                shutil.rmtree(temporary_bundle, ignore_errors=True)
+            if isinstance(error, StackStoreError):
+                raise
+            raise StackStoreError(f"could not create bundle {destination}: {error}") from error
+        return StackStore(destination)

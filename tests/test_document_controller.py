@@ -233,3 +233,19 @@ def test_autosave_hook_signals_execute_undo_and_redo_with_snapshots() -> None:
 
     assert [len(stack.cards) for stack in signals] == [1, 0, 1]
     assert signals[-1] is not controller.document
+
+
+def test_replace_document_clears_session_history_without_autosave() -> None:
+    signals: list[Stack] = []
+    controller = DocumentController(Stack(name="First"), autosave_hook=signals.append)
+    controller.execute(CreateCardCommand(name="Old card"))
+    assert controller.can_undo
+    signals.clear()
+
+    replaced = controller.replace_document(Stack(name="Second"))
+
+    assert replaced.name == "Second"
+    assert controller.document.name == "Second"
+    assert not controller.can_undo
+    assert not controller.can_redo
+    assert signals == []

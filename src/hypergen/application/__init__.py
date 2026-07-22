@@ -19,6 +19,11 @@ from hypergen.application.commands import (
     SetStartCardCommand,
 )
 from hypergen.application.document_controller import AutosaveHook, DocumentController
+from hypergen.application.document_session import (
+    DocumentSession,
+    DocumentSessionError,
+    DocumentSessionState,
+)
 from hypergen.application.workers import (
     AdapterKind,
     AdapterWorkers,
@@ -42,6 +47,9 @@ __all__ = [
     "DeleteCardCommand",
     "DocumentCommand",
     "DocumentController",
+    "DocumentSession",
+    "DocumentSessionError",
+    "DocumentSessionState",
     "EditCardTextCommand",
     "OperationStatus",
     "RenameCardCommand",

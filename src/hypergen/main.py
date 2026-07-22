@@ -10,6 +10,7 @@ from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication
 
 from hypergen.application.document_controller import DocumentController
+from hypergen.application.document_session import DocumentSession
 from hypergen.application.workers import AdapterKind, AdapterWorkers
 from hypergen.domain.models import Stack
 from hypergen.generation.errors import ModelUnavailableError
@@ -77,6 +78,7 @@ def build_main_window(
     settings: SettingsStore | None = None,
     availability_checks: Mapping[AdapterKind, Callable[[], Any]] | None = None,
     availability_checks_factory: AvailabilityChecksFactory | None = None,
+    document_session: DocumentSession | None = None,
     start_diagnostics: bool = False,
 ) -> MainWindow:
     """Construct an injectable shell without creating live model clients."""
@@ -85,12 +87,18 @@ def build_main_window(
     )
     adapter_workers = workers if workers is not None else AdapterWorkers()
     machine_settings = settings if settings is not None else QSettings()
+    active_session = (
+        document_session
+        if document_session is not None
+        else (DocumentSession(document_controller) if controller is None else None)
+    )
     return MainWindow(
         document_controller,
         adapter_workers,
         machine_settings,
         availability_checks=availability_checks,
         availability_checks_factory=availability_checks_factory,
+        document_session=active_session,
         start_diagnostics=start_diagnostics,
         owns_workers=workers is None,
     )

@@ -50,6 +50,12 @@ class DocumentController:
         """Replace the callback signaled after each effective document change."""
         self._autosave_hook = hook
 
+    def replace_document(self, document: Stack) -> Stack:
+        """Replace the active document and start a fresh session history."""
+        self._document = validated_copy(document)
+        self.clear_history()
+        return self.document
+
     def execute(self, command: DocumentCommand) -> Stack:
         """Apply one command and record one session undo boundary."""
         before = self._document

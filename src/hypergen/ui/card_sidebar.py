@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 
 from hypergen.application.commands import (
     CreateCardCommand,
+    DeleteCardCommand,
     RenameCardCommand,
     ReorderCardCommand,
     SetStartCardCommand,
@@ -32,6 +33,7 @@ class CardSidebar(QWidget):
     """Render card order and route all document mutations through the controller."""
 
     card_selected = Signal(object)
+    delete_requested = Signal(object)
     document_changed = Signal(object)
 
     def __init__(self, controller: DocumentController, parent: QWidget | None = None) -> None:
@@ -66,6 +68,10 @@ class CardSidebar(QWidget):
         self.move_down_button.setText("↓")
         self.move_down_button.setToolTip("Move card down")
         self.move_down_button.clicked.connect(lambda: self._move_selected(1))
+        self.delete_button = QPushButton("Delete Card")
+        self.delete_button.setObjectName("deleteCardButton")
+        self.delete_button.clicked.connect(self._request_delete)
+        self._document_editable = True
 
         self.empty_label = QLabel("No cards yet")
         self.empty_label.setObjectName("emptyCardListLabel")
@@ -76,6 +82,7 @@ class CardSidebar(QWidget):
         buttons.addWidget(self.start_button, 0, 1)
         buttons.addWidget(self.move_up_button, 1, 0)
         buttons.addWidget(self.move_down_button, 1, 1)
+        buttons.addWidget(self.delete_button, 2, 0, 1, 2)
 
         layout = QVBoxLayout(self)
         layout.addWidget(heading)
@@ -112,6 +119,13 @@ class CardSidebar(QWidget):
         row = self._row_for(card_id)
         self.card_list.setCurrentRow(row)
 
+    def set_document_editable(self, editable: bool) -> None:
+        """Enable mutations only after the application has a durable document."""
+        self._document_editable = editable
+        self.card_list.setDragEnabled(editable)
+        self.add_button.setEnabled(editable)
+        self._update_buttons()
+
     def add_card(self, name: str | None = None) -> UUID:
         """Create and select a uniquely named blank card."""
         document = self.controller.document
@@ -144,6 +158,12 @@ class CardSidebar(QWidget):
         self.render(changed, card_id)
         self.document_changed.emit(changed)
 
+    def delete_card(self, card_id: UUID) -> None:
+        """Delete a confirmed card through one typed controller command."""
+        changed = self.controller.execute(DeleteCardCommand(card_id=card_id))
+        self.render(changed)
+        self.document_changed.emit(changed)
+
     def _selection_changed(
         self,
         current: QListWidgetItem | None,
@@ -160,6 +180,11 @@ class CardSidebar(QWidget):
         destination = row + offset
         if card_id is not None and 0 <= destination < self.card_list.count():
             self.move_card(card_id, destination)
+
+    def _request_delete(self) -> None:
+        card_id = self.selected_card_id
+        if card_id is not None:
+            self.delete_requested.emit(card_id)
 
     def _rows_moved(
         self,
@@ -184,10 +209,12 @@ class CardSidebar(QWidget):
 
     def _update_buttons(self) -> None:
         row = self.card_list.currentRow()
-        has_selection = row >= 0
+        has_selection = self._document_editable and row >= 0
+        self.add_button.setEnabled(self._document_editable)
         self.start_button.setEnabled(has_selection)
         self.move_up_button.setEnabled(has_selection and row > 0)
         self.move_down_button.setEnabled(has_selection and row < self.card_list.count() - 1)
+        self.delete_button.setEnabled(has_selection)
 
     def _row_for(self, card_id: UUID | None) -> int:
         for row in range(self.card_list.count()):

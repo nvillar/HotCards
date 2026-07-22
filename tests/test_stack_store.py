@@ -243,3 +243,49 @@ def test_symlinked_asset_directory_cannot_escape_bundle(tmp_path: Path) -> None:
 
     with pytest.raises(StackStoreError, match="outside"):
         store.import_image(source, card_id=card_id, revision_id=revision_id)
+
+
+def test_clone_to_creates_independent_bundle_with_referenced_assets(tmp_path: Path) -> None:
+    source = tmp_path / "source.png"
+    _write_png(source)
+    original = StackStore(tmp_path / "Original.hypergen")
+    stack = _stack_with_asset(original, source)
+    original.save(stack)
+
+    destination = tmp_path / "Copy.hypergen"
+    copied_store = original.clone_to(destination, stack)
+
+    assert copied_store.load() == stack
+    image_path = stack.cards[0].image_revisions[0].image_path
+    assert copied_store.asset_path(image_path).is_file()
+    copied_store.asset_path(image_path).unlink()
+    assert original.asset_path(image_path).is_file()
+
+
+def test_clone_to_refuses_existing_destination(tmp_path: Path) -> None:
+    source_store = StackStore(tmp_path / "Source.hypergen")
+    source_store.save(Stack(name="Source"))
+    destination = tmp_path / "Existing.hypergen"
+    destination.mkdir()
+
+    with pytest.raises(StackStoreError, match="refusing to overwrite"):
+        source_store.clone_to(destination, Stack(name="Source"))
+
+
+def test_clone_to_wraps_destination_preparation_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_store = StackStore(tmp_path / "Source.hypergen")
+    source_store.save(Stack(name="Source"))
+
+    def fail_mkdtemp(**_kwargs: object) -> str:
+        raise PermissionError("destination is read-only")
+
+    monkeypatch.setattr("hypergen.storage.stack_store.tempfile.mkdtemp", fail_mkdtemp)
+
+    with pytest.raises(StackStoreError, match="destination is read-only"):
+        source_store.clone_to(
+            tmp_path / "Copy.hypergen",
+            Stack(name="Source"),
+        )

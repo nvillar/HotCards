@@ -4,15 +4,20 @@ from __future__ import annotations
 
 import os
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtCore import QModelIndex, QObject, Signal
-from PySide6.QtWidgets import QApplication, QLabel
+from PySide6.QtGui import QCloseEvent
+from PySide6.QtWidgets import QApplication, QDialog, QLabel
 
+import hypergen.ui.main_window as main_window_module
+from hypergen.application.commands import CreateCardCommand
 from hypergen.application.document_controller import DocumentController
+from hypergen.application.document_session import DocumentSession
 from hypergen.application.workers import (
     AdapterKind,
     WorkerFailure,
@@ -32,7 +37,9 @@ from hypergen.domain.models import (
 )
 from hypergen.generation.errors import ModelUnavailableError
 from hypergen.main import build_availability_checks, build_main_window
+from hypergen.storage.stack_store import StackStore, StackStoreError
 from hypergen.ui.main_window import MainWindow
+from hypergen.ui.new_stack_dialog import NewStackDialog
 from hypergen.ui.settings_dialog import (
     MachineSettings,
     SettingsDialog,
@@ -212,9 +219,159 @@ def test_sidebar_actions_fit_at_minimum_width(application: QApplication) -> None
         window.card_sidebar.start_button,
         window.card_sidebar.move_up_button,
         window.card_sidebar.move_down_button,
+        window.card_sidebar.delete_button,
     ):
         assert button.width() > 0
         assert button.geometry().right() <= sidebar_right
+    window.close()
+
+
+def test_new_stack_dialog_builds_initial_saved_shape(application: QApplication) -> None:
+    dialog = NewStackDialog()
+    dialog.name_edit.setText("Garden")
+    dialog.art_direction_edit.setPlainText("Pencil sketch")
+    dialog.width_spin.setValue(1280)
+    dialog.height_spin.setValue(720)
+
+    stack = dialog.stack()
+
+    assert stack.name == "Garden"
+    assert stack.art_direction == "Pencil sketch"
+    assert (stack.canvas.width, stack.canvas.height) == (1280, 720)
+    assert [card.name for card in stack.cards] == ["Card 1"]
+    assert stack.start_card_id == stack.cards[0].id
+    dialog.close()
+
+
+def test_bound_new_stack_flow_enables_editing_and_persists(
+    application: QApplication,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = DocumentController(Stack(name="Welcome"))
+    session = DocumentSession(controller)
+    workers = FakeWorkers()
+    window = MainWindow(
+        controller,
+        workers,  # type: ignore[arg-type]
+        FakeSettings(),
+        document_session=session,
+        start_diagnostics=False,
+    )
+    created = Stack(name="Garden", art_direction="Pencil sketch", cards=(Card(name="Card 1"),))
+
+    class AcceptedNewStackDialog:
+        def __init__(self, _parent: object) -> None:
+            pass
+
+        def exec(self) -> QDialog.DialogCode:
+            return QDialog.DialogCode.Accepted
+
+        def stack(self) -> Stack:
+            return created
+
+    bundle = tmp_path / "Garden.hypergen"
+    monkeypatch.setattr(main_window_module, "NewStackDialog", AcceptedNewStackDialog)
+    monkeypatch.setattr(
+        main_window_module.QFileDialog,
+        "getSaveFileName",
+        lambda *_args, **_kwargs: (str(bundle), "HyperGen Stack (*.hypergen)"),
+    )
+
+    assert not window.card_sidebar.add_button.isEnabled()
+    assert window.create_first_card_button.text() == "Create New Stack"
+    window.new_stack()
+
+    assert session.state.bundle_path == bundle
+    assert session.store is not None
+    assert session.store.load() == created
+    assert window.card_sidebar.add_button.isEnabled()
+    assert window.card_sidebar.card_list.count() == 1
+    window.close()
+
+
+def test_close_is_cancelled_when_pending_autosave_fails(
+    application: QApplication,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = DocumentController(Stack(name="Welcome"))
+    session = DocumentSession(controller)
+    session.create(Stack(name="Saved"), tmp_path / "Saved.hypergen")
+    workers = FakeWorkers()
+    window = MainWindow(
+        controller,
+        workers,  # type: ignore[arg-type]
+        FakeSettings(),
+        document_session=session,
+        start_diagnostics=False,
+    )
+    controller.execute(CreateCardCommand(name="Pending"))
+    assert session.store is not None
+    real_save = session.store.save
+
+    def fail_save(_stack: Stack) -> None:
+        raise StackStoreError("disk full")
+
+    monkeypatch.setattr(session.store, "save", fail_save)
+    monkeypatch.setattr(
+        main_window_module.QMessageBox,
+        "warning",
+        lambda *_args, **_kwargs: main_window_module.QMessageBox.StandardButton.Cancel,
+    )
+    event = QCloseEvent()
+    window.closeEvent(event)
+
+    assert not event.isAccepted()
+    assert session.state.dirty
+    assert session.state.error == "disk full"
+
+    monkeypatch.setattr(session.store, "save", real_save)
+    assert session.flush()
+    window.close()
+
+
+def test_close_commits_focused_inspector_edits_before_flush(
+    application: QApplication,
+    tmp_path: Path,
+) -> None:
+    card = Card(name="Card")
+    controller = DocumentController(Stack(name="Saved", cards=(card,)))
+    session = DocumentSession(controller)
+    bundle = tmp_path / "Saved.hypergen"
+    session.create(controller.document, bundle)
+    workers = FakeWorkers()
+    window = MainWindow(
+        controller,
+        workers,  # type: ignore[arg-type]
+        FakeSettings(),
+        document_session=session,
+        start_diagnostics=False,
+    )
+    window.inspector.scene_edit.setPlainText("Committed during close")
+
+    window.close()
+
+    assert StackStore(bundle).load().cards[0].scene_description == "Committed during close"
+
+
+def test_undo_redo_actions_and_confirmed_delete_use_controller(
+    application: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window, controller, _workers, _settings = make_window()
+    created_id = window.card_sidebar.add_card("Library")
+    assert window.undo_action.isEnabled()
+
+    window.undo_action.trigger()
+    assert [card.name for card in controller.document.cards] == ["Foyer", "Hall"]
+    assert window.redo_action.isEnabled()
+    window.redo_action.trigger()
+    assert [card.name for card in controller.document.cards] == ["Foyer", "Hall", "Library"]
+
+    monkeypatch.setattr(window, "_ask_delete_card", lambda _message: True)
+    window._confirm_delete_card(created_id)
+    assert [card.name for card in controller.document.cards] == ["Foyer", "Hall"]
     window.close()
 
 
@@ -506,4 +663,24 @@ def test_bootstrap_construction_uses_injected_services_without_live_clients(
     assert not workers.ollama_checks
     assert not workers.mflux_checks
     assert window.windowTitle() == "HyperGen — Injected"
+    window.close()
+
+
+def test_default_bootstrap_requires_bound_stack_before_editing(
+    application: QApplication,
+) -> None:
+    workers = FakeWorkers()
+    window = build_main_window(
+        workers=workers,  # type: ignore[arg-type]
+        settings=FakeSettings(),
+    )
+
+    assert window.document_session is not None
+    assert window.document_session.store is None
+    assert not window.card_sidebar.add_button.isEnabled()
+    assert window.create_first_card_button.text() == "Create New Stack"
+    assert window.new_stack_action.isEnabled()
+    assert window.open_stack_action.isEnabled()
+    assert not window.save_action.isEnabled()
+    assert not window.save_as_action.isEnabled()
     window.close()
