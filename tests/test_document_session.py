@@ -178,6 +178,22 @@ def test_save_as_refuses_existing_destination(tmp_path: Path) -> None:
         session.save_as(existing)
 
 
+def test_save_as_clears_history_that_can_reference_uncloned_assets(
+    tmp_path: Path,
+) -> None:
+    controller = DocumentController(Stack(name="Welcome"))
+    session = DocumentSession(controller)
+    session.create(Stack(name="Current"), tmp_path / "Current.hypergen")
+    controller.execute(CreateCardCommand(name="Undo-only state"))
+    assert controller.undo()
+    assert controller.can_redo
+
+    session.save_as(tmp_path / "Copy.hypergen")
+
+    assert not controller.can_undo
+    assert not controller.can_redo
+
+
 def test_create_can_recover_empty_bundle_left_by_failed_attempt(tmp_path: Path) -> None:
     controller = DocumentController(Stack(name="Welcome"))
     session = DocumentSession(controller)

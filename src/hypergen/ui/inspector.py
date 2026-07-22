@@ -5,21 +5,26 @@ from __future__ import annotations
 from uuid import UUID
 
 from pydantic import ValidationError
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSignalBlocker, Qt, Signal
 from PySide6.QtGui import QFocusEvent
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QFormLayout,
-    QGroupBox,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
     QListWidget,
     QPlainTextEdit,
+    QPushButton,
+    QScrollArea,
     QStackedWidget,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
+from hypergen.application.background_workflow import BackgroundCandidate
 from hypergen.application.commands import (
     CommandError,
     EditCardTextCommand,
@@ -38,10 +43,61 @@ class _CommitPlainTextEdit(QPlainTextEdit):
         self.editing_finished.emit()
 
 
+class DisclosureSection(QWidget):
+    """A chevron disclosure header whose state cannot read as an option checkbox."""
+
+    toggled = Signal(bool)
+
+    def __init__(
+        self,
+        title: str,
+        *,
+        expanded: bool,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.header = QToolButton()
+        self.header.setText(title)
+        self.header.setCheckable(True)
+        self.header.setChecked(expanded)
+        self.header.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.header.setAutoRaise(True)
+        self.header.toggled.connect(self._set_expanded)
+        self.content = QWidget()
+        self.content_layout = QVBoxLayout(self.content)
+        self.content_layout.setContentsMargins(18, 4, 0, 8)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(self.header)
+        layout.addWidget(self.content)
+        self._set_expanded(expanded)
+
+    def isChecked(self) -> bool:
+        return self.header.isChecked()
+
+    def setChecked(self, checked: bool) -> None:
+        self.header.setChecked(checked)
+
+    def _set_expanded(self, expanded: bool) -> None:
+        self.header.setArrowType(
+            Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow
+        )
+        self.content.setVisible(expanded)
+        self.toggled.emit(expanded)
+
+
 class Inspector(QWidget):
     """Render selected-card snapshots and issue typed metadata commands."""
 
     document_changed = Signal(object)
+    generate_background_requested = Signal()
+    import_background_requested = Signal()
+    apply_background_requested = Signal()
+    discard_background_requested = Signal()
+    revision_activation_requested = Signal(object)
+    revision_deletion_requested = Signal(object)
 
     def __init__(self, controller: DocumentController, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -81,15 +137,66 @@ class Inspector(QWidget):
         card_layout.addWidget(self.start_card_check)
         card_layout.addWidget(self.validation_error)
 
-        self.background_section, background_layout = self._section("Background", expanded=False)
+        self.background_section, background_layout = self._section(
+            "Background",
+            expanded=False,
+        )
         self.background_section.setObjectName("backgroundInspectorSection")
         self.background_value = QLabel("No background revision")
         self.background_value.setObjectName("backgroundRevisionValue")
         self.background_value.setWordWrap(True)
         background_layout.addWidget(self.background_value)
+        background_actions = QHBoxLayout()
+        self.generate_background_button = QPushButton("Generate")
+        self.generate_background_button.setObjectName("generateBackgroundButton")
+        self.import_background_button = QPushButton("Import...")
+        self.import_background_button.setObjectName("importBackgroundButton")
+        background_actions.addWidget(self.generate_background_button)
+        background_actions.addWidget(self.import_background_button)
+        background_layout.addLayout(background_actions)
+        self.background_status = QLabel()
+        self.background_status.setObjectName("backgroundStatus")
+        self.background_status.setWordWrap(True)
+        background_layout.addWidget(self.background_status)
+
+        self.candidate_widget = QWidget()
+        candidate_layout = QVBoxLayout(self.candidate_widget)
+        candidate_layout.setContentsMargins(0, 4, 0, 4)
+        self.candidate_value = QLabel()
+        self.candidate_value.setObjectName("backgroundCandidateValue")
+        self.candidate_value.setWordWrap(True)
+        candidate_layout.addWidget(self.candidate_value)
+        candidate_actions = QHBoxLayout()
+        self.apply_background_button = QPushButton("Apply")
+        self.apply_background_button.setObjectName("applyBackgroundButton")
+        self.discard_background_button = QPushButton("Discard")
+        self.discard_background_button.setObjectName("discardBackgroundButton")
+        candidate_actions.addWidget(self.apply_background_button)
+        candidate_actions.addWidget(self.discard_background_button)
+        candidate_layout.addLayout(candidate_actions)
+        background_layout.addWidget(self.candidate_widget)
+        self.candidate_widget.setVisible(False)
+
+        revision_form = QFormLayout()
+        self.revision_combo = QComboBox()
+        self.revision_combo.setObjectName("backgroundRevisionCombo")
+        revision_form.addRow("Revision", self.revision_combo)
+        background_layout.addLayout(revision_form)
+        self.revision_metadata = QLabel()
+        self.revision_metadata.setObjectName("backgroundRevisionMetadata")
+        self.revision_metadata.setWordWrap(True)
+        background_layout.addWidget(self.revision_metadata)
+        self.delete_revision_button = QPushButton("Delete Revision...")
+        self.delete_revision_button.setObjectName("deleteRevisionButton")
+        background_layout.addWidget(self.delete_revision_button)
 
         self.hotspots_section, hotspots_layout = self._section("Hotspots", expanded=False)
         self.hotspots_section.setObjectName("hotspotsInspectorSection")
+        self.hotspots_placeholder = QLabel(
+            "Hotspot editing becomes available after a background revision is active."
+        )
+        self.hotspots_placeholder.setWordWrap(True)
+        hotspots_layout.addWidget(self.hotspots_placeholder)
         self.hotspot_list = QListWidget()
         self.hotspot_list.setObjectName("hotspotList")
         hotspots_layout.addWidget(self.hotspot_list)
@@ -113,7 +220,12 @@ class Inspector(QWidget):
         form_layout.addWidget(self.background_section)
         form_layout.addWidget(self.hotspots_section)
         form_layout.addStretch(1)
-        self.pages.addWidget(form_page)
+        form_scroll = QScrollArea()
+        form_scroll.setObjectName("inspectorScrollArea")
+        form_scroll.setWidgetResizable(True)
+        form_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        form_scroll.setWidget(form_page)
+        self.pages.addWidget(form_scroll)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -124,20 +236,30 @@ class Inspector(QWidget):
         self.interactions_edit.editing_finished.connect(self.commit_card_metadata)
         self.card_style_edit.editingFinished.connect(self.commit_card_metadata)
         self.start_card_check.toggled.connect(self._set_start_card)
+        self.generate_background_button.clicked.connect(
+            self.generate_background_requested
+        )
+        self.import_background_button.clicked.connect(
+            self.import_background_requested
+        )
+        self.apply_background_button.clicked.connect(
+            self.apply_background_requested
+        )
+        self.discard_background_button.clicked.connect(
+            self.discard_background_requested
+        )
+        self.revision_combo.currentIndexChanged.connect(self._revision_selected)
+        self.delete_revision_button.clicked.connect(self._delete_selected_revision)
         self.render(controller.document, None)
 
     @staticmethod
-    def _section(title: str, *, expanded: bool) -> tuple[QGroupBox, QVBoxLayout]:
-        section = QGroupBox(title)
-        section.setCheckable(True)
-        section.setChecked(expanded)
-        content = QWidget()
-        content_layout = QVBoxLayout(content)
-        layout = QVBoxLayout(section)
-        layout.addWidget(content)
-        section.toggled.connect(content.setVisible)
-        content.setVisible(expanded)
-        return section, content_layout
+    def _section(
+        title: str,
+        *,
+        expanded: bool,
+    ) -> tuple[DisclosureSection, QVBoxLayout]:
+        section = DisclosureSection(title, expanded=expanded)
+        return section, section.content_layout
 
     def render(self, document: Stack, selected_card_id: UUID | None) -> None:
         """Render only data from the supplied authoritative snapshot."""
@@ -156,6 +278,8 @@ class Inspector(QWidget):
                 self.card_style_edit.clear()
                 self.start_card_check.setChecked(False)
                 self.background_value.setText("No card selected")
+                self.revision_combo.clear()
+                self.revision_metadata.clear()
                 self.hotspot_list.clear()
                 return
             self.pages.setCurrentIndex(1)
@@ -164,7 +288,7 @@ class Inspector(QWidget):
             self.interactions_edit.setPlainText(card.interaction_description)
             self.card_style_edit.setText(card.card_style or "")
             self.start_card_check.setChecked(card.id == document.start_card_id)
-            self._render_revision(self._active_revision(card))
+            self._render_revisions(card)
         finally:
             self._rendering = False
 
@@ -214,16 +338,97 @@ class Inspector(QWidget):
         self.render(changed, self.selected_card_id)
         self.document_changed.emit(changed)
 
+    def set_background_capabilities(
+        self,
+        *,
+        can_generate: bool,
+        generate_reason: str,
+        can_import: bool,
+        import_reason: str,
+        busy: bool,
+    ) -> None:
+        self.generate_background_button.setEnabled(can_generate and not busy)
+        self.generate_background_button.setToolTip(generate_reason)
+        self.import_background_button.setEnabled(can_import and not busy)
+        self.import_background_button.setToolTip(import_reason)
+
+    def set_background_status(self, message: str, *, detail: str = "") -> None:
+        self.background_status.setText(message)
+        self.background_status.setToolTip(detail)
+
+    def show_background_candidate(
+        self,
+        candidate: BackgroundCandidate | None,
+    ) -> None:
+        self.candidate_widget.setVisible(candidate is not None)
+        if candidate is None:
+            self.candidate_value.clear()
+            return
+        origin = "Generated" if candidate.origin.value == "generated" else "Imported"
+        detail = (
+            candidate.generation_metadata.derived_prompt
+            if candidate.generation_metadata is not None
+            else candidate.source_filename or ""
+        )
+        self.candidate_value.setText(
+            f"{origin} candidate ready for review"
+            + (f"\nPrompt: {detail}" if detail and candidate.generation_metadata else "")
+        )
+        self.candidate_value.setToolTip(detail)
+
+    def _render_revisions(self, card: Card) -> None:
+        active_revision = self._active_revision(card)
+        with QSignalBlocker(self.revision_combo):
+            self.revision_combo.clear()
+            for index, revision in enumerate(card.image_revisions, start=1):
+                origin = "Generated" if revision.origin.value == "generated" else "Imported"
+                self.revision_combo.addItem(f"{index}. {origin}", revision.id)
+            active_index = self.revision_combo.findData(card.active_revision_id)
+            self.revision_combo.setCurrentIndex(active_index)
+        self.revision_combo.setEnabled(bool(card.image_revisions))
+        self.delete_revision_button.setEnabled(active_revision is not None)
+        self._render_revision(active_revision)
+
     def _render_revision(self, revision: ImageRevision | None) -> None:
         self.hotspot_list.clear()
         if revision is None:
             self.background_value.setText("No background revision")
+            self.revision_metadata.clear()
             return
-        self.background_value.setText(revision.image_path)
+        self.background_value.setText(
+            "Generated background"
+            if revision.origin.value == "generated"
+            else revision.source_filename or "Imported background"
+        )
+        if revision.generation_metadata is not None:
+            metadata = revision.generation_metadata
+            self.revision_metadata.setText(
+                f"{metadata.model_identifier} | seed {metadata.seed} | "
+                f"{metadata.width}x{metadata.height} | {metadata.step_count} steps"
+                f"\nPrompt: {metadata.derived_prompt}"
+            )
+            self.revision_metadata.setToolTip(metadata.derived_prompt)
+        else:
+            self.revision_metadata.setText(
+                f"Imported from {revision.source_filename or 'image'}"
+            )
+            self.revision_metadata.setToolTip("")
         if revision.hotspot_set is None:
             return
         for interaction in revision.hotspot_set.interactions:
             self.hotspot_list.addItem(interaction.label)
+
+    def _revision_selected(self, index: int) -> None:
+        if self._rendering or index < 0:
+            return
+        revision_id = self.revision_combo.itemData(index)
+        if isinstance(revision_id, UUID):
+            self.revision_activation_requested.emit(revision_id)
+
+    def _delete_selected_revision(self) -> None:
+        revision_id = self.revision_combo.currentData()
+        if isinstance(revision_id, UUID):
+            self.revision_deletion_requested.emit(revision_id)
 
     @staticmethod
     def _active_revision(card: Card) -> ImageRevision | None:

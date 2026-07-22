@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QFileDialog,
+    QHBoxLayout,
     QLabel,
     QMainWindow,
     QMessageBox,
@@ -25,7 +26,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from hypergen.application.commands import SetRunOverlayModeCommand
+from hypergen.application.background_workflow import (
+    BackgroundGenerationSettings,
+    BackgroundWorkflow,
+    BackgroundWorkflowError,
+)
+from hypergen.application.commands import CommandError, SetRunOverlayModeCommand
 from hypergen.application.document_controller import DocumentController
 from hypergen.application.document_session import (
     DocumentSession,
@@ -36,13 +42,21 @@ from hypergen.application.workers import (
     AdapterKind,
     AdapterWorkers,
     AvailabilityDiagnostic,
+    WorkerFailure,
     WorkerOperation,
 )
 from hypergen.domain.models import RunOverlayMode, Stack
+from hypergen.storage.stack_store import StackStoreError
+from hypergen.ui.card_canvas import CardCanvas
 from hypergen.ui.card_sidebar import CardSidebar
+from hypergen.ui.crop_dialog import CropDialog
 from hypergen.ui.inspector import Inspector
 from hypergen.ui.new_stack_dialog import NewStackDialog
-from hypergen.ui.settings_dialog import SettingsDialog, SettingsStore
+from hypergen.ui.settings_dialog import (
+    SettingsDialog,
+    SettingsStore,
+    load_machine_settings,
+)
 
 AvailabilityChecks = Mapping[AdapterKind, Callable[[], Any]]
 AvailabilityChecksFactory = Callable[[], AvailabilityChecks]
@@ -62,6 +76,7 @@ class MainWindow(QMainWindow):
         availability_checks_factory: AvailabilityChecksFactory | None = None,
         settings_dialog_factory: SettingsDialogFactory = SettingsDialog,
         document_session: DocumentSession | None = None,
+        background_workflow: BackgroundWorkflow | None = None,
         start_diagnostics: bool = True,
         owns_workers: bool = False,
     ) -> None:
@@ -70,6 +85,7 @@ class MainWindow(QMainWindow):
         self.workers = workers
         self.settings = settings if settings is not None else QSettings()
         self.document_session = document_session
+        self.background_workflow = background_workflow
         self._availability_checks = dict(availability_checks or {})
         self._availability_checks_factory = availability_checks_factory
         self._settings_dialog_factory = settings_dialog_factory
@@ -85,6 +101,14 @@ class MainWindow(QMainWindow):
         self._diagnostic_operations: list[WorkerOperation] = []
         self._diagnostic_generation = 0
         self._rendering = False
+        if self.background_workflow is None and self.document_session is not None:
+            self.background_workflow = BackgroundWorkflow(
+                controller,
+                self.document_session,
+                workers,
+                self._background_generation_settings,
+                parent=self,
+            )
 
         self.setWindowTitle(f"HyperGen — {controller.document.name}")
         self.setObjectName("mainWindow")
@@ -118,14 +142,6 @@ class MainWindow(QMainWindow):
         self.mode_selector.addItems(["Author", "Run"])
         self.mode_selector.setToolTip("Switch between authoring and interactive preview")
         toolbar.addWidget(self.mode_selector)
-        toolbar.addSeparator()
-
-        self.generate_background_action = QAction("Generate Background", self)
-        self.generate_background_action.setObjectName("generateBackgroundAction")
-        self.generate_hotspots_action = QAction("Generate Hotspots", self)
-        self.generate_hotspots_action.setObjectName("generateHotspotsAction")
-        toolbar.addAction(self.generate_background_action)
-        toolbar.addAction(self.generate_hotspots_action)
         toolbar.addSeparator()
 
         toolbar.addWidget(QLabel("Overlay"))
@@ -190,9 +206,14 @@ class MainWindow(QMainWindow):
         self.canvas_pages.addWidget(empty_canvas)
 
         card_canvas = QWidget()
-        card_canvas.setObjectName("cardCanvas")
+        card_canvas.setObjectName("cardCanvasPanel")
         canvas_layout = QVBoxLayout(card_canvas)
-        canvas_layout.addStretch(1)
+        canvas_toolbar = QHBoxLayout()
+        canvas_toolbar.addStretch(1)
+        self.fit_canvas_button = QPushButton("Fit")
+        self.fit_canvas_button.setObjectName("fitCanvasButton")
+        canvas_toolbar.addWidget(self.fit_canvas_button)
+        canvas_layout.addLayout(canvas_toolbar)
         canvas_title = QLabel("Card Canvas")
         canvas_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         canvas_title.setStyleSheet("font-size: 18px; font-weight: 600;")
@@ -201,15 +222,31 @@ class MainWindow(QMainWindow):
         self.canvas_card_name.setObjectName("canvasCardName")
         self.canvas_card_name.setAlignment(Qt.AlignmentFlag.AlignCenter)
         canvas_layout.addWidget(self.canvas_card_name)
-        canvas_hint = QLabel("Use the generation actions above to add content to this card.")
-        canvas_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        canvas_hint.setWordWrap(True)
-        canvas_layout.addWidget(canvas_hint)
-        canvas_layout.addStretch(1)
+        self.card_canvas = CardCanvas()
+        canvas_layout.addWidget(self.card_canvas, 1)
         self.canvas_pages.addWidget(card_canvas)
+        self.fit_canvas_button.clicked.connect(self.card_canvas.fit_to_window)
 
         self.inspector = Inspector(self.controller)
         self.inspector.document_changed.connect(self.render_document)
+        self.inspector.generate_background_requested.connect(self._generate_background)
+        self.inspector.import_background_requested.connect(self._import_background)
+        self.inspector.apply_background_requested.connect(self._apply_background)
+        self.inspector.discard_background_requested.connect(self._discard_background)
+        self.inspector.revision_activation_requested.connect(self._activate_revision)
+        self.inspector.revision_deletion_requested.connect(self._delete_revision)
+        if self.background_workflow is not None:
+            self.background_workflow.candidate_changed.connect(
+                self._background_candidate_changed
+            )
+            self.background_workflow.busy_changed.connect(
+                lambda _busy: self._update_generation_actions()
+            )
+            self.background_workflow.progress_changed.connect(
+                self._background_progress_changed
+            )
+            self.background_workflow.failed.connect(self._background_failed)
+            self.background_workflow.document_changed.connect(self.render_document)
 
         self.pane_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.pane_splitter.setObjectName("threePaneSplitter")
@@ -294,9 +331,21 @@ class MainWindow(QMainWindow):
             if selected_card is None:
                 self.canvas_pages.setCurrentIndex(0)
                 self.canvas_card_name.clear()
+                self.inspector.show_background_candidate(None)
             else:
                 self.canvas_pages.setCurrentIndex(1)
                 self.canvas_card_name.setText(selected_card.name)
+                candidate = (
+                    self.background_workflow.candidate
+                    if self.background_workflow is not None
+                    else None
+                )
+                self.inspector.show_background_candidate(
+                    candidate
+                    if candidate is not None and candidate.card_id == selected_card.id
+                    else None
+                )
+                self._render_card_canvas(selected_card)
             overlay_index = self.overlay_selector.findData(snapshot.run_overlay_mode)
             self.overlay_selector.setCurrentIndex(overlay_index)
         finally:
@@ -329,10 +378,17 @@ class MainWindow(QMainWindow):
         )
         if not selected_path:
             return
+        if not self._confirm_candidate_discard("creating a new stack"):
+            return
+        if not self._confirm_generation_cancel("creating a new stack"):
+            return
         try:
             self.document_session.create(stack, self._bundle_path(selected_path))
         except DocumentSessionError as error:
             self._show_document_error("Could Not Create Stack", str(error))
+        else:
+            if self.background_workflow is not None:
+                self.background_workflow.discard_candidate()
 
     def open_stack(self) -> None:
         """Open a validated bundle without replacing the current session on failure."""
@@ -345,10 +401,17 @@ class MainWindow(QMainWindow):
         )
         if not selected_path:
             return
+        if not self._confirm_candidate_discard("opening another stack"):
+            return
+        if not self._confirm_generation_cancel("opening another stack"):
+            return
         try:
             self.document_session.open(Path(selected_path))
         except DocumentSessionError as error:
             self._show_document_error("Could Not Open Stack", str(error))
+        else:
+            if self.background_workflow is not None:
+                self.background_workflow.discard_candidate()
 
     def save_document(self) -> bool:
         """Flush accepted mutations and keep a failed save visible."""
@@ -375,6 +438,8 @@ class MainWindow(QMainWindow):
             "HyperGen Stack (*.hypergen)",
         )
         if not selected_path:
+            return
+        if not self._confirm_generation_cancel("saving the stack under a new name"):
             return
         try:
             self.document_session.save_as(self._bundle_path(selected_path))
@@ -414,7 +479,20 @@ class MainWindow(QMainWindow):
             f"{start_warning}"
         )
         if self._ask_delete_card(message):
+            candidate = (
+                self.background_workflow.candidate
+                if self.background_workflow is not None
+                else None
+            )
+            if (
+                self.background_workflow is not None
+                and self.background_workflow.is_generating_for(card.id)
+                and not self._confirm_generation_cancel("deleting this card")
+            ):
+                return
             self.card_sidebar.delete_card(card.id)
+            if candidate is not None and candidate.card_id == card.id:
+                self.background_workflow.discard_candidate()
 
     def _ask_delete_card(self, message: str) -> bool:
         dialog = QMessageBox(
@@ -520,6 +598,161 @@ class MainWindow(QMainWindow):
             operation.finished.connect(partial(self._diagnostic_finished, operation))
         self._update_generation_actions()
 
+    def _generate_background(self) -> None:
+        workflow = self.background_workflow
+        card_id = self._selected_card_id
+        if workflow is None or card_id is None:
+            return
+        self.inspector.commit_card_metadata()
+        try:
+            workflow.generate(card_id)
+        except BackgroundWorkflowError as error:
+            self.inspector.set_background_status(str(error), detail=str(error))
+        self._update_generation_actions()
+
+    def _import_background(self) -> None:
+        workflow = self.background_workflow
+        card_id = self._selected_card_id
+        if workflow is None or card_id is None:
+            return
+        self.inspector.commit_card_metadata()
+        selected_path, _filter = QFileDialog.getOpenFileName(
+            self,
+            "Import Background",
+            "",
+            "Images (*.png *.jpg *.jpeg *.webp *.tif *.tiff)",
+        )
+        if not selected_path:
+            return
+        source_path = Path(selected_path)
+        position_x = 0.5
+        position_y = 0.5
+        try:
+            canvas_size = self.controller.document.canvas
+            if CropDialog.requires_crop(source_path, canvas_size):
+                crop_dialog = CropDialog(source_path, canvas_size, self)
+                if crop_dialog.exec() != QDialog.DialogCode.Accepted:
+                    return
+                position_x = crop_dialog.position_x
+                position_y = crop_dialog.position_y
+            workflow.import_image(
+                card_id,
+                source_path,
+                position_x=position_x,
+                position_y=position_y,
+            )
+        except (BackgroundWorkflowError, ValueError) as error:
+            self.inspector.set_background_status(str(error), detail=str(error))
+        self._update_generation_actions()
+
+    def _apply_background(self) -> None:
+        if self.background_workflow is None:
+            return
+        try:
+            self.background_workflow.apply_candidate()
+        except (BackgroundWorkflowError, StackStoreError, CommandError) as error:
+            self.inspector.set_background_status(str(error), detail=str(error))
+
+    def _discard_background(self) -> None:
+        if self.background_workflow is not None:
+            self.background_workflow.discard_candidate()
+
+    def _activate_revision(self, revision_id: object) -> None:
+        if (
+            self.background_workflow is None
+            or self._selected_card_id is None
+            or not isinstance(revision_id, UUID)
+        ):
+            return
+        try:
+            self.background_workflow.activate_revision(
+                self._selected_card_id,
+                revision_id,
+            )
+        except (BackgroundWorkflowError, CommandError) as error:
+            self.inspector.set_background_status(str(error), detail=str(error))
+
+    def _delete_revision(self, revision_id: object) -> None:
+        if (
+            self.background_workflow is None
+            or self._selected_card_id is None
+            or not isinstance(revision_id, UUID)
+        ):
+            return
+        dialog = QMessageBox(
+            QMessageBox.Icon.Warning,
+            "Delete Background Revision",
+            "Delete this revision and its associated hotspots?",
+            parent=self,
+        )
+        delete_button = dialog.addButton(
+            "Delete Revision",
+            QMessageBox.ButtonRole.DestructiveRole,
+        )
+        dialog.addButton(QMessageBox.StandardButton.Cancel)
+        dialog.exec()
+        if dialog.clickedButton() is not delete_button:
+            return
+        try:
+            self.background_workflow.delete_revision(
+                self._selected_card_id,
+                revision_id,
+            )
+        except (BackgroundWorkflowError, CommandError) as error:
+            self.inspector.set_background_status(str(error), detail=str(error))
+
+    def _background_candidate_changed(self, candidate: object) -> None:
+        self.render_document()
+
+    def _confirm_candidate_discard(self, action: str) -> bool:
+        if (
+            self.background_workflow is None
+            or self.background_workflow.candidate is None
+        ):
+            return True
+        answer = QMessageBox.question(
+            self,
+            "Discard Background Candidate?",
+            f"A background candidate has not been applied. Discard it before {action}?",
+            QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Discard:
+            return False
+        return True
+
+    def _confirm_generation_cancel(self, action: str) -> bool:
+        if (
+            self.background_workflow is None
+            or not self.background_workflow.busy
+        ):
+            return True
+        answer = QMessageBox.question(
+            self,
+            "Cancel Background Generation?",
+            f"Background generation is still running. Cancel it before {action}?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return False
+        self.background_workflow.cancel()
+        return True
+
+    def _background_progress_changed(self, message: str) -> None:
+        self.inspector.set_background_status(message)
+        self._update_generation_actions()
+
+    def _background_failed(self, failure: object) -> None:
+        if isinstance(failure, WorkerFailure):
+            self.inspector.set_background_status(
+                "Background generation failed",
+                detail=failure.message,
+            )
+        else:
+            self.inspector.set_background_status(str(failure), detail=str(failure))
+        self._update_generation_actions()
+
     def _availability_check_succeeded(
         self,
         adapter: AdapterKind,
@@ -572,20 +805,55 @@ class MainWindow(QMainWindow):
 
     def _update_generation_actions(self) -> None:
         bound = self.document_session is None or self.document_session.store is not None
-        has_card = bound and self._selected_card_id is not None
+        workflow_available = self.background_workflow is not None
+        has_card = (
+            workflow_available
+            and bound
+            and self._selected_card_id is not None
+        )
         mflux_available = self._availability[AdapterKind.MFLUX] is True
         ollama_available = self._availability[AdapterKind.OLLAMA] is True
-        self.generate_background_action.setEnabled(
-            has_card and mflux_available and ollama_available
+        workflow_busy = (
+            self.background_workflow.busy
+            if self.background_workflow is not None
+            else False
         )
-        self.generate_hotspots_action.setEnabled(has_card and ollama_available)
-        self.generate_background_action.setToolTip(
-            " · ".join(
+        has_candidate = (
+            self.background_workflow is not None
+            and self.background_workflow.candidate is not None
+        )
+        generate_reason = "Ready to generate"
+        if not has_card:
+            generate_reason = "Select a card in a saved stack"
+        elif has_candidate:
+            generate_reason = "Apply or discard the current candidate first"
+        elif not ollama_available or not mflux_available:
+            generate_reason = " · ".join(
                 self._action_diagnostic(adapter)
                 for adapter in (AdapterKind.OLLAMA, AdapterKind.MFLUX)
+                if self._availability[adapter] is not True
+            )
+        import_reason = (
+            "Ready to import"
+            if has_card and not has_candidate
+            else (
+                "Apply or discard the current candidate first"
+                if has_candidate
+                else "Select a card in a saved stack"
             )
         )
-        self.generate_hotspots_action.setToolTip(self._action_diagnostic(AdapterKind.OLLAMA))
+        self.inspector.set_background_capabilities(
+            can_generate=(
+                has_card
+                and not has_candidate
+                and ollama_available
+                and mflux_available
+            ),
+            generate_reason=generate_reason,
+            can_import=has_card and not has_candidate,
+            import_reason=import_reason,
+            busy=workflow_busy,
+        )
         pending = [
             adapter for adapter, available in self._availability.items() if available is None
         ]
@@ -615,6 +883,53 @@ class MainWindow(QMainWindow):
         )
         self.review_settings_button.setVisible(bool(unavailable))
 
+    def _render_card_canvas(self, card: object) -> None:
+        from hypergen.domain.models import Card
+
+        if not isinstance(card, Card):
+            return
+        self.card_canvas.set_canvas_size(self.controller.document.canvas)
+        candidate = (
+            self.background_workflow.candidate
+            if self.background_workflow is not None
+            else None
+        )
+        if candidate is not None and candidate.card_id == card.id:
+            self.card_canvas.show_image(candidate.image_path, candidate=True)
+            return
+        revision = next(
+            (
+                revision
+                for revision in card.image_revisions
+                if revision.id == card.active_revision_id
+            ),
+            None,
+        )
+        if revision is None:
+            self.card_canvas.show_message("No background revision")
+            return
+        if self.document_session is None or self.document_session.store is None:
+            self.card_canvas.show_message("Background bundle is unavailable")
+            return
+        try:
+            asset_path = self.document_session.store.asset_path(revision.image_path)
+        except StackStoreError as error:
+            self.card_canvas.show_message(str(error))
+            return
+        self.card_canvas.show_image(asset_path)
+
+    def _background_generation_settings(self) -> BackgroundGenerationSettings:
+        values = load_machine_settings(self.settings)
+        return BackgroundGenerationSettings(
+            ollama_endpoint=values.ollama_endpoint,
+            ollama_model=values.ollama_model,
+            mflux_model=values.mflux_model,
+            step_count=values.step_count,
+            quantization=values.quantization,
+            random_seed=values.random_seed,
+            fixed_seed=values.fixed_seed,
+        )
+
     def _action_diagnostic(self, adapter: AdapterKind) -> str:
         if self._availability[adapter] is True:
             return f"{adapter.value} is available"
@@ -640,6 +955,12 @@ class MainWindow(QMainWindow):
             self.run_availability_checks()
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        if not self._confirm_candidate_discard("closing the stack"):
+            event.ignore()
+            return
+        if not self._confirm_generation_cancel("closing the stack"):
+            event.ignore()
+            return
         self.inspector.commit_card_metadata()
         if self.document_session is not None and not self.document_session.flush():
             answer = QMessageBox.warning(
@@ -657,6 +978,10 @@ class MainWindow(QMainWindow):
             else:
                 event.ignore()
                 return
+        if self.background_workflow is not None:
+            self.background_workflow.discard_candidate()
+        if self.background_workflow is not None:
+            self.background_workflow.close()
         if self._owns_workers:
             self.workers.shutdown(wait_milliseconds=100)
         super().closeEvent(event)

@@ -16,6 +16,10 @@ authoring shell remains usable when either service is unavailable.
 Stacks are stored as self-contained `.hypergen` directory bundles and
 autosaved atomically after creation or opening.
 
+The current Author workflow supports card metadata, generated or imported
+background candidates, and revision history. Hotspot editing and Run mode are
+still under development.
+
 ## Setup and run
 
 Prerequisites: Python 3.12 and [uv](https://docs.astral.sh/uv/). To enable

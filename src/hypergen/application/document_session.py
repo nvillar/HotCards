@@ -118,6 +118,7 @@ class DocumentSession(QObject):
                 store = self._store.clone_to(bundle_path, stack)
         except StackStoreError as error:
             raise DocumentSessionError(str(error)) from error
+        self.controller.clear_history()
         return self._bind(store, stack, replace_document=False)
 
     @Slot(object)

@@ -6,15 +6,18 @@ import os
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtCore import QModelIndex, QObject, Signal
-from PySide6.QtGui import QCloseEvent
+from PIL import Image
+from PySide6.QtCore import QModelIndex, QObject, Qt, Signal
+from PySide6.QtGui import QAction, QCloseEvent
 from PySide6.QtWidgets import QApplication, QDialog, QLabel
 
 import hypergen.ui.main_window as main_window_module
+from hypergen.application.background_workflow import BackgroundCandidate
 from hypergen.application.commands import CreateCardCommand
 from hypergen.application.document_controller import DocumentController
 from hypergen.application.document_session import DocumentSession
@@ -107,6 +110,34 @@ class FakeWorkers(QObject):
         self.shutdown_calls += 1
 
 
+class FakeBackgroundWorkflow(QObject):
+    candidate_changed = Signal(object)
+    busy_changed = Signal(bool)
+    progress_changed = Signal(str)
+    failed = Signal(object)
+    document_changed = Signal(object)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.candidate = None
+        self.busy = False
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+    def discard_candidate(self) -> None:
+        self.candidate = None
+        self.candidate_changed.emit(None)
+
+    def is_generating_for(self, _card_id: object) -> bool:
+        return False
+
+    def cancel(self) -> None:
+        self.busy = False
+        self.busy_changed.emit(False)
+
+
 @pytest.fixture(scope="module")
 def application() -> QApplication:
     return QApplication.instance() or QApplication([])
@@ -150,6 +181,7 @@ def make_window(
     controller = DocumentController(stack or loaded_stack())
     workers = FakeWorkers()
     settings = FakeSettings()
+    background_workflow = FakeBackgroundWorkflow()
     window = MainWindow(
         controller,
         workers,  # type: ignore[arg-type]
@@ -158,6 +190,7 @@ def make_window(
             AdapterKind.OLLAMA: lambda: None,
             AdapterKind.MFLUX: lambda: None,
         },
+        background_workflow=background_workflow,  # type: ignore[arg-type]
         start_diagnostics=start_diagnostics,
     )
     return window, controller, workers, settings
@@ -172,7 +205,7 @@ def test_three_panes_render_loaded_stack_in_sidebar_and_inspector(
     assert window.card_sidebar.card_list.count() == 2
     assert window.card_sidebar.card_list.item(0).text() == "★  Foyer"
     assert window.inspector.card_name_edit.text() == "Foyer"
-    assert window.inspector.background_value.text().endswith("background.png")
+    assert window.inspector.background_value.text() == "Imported background"
     assert window.inspector.hotspot_list.item(0).text() == "Door"
     assert window.card_sidebar.findChild(QObject, "addCardButton") is not None
     window.close()
@@ -193,8 +226,8 @@ def test_empty_document_presents_first_card_path(
     assert window.card_sidebar.empty_label.isVisible()
     workers.ollama_operations[0].succeeded.emit(None)
     workers.mflux_operations[0].succeeded.emit(None)
-    assert not window.generate_background_action.isEnabled()
-    assert not window.generate_hotspots_action.isEnabled()
+    assert not window.inspector.generate_background_button.isEnabled()
+    assert not window.inspector.import_background_button.isEnabled()
     window.create_first_card_button.click()
 
     assert [card.name for card in controller.document.cards] == ["Card 1"]
@@ -202,8 +235,8 @@ def test_empty_document_presents_first_card_path(
     assert window.inspector.selected_card_id == controller.document.cards[0].id
     assert window.inspector.pages.currentIndex() == 1
     assert window.canvas_pages.currentIndex() == 1
-    assert window.generate_background_action.isEnabled()
-    assert window.generate_hotspots_action.isEnabled()
+    assert window.inspector.generate_background_button.isEnabled()
+    assert window.inspector.import_background_button.isEnabled()
     window.close()
 
 
@@ -434,6 +467,86 @@ def test_inspector_sections_progressively_disclose(application: QApplication) ->
     assert not window.inspector.hotspots_section.isChecked()
     window.inspector.background_section.setChecked(True)
     assert window.inspector.background_section.isChecked()
+    assert (
+        window.inspector.background_section.header.arrowType()
+        == Qt.ArrowType.DownArrow
+    )
+    window.close()
+
+
+def test_background_candidate_is_contextual_and_previews_on_canvas(
+    application: QApplication,
+    tmp_path: Path,
+) -> None:
+    window, controller, _workers, _settings = make_window()
+    workflow = window.background_workflow
+    assert isinstance(workflow, FakeBackgroundWorkflow)
+    image_path = tmp_path / "candidate.png"
+    Image.new("RGB", (1024, 768), "navy").save(image_path)
+    candidate = BackgroundCandidate(
+        card_id=controller.document.cards[0].id,
+        revision_id=uuid4(),
+        image_path=image_path,
+        origin=ImageOrigin.IMPORTED,
+        source_filename="candidate.png",
+        created_at=datetime.now(UTC),
+    )
+
+    workflow.candidate = candidate
+    workflow.candidate_changed.emit(candidate)
+
+    assert not window.inspector.candidate_widget.isHidden()
+    assert not window.inspector.generate_background_button.isEnabled()
+    assert not window.inspector.import_background_button.isEnabled()
+    assert window.card_canvas._border_item is not None
+    assert window.card_canvas._border_item.pen().style() == Qt.PenStyle.DashLine
+
+    workflow.candidate = None
+    workflow.candidate_changed.emit(None)
+    assert window.inspector.candidate_widget.isHidden()
+    window.close()
+
+
+def test_import_and_apply_background_through_contextual_inspector(
+    application: QApplication,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    card = Card(name="Card")
+    controller = DocumentController(
+        Stack(name="Saved", cards=(card,), start_card_id=card.id)
+    )
+    session = DocumentSession(controller)
+    bundle = tmp_path / "Saved.hypergen"
+    session.create(controller.document, bundle)
+    source = tmp_path / "source.png"
+    Image.new("RGB", (1024, 768), "green").save(source)
+    workers = FakeWorkers()
+    window = MainWindow(
+        controller,
+        workers,  # type: ignore[arg-type]
+        FakeSettings(),
+        document_session=session,
+        start_diagnostics=False,
+    )
+    monkeypatch.setattr(
+        main_window_module.QFileDialog,
+        "getOpenFileName",
+        lambda *_args, **_kwargs: (str(source), "Images (*.png)"),
+    )
+
+    window.inspector.import_background_button.click()
+    assert window.background_workflow is not None
+    assert window.background_workflow.candidate is not None
+    assert not window.inspector.candidate_widget.isHidden()
+
+    window.inspector.apply_background_button.click()
+    assert window.background_workflow.candidate is None
+    revision = controller.document.cards[0].image_revisions[0]
+    assert revision.source_filename == "source.png"
+    assert session.flush()
+    assert session.store is not None
+    assert session.store.asset_path(revision.image_path).is_file()
     window.close()
 
 
@@ -503,8 +616,8 @@ def test_service_diagnostics_toggle_only_generation_actions(
     window, _controller, workers, _settings = make_window(start_diagnostics=True)
     assert len(workers.ollama_checks) == 1
     assert len(workers.mflux_checks) == 1
-    assert not window.generate_background_action.isEnabled()
-    assert not window.generate_hotspots_action.isEnabled()
+    assert not window.inspector.generate_background_button.isEnabled()
+    assert window.inspector.import_background_button.isEnabled()
     assert window.card_sidebar.add_button.isEnabled()
 
     unavailable = WorkerFailure(
@@ -515,12 +628,12 @@ def test_service_diagnostics_toggle_only_generation_actions(
     )
     workers.mflux_operations[0].failed.emit(unavailable)
     workers.ollama_operations[0].succeeded.emit(None)
-    assert not window.generate_background_action.isEnabled()
-    assert window.generate_hotspots_action.isEnabled()
+    assert not window.inspector.generate_background_button.isEnabled()
+    assert window.inspector.import_background_button.isEnabled()
     assert window.card_sidebar.add_button.isEnabled()
 
     workers.mflux_operations[0].succeeded.emit(None)
-    assert window.generate_background_action.isEnabled()
+    assert window.inspector.generate_background_button.isEnabled()
     window.close()
 
 
@@ -532,15 +645,15 @@ def test_service_rechecks_use_latest_completion_and_reenable_actions(
     old_mflux = workers.mflux_operations[0]
     old_ollama.succeeded.emit(None)
     old_mflux.succeeded.emit(None)
-    assert window.generate_background_action.isEnabled()
+    assert window.inspector.generate_background_button.isEnabled()
 
     window.run_availability_checks()
-    assert not window.generate_background_action.isEnabled()
+    assert not window.inspector.generate_background_button.isEnabled()
     assert window.service_status_label.text() == "Checking local AI services…"
     assert "is available" not in window.service_status_label.text()
     workers.ollama_operations[1].succeeded.emit(None)
     workers.mflux_operations[1].succeeded.emit(None)
-    assert window.generate_background_action.isEnabled()
+    assert window.inspector.generate_background_button.isEnabled()
 
     stale_failure = WorkerFailure(
         adapter=AdapterKind.MFLUX,
@@ -549,7 +662,7 @@ def test_service_rechecks_use_latest_completion_and_reenable_actions(
         message="stale failure",
     )
     old_mflux.failed.emit(stale_failure)
-    assert window.generate_background_action.isEnabled()
+    assert window.inspector.generate_background_button.isEnabled()
     window.close()
 
 
@@ -580,13 +693,14 @@ def test_shell_copy_does_not_expose_issue_roadmap(application: QApplication) -> 
     visible_copy = " ".join(label.text() for label in window.findChildren(QLabel))
     action_tooltips = " ".join(
         action.toolTip()
-        for action in (
-            *window.player_navigation_actions,
-            window.generate_background_action,
-            window.generate_hotspots_action,
-        )
+        for action in window.player_navigation_actions
     )
     assert "issue #" not in f"{visible_copy} {action_tooltips}".casefold()
+    toolbar_action_names = {
+        action.objectName() for action in window.findChildren(QAction)
+    }
+    assert "generateBackgroundAction" not in toolbar_action_names
+    assert "generateHotspotsAction" not in toolbar_action_names
     window.close()
 
 

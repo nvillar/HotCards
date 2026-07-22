@@ -8,10 +8,12 @@ from pydantic import ValidationError
 
 from hypergen.application.commands import (
     ActivateRevisionCommand,
+    AddImageRevisionCommand,
     ChangeHotspotDestinationCommand,
     CommandError,
     CreateCardCommand,
     DeleteCardCommand,
+    DeleteImageRevisionCommand,
     EditCardTextCommand,
     RenameCardCommand,
     ReorderCardCommand,
@@ -159,6 +161,49 @@ def test_revision_activation_and_complete_hotspot_replacement() -> None:
         .hotspot_set
         is None
     )
+
+
+def test_add_and_delete_image_revisions_choose_safe_active_revision() -> None:
+    card = Card(name="Card")
+    document = Stack(name="Stack", cards=(card,))
+    first = ImageRevision(
+        image_path=f"assets/cards/{card.id}/image-{uuid4()}.png",
+        origin=ImageOrigin.IMPORTED,
+        created_at=datetime.now(UTC),
+    )
+    first = first.model_copy(
+        update={
+            "image_path": f"assets/cards/{card.id}/image-{first.id}.png",
+        }
+    )
+    second = ImageRevision(
+        image_path=f"assets/cards/{card.id}/image-{uuid4()}.png",
+        origin=ImageOrigin.IMPORTED,
+        created_at=datetime.now(UTC),
+    )
+    second = second.model_copy(
+        update={
+            "image_path": f"assets/cards/{card.id}/image-{second.id}.png",
+        }
+    )
+
+    document = AddImageRevisionCommand(card_id=card.id, revision=first).apply(document)
+    document = AddImageRevisionCommand(card_id=card.id, revision=second).apply(document)
+    assert document.cards[0].active_revision_id == second.id
+
+    document = DeleteImageRevisionCommand(
+        card_id=card.id,
+        revision_id=second.id,
+    ).apply(document)
+    assert document.cards[0].active_revision_id == first.id
+    assert document.cards[0].image_revisions == (first,)
+
+    document = DeleteImageRevisionCommand(
+        card_id=card.id,
+        revision_id=first.id,
+    ).apply(document)
+    assert document.cards[0].active_revision_id is None
+    assert document.cards[0].image_revisions == ()
 
 
 def test_polygon_destination_and_hotspot_order_changes() -> None:

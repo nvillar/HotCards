@@ -279,6 +279,58 @@ class ActivateRevisionCommand:
 
 
 @dataclass(frozen=True, slots=True)
+class AddImageRevisionCommand:
+    """Append and activate one durably stored immutable image revision."""
+
+    card_id: UUID
+    revision: ImageRevision
+
+    def apply(self, document: Stack) -> Stack:
+        card_index = _card_index(document, self.card_id)
+        card = document.cards[card_index]
+        if any(revision.id == self.revision.id for revision in card.image_revisions):
+            raise CommandError(f"revision {self.revision.id} already exists on card {card.id}")
+        card = card.model_copy(
+            update={
+                "image_revisions": (
+                    *card.image_revisions,
+                    self.revision.model_copy(deep=True),
+                ),
+                "active_revision_id": self.revision.id,
+            }
+        )
+        return validated_copy(_replace_card(document, card_index, card))
+
+
+@dataclass(frozen=True, slots=True)
+class DeleteImageRevisionCommand:
+    """Remove one revision and activate the nearest remaining revision."""
+
+    card_id: UUID
+    revision_id: UUID
+
+    def apply(self, document: Stack) -> Stack:
+        card_index = _card_index(document, self.card_id)
+        card = document.cards[card_index]
+        revision_index = _revision_index(card, self.revision_id)
+        revisions = list(card.image_revisions)
+        revisions.pop(revision_index)
+        active_revision_id = card.active_revision_id
+        if active_revision_id == self.revision_id:
+            replacement_index = min(revision_index, len(revisions) - 1)
+            active_revision_id = (
+                revisions[replacement_index].id if replacement_index >= 0 else None
+            )
+        card = card.model_copy(
+            update={
+                "image_revisions": tuple(revisions),
+                "active_revision_id": active_revision_id,
+            }
+        )
+        return validated_copy(_replace_card(document, card_index, card))
+
+
+@dataclass(frozen=True, slots=True)
 class ReplaceHotspotSetCommand:
     """Replace one revision's complete applied hotspot set atomically."""
 
@@ -452,12 +504,14 @@ class CreateCardAndResolveCommand:
 
 __all__ = [
     "ActivateRevisionCommand",
+    "AddImageRevisionCommand",
     "CardTextField",
     "ChangeHotspotDestinationCommand",
     "CommandError",
     "CreateCardAndResolveCommand",
     "CreateCardCommand",
     "DeleteCardCommand",
+    "DeleteImageRevisionCommand",
     "DocumentCommand",
     "EditCardTextCommand",
     "RenameCardCommand",

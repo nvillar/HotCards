@@ -1,12 +1,20 @@
 """Document commands, controllers, and workers."""
 
+from hypergen.application.background_workflow import (
+    BackgroundCandidate,
+    BackgroundGenerationSettings,
+    BackgroundWorkflow,
+    BackgroundWorkflowError,
+)
 from hypergen.application.commands import (
     ActivateRevisionCommand,
+    AddImageRevisionCommand,
     ChangeHotspotDestinationCommand,
     CommandError,
     CreateCardAndResolveCommand,
     CreateCardCommand,
     DeleteCardCommand,
+    DeleteImageRevisionCommand,
     DocumentCommand,
     EditCardTextCommand,
     RenameCardCommand,
@@ -36,15 +44,21 @@ from hypergen.application.workers import (
 
 __all__ = [
     "ActivateRevisionCommand",
+    "AddImageRevisionCommand",
     "AdapterKind",
     "AdapterWorkers",
     "AutosaveHook",
     "AvailabilityDiagnostic",
+    "BackgroundCandidate",
+    "BackgroundGenerationSettings",
+    "BackgroundWorkflow",
+    "BackgroundWorkflowError",
     "ChangeHotspotDestinationCommand",
     "CommandError",
     "CreateCardAndResolveCommand",
     "CreateCardCommand",
     "DeleteCardCommand",
+    "DeleteImageRevisionCommand",
     "DocumentCommand",
     "DocumentController",
     "DocumentSession",
