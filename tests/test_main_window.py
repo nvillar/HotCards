@@ -459,18 +459,20 @@ def test_invalid_card_name_is_rejected_and_inspector_is_restored(
     window.close()
 
 
-def test_inspector_sections_progressively_disclose(application: QApplication) -> None:
+def test_inspector_sections_are_always_open_and_scrollable(
+    application: QApplication,
+) -> None:
     window, _controller, _workers, _settings = make_window()
 
-    assert window.inspector.card_section.isChecked()
-    assert not window.inspector.background_section.isChecked()
-    assert not window.inspector.hotspots_section.isChecked()
-    window.inspector.background_section.setChecked(True)
-    assert window.inspector.background_section.isChecked()
-    assert (
-        window.inspector.background_section.header.arrowType()
-        == Qt.ArrowType.DownArrow
+    assert window.inspector.pages.widget(1).objectName() == "inspectorScrollArea"
+    sections = (
+        (window.inspector.card_section, "Card"),
+        (window.inspector.background_section, "Background"),
+        (window.inspector.hotspots_section, "Hotspots"),
     )
+    for section, title in sections:
+        assert section.title_label.text() == title
+        assert not section.content.isHidden()
     window.close()
 
 
@@ -544,6 +546,8 @@ def test_import_and_apply_background_through_contextual_inspector(
     assert window.background_workflow.candidate is None
     revision = controller.document.cards[0].image_revisions[0]
     assert revision.source_filename == "source.png"
+    assert window.inspector.hotspots_placeholder.text() == "No hotspots yet."
+    assert not window.inspector.hotspots_placeholder.isHidden()
     assert session.flush()
     assert session.store is not None
     assert session.store.asset_path(revision.image_path).is_file()

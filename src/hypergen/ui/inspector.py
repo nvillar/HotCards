@@ -1,4 +1,4 @@
-"""Progressively disclosed selected-card inspector."""
+"""Scrollable selected-card inspector."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFormLayout,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -19,7 +20,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QStackedWidget,
-    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -43,49 +43,26 @@ class _CommitPlainTextEdit(QPlainTextEdit):
         self.editing_finished.emit()
 
 
-class DisclosureSection(QWidget):
-    """A chevron disclosure header whose state cannot read as an option checkbox."""
+class InspectorSection(QWidget):
+    """An always-visible titled inspector section."""
 
-    toggled = Signal(bool)
-
-    def __init__(
-        self,
-        title: str,
-        *,
-        expanded: bool,
-        parent: QWidget | None = None,
-    ) -> None:
+    def __init__(self, title: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.header = QToolButton()
-        self.header.setText(title)
-        self.header.setCheckable(True)
-        self.header.setChecked(expanded)
-        self.header.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        self.header.setAutoRaise(True)
-        self.header.toggled.connect(self._set_expanded)
+        self.title_label = QLabel(title)
+        self.title_label.setStyleSheet("font-weight: 600; margin-top: 6px;")
+        separator = QFrame()
+        separator.setFrameShape(QFrame.Shape.HLine)
+        separator.setFrameShadow(QFrame.Shadow.Sunken)
         self.content = QWidget()
         self.content_layout = QVBoxLayout(self.content)
-        self.content_layout.setContentsMargins(18, 4, 0, 8)
+        self.content_layout.setContentsMargins(8, 4, 0, 10)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-        layout.addWidget(self.header)
+        layout.setSpacing(2)
+        layout.addWidget(self.title_label)
+        layout.addWidget(separator)
         layout.addWidget(self.content)
-        self._set_expanded(expanded)
-
-    def isChecked(self) -> bool:
-        return self.header.isChecked()
-
-    def setChecked(self, checked: bool) -> None:
-        self.header.setChecked(checked)
-
-    def _set_expanded(self, expanded: bool) -> None:
-        self.header.setArrowType(
-            Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow
-        )
-        self.content.setVisible(expanded)
-        self.toggled.emit(expanded)
 
 
 class Inspector(QWidget):
@@ -110,7 +87,7 @@ class Inspector(QWidget):
         heading = QLabel("Inspector")
         heading.setObjectName("inspectorHeading")
 
-        self.card_section, card_layout = self._section("Card", expanded=True)
+        self.card_section, card_layout = self._section("Card")
         self.card_section.setObjectName("cardInspectorSection")
         self.card_name_edit = QLineEdit()
         self.card_name_edit.setObjectName("cardNameEdit")
@@ -137,10 +114,7 @@ class Inspector(QWidget):
         card_layout.addWidget(self.start_card_check)
         card_layout.addWidget(self.validation_error)
 
-        self.background_section, background_layout = self._section(
-            "Background",
-            expanded=False,
-        )
+        self.background_section, background_layout = self._section("Background")
         self.background_section.setObjectName("backgroundInspectorSection")
         self.background_value = QLabel("No background revision")
         self.background_value.setObjectName("backgroundRevisionValue")
@@ -190,10 +164,10 @@ class Inspector(QWidget):
         self.delete_revision_button.setObjectName("deleteRevisionButton")
         background_layout.addWidget(self.delete_revision_button)
 
-        self.hotspots_section, hotspots_layout = self._section("Hotspots", expanded=False)
+        self.hotspots_section, hotspots_layout = self._section("Hotspots")
         self.hotspots_section.setObjectName("hotspotsInspectorSection")
         self.hotspots_placeholder = QLabel(
-            "Hotspot editing becomes available after a background revision is active."
+            "Apply a background before adding hotspots."
         )
         self.hotspots_placeholder.setWordWrap(True)
         hotspots_layout.addWidget(self.hotspots_placeholder)
@@ -255,10 +229,8 @@ class Inspector(QWidget):
     @staticmethod
     def _section(
         title: str,
-        *,
-        expanded: bool,
-    ) -> tuple[DisclosureSection, QVBoxLayout]:
-        section = DisclosureSection(title, expanded=expanded)
+    ) -> tuple[InspectorSection, QVBoxLayout]:
+        section = InspectorSection(title)
         return section, section.content_layout
 
     def render(self, document: Stack, selected_card_id: UUID | None) -> None:
@@ -280,6 +252,8 @@ class Inspector(QWidget):
                 self.background_value.setText("No card selected")
                 self.revision_combo.clear()
                 self.revision_metadata.clear()
+                self.hotspots_placeholder.setText("Select a card to view hotspots.")
+                self.hotspots_placeholder.setVisible(True)
                 self.hotspot_list.clear()
                 return
             self.pages.setCurrentIndex(1)
@@ -394,7 +368,16 @@ class Inspector(QWidget):
         if revision is None:
             self.background_value.setText("No background revision")
             self.revision_metadata.clear()
+            self.hotspots_placeholder.setText(
+                "Apply a background before adding hotspots."
+            )
+            self.hotspots_placeholder.setVisible(True)
             return
+        self.hotspots_placeholder.setText("No hotspots yet.")
+        self.hotspots_placeholder.setVisible(
+            revision.hotspot_set is None
+            or not revision.hotspot_set.interactions
+        )
         self.background_value.setText(
             "Generated background"
             if revision.origin.value == "generated"
