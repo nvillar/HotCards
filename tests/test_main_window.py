@@ -16,6 +16,7 @@ from PySide6.QtCore import QModelIndex, QObject, Qt, Signal
 from PySide6.QtGui import QAction, QCloseEvent
 from PySide6.QtWidgets import QApplication, QDialog, QLabel
 
+import hypergen.ui.inspector as inspector_module
 import hypergen.ui.main_window as main_window_module
 from hypergen.application.background_workflow import BackgroundCandidate
 from hypergen.application.commands import CreateCardCommand
@@ -35,6 +36,7 @@ from hypergen.domain.models import (
     NavigateAction,
     Point,
     Polygon,
+    ResolvedCardReference,
     Stack,
     UnresolvedCardReference,
 )
@@ -206,7 +208,7 @@ def test_three_panes_render_loaded_stack_in_sidebar_and_inspector(
     assert window.card_sidebar.card_list.item(0).text() == "★  Foyer"
     assert window.inspector.card_name_edit.text() == "Foyer"
     assert window.inspector.background_value.text() == "Imported background"
-    assert window.inspector.hotspot_list.item(0).text() == "Door"
+    assert window.inspector.hotspot_list.item(0).text() == "Door (1 area)"
     assert window.card_sidebar.findChild(QObject, "addCardButton") is not None
     window.close()
 
@@ -551,6 +553,147 @@ def test_import_and_apply_background_through_contextual_inspector(
     assert session.flush()
     assert session.store is not None
     assert session.store.asset_path(revision.image_path).is_file()
+    window.close()
+
+
+def test_manual_hotspot_canvas_commands_are_undoable(
+    application: QApplication,
+) -> None:
+    window, controller, _workers, _settings = make_window()
+    source = controller.document.cards[0]
+    revision = source.image_revisions[0]
+    assert revision.hotspot_set is not None
+    original = revision.hotspot_set.interactions[0]
+    added_polygon = Polygon(
+        points=(
+            Point(x=0.55, y=0.2),
+            Point(x=0.85, y=0.2),
+            Point(x=0.7, y=0.55),
+        )
+    )
+
+    assert window.inspector.add_hotspot_button.isEnabled()
+    window.card_canvas.polygon_created.emit(None, added_polygon)
+    hotspot_set = controller.document.cards[0].image_revisions[0].hotspot_set
+    assert hotspot_set is not None
+    assert len(hotspot_set.interactions) == 2
+    created = hotspot_set.interactions[-1]
+    assert created.label == "Hotspot 2"
+    assert window.inspector.selected_interaction_id == created.id
+    window.inspector.move_hotspot_up_button.click()
+    hotspot_set = controller.document.cards[0].image_revisions[0].hotspot_set
+    assert hotspot_set is not None
+    assert [interaction.id for interaction in hotspot_set.interactions] == [
+        created.id,
+        original.id,
+    ]
+
+    window.card_canvas.polygon_created.emit(created.id, original.polygons[0])
+    hotspot_set = controller.document.cards[0].image_revisions[0].hotspot_set
+    assert hotspot_set is not None
+    edited = next(
+        interaction
+        for interaction in hotspot_set.interactions
+        if interaction.id == created.id
+    )
+    assert len(edited.polygons) == 2
+
+    window.card_canvas.polygon_deletion_requested.emit(created.id, 1)
+    hotspot_set = controller.document.cards[0].image_revisions[0].hotspot_set
+    assert hotspot_set is not None
+    edited = next(
+        interaction
+        for interaction in hotspot_set.interactions
+        if interaction.id == created.id
+    )
+    assert len(edited.polygons) == 1
+    assert controller.undo()
+    window.render_document()
+    hotspot_set = controller.document.cards[0].image_revisions[0].hotspot_set
+    assert hotspot_set is not None
+    edited = next(
+        interaction
+        for interaction in hotspot_set.interactions
+        if interaction.id == created.id
+    )
+    assert len(edited.polygons) == 2
+    window.close()
+
+
+def test_manual_hotspot_properties_and_destination_actions(
+    application: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window, controller, _workers, _settings = make_window()
+    source = controller.document.cards[0]
+    destination = controller.document.cards[1]
+    interaction_id = window.inspector.selected_interaction_id
+    assert interaction_id is not None
+
+    window.inspector.hotspot_label_edit.setText("Archway")
+    window.inspector.hotspot_label_edit.editingFinished.emit()
+    hotspot_set = controller.document.cards[0].image_revisions[0].hotspot_set
+    assert hotspot_set is not None
+    assert hotspot_set.interactions[0].label == "Archway"
+
+    destination_index = window.inspector.hotspot_destination_combo.findData(
+        destination.id
+    )
+    window.inspector.hotspot_destination_combo.setCurrentIndex(destination_index)
+    hotspot_set = controller.document.cards[0].image_revisions[0].hotspot_set
+    assert hotspot_set is not None
+    assert hotspot_set.interactions[0].action.target == ResolvedCardReference(
+        target_card_id=destination.id
+    )
+
+    window.inspector.hotspot_destination_combo.setCurrentIndex(0)
+    hotspot_set = controller.document.cards[0].image_revisions[0].hotspot_set
+    assert hotspot_set is not None
+    assert hotspot_set.interactions[0].action.target == UnresolvedCardReference()
+
+    monkeypatch.setattr(
+        inspector_module.QInputDialog,
+        "getText",
+        lambda *_args, **_kwargs: ("Ignored", False),
+    )
+    create_index = window.inspector.hotspot_destination_combo.findData("create")
+    window.inspector.hotspot_destination_combo.setCurrentIndex(create_index)
+    assert len(controller.document.cards) == 2
+
+    monkeypatch.setattr(
+        inspector_module.QInputDialog,
+        "getText",
+        lambda *_args, **_kwargs: ("New Room", True),
+    )
+    create_index = window.inspector.hotspot_destination_combo.findData("create")
+    window.inspector.hotspot_destination_combo.setCurrentIndex(create_index)
+
+    assert [card.name for card in controller.document.cards] == [
+        source.name,
+        destination.name,
+        "New Room",
+    ]
+    hotspot_set = controller.document.cards[0].image_revisions[0].hotspot_set
+    assert hotspot_set is not None
+    target = hotspot_set.interactions[0].action.target
+    assert isinstance(target, ResolvedCardReference)
+    assert target.target_card_id == controller.document.cards[-1].id
+    assert controller.undo()
+    assert len(controller.document.cards) == 2
+    window.close()
+
+
+def test_canvas_deselection_keeps_inspector_and_canvas_in_sync(
+    application: QApplication,
+) -> None:
+    window, _controller, _workers, _settings = make_window()
+    assert window.inspector.selected_interaction_id is not None
+
+    window.card_canvas.interaction_selected.emit(None)
+
+    assert window.inspector.selected_interaction_id is None
+    assert window.card_canvas._selected_interaction_id is None
+    assert not window.inspector.hotspot_label_edit.isEnabled()
     window.close()
 
 

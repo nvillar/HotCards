@@ -3,12 +3,14 @@
 from datetime import UTC, datetime
 
 from hypergen.application.commands import (
+    AddInteractionCommand,
     ChangeHotspotDestinationCommand,
     CreateCardAndResolveCommand,
     CreateCardCommand,
     DeleteCardCommand,
     EditCardTextCommand,
     RenameCardCommand,
+    RenameInteractionCommand,
     ReplaceHotspotSetCommand,
 )
 from hypergen.application.document_controller import DocumentController
@@ -151,6 +153,40 @@ def test_destination_resolution_is_one_undoable_command() -> None:
 
     assert controller.undo()
     assert hotspot_target(controller) == UnresolvedCardReference(target_name="Retained destination")
+
+
+def test_manual_interaction_edits_have_individual_undo_boundaries() -> None:
+    document, source, revision, _hotspot = document_with_hotspot()
+    controller = DocumentController(document)
+    added = interaction("New destination")
+
+    controller.execute(
+        AddInteractionCommand(
+            card_id=source.id,
+            revision_id=revision.id,
+            interaction=added,
+        )
+    )
+    controller.execute(
+        RenameInteractionCommand(
+            card_id=source.id,
+            revision_id=revision.id,
+            interaction_id=added.id,
+            label="Renamed",
+        )
+    )
+
+    hotspot_set = controller.document.cards[0].image_revisions[0].hotspot_set
+    assert hotspot_set is not None
+    assert hotspot_set.interactions[-1].label == "Renamed"
+    assert controller.undo()
+    hotspot_set = controller.document.cards[0].image_revisions[0].hotspot_set
+    assert hotspot_set is not None
+    assert hotspot_set.interactions[-1].label == "Door"
+    assert controller.undo()
+    hotspot_set = controller.document.cards[0].image_revisions[0].hotspot_set
+    assert hotspot_set is not None
+    assert len(hotspot_set.interactions) == 1
 
 
 def test_deleting_start_destination_is_valid_and_undo_restores_inbound_link() -> None:

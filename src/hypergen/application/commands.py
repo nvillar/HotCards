@@ -354,6 +354,79 @@ class ReplaceHotspotSetCommand:
 
 
 @dataclass(frozen=True, slots=True)
+class AddInteractionCommand:
+    """Add one complete interaction to an applied hotspot set."""
+
+    card_id: UUID
+    revision_id: UUID
+    interaction: Interaction
+
+    def apply(self, document: Stack) -> Stack:
+        card_index = _card_index(document, self.card_id)
+        card = document.cards[card_index]
+        revision_index = _revision_index(card, self.revision_id)
+        revision = card.image_revisions[revision_index]
+        hotspot_set = revision.hotspot_set or HotspotSet()
+        interactions = (*hotspot_set.interactions, self.interaction)
+        hotspot_set = hotspot_set.model_copy(update={"interactions": interactions})
+        revision = revision.model_copy(update={"hotspot_set": hotspot_set})
+        card = _replace_revision(card, revision_index, revision)
+        return validated_copy(_replace_card(document, card_index, card))
+
+
+@dataclass(frozen=True, slots=True)
+class RenameInteractionCommand:
+    """Change one interaction label."""
+
+    card_id: UUID
+    revision_id: UUID
+    interaction_id: UUID
+    label: str
+
+    def apply(self, document: Stack) -> Stack:
+        interaction = _interaction(
+            document,
+            card_id=self.card_id,
+            revision_id=self.revision_id,
+            interaction_id=self.interaction_id,
+        ).model_copy(update={"label": self.label})
+        return validated_copy(
+            _replace_interaction(
+                document,
+                card_id=self.card_id,
+                revision_id=self.revision_id,
+                interaction_id=self.interaction_id,
+                replacement=interaction,
+            )
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class DeleteInteractionCommand:
+    """Delete one interaction while retaining the applied hotspot set."""
+
+    card_id: UUID
+    revision_id: UUID
+    interaction_id: UUID
+
+    def apply(self, document: Stack) -> Stack:
+        card_index = _card_index(document, self.card_id)
+        card = document.cards[card_index]
+        revision_index = _revision_index(card, self.revision_id)
+        revision = card.image_revisions[revision_index]
+        interaction_index = _interaction_index(revision, self.interaction_id)
+        assert revision.hotspot_set is not None
+        interactions = list(revision.hotspot_set.interactions)
+        interactions.pop(interaction_index)
+        hotspot_set = revision.hotspot_set.model_copy(
+            update={"interactions": tuple(interactions)}
+        )
+        revision = revision.model_copy(update={"hotspot_set": hotspot_set})
+        card = _replace_revision(card, revision_index, revision)
+        return validated_copy(_replace_card(document, card_index, card))
+
+
+@dataclass(frozen=True, slots=True)
 class ReplaceInteractionPolygonsCommand:
     """Replace all polygon components of one interaction."""
 
@@ -377,6 +450,62 @@ class ReplaceInteractionPolygonsCommand:
             replacement=interaction,
         )
         return validated_copy(changed)
+
+
+@dataclass(frozen=True, slots=True)
+class AddPolygonCommand:
+    """Append one polygon component to an interaction."""
+
+    card_id: UUID
+    revision_id: UUID
+    interaction_id: UUID
+    polygon: Polygon
+
+    def apply(self, document: Stack) -> Stack:
+        interaction = _interaction(
+            document,
+            card_id=self.card_id,
+            revision_id=self.revision_id,
+            interaction_id=self.interaction_id,
+        )
+        return ReplaceInteractionPolygonsCommand(
+            card_id=self.card_id,
+            revision_id=self.revision_id,
+            interaction_id=self.interaction_id,
+            polygons=(*interaction.polygons, self.polygon),
+        ).apply(document)
+
+
+@dataclass(frozen=True, slots=True)
+class DeletePolygonCommand:
+    """Delete one polygon component from a multi-component interaction."""
+
+    card_id: UUID
+    revision_id: UUID
+    interaction_id: UUID
+    polygon_index: int
+
+    def apply(self, document: Stack) -> Stack:
+        interaction = _interaction(
+            document,
+            card_id=self.card_id,
+            revision_id=self.revision_id,
+            interaction_id=self.interaction_id,
+        )
+        if not 0 <= self.polygon_index < len(interaction.polygons):
+            raise CommandError(f"polygon index {self.polygon_index} is out of range")
+        if len(interaction.polygons) == 1:
+            raise CommandError(
+                "cannot delete the only polygon component; delete the interaction instead"
+            )
+        polygons = list(interaction.polygons)
+        polygons.pop(self.polygon_index)
+        return ReplaceInteractionPolygonsCommand(
+            card_id=self.card_id,
+            revision_id=self.revision_id,
+            interaction_id=self.interaction_id,
+            polygons=tuple(polygons),
+        ).apply(document)
 
 
 @dataclass(frozen=True, slots=True)
@@ -482,12 +611,16 @@ class CreateCardAndResolveCommand:
             interaction_id=self.interaction_id,
         )
         target = interaction.action.target
-        if not isinstance(target, UnresolvedCardReference):
-            raise CommandError("create-and-resolve requires an unresolved hotspot destination")
-        name = self.card_name if self.card_name is not None else target.target_name
+        name = (
+            self.card_name
+            if self.card_name is not None
+            else target.target_name
+            if isinstance(target, UnresolvedCardReference)
+            else None
+        )
         if name is None:
             raise CommandError(
-                "card_name is required when the unresolved destination has no target name"
+                "card_name is required when the hotspot has no unresolved target name"
             )
         changed = CreateCardCommand(
             name=name,
@@ -504,17 +637,22 @@ class CreateCardAndResolveCommand:
 
 __all__ = [
     "ActivateRevisionCommand",
+    "AddInteractionCommand",
     "AddImageRevisionCommand",
+    "AddPolygonCommand",
     "CardTextField",
     "ChangeHotspotDestinationCommand",
     "CommandError",
     "CreateCardAndResolveCommand",
     "CreateCardCommand",
     "DeleteCardCommand",
+    "DeleteInteractionCommand",
     "DeleteImageRevisionCommand",
+    "DeletePolygonCommand",
     "DocumentCommand",
     "EditCardTextCommand",
     "RenameCardCommand",
+    "RenameInteractionCommand",
     "ReorderCardCommand",
     "ReorderHotspotCommand",
     "ReplaceHotspotSetCommand",

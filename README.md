@@ -17,7 +17,8 @@ Stacks are stored as self-contained `.hypergen` directory bundles and
 autosaved atomically after creation or opening.
 
 The current Author workflow supports card metadata, generated or imported
-background candidates, and revision history. Hotspot editing and Run mode are
+background candidates, revision history, and manual multi-area polygon hotspot
+editing with explicit card destinations. AI hotspot generation and Run mode are
 still under development.
 
 ## Setup and run

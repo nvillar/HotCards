@@ -9,13 +9,18 @@ from pydantic import ValidationError
 from hypergen.application.commands import (
     ActivateRevisionCommand,
     AddImageRevisionCommand,
+    AddInteractionCommand,
+    AddPolygonCommand,
     ChangeHotspotDestinationCommand,
     CommandError,
     CreateCardCommand,
     DeleteCardCommand,
     DeleteImageRevisionCommand,
+    DeleteInteractionCommand,
+    DeletePolygonCommand,
     EditCardTextCommand,
     RenameCardCommand,
+    RenameInteractionCommand,
     ReorderCardCommand,
     ReorderHotspotCommand,
     ReplaceHotspotSetCommand,
@@ -248,6 +253,63 @@ def test_polygon_destination_and_hotspot_order_changes() -> None:
     assert hotspots.interactions[1].action.target == ResolvedCardReference(
         target_card_id=destination.id
     )
+
+
+def test_interaction_and_polygon_component_lifecycle() -> None:
+    first = interaction("Door", "Hall")
+    second = interaction("Window", "Garden")
+    source, revision = card_with_revision(first)
+    document = Stack(name="Stack", cards=(source,))
+    extra = polygon(0.4)
+
+    document = AddInteractionCommand(
+        card_id=source.id,
+        revision_id=revision.id,
+        interaction=second,
+    ).apply(document)
+    document = RenameInteractionCommand(
+        card_id=source.id,
+        revision_id=revision.id,
+        interaction_id=first.id,
+        label="Archway",
+    ).apply(document)
+    document = AddPolygonCommand(
+        card_id=source.id,
+        revision_id=revision.id,
+        interaction_id=first.id,
+        polygon=extra,
+    ).apply(document)
+    document = DeletePolygonCommand(
+        card_id=source.id,
+        revision_id=revision.id,
+        interaction_id=first.id,
+        polygon_index=0,
+    ).apply(document)
+    document = DeleteInteractionCommand(
+        card_id=source.id,
+        revision_id=revision.id,
+        interaction_id=second.id,
+    ).apply(document)
+
+    hotspot_set = document.cards[0].image_revisions[0].hotspot_set
+    assert hotspot_set is not None
+    assert len(hotspot_set.interactions) == 1
+    assert hotspot_set.interactions[0].label == "Archway"
+    assert hotspot_set.interactions[0].polygons == (extra,)
+
+
+def test_polygon_component_deletion_preserves_valid_interactions() -> None:
+    first = interaction("Door", "Hall")
+    source, revision = card_with_revision(first)
+    document = Stack(name="Stack", cards=(source,))
+
+    with pytest.raises(CommandError, match="only polygon"):
+        DeletePolygonCommand(
+            card_id=source.id,
+            revision_id=revision.id,
+            interaction_id=first.id,
+            polygon_index=0,
+        ).apply(document)
 
 
 def test_delete_card_converts_all_inbound_references_and_clears_start() -> None:

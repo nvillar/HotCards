@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
+from pydantic import ValidationError
 from PySide6.QtCore import QSettings, Qt
 from PySide6.QtGui import QAction, QCloseEvent, QKeySequence
 from PySide6.QtWidgets import (
@@ -31,7 +32,16 @@ from hypergen.application.background_workflow import (
     BackgroundWorkflow,
     BackgroundWorkflowError,
 )
-from hypergen.application.commands import CommandError, SetRunOverlayModeCommand
+from hypergen.application.commands import (
+    AddInteractionCommand,
+    AddPolygonCommand,
+    CommandError,
+    DeleteInteractionCommand,
+    DeletePolygonCommand,
+    DocumentCommand,
+    ReplacePolygonCommand,
+    SetRunOverlayModeCommand,
+)
 from hypergen.application.document_controller import DocumentController
 from hypergen.application.document_session import (
     DocumentSession,
@@ -45,7 +55,15 @@ from hypergen.application.workers import (
     WorkerFailure,
     WorkerOperation,
 )
-from hypergen.domain.models import RunOverlayMode, Stack
+from hypergen.domain.models import (
+    HotspotSet,
+    Interaction,
+    NavigateAction,
+    Polygon,
+    RunOverlayMode,
+    Stack,
+    UnresolvedCardReference,
+)
 from hypergen.storage.stack_store import StackStoreError
 from hypergen.ui.card_canvas import CardCanvas
 from hypergen.ui.card_sidebar import CardSidebar
@@ -235,6 +253,27 @@ class MainWindow(QMainWindow):
         self.inspector.discard_background_requested.connect(self._discard_background)
         self.inspector.revision_activation_requested.connect(self._activate_revision)
         self.inspector.revision_deletion_requested.connect(self._delete_revision)
+        self.inspector.hotspot_selected.connect(
+            self.card_canvas.select_interaction
+        )
+        self.inspector.add_hotspot_requested.connect(
+            lambda: self.card_canvas.begin_polygon()
+        )
+        self.inspector.add_hotspot_component_requested.connect(
+            self.card_canvas.begin_polygon
+        )
+        self.card_canvas.interaction_selected.connect(
+            self.inspector.select_interaction
+        )
+        self.card_canvas.polygon_created.connect(self._create_hotspot_polygon)
+        self.card_canvas.polygon_changed.connect(self._replace_hotspot_polygon)
+        self.card_canvas.polygon_deletion_requested.connect(
+            self._delete_hotspot_polygon
+        )
+        self.card_canvas.interaction_deletion_requested.connect(
+            self._delete_hotspot_interaction
+        )
+        self.card_canvas.editing_error.connect(self.inspector.set_hotspot_error)
         if self.background_workflow is not None:
             self.background_workflow.candidate_changed.connect(
                 self._background_candidate_changed
@@ -896,6 +935,7 @@ class MainWindow(QMainWindow):
         )
         if candidate is not None and candidate.card_id == card.id:
             self.card_canvas.show_image(candidate.image_path, candidate=True)
+            self.card_canvas.set_hotspots(None, None, editable=False)
             return
         revision = next(
             (
@@ -917,6 +957,150 @@ class MainWindow(QMainWindow):
             self.card_canvas.show_message(str(error))
             return
         self.card_canvas.show_image(asset_path)
+        self.card_canvas.set_hotspots(
+            revision.hotspot_set,
+            self.inspector.selected_interaction_id,
+            editable=True,
+        )
+
+    def _create_hotspot_polygon(
+        self,
+        interaction_id: object,
+        polygon: object,
+    ) -> None:
+        context = self._active_hotspot_context()
+        if context is None or not isinstance(polygon, Polygon):
+            return
+        card_id, revision_id, hotspot_set = context
+        if isinstance(interaction_id, UUID):
+            command = AddPolygonCommand(
+                card_id=card_id,
+                revision_id=revision_id,
+                interaction_id=interaction_id,
+                polygon=polygon,
+            )
+            selected_id = interaction_id
+        else:
+            existing_labels = {
+                interaction.label.casefold()
+                for interaction in hotspot_set.interactions
+            }
+            number = len(hotspot_set.interactions) + 1
+            while f"Hotspot {number}".casefold() in existing_labels:
+                number += 1
+            interaction = Interaction(
+                label=f"Hotspot {number}",
+                action=NavigateAction(target=UnresolvedCardReference()),
+                polygons=(polygon,),
+            )
+            command = AddInteractionCommand(
+                card_id=card_id,
+                revision_id=revision_id,
+                interaction=interaction,
+            )
+            selected_id = interaction.id
+        self._execute_hotspot_canvas_command(command, selected_id)
+
+    def _replace_hotspot_polygon(
+        self,
+        interaction_id: object,
+        polygon_index: int,
+        polygon: object,
+    ) -> None:
+        context = self._active_hotspot_context()
+        if (
+            context is None
+            or not isinstance(interaction_id, UUID)
+            or not isinstance(polygon, Polygon)
+        ):
+            return
+        card_id, revision_id, _hotspot_set = context
+        self._execute_hotspot_canvas_command(
+            ReplacePolygonCommand(
+                card_id=card_id,
+                revision_id=revision_id,
+                interaction_id=interaction_id,
+                polygon_index=polygon_index,
+                polygon=polygon,
+            ),
+            interaction_id,
+        )
+
+    def _delete_hotspot_polygon(
+        self,
+        interaction_id: object,
+        polygon_index: int,
+    ) -> None:
+        context = self._active_hotspot_context()
+        if context is None or not isinstance(interaction_id, UUID):
+            return
+        card_id, revision_id, _hotspot_set = context
+        self._execute_hotspot_canvas_command(
+            DeletePolygonCommand(
+                card_id=card_id,
+                revision_id=revision_id,
+                interaction_id=interaction_id,
+                polygon_index=polygon_index,
+            ),
+            interaction_id,
+        )
+
+    def _delete_hotspot_interaction(self, interaction_id: object) -> None:
+        context = self._active_hotspot_context()
+        if context is None or not isinstance(interaction_id, UUID):
+            return
+        card_id, revision_id, _hotspot_set = context
+        self._execute_hotspot_canvas_command(
+            DeleteInteractionCommand(
+                card_id=card_id,
+                revision_id=revision_id,
+                interaction_id=interaction_id,
+            ),
+            None,
+        )
+
+    def _execute_hotspot_canvas_command(
+        self,
+        command: DocumentCommand,
+        selected_interaction_id: UUID | None,
+    ) -> None:
+        try:
+            changed = self.controller.execute(command)
+        except (CommandError, ValidationError) as error:
+            self.inspector.set_hotspot_error(str(error))
+            self.render_document()
+            return
+        self.inspector.set_hotspot_error("")
+        self.render_document(changed)
+        self.inspector.select_interaction(selected_interaction_id)
+        self.card_canvas.select_interaction(selected_interaction_id)
+
+    def _active_hotspot_context(
+        self,
+    ) -> tuple[UUID, UUID, HotspotSet] | None:
+        card = next(
+            (
+                card
+                for card in self.controller.document.cards
+                if card.id == self._selected_card_id
+            ),
+            None,
+        )
+        if card is None or card.active_revision_id is None:
+            self.inspector.set_hotspot_error(
+                "Apply a background before editing hotspots."
+            )
+            return None
+        revision = next(
+            revision
+            for revision in card.image_revisions
+            if revision.id == card.active_revision_id
+        )
+        return (
+            card.id,
+            revision.id,
+            revision.hotspot_set or HotspotSet(),
+        )
 
     def _background_generation_settings(self) -> BackgroundGenerationSettings:
         values = load_machine_settings(self.settings)

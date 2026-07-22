@@ -13,9 +13,12 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QFrame,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
+    QListWidgetItem,
+    QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
@@ -26,13 +29,26 @@ from PySide6.QtWidgets import (
 
 from hypergen.application.background_workflow import BackgroundCandidate
 from hypergen.application.commands import (
+    ChangeHotspotDestinationCommand,
     CommandError,
+    CreateCardAndResolveCommand,
+    DeleteInteractionCommand,
+    DocumentCommand,
     EditCardTextCommand,
     RenameCardCommand,
+    RenameInteractionCommand,
+    ReorderHotspotCommand,
     SetStartCardCommand,
 )
 from hypergen.application.document_controller import DocumentController
-from hypergen.domain.models import Card, ImageRevision, Stack
+from hypergen.domain.models import (
+    Card,
+    ImageRevision,
+    Interaction,
+    ResolvedCardReference,
+    Stack,
+    UnresolvedCardReference,
+)
 
 
 class _CommitPlainTextEdit(QPlainTextEdit):
@@ -75,6 +91,9 @@ class Inspector(QWidget):
     discard_background_requested = Signal()
     revision_activation_requested = Signal(object)
     revision_deletion_requested = Signal(object)
+    hotspot_selected = Signal(object)
+    add_hotspot_requested = Signal()
+    add_hotspot_component_requested = Signal(object)
 
     def __init__(self, controller: DocumentController, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -174,6 +193,46 @@ class Inspector(QWidget):
         self.hotspot_list = QListWidget()
         self.hotspot_list.setObjectName("hotspotList")
         hotspots_layout.addWidget(self.hotspot_list)
+        hotspot_actions = QHBoxLayout()
+        self.add_hotspot_button = QPushButton("Draw Hotspot")
+        self.add_hotspot_button.setObjectName("addHotspotButton")
+        self.add_component_button = QPushButton("Add Area")
+        self.add_component_button.setObjectName("addHotspotComponentButton")
+        hotspot_actions.addWidget(self.add_hotspot_button)
+        hotspot_actions.addWidget(self.add_component_button)
+        hotspots_layout.addLayout(hotspot_actions)
+        self.hotspot_label_edit = QLineEdit()
+        self.hotspot_label_edit.setObjectName("hotspotLabelEdit")
+        self.hotspot_destination_combo = QComboBox()
+        self.hotspot_destination_combo.setObjectName("hotspotDestinationCombo")
+        hotspot_form = QFormLayout()
+        hotspot_form.addRow("Label", self.hotspot_label_edit)
+        hotspot_form.addRow("Destination", self.hotspot_destination_combo)
+        hotspots_layout.addLayout(hotspot_form)
+        order_actions = QHBoxLayout()
+        self.move_hotspot_up_button = QPushButton("Move Up")
+        self.move_hotspot_up_button.setObjectName("moveHotspotUpButton")
+        self.move_hotspot_down_button = QPushButton("Move Down")
+        self.move_hotspot_down_button.setObjectName("moveHotspotDownButton")
+        order_actions.addWidget(self.move_hotspot_up_button)
+        order_actions.addWidget(self.move_hotspot_down_button)
+        hotspots_layout.addLayout(order_actions)
+        self.delete_hotspot_button = QPushButton("Delete Hotspot...")
+        self.delete_hotspot_button.setObjectName("deleteHotspotButton")
+        hotspots_layout.addWidget(self.delete_hotspot_button)
+        self.hotspot_help = QLabel(
+            "Click to add vertices; double-click or Return to close. "
+            "Drag vertices or a selected area. Double-click an edge to insert a vertex. "
+            "Delete removes the selected vertex or area; Escape cancels drawing. "
+            "Use the middle mouse button to pan."
+        )
+        self.hotspot_help.setWordWrap(True)
+        hotspots_layout.addWidget(self.hotspot_help)
+        self.hotspot_error = QLabel()
+        self.hotspot_error.setObjectName("hotspotValidationError")
+        self.hotspot_error.setWordWrap(True)
+        self.hotspot_error.setVisible(False)
+        hotspots_layout.addWidget(self.hotspot_error)
 
         self.pages = QStackedWidget()
         empty_page = QWidget()
@@ -224,6 +283,24 @@ class Inspector(QWidget):
         )
         self.revision_combo.currentIndexChanged.connect(self._revision_selected)
         self.delete_revision_button.clicked.connect(self._delete_selected_revision)
+        self.hotspot_list.currentItemChanged.connect(
+            self._hotspot_selection_changed
+        )
+        self.add_hotspot_button.clicked.connect(self.add_hotspot_requested)
+        self.add_component_button.clicked.connect(self._add_hotspot_component)
+        self.hotspot_label_edit.editingFinished.connect(
+            self._commit_hotspot_label
+        )
+        self.hotspot_destination_combo.currentIndexChanged.connect(
+            self._destination_changed
+        )
+        self.move_hotspot_up_button.clicked.connect(
+            lambda: self._move_hotspot(-1)
+        )
+        self.move_hotspot_down_button.clicked.connect(
+            lambda: self._move_hotspot(1)
+        )
+        self.delete_hotspot_button.clicked.connect(self._delete_hotspot)
         self.render(controller.document, None)
 
     @staticmethod
@@ -255,6 +332,7 @@ class Inspector(QWidget):
                 self.hotspots_placeholder.setText("Select a card to view hotspots.")
                 self.hotspots_placeholder.setVisible(True)
                 self.hotspot_list.clear()
+                self._render_hotspot_properties(document, None, None)
                 return
             self.pages.setCurrentIndex(1)
             self.card_name_edit.setText(card.name)
@@ -262,7 +340,7 @@ class Inspector(QWidget):
             self.interactions_edit.setPlainText(card.interaction_description)
             self.card_style_edit.setText(card.card_style or "")
             self.start_card_check.setChecked(card.id == document.start_card_id)
-            self._render_revisions(card)
+            self._render_revisions(document, card)
         finally:
             self._rendering = False
 
@@ -330,6 +408,26 @@ class Inspector(QWidget):
         self.background_status.setText(message)
         self.background_status.setToolTip(detail)
 
+    @property
+    def selected_interaction_id(self) -> UUID | None:
+        item = self.hotspot_list.currentItem()
+        if item is None:
+            return None
+        interaction_id = item.data(Qt.ItemDataRole.UserRole)
+        return interaction_id if isinstance(interaction_id, UUID) else None
+
+    def select_interaction(self, interaction_id: UUID | None) -> None:
+        for row in range(self.hotspot_list.count()):
+            item = self.hotspot_list.item(row)
+            if item.data(Qt.ItemDataRole.UserRole) == interaction_id:
+                self.hotspot_list.setCurrentRow(row)
+                return
+        self.hotspot_list.setCurrentRow(-1)
+
+    def set_hotspot_error(self, message: str) -> None:
+        self.hotspot_error.setText(message)
+        self.hotspot_error.setVisible(bool(message))
+
     def show_background_candidate(
         self,
         candidate: BackgroundCandidate | None,
@@ -350,7 +448,7 @@ class Inspector(QWidget):
         )
         self.candidate_value.setToolTip(detail)
 
-    def _render_revisions(self, card: Card) -> None:
+    def _render_revisions(self, document: Stack, card: Card) -> None:
         active_revision = self._active_revision(card)
         with QSignalBlocker(self.revision_combo):
             self.revision_combo.clear()
@@ -361,10 +459,16 @@ class Inspector(QWidget):
             self.revision_combo.setCurrentIndex(active_index)
         self.revision_combo.setEnabled(bool(card.image_revisions))
         self.delete_revision_button.setEnabled(active_revision is not None)
-        self._render_revision(active_revision)
+        self._render_revision(document, active_revision)
 
-    def _render_revision(self, revision: ImageRevision | None) -> None:
-        self.hotspot_list.clear()
+    def _render_revision(
+        self,
+        document: Stack,
+        revision: ImageRevision | None,
+    ) -> None:
+        desired_interaction_id = self.selected_interaction_id
+        with QSignalBlocker(self.hotspot_list):
+            self.hotspot_list.clear()
         if revision is None:
             self.background_value.setText("No background revision")
             self.revision_metadata.clear()
@@ -372,6 +476,7 @@ class Inspector(QWidget):
                 "Apply a background before adding hotspots."
             )
             self.hotspots_placeholder.setVisible(True)
+            self._render_hotspot_properties(document, None, None)
             return
         self.hotspots_placeholder.setText("No hotspots yet.")
         self.hotspots_placeholder.setVisible(
@@ -396,10 +501,38 @@ class Inspector(QWidget):
                 f"Imported from {revision.source_filename or 'image'}"
             )
             self.revision_metadata.setToolTip("")
-        if revision.hotspot_set is None:
-            return
-        for interaction in revision.hotspot_set.interactions:
-            self.hotspot_list.addItem(interaction.label)
+        interactions = (
+            revision.hotspot_set.interactions
+            if revision.hotspot_set is not None
+            else ()
+        )
+        with QSignalBlocker(self.hotspot_list):
+            for interaction in interactions:
+                item = QListWidgetItem(
+                    f"{interaction.label} ({len(interaction.polygons)} "
+                    f"{'area' if len(interaction.polygons) == 1 else 'areas'})"
+                )
+                item.setData(Qt.ItemDataRole.UserRole, interaction.id)
+                self.hotspot_list.addItem(item)
+            selected_row = next(
+                (
+                    row
+                    for row in range(self.hotspot_list.count())
+                    if self.hotspot_list.item(row).data(Qt.ItemDataRole.UserRole)
+                    == desired_interaction_id
+                ),
+                0 if interactions else -1,
+            )
+            self.hotspot_list.setCurrentRow(selected_row)
+        selected = next(
+            (
+                interaction
+                for interaction in interactions
+                if interaction.id == self.selected_interaction_id
+            ),
+            None,
+        )
+        self._render_hotspot_properties(document, revision, selected)
 
     def _revision_selected(self, index: int) -> None:
         if self._rendering or index < 0:
@@ -412,6 +545,239 @@ class Inspector(QWidget):
         revision_id = self.revision_combo.currentData()
         if isinstance(revision_id, UUID):
             self.revision_deletion_requested.emit(revision_id)
+
+    def _hotspot_selection_changed(
+        self,
+        current: QListWidgetItem | None,
+        _previous: QListWidgetItem | None,
+    ) -> None:
+        if self._rendering:
+            return
+        interaction_id = (
+            current.data(Qt.ItemDataRole.UserRole)
+            if current is not None
+            else None
+        )
+        revision = self._active_revision_for_selected_card()
+        interaction = self._selected_interaction()
+        self._render_hotspot_properties(
+            self.controller.document,
+            revision,
+            interaction,
+        )
+        self.hotspot_selected.emit(interaction_id)
+
+    def _render_hotspot_properties(
+        self,
+        document: Stack,
+        revision: ImageRevision | None,
+        interaction: Interaction | None,
+    ) -> None:
+        has_revision = revision is not None
+        has_interaction = interaction is not None
+        self.add_hotspot_button.setEnabled(has_revision)
+        self.add_component_button.setEnabled(has_interaction)
+        self.hotspot_label_edit.setEnabled(has_interaction)
+        self.hotspot_destination_combo.setEnabled(has_interaction)
+        self.move_hotspot_up_button.setEnabled(
+            has_interaction and self.hotspot_list.currentRow() > 0
+        )
+        self.move_hotspot_down_button.setEnabled(
+            has_interaction
+            and self.hotspot_list.currentRow() < self.hotspot_list.count() - 1
+        )
+        self.delete_hotspot_button.setEnabled(has_interaction)
+        self.hotspot_help.setVisible(has_revision)
+        with QSignalBlocker(self.hotspot_label_edit):
+            self.hotspot_label_edit.setText(
+                interaction.label if interaction is not None else ""
+            )
+        with QSignalBlocker(self.hotspot_destination_combo):
+            self.hotspot_destination_combo.clear()
+            self.hotspot_destination_combo.addItem("Unresolved", "unresolved")
+            for card in document.cards:
+                self.hotspot_destination_combo.addItem(card.name, card.id)
+            self.hotspot_destination_combo.addItem(
+                "Create New Card...",
+                "create",
+            )
+            if interaction is None:
+                self.hotspot_destination_combo.setCurrentIndex(-1)
+            elif isinstance(
+                interaction.action.target,
+                ResolvedCardReference,
+            ):
+                self.hotspot_destination_combo.setCurrentIndex(
+                    self.hotspot_destination_combo.findData(
+                        interaction.action.target.target_card_id
+                    )
+                )
+            else:
+                unresolved = interaction.action.target
+                label = (
+                    f"Unresolved ({unresolved.target_name})"
+                    if unresolved.target_name
+                    else "Unresolved"
+                )
+                self.hotspot_destination_combo.setItemText(0, label)
+                self.hotspot_destination_combo.setCurrentIndex(0)
+
+    def _add_hotspot_component(self) -> None:
+        interaction_id = self.selected_interaction_id
+        if interaction_id is not None:
+            self.add_hotspot_component_requested.emit(interaction_id)
+
+    def _commit_hotspot_label(self) -> None:
+        interaction = self._selected_interaction()
+        revision_id = self._active_revision_id()
+        if (
+            self._rendering
+            or interaction is None
+            or revision_id is None
+            or self.selected_card_id is None
+            or self.hotspot_label_edit.text() == interaction.label
+        ):
+            return
+        self._execute_hotspot_command(
+            RenameInteractionCommand(
+                card_id=self.selected_card_id,
+                revision_id=revision_id,
+                interaction_id=interaction.id,
+                label=self.hotspot_label_edit.text(),
+            )
+        )
+
+    def _destination_changed(self, index: int) -> None:
+        if self._rendering or index < 0:
+            return
+        interaction = self._selected_interaction()
+        revision_id = self._active_revision_id()
+        card_id = self.selected_card_id
+        if interaction is None or revision_id is None or card_id is None:
+            return
+        destination = self.hotspot_destination_combo.itemData(index)
+        if destination == "create":
+            name, accepted = QInputDialog.getText(
+                self,
+                "Create Destination Card",
+                "Card name",
+            )
+            if not accepted:
+                self.render(self.controller.document, card_id)
+                return
+            command = CreateCardAndResolveCommand(
+                source_card_id=card_id,
+                revision_id=revision_id,
+                interaction_id=interaction.id,
+                card_name=name,
+            )
+        else:
+            target = (
+                ResolvedCardReference(target_card_id=destination)
+                if isinstance(destination, UUID)
+                else UnresolvedCardReference()
+            )
+            if interaction.action.target == target:
+                return
+            command = ChangeHotspotDestinationCommand(
+                card_id=card_id,
+                revision_id=revision_id,
+                interaction_id=interaction.id,
+                destination=target,
+            )
+        self._execute_hotspot_command(command)
+
+    def _move_hotspot(self, offset: int) -> None:
+        interaction_id = self.selected_interaction_id
+        revision_id = self._active_revision_id()
+        card_id = self.selected_card_id
+        destination = self.hotspot_list.currentRow() + offset
+        if (
+            interaction_id is None
+            or revision_id is None
+            or card_id is None
+            or not 0 <= destination < self.hotspot_list.count()
+        ):
+            return
+        self._execute_hotspot_command(
+            ReorderHotspotCommand(
+                card_id=card_id,
+                revision_id=revision_id,
+                interaction_id=interaction_id,
+                new_index=destination,
+            )
+        )
+
+    def _delete_hotspot(self) -> None:
+        interaction_id = self.selected_interaction_id
+        revision_id = self._active_revision_id()
+        card_id = self.selected_card_id
+        if interaction_id is None or revision_id is None or card_id is None:
+            return
+        dialog = QMessageBox(
+            QMessageBox.Icon.Warning,
+            "Delete Hotspot?",
+            "Delete this hotspot and all of its polygon areas?",
+            parent=self,
+        )
+        delete_button = dialog.addButton(
+            "Delete Hotspot",
+            QMessageBox.ButtonRole.DestructiveRole,
+        )
+        dialog.addButton(QMessageBox.StandardButton.Cancel)
+        dialog.exec()
+        if dialog.clickedButton() is not delete_button:
+            return
+        self._execute_hotspot_command(
+            DeleteInteractionCommand(
+                card_id=card_id,
+                revision_id=revision_id,
+                interaction_id=interaction_id,
+            )
+        )
+
+    def _execute_hotspot_command(self, command: DocumentCommand) -> None:
+        card_id = self.selected_card_id
+        if card_id is None:
+            return
+        try:
+            changed = self.controller.execute(command)
+        except (CommandError, ValidationError) as error:
+            self.set_hotspot_error(str(error))
+            self.render(self.controller.document, card_id)
+            return
+        self.set_hotspot_error("")
+        self.render(changed, card_id)
+        self.document_changed.emit(changed)
+
+    def _selected_interaction(self) -> Interaction | None:
+        interaction_id = self.selected_interaction_id
+        revision = self._active_revision_for_selected_card()
+        if interaction_id is None or revision is None or revision.hotspot_set is None:
+            return None
+        return next(
+            (
+                interaction
+                for interaction in revision.hotspot_set.interactions
+                if interaction.id == interaction_id
+            ),
+            None,
+        )
+
+    def _active_revision_id(self) -> UUID | None:
+        revision = self._active_revision_for_selected_card()
+        return revision.id if revision is not None else None
+
+    def _active_revision_for_selected_card(self) -> ImageRevision | None:
+        card = next(
+            (
+                card
+                for card in self.controller.document.cards
+                if card.id == self.selected_card_id
+            ),
+            None,
+        )
+        return self._active_revision(card) if card is not None else None
 
     @staticmethod
     def _active_revision(card: Card) -> ImageRevision | None:
