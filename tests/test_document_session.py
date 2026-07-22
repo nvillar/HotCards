@@ -176,3 +176,45 @@ def test_save_as_refuses_existing_destination(tmp_path: Path) -> None:
 
     with pytest.raises(DocumentSessionError, match="refusing to overwrite"):
         session.save_as(existing)
+
+
+def test_create_can_recover_empty_bundle_left_by_failed_attempt(tmp_path: Path) -> None:
+    controller = DocumentController(Stack(name="Welcome"))
+    session = DocumentSession(controller)
+    bundle = tmp_path / "Retry.hypergen"
+    bundle.mkdir()
+
+    session.create(Stack(name="Retry"), bundle)
+
+    assert StackStore(bundle).load().name == "Retry"
+
+
+def test_create_refuses_nonempty_existing_bundle(tmp_path: Path) -> None:
+    controller = DocumentController(Stack(name="Welcome"))
+    session = DocumentSession(controller)
+    bundle = tmp_path / "Existing.hypergen"
+    StackStore(bundle).save(Stack(name="Existing"))
+
+    with pytest.raises(DocumentSessionError, match="bundle already exists"):
+        session.create(Stack(name="Replacement"), bundle)
+
+
+def test_create_does_not_replace_stack_created_after_destination_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = DocumentController(Stack(name="Welcome"))
+    session = DocumentSession(controller)
+    bundle = tmp_path / "Race.hypergen"
+    bundle.mkdir()
+
+    def competing_create() -> bool:
+        StackStore(bundle).create(Stack(name="Competing"))
+        return True
+
+    monkeypatch.setattr(session, "flush", competing_create)
+
+    with pytest.raises(DocumentSessionError, match="refusing to overwrite"):
+        session.create(Stack(name="Replacement"), bundle)
+
+    assert StackStore(bundle).load().name == "Competing"

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import errno
 import json
+import logging
 import os
 import shutil
+import sys
 import tempfile
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath
@@ -18,6 +21,7 @@ from hypergen.storage.migrations import MigrationError, migrate_document
 
 STACK_FILENAME = "stack.json"
 ASSET_ROOT = PurePosixPath("assets/cards")
+logger = logging.getLogger(__name__)
 
 
 class StackStoreError(ValueError):
@@ -40,11 +44,20 @@ def _image_asset_path(card_id: UUID, revision_id: UUID) -> PurePosixPath:
 
 
 def _fsync_directory(path: Path) -> None:
-    directory_fd = os.open(path, os.O_RDONLY)
     try:
-        os.fsync(directory_fd)
-    finally:
-        os.close(directory_fd)
+        directory_fd = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except PermissionError as error:
+        if sys.platform == "darwin" and error.errno in {errno.EACCES, errno.EPERM}:
+            logger.warning(
+                "macOS denied directory fsync for %s; file data remains flushed",
+                path,
+            )
+            return
+        raise
 
 
 def _mkdir_durable(path: Path) -> None:
@@ -127,15 +140,22 @@ class StackStore:
 
     def save(self, stack: Stack) -> None:
         """Atomically replace `stack.json` after validating all referenced assets."""
+        self._write_stack(stack, replace=True)
+
+    def create(self, stack: Stack) -> None:
+        """Atomically create `stack.json` without replacing an existing document."""
+        self._write_stack(stack, replace=False)
+
+    def _write_stack(self, stack: Stack, *, replace: bool) -> None:
         try:
             validated = Stack.model_validate(stack.model_dump(mode="python", round_trip=True))
         except ValidationError as error:
             raise StackStoreError(f"stack is invalid and cannot be saved: {error}") from error
         self._validate_assets(validated)
-        _mkdir_durable(self.bundle_path)
         payload = validated.model_dump_json(indent=2) + "\n"
         temporary_path: Path | None = None
         try:
+            _mkdir_durable(self.bundle_path)
             with tempfile.NamedTemporaryFile(
                 mode="w",
                 encoding="utf-8",
@@ -148,8 +168,15 @@ class StackStore:
                 temporary.write(payload)
                 temporary.flush()
                 os.fsync(temporary.fileno())
-            os.replace(temporary_path, self.stack_path)
+            if replace:
+                os.replace(temporary_path, self.stack_path)
+            else:
+                os.link(temporary_path, self.stack_path)
             _fsync_directory(self.bundle_path)
+        except FileExistsError as error:
+            raise StackStoreError(
+                f"refusing to overwrite existing stack document: {self.stack_path}"
+            ) from error
         except OSError as error:
             raise StackStoreError(
                 f"could not atomically save {self.stack_path}: {error}"
@@ -171,9 +198,9 @@ class StackStore:
         if destination.exists():
             raise StackStoreError(f"refusing to overwrite existing image asset: {relative_path}")
 
-        _mkdir_durable(destination.parent)
         temporary_path: Path | None = None
         try:
+            _mkdir_durable(destination.parent)
             with tempfile.NamedTemporaryFile(
                 mode="wb",
                 dir=destination.parent,

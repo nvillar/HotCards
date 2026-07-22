@@ -1,5 +1,6 @@
 """Tests for safe, atomic HyperGen stack bundles."""
 
+import errno
 import json
 from datetime import UTC, datetime
 from pathlib import Path
@@ -8,6 +9,7 @@ from uuid import uuid4
 import pytest
 from PIL import Image
 
+import hypergen.storage.stack_store as stack_store_module
 from hypergen.domain.models import (
     Card,
     HotspotSet,
@@ -103,6 +105,16 @@ def test_failed_replace_preserves_active_stack_and_removes_temporary_file(
 
     assert store.stack_path.read_bytes() == original
     assert list(store.bundle_path.glob(".stack-*.tmp")) == []
+
+
+def test_create_never_replaces_existing_stack_document(tmp_path: Path) -> None:
+    store = StackStore(tmp_path / "Existing.hypergen")
+    store.create(Stack(name="Existing"))
+
+    with pytest.raises(StackStoreError, match="refusing to overwrite"):
+        store.create(Stack(name="Replacement"))
+
+    assert store.load().name == "Existing"
 
 
 @pytest.mark.parametrize(
@@ -289,3 +301,32 @@ def test_clone_to_wraps_destination_preparation_errors(
             tmp_path / "Copy.hypergen",
             Stack(name="Source"),
         )
+
+
+def test_macos_privacy_denial_during_directory_fsync_is_tolerated(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def deny_directory_open(_path: Path, _flags: int) -> int:
+        raise PermissionError(errno.EPERM, "Operation not permitted")
+
+    monkeypatch.setattr(stack_store_module.sys, "platform", "darwin")
+    monkeypatch.setattr(stack_store_module.os, "open", deny_directory_open)
+
+    stack_store_module._fsync_directory(tmp_path)
+
+    assert "file data remains flushed" in caplog.text
+
+
+def test_save_wraps_bundle_directory_preparation_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_mkdir(_path: Path) -> None:
+        raise PermissionError(errno.EACCES, "protected folder")
+
+    monkeypatch.setattr(stack_store_module, "_mkdir_durable", fail_mkdir)
+
+    with pytest.raises(StackStoreError, match="protected folder"):
+        StackStore(tmp_path / "Protected.hypergen").save(Stack(name="Protected"))

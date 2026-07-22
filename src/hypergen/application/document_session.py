@@ -66,13 +66,20 @@ class DocumentSession(QObject):
 
     def create(self, stack: Stack, bundle_path: Path) -> Stack:
         """Create, save, and bind a new bundle before exposing its document."""
-        if bundle_path.exists():
-            raise DocumentSessionError(f"bundle already exists: {bundle_path}")
+        try:
+            if bundle_path.exists() and (
+                not bundle_path.is_dir() or any(bundle_path.iterdir())
+            ):
+                raise DocumentSessionError(f"bundle already exists: {bundle_path}")
+        except OSError as error:
+            raise DocumentSessionError(
+                f"could not inspect bundle destination {bundle_path}: {error}"
+            ) from error
         if not self.flush():
             raise DocumentSessionError(self._error or "current document could not be saved")
         store = StackStore(bundle_path)
         try:
-            store.save(stack)
+            store.create(stack)
         except StackStoreError as error:
             raise DocumentSessionError(str(error)) from error
         return self._bind(store, stack, replace_document=True)
