@@ -219,7 +219,7 @@ def test_three_panes_render_loaded_stack_in_sidebar_and_inspector(
     assert window.card_sidebar.card_list.count() == 2
     assert window.card_sidebar.card_list.item(0).text() == "★  Foyer"
     assert window.inspector.card_name_edit.text() == "Foyer"
-    assert window.inspector.background_value.text() == "Imported background"
+    assert window.inspector.revision_combo.currentText() == "1. Imported"
     assert window.inspector.hotspot_list.item(0).text() == "Door (1 area)"
     assert window.card_sidebar.findChild(QObject, "addCardButton") is not None
     window.close()

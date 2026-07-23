@@ -54,7 +54,7 @@ def generated_revision(image_path: str) -> ImageRevision:
     )
 
 
-def test_card_tab_compacts_metadata_and_collapses_details_and_style(
+def test_card_tab_hides_revision_summary_and_collapses_details_and_style(
     application: QApplication,
     tmp_path: Path,
 ) -> None:
@@ -77,10 +77,8 @@ def test_card_tab_compacts_metadata_and_collapses_details_and_style(
     inspector.render(controller.document, card.id)
 
     assert inspector.inspector_tabs.count() == 2
-    assert inspector.revision_metadata.text() == (
-        "flux2-klein-4b · seed 42 · 1024×768 · 4 steps"
-    )
-    assert "Prompt" not in inspector.revision_metadata.text()
+    assert not hasattr(inspector, "background_value")
+    assert not hasattr(inspector, "revision_metadata")
     assert inspector.revision_details.isHidden()
     inspector.revision_details_button.click()
     assert not inspector.revision_details.isHidden()
@@ -93,6 +91,25 @@ def test_card_tab_compacts_metadata_and_collapses_details_and_style(
     assert inspector.style_details.isHidden()
     inspector.style_details_button.click()
     assert not inspector.style_details.isHidden()
+    inspector.close()
+
+
+def test_section_headings_are_bold(
+    application: QApplication,
+) -> None:
+    card = Card(name="Card")
+    controller = DocumentController(Stack(name="Demo", cards=(card,)))
+    inspector = Inspector(controller)
+    inspector.render(controller.document, card.id)
+
+    for heading in (
+        inspector.scene_heading,
+        inspector.background_heading,
+        inspector.intent_heading,
+        inspector.hotspots_heading,
+    ):
+        assert heading.font().bold()
+    assert inspector.style_details_button.font().bold()
     inspector.close()
 
 
@@ -130,4 +147,23 @@ def test_card_tab_keeps_revision_button_labels_readable(
         inspector.delete_revision_button,
     ):
         assert button.width() >= button.minimumSizeHint().width()
+
+    style_row, _column, _row_span, _column_span = (
+        inspector.revision_controls.getItemPosition(
+            inspector.revision_controls.indexOf(inspector.style_details_button)
+        )
+    )
+    generate_row, _column, _row_span, _column_span = (
+        inspector.revision_controls.getItemPosition(
+            inspector.revision_controls.indexOf(inspector.generate_background_button)
+        )
+    )
+    import_row, _column, _row_span, import_column_span = (
+        inspector.revision_controls.getItemPosition(
+            inspector.revision_controls.indexOf(inspector.import_background_button)
+        )
+    )
+    assert style_row == generate_row
+    assert import_row > generate_row
+    assert import_column_span == 2
     inspector.close()

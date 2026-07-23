@@ -68,6 +68,14 @@ class _CommitPlainTextEdit(QPlainTextEdit):
         self.editing_finished.emit()
 
 
+def _section_heading(text: str) -> QLabel:
+    label = QLabel(text)
+    font = label.font()
+    font.setBold(True)
+    label.setFont(font)
+    return label
+
+
 class Inspector(QWidget):
     """Render selected-card snapshots and issue typed metadata commands."""
 
@@ -118,7 +126,8 @@ class Inspector(QWidget):
         name_form.addRow("Name", self.card_name_edit)
         card_layout.addLayout(name_form)
         scene_heading = QHBoxLayout()
-        scene_heading.addWidget(QLabel("Scene"))
+        self.scene_heading = _section_heading("Scene")
+        scene_heading.addWidget(self.scene_heading)
         scene_heading.addStretch(1)
         self.enrich_scene_button = QPushButton("Enrich")
         self.enrich_scene_button.setObjectName("enrichSceneButton")
@@ -140,9 +149,9 @@ class Inspector(QWidget):
         self.validation_error.setVisible(False)
         card_layout.addWidget(self.validation_error)
 
-        background_heading = QLabel("Background")
-        background_heading.setStyleSheet("font-weight: 600; margin-top: 8px;")
-        card_layout.addWidget(background_heading)
+        card_layout.addSpacing(8)
+        self.background_heading = _section_heading("Background")
+        card_layout.addWidget(self.background_heading)
         revision_header = QHBoxLayout()
         self.revision_thumbnail = QLabel("No image")
         self.revision_thumbnail.setObjectName("backgroundRevisionThumbnail")
@@ -152,18 +161,8 @@ class Inspector(QWidget):
             "border: 1px solid palette(mid); color: palette(mid);"
         )
         revision_header.addWidget(self.revision_thumbnail)
-        revision_summary = QVBoxLayout()
-        self.background_value = QLabel("No background revision")
-        self.background_value.setObjectName("backgroundRevisionValue")
-        self.background_value.setWordWrap(True)
-        revision_summary.addWidget(self.background_value)
-        revision_summary.addStretch(1)
-        revision_header.addLayout(revision_summary, 1)
+        revision_header.addStretch(1)
         card_layout.addLayout(revision_header)
-        self.revision_metadata = QLabel()
-        self.revision_metadata.setObjectName("backgroundRevisionMetadata")
-        self.revision_metadata.setWordWrap(True)
-        card_layout.addWidget(self.revision_metadata)
         self.revision_details_button = QToolButton()
         self.revision_details_button.setObjectName("backgroundRevisionDetailsButton")
         self.revision_details_button.setText("Details ▸")
@@ -183,7 +182,9 @@ class Inspector(QWidget):
         self.style_details_button.setObjectName("styleDetailsButton")
         self.style_details_button.setText("Style ▸")
         self.style_details_button.setCheckable(True)
-        card_layout.addWidget(self.style_details_button)
+        style_heading_font = self.style_details_button.font()
+        style_heading_font.setBold(True)
+        self.style_details_button.setFont(style_heading_font)
         self.style_details = QWidget()
         self.style_details.setObjectName("styleDetails")
         style_layout = QVBoxLayout(self.style_details)
@@ -210,25 +211,26 @@ class Inspector(QWidget):
         self.style_scope_caption.setWordWrap(True)
         style_layout.addWidget(self.style_scope_caption)
         self.style_details.setVisible(False)
-        card_layout.addWidget(self.style_details)
 
-        revision_controls = QGridLayout()
+        self.revision_controls = QGridLayout()
         revision_label = QLabel("Revision")
         self.revision_combo = QComboBox()
         self.revision_combo.setObjectName("backgroundRevisionCombo")
-        revision_controls.addWidget(revision_label, 0, 0)
-        revision_controls.addWidget(self.revision_combo, 0, 1)
+        self.revision_controls.addWidget(revision_label, 0, 0)
+        self.revision_controls.addWidget(self.revision_combo, 0, 1)
         self.generate_background_button = QPushButton("Generate")
         self.generate_background_button.setObjectName("generateBackgroundButton")
         self.import_background_button = QPushButton("Import...")
         self.import_background_button.setObjectName("importBackgroundButton")
         self.delete_revision_button = QPushButton("Delete Revision...")
         self.delete_revision_button.setObjectName("deleteRevisionButton")
-        revision_controls.addWidget(self.generate_background_button, 1, 0)
-        revision_controls.addWidget(self.import_background_button, 1, 1)
-        revision_controls.addWidget(self.delete_revision_button, 2, 0, 1, 2)
-        revision_controls.setColumnStretch(1, 1)
-        card_layout.addLayout(revision_controls)
+        self.revision_controls.addWidget(self.style_details_button, 1, 0)
+        self.revision_controls.addWidget(self.generate_background_button, 1, 1)
+        self.revision_controls.addWidget(self.style_details, 2, 0, 1, 2)
+        self.revision_controls.addWidget(self.import_background_button, 3, 0, 1, 2)
+        self.revision_controls.addWidget(self.delete_revision_button, 4, 0, 1, 2)
+        self.revision_controls.setColumnStretch(1, 1)
+        card_layout.addLayout(self.revision_controls)
         self.background_status = QLabel()
         self.background_status.setObjectName("backgroundStatus")
         self.background_status.setWordWrap(True)
@@ -258,7 +260,8 @@ class Inspector(QWidget):
         interactivity_page = QWidget()
         interactivity_page.setObjectName("interactivityInspectorTab")
         hotspots_layout = QVBoxLayout(interactivity_page)
-        hotspots_layout.addWidget(QLabel("Intent"))
+        self.intent_heading = _section_heading("Intent")
+        hotspots_layout.addWidget(self.intent_heading)
         self.interactions_edit = _CommitPlainTextEdit()
         self.interactions_edit.setObjectName("interactionDescriptionEdit")
         self.interactions_edit.setPlaceholderText(
@@ -266,10 +269,10 @@ class Inspector(QWidget):
         )
         self.interactions_edit.setMaximumHeight(110)
         hotspots_layout.addWidget(self.interactions_edit)
+        hotspots_layout.addSpacing(8)
         hotspots_heading = QHBoxLayout()
-        hotspots_title = QLabel("Hotspots")
-        hotspots_title.setStyleSheet("font-weight: 600; margin-top: 8px;")
-        hotspots_heading.addWidget(hotspots_title)
+        self.hotspots_heading = _section_heading("Hotspots")
+        hotspots_heading.addWidget(self.hotspots_heading)
         hotspots_heading.addStretch(1)
         self.hotspot_help_button = QToolButton()
         self.hotspot_help_button.setObjectName("hotspotHelpButton")
@@ -431,9 +434,7 @@ class Inspector(QWidget):
                 self.interactions_edit.clear()
                 self.style_edit.clear()
                 self.start_card_check.setChecked(False)
-                self.background_value.setText("No card selected")
                 self.revision_combo.clear()
-                self.revision_metadata.clear()
                 self.revision_details.clear()
                 self._set_revision_thumbnail(None)
                 self.hotspots_placeholder.setText("Select a card to view hotspots.")
@@ -653,8 +654,6 @@ class Inspector(QWidget):
         with QSignalBlocker(self.hotspot_list):
             self.hotspot_list.clear()
         if revision is None:
-            self.background_value.setText("No background revision")
-            self.revision_metadata.clear()
             self.revision_details.clear()
             self.revision_details_button.setVisible(False)
             self.revision_details_button.setChecked(False)
@@ -671,18 +670,8 @@ class Inspector(QWidget):
             revision.hotspot_set is None
             or not revision.hotspot_set.interactions
         )
-        self.background_value.setText(
-            "Generated background"
-            if revision.origin.value == "generated"
-            else revision.source_filename or "Imported background"
-        )
         if revision.generation_metadata is not None:
             metadata = revision.generation_metadata
-            self.revision_metadata.setText(
-                f"{metadata.model_identifier} · seed {metadata.seed} · "
-                f"{metadata.width}×{metadata.height} · {metadata.step_count} steps"
-            )
-            self.revision_metadata.setToolTip(metadata.render_prompt)
             self.revision_details.setText(
                 json.dumps(
                     metadata.model_dump(mode="json"),
@@ -692,10 +681,6 @@ class Inspector(QWidget):
             )
             self.revision_details_button.setVisible(True)
         else:
-            self.revision_metadata.setText(
-                f"Imported from {revision.source_filename or 'image'}"
-            )
-            self.revision_metadata.setToolTip("")
             self.revision_details.clear()
             self.revision_details_button.setChecked(False)
             self.revision_details_button.setVisible(False)
