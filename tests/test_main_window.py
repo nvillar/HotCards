@@ -474,21 +474,20 @@ def test_invalid_card_name_is_rejected_and_inspector_is_restored(
     window.close()
 
 
-def test_inspector_uses_pipeline_tabs_and_groups_fields_by_stage(
+def test_inspector_combines_card_and_background_authoring(
     application: QApplication,
 ) -> None:
     window, _controller, _workers, _settings = make_window()
 
     tabs = window.inspector.inspector_tabs
-    assert tabs.count() == 3
-    assert [tabs.tabText(index) for index in range(3)] == [
+    assert tabs.count() == 2
+    assert [tabs.tabText(index) for index in range(2)] == [
         "Card",
-        "Background",
         "Interactivity (1)",
     ]
-    assert tabs.indexOf(window.inspector.scene_edit.parentWidget()) == 0
-    assert tabs.indexOf(window.inspector.style_edit.parentWidget()) == 1
-    assert tabs.indexOf(window.inspector.interactions_edit.parentWidget()) == 2
+    assert tabs.widget(0).isAncestorOf(window.inspector.scene_edit)
+    assert tabs.widget(0).isAncestorOf(window.inspector.style_edit)
+    assert not window.inspector.style_details_button.isChecked()
     assert not window.inspector.enrich_scene_button.isEnabled()
     assert not window.inspector.hotspot_help_button.toolTip() == ""
     window.close()
@@ -605,7 +604,7 @@ def test_background_candidate_is_contextual_and_previews_on_canvas(
     workflow.candidate_changed.emit(candidate)
 
     assert not window.inspector.candidate_widget.isHidden()
-    assert window.inspector.inspector_tabs.tabText(1) == "Background ●"
+    assert window.inspector.inspector_tabs.tabText(0) == "Card ●"
     assert not window.inspector.generate_background_button.isEnabled()
     assert not window.inspector.import_background_button.isEnabled()
     assert window.card_canvas._border_item is not None

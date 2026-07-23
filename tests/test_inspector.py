@@ -54,7 +54,7 @@ def generated_revision(image_path: str) -> ImageRevision:
     )
 
 
-def test_background_tab_compacts_metadata_and_exposes_details(
+def test_card_tab_compacts_metadata_and_collapses_details_and_style(
     application: QApplication,
     tmp_path: Path,
 ) -> None:
@@ -76,7 +76,7 @@ def test_background_tab_compacts_metadata_and_exposes_details(
     )
     inspector.render(controller.document, card.id)
 
-    assert inspector.inspector_tabs.count() == 3
+    assert inspector.inspector_tabs.count() == 2
     assert inspector.revision_metadata.text() == (
         "flux2-klein-4b · seed 42 · 1024×768 · 4 steps"
     )
@@ -90,6 +90,9 @@ def test_background_tab_compacts_metadata_and_exposes_details(
     )
     thumbnail = inspector.revision_thumbnail.pixmap()
     assert thumbnail is not None and not thumbnail.isNull()
+    assert inspector.style_details.isHidden()
+    inspector.style_details_button.click()
+    assert not inspector.style_details.isHidden()
     inspector.close()
 
 
@@ -101,10 +104,30 @@ def test_interactivity_tab_uses_compact_controls_and_on_demand_help(
     inspector = Inspector(controller)
     inspector.render(controller.document, card.id)
 
-    assert inspector.inspector_tabs.tabText(2) == "Interactivity (0)"
+    assert inspector.inspector_tabs.tabText(1) == "Interactivity (0)"
     assert inspector.interactions_edit.toPlainText() == "Tap the fox"
     assert inspector.move_hotspot_up_button.text() == "↑"
     assert inspector.move_hotspot_down_button.text() == "↓"
     assert inspector.delete_hotspot_button.text() == "🗑"
     assert "Click to add vertices" in inspector.hotspot_help_button.toolTip()
+    inspector.close()
+
+
+def test_card_tab_keeps_revision_button_labels_readable(
+    application: QApplication,
+) -> None:
+    card = Card(name="Card")
+    controller = DocumentController(Stack(name="Demo", cards=(card,)))
+    inspector = Inspector(controller)
+    inspector.render(controller.document, card.id)
+    inspector.resize(inspector.minimumWidth(), 700)
+    inspector.show()
+    application.processEvents()
+
+    for button in (
+        inspector.generate_background_button,
+        inspector.import_background_button,
+        inspector.delete_revision_button,
+    ):
+        assert button.width() >= button.minimumSizeHint().width()
     inspector.close()

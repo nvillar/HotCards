@@ -15,6 +15,8 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFormLayout,
+    QFrame,
+    QGridLayout,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -25,6 +27,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QRadioButton,
+    QScrollArea,
     QStackedWidget,
     QTabWidget,
     QToolButton,
@@ -102,8 +105,12 @@ class Inspector(QWidget):
         self.inspector_tabs = QTabWidget()
         self.inspector_tabs.setObjectName("inspectorTabs")
 
+        card_scroll = QScrollArea()
+        card_scroll.setObjectName("cardInspectorTab")
+        card_scroll.setWidgetResizable(True)
+        card_scroll.setFrameShape(QFrame.Shape.NoFrame)
         card_page = QWidget()
-        card_page.setObjectName("cardInspectorTab")
+        card_page.setObjectName("cardInspectorContent")
         card_layout = QVBoxLayout(card_page)
         self.card_name_edit = QLineEdit()
         self.card_name_edit.setObjectName("cardNameEdit")
@@ -132,12 +139,10 @@ class Inspector(QWidget):
         self.validation_error.setWordWrap(True)
         self.validation_error.setVisible(False)
         card_layout.addWidget(self.validation_error)
-        card_layout.addStretch(1)
-        self.inspector_tabs.addTab(card_page, "Card")
 
-        background_page = QWidget()
-        background_page.setObjectName("backgroundInspectorTab")
-        background_layout = QVBoxLayout(background_page)
+        background_heading = QLabel("Background")
+        background_heading.setStyleSheet("font-weight: 600; margin-top: 8px;")
+        card_layout.addWidget(background_heading)
         revision_header = QHBoxLayout()
         self.revision_thumbnail = QLabel("No image")
         self.revision_thumbnail.setObjectName("backgroundRevisionThumbnail")
@@ -152,20 +157,19 @@ class Inspector(QWidget):
         self.background_value.setObjectName("backgroundRevisionValue")
         self.background_value.setWordWrap(True)
         revision_summary.addWidget(self.background_value)
-        self.revision_combo = QComboBox()
-        self.revision_combo.setObjectName("backgroundRevisionCombo")
-        revision_summary.addWidget(self.revision_combo)
+        revision_summary.addStretch(1)
         revision_header.addLayout(revision_summary, 1)
-        background_layout.addLayout(revision_header)
+        card_layout.addLayout(revision_header)
         self.revision_metadata = QLabel()
         self.revision_metadata.setObjectName("backgroundRevisionMetadata")
-        background_layout.addWidget(self.revision_metadata)
+        self.revision_metadata.setWordWrap(True)
+        card_layout.addWidget(self.revision_metadata)
         self.revision_details_button = QToolButton()
         self.revision_details_button.setObjectName("backgroundRevisionDetailsButton")
         self.revision_details_button.setText("Details ▸")
         self.revision_details_button.setCheckable(True)
         self.revision_details_button.setVisible(False)
-        background_layout.addWidget(self.revision_details_button)
+        card_layout.addWidget(self.revision_details_button)
         self.revision_details = QLabel()
         self.revision_details.setObjectName("backgroundRevisionDetails")
         self.revision_details.setWordWrap(True)
@@ -173,11 +177,17 @@ class Inspector(QWidget):
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
         self.revision_details.setVisible(False)
-        background_layout.addWidget(self.revision_details)
+        card_layout.addWidget(self.revision_details)
 
-        style_heading = QLabel("Style")
-        style_heading.setStyleSheet("font-weight: 600; margin-top: 8px;")
-        background_layout.addWidget(style_heading)
+        self.style_details_button = QToolButton()
+        self.style_details_button.setObjectName("styleDetailsButton")
+        self.style_details_button.setText("Style ▸")
+        self.style_details_button.setCheckable(True)
+        card_layout.addWidget(self.style_details_button)
+        self.style_details = QWidget()
+        self.style_details.setObjectName("styleDetails")
+        style_layout = QVBoxLayout(self.style_details)
+        style_layout.setContentsMargins(0, 0, 0, 0)
         style_modes = QHBoxLayout()
         self.global_style_radio = QRadioButton("Global")
         self.global_style_radio.setObjectName("globalStyleRadio")
@@ -189,32 +199,40 @@ class Inspector(QWidget):
         style_modes.addWidget(self.global_style_radio)
         style_modes.addWidget(self.card_style_radio)
         style_modes.addStretch(1)
-        background_layout.addLayout(style_modes)
+        style_layout.addLayout(style_modes)
         self.style_edit = _CommitPlainTextEdit()
         self.style_edit.setObjectName("styleEdit")
         self.style_edit.setMaximumHeight(100)
         self.style_edit.setPlaceholderText("Visual style for generated backgrounds")
-        background_layout.addWidget(self.style_edit)
+        style_layout.addWidget(self.style_edit)
         self.style_scope_caption = QLabel()
         self.style_scope_caption.setObjectName("styleScopeCaption")
         self.style_scope_caption.setWordWrap(True)
-        background_layout.addWidget(self.style_scope_caption)
+        style_layout.addWidget(self.style_scope_caption)
+        self.style_details.setVisible(False)
+        card_layout.addWidget(self.style_details)
 
-        background_actions = QHBoxLayout()
+        revision_controls = QGridLayout()
+        revision_label = QLabel("Revision")
+        self.revision_combo = QComboBox()
+        self.revision_combo.setObjectName("backgroundRevisionCombo")
+        revision_controls.addWidget(revision_label, 0, 0)
+        revision_controls.addWidget(self.revision_combo, 0, 1)
         self.generate_background_button = QPushButton("Generate")
         self.generate_background_button.setObjectName("generateBackgroundButton")
         self.import_background_button = QPushButton("Import...")
         self.import_background_button.setObjectName("importBackgroundButton")
         self.delete_revision_button = QPushButton("Delete Revision...")
         self.delete_revision_button.setObjectName("deleteRevisionButton")
-        background_actions.addWidget(self.generate_background_button)
-        background_actions.addWidget(self.import_background_button)
-        background_actions.addWidget(self.delete_revision_button)
-        background_layout.addLayout(background_actions)
+        revision_controls.addWidget(self.generate_background_button, 1, 0)
+        revision_controls.addWidget(self.import_background_button, 1, 1)
+        revision_controls.addWidget(self.delete_revision_button, 2, 0, 1, 2)
+        revision_controls.setColumnStretch(1, 1)
+        card_layout.addLayout(revision_controls)
         self.background_status = QLabel()
         self.background_status.setObjectName("backgroundStatus")
         self.background_status.setWordWrap(True)
-        background_layout.addWidget(self.background_status)
+        card_layout.addWidget(self.background_status)
 
         self.candidate_widget = QWidget()
         candidate_layout = QVBoxLayout(self.candidate_widget)
@@ -231,10 +249,11 @@ class Inspector(QWidget):
         candidate_actions.addWidget(self.apply_background_button)
         candidate_actions.addWidget(self.discard_background_button)
         candidate_layout.addLayout(candidate_actions)
-        background_layout.addWidget(self.candidate_widget)
+        card_layout.addWidget(self.candidate_widget)
         self.candidate_widget.setVisible(False)
-        background_layout.addStretch(1)
-        self.inspector_tabs.addTab(background_page, "Background")
+        card_layout.addStretch(1)
+        card_scroll.setWidget(card_page)
+        self.inspector_tabs.addTab(card_scroll, "Card")
 
         interactivity_page = QWidget()
         interactivity_page.setObjectName("interactivityInspectorTab")
@@ -360,6 +379,7 @@ class Inspector(QWidget):
         self.revision_details_button.toggled.connect(
             self._toggle_revision_details
         )
+        self.style_details_button.toggled.connect(self._toggle_style_details)
         self.delete_revision_button.clicked.connect(self._delete_selected_revision)
         self.hotspot_list.currentItemChanged.connect(
             self._hotspot_selection_changed
@@ -594,7 +614,7 @@ class Inspector(QWidget):
     ) -> None:
         self._has_background_candidate = candidate is not None
         self.candidate_widget.setVisible(candidate is not None)
-        self._update_background_tab_label()
+        self._update_card_tab_label()
         if candidate is None:
             self.candidate_value.clear()
             return
@@ -718,6 +738,10 @@ class Inspector(QWidget):
             "Details ▾" if visible else "Details ▸"
         )
 
+    def _toggle_style_details(self, visible: bool) -> None:
+        self.style_details.setVisible(visible)
+        self.style_details_button.setText("Style ▾" if visible else "Style ▸")
+
     def _set_revision_thumbnail(self, image_path: Path | None) -> None:
         if image_path is None:
             self.revision_thumbnail.setPixmap(QPixmap())
@@ -738,14 +762,13 @@ class Inspector(QWidget):
         )
 
     def _update_tab_labels(self, hotspot_count: int) -> None:
-        self.inspector_tabs.setTabText(0, "Card")
-        self._update_background_tab_label()
-        self.inspector_tabs.setTabText(2, f"Interactivity ({hotspot_count})")
+        self._update_card_tab_label()
+        self.inspector_tabs.setTabText(1, f"Interactivity ({hotspot_count})")
 
-    def _update_background_tab_label(self) -> None:
+    def _update_card_tab_label(self) -> None:
         self.inspector_tabs.setTabText(
-            1,
-            "Background ●" if self._has_background_candidate else "Background",
+            0,
+            "Card ●" if self._has_background_candidate else "Card",
         )
 
     def _revision_selected(self, index: int) -> None:

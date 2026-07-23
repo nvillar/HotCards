@@ -16,12 +16,13 @@ authoring shell remains usable when either service is unavailable.
 Stacks are stored as self-contained `.hypergen` directory bundles and
 autosaved atomically after creation or opening.
 
-The current Author workflow uses Card, Background, and Interactivity inspector
-tabs. Background prompts are composed directly from the author-visible Scene
-plus either the stack's global Style or a card-specific replacement; interaction
-intent does not alter the image. Authors can review generated or imported
-background candidates, manage revision history, and edit manual multi-area
-polygon hotspots with explicit card destinations. Run mode supports
+The current Author workflow uses Card and Interactivity inspector tabs. The
+Card tab keeps Scene, background revisions, and a collapsible Style editor
+together. Background prompts are composed directly from the author-visible
+Scene plus either the stack's global Style or a card-specific replacement;
+interaction intent does not alter the image. Authors can review generated or
+imported background candidates, manage revision history, and edit manual
+multi-area polygon hotspots with explicit card destinations. Run mode supports
 deterministic hotspot navigation, Back/Restart history, and configurable
 overlays. AI hotspot generation is still under development.
 
