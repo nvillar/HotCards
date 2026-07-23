@@ -7,7 +7,7 @@ from pathlib import Path
 from uuid import UUID
 
 from pydantic import ValidationError
-from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import (
     QBrush,
     QColor,
@@ -31,7 +31,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from hypergen.domain.models import CanvasSize, HotspotSet, Interaction, Point, Polygon
+from hypergen.domain.geometry import hit_test_interactions
+from hypergen.domain.models import (
+    CanvasSize,
+    HotspotSet,
+    Interaction,
+    Point,
+    Polygon,
+    RunOverlayMode,
+)
 
 
 class CardCanvas(QGraphicsView):
@@ -43,6 +51,7 @@ class CardCanvas(QGraphicsView):
     polygon_deletion_requested = Signal(object, int)
     interaction_deletion_requested = Signal(object)
     editing_error = Signal(str)
+    interaction_activated = Signal(object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -67,6 +76,9 @@ class CardCanvas(QGraphicsView):
         self._selected_polygon_index: int | None = None
         self._selected_vertex_index: int | None = None
         self._editable = False
+        self._run_mode = False
+        self._overlay_mode = RunOverlayMode.HIDDEN
+        self._hovered_interaction_id: UUID | None = None
         self._overlay_items: list[QGraphicsItem] = []
         self._drawing_interaction_id: UUID | None = None
         self._draft_points: list[QPointF] | None = None
@@ -144,7 +156,32 @@ class CardCanvas(QGraphicsView):
         self._drag_original = None
         self._preview_polygon = None
         self._editable = editable
+        self._run_mode = False
+        self._hovered_interaction_id = None
+        self.viewport().unsetCursor()
         self._render_hotspots()
+
+    def set_run_hotspots(
+        self,
+        hotspot_set: HotspotSet | None,
+        overlay_mode: RunOverlayMode,
+    ) -> None:
+        """Render player overlays and route clicks without exposing edit handles."""
+        self._hotspot_set = hotspot_set
+        self._selected_interaction_id = None
+        self._selected_polygon_index = None
+        self._selected_vertex_index = None
+        self._editable = False
+        self._run_mode = True
+        self._overlay_mode = overlay_mode
+        self._hovered_interaction_id = None
+        self._drag_kind = None
+        self._drag_origin = None
+        self._drag_original = None
+        self._preview_polygon = None
+        self.cancel_drawing()
+        self.viewport().unsetCursor()
+        self.fit_to_window()
 
     def select_interaction(self, interaction_id: UUID | None) -> None:
         self._selected_interaction_id = interaction_id
@@ -242,6 +279,14 @@ class CardCanvas(QGraphicsView):
             self.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
             event.accept()
             return
+        if event.button() == Qt.MouseButton.LeftButton and self._run_mode:
+            interaction = self._run_interaction_at(
+                self.document_point_at(event.position().toPoint())
+            )
+            if interaction is not None:
+                self.interaction_activated.emit(interaction.id)
+            event.accept()
+            return
         if event.button() != Qt.MouseButton.LeftButton or not self._editable:
             super().mousePressEvent(event)
             return
@@ -298,6 +343,23 @@ class CardCanvas(QGraphicsView):
             self.verticalScrollBar().setValue(
                 self.verticalScrollBar().value() - delta.y()
             )
+            event.accept()
+            return
+        if self._run_mode:
+            interaction = self._run_interaction_at(
+                self.document_point_at(event.position().toPoint())
+            )
+            hovered_interaction_id = (
+                interaction.id if interaction is not None else None
+            )
+            self.viewport().setCursor(
+                Qt.CursorShape.PointingHandCursor
+                if hovered_interaction_id is not None
+                else Qt.CursorShape.ArrowCursor
+            )
+            if hovered_interaction_id != self._hovered_interaction_id:
+                self._hovered_interaction_id = hovered_interaction_id
+                self._render_hotspots()
             event.accept()
             return
         if (
@@ -439,6 +501,13 @@ class CardCanvas(QGraphicsView):
         if self._fit_mode:
             self.fit_to_window()
 
+    def leaveEvent(self, event: QEvent) -> None:
+        if self._run_mode and self._hovered_interaction_id is not None:
+            self._hovered_interaction_id = None
+            self.viewport().setCursor(Qt.CursorShape.ArrowCursor)
+            self._render_hotspots()
+        super().leaveEvent(event)
+
     def _clear_scene_items(self) -> None:
         self.scene().clear()
         self._overlay_items.clear()
@@ -447,6 +516,8 @@ class CardCanvas(QGraphicsView):
         self._message_item = None
         self._hotspot_set = None
         self._editable = False
+        self._run_mode = False
+        self._hovered_interaction_id = None
         self.cancel_drawing()
 
     def _render_hotspots(self) -> None:
@@ -458,6 +529,14 @@ class CardCanvas(QGraphicsView):
             for interaction_index, interaction in enumerate(
                 self._hotspot_set.interactions
             ):
+                if self._run_mode and (
+                    self._overlay_mode is RunOverlayMode.HIDDEN
+                    or (
+                        self._overlay_mode is RunOverlayMode.HOVER
+                        and interaction.id != self._hovered_interaction_id
+                    )
+                ):
+                    continue
                 selected = interaction.id == self._selected_interaction_id
                 for polygon_index, polygon in enumerate(interaction.polygons):
                     points = (
@@ -468,10 +547,34 @@ class CardCanvas(QGraphicsView):
                         else polygon.points
                     )
                     path = self._polygon_path(points)
-                    color = QColor("#ffb347") if selected else QColor("#4da3ff")
+                    color = (
+                        QColor("#70d6a4")
+                        if self._run_mode
+                        else QColor("#ffb347")
+                        if selected
+                        else QColor("#4da3ff")
+                    )
                     fill = QColor(color)
-                    fill.setAlpha(70 if selected else 42)
-                    pen = QPen(color, 3 if selected else 2)
+                    fill.setAlpha(
+                        78
+                        if self._run_mode
+                        and interaction.id == self._hovered_interaction_id
+                        else 55
+                        if self._run_mode
+                        else 70
+                        if selected
+                        else 42
+                    )
+                    pen = QPen(
+                        color,
+                        3
+                        if selected
+                        or (
+                            self._run_mode
+                            and interaction.id == self._hovered_interaction_id
+                        )
+                        else 2,
+                    )
                     pen.setCosmetic(True)
                     item = self.scene().addPath(
                         path,
@@ -480,7 +583,7 @@ class CardCanvas(QGraphicsView):
                     )
                     item.setZValue(10 + interaction_index)
                     self._overlay_items.append(item)
-                    if selected:
+                    if selected and not self._run_mode:
                         self._add_vertex_handles(
                             interaction.id,
                             polygon_index,
@@ -621,6 +724,16 @@ class CardCanvas(QGraphicsView):
                 ).contains(scene_point):
                     return interaction.id, polygon_index
         return None
+
+    def _run_interaction_at(self, point: QPointF) -> Interaction | None:
+        if self._hotspot_set is None or not (
+            0.0 <= point.x() <= 1.0 and 0.0 <= point.y() <= 1.0
+        ):
+            return None
+        return hit_test_interactions(
+            (point.x(), point.y()),
+            self._hotspot_set.interactions,
+        )
 
     def _nearest_edge_insertion(
         self,

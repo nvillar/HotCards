@@ -48,6 +48,7 @@ from hypergen.application.document_session import (
     DocumentSessionError,
     DocumentSessionState,
 )
+from hypergen.application.run_session import RunSession, RunSessionState
 from hypergen.application.workers import (
     AdapterKind,
     AdapterWorkers,
@@ -119,6 +120,8 @@ class MainWindow(QMainWindow):
         self._diagnostic_operations: list[WorkerOperation] = []
         self._diagnostic_generation = 0
         self._rendering = False
+        self._is_running = False
+        self._run_session = RunSession()
         if self.background_workflow is None and self.document_session is not None:
             self.background_workflow = BackgroundWorkflow(
                 controller,
@@ -159,10 +162,12 @@ class MainWindow(QMainWindow):
         self.mode_selector.setObjectName("modeSelector")
         self.mode_selector.addItems(["Author", "Run"])
         self.mode_selector.setToolTip("Switch between authoring and interactive preview")
+        self.mode_selector.currentIndexChanged.connect(self._mode_changed)
         toolbar.addWidget(self.mode_selector)
         toolbar.addSeparator()
 
-        toolbar.addWidget(QLabel("Overlay"))
+        self.overlay_label = QLabel("Overlay")
+        toolbar.addWidget(self.overlay_label)
         self.overlay_selector = QComboBox()
         self.overlay_selector.setObjectName("overlaySelector")
         for mode, label in (
@@ -175,20 +180,24 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(self.overlay_selector)
         toolbar.addSeparator()
 
-        self.first_card_action = QAction("First", self)
-        self.previous_card_action = QAction("Previous", self)
-        self.next_card_action = QAction("Next", self)
-        self.last_card_action = QAction("Last", self)
+        self.back_action = QAction("Back", self)
+        self.back_action.setObjectName("runBackAction")
+        self.back_action.setToolTip("Return to the previous visited card")
+        self.back_action.triggered.connect(self._run_back)
+        self.restart_action = QAction("Restart", self)
+        self.restart_action.setObjectName("runRestartAction")
+        self.restart_action.setToolTip("Return to the stack's start card")
+        self.restart_action.triggered.connect(self._run_restart)
         self.player_navigation_actions = (
-            self.first_card_action,
-            self.previous_card_action,
-            self.next_card_action,
-            self.last_card_action,
+            self.back_action,
+            self.restart_action,
         )
         for action in self.player_navigation_actions:
             action.setEnabled(False)
-            action.setToolTip("Available in Run mode")
+            action.setVisible(False)
             toolbar.addAction(action)
+        self.overlay_label.setVisible(False)
+        self.overlay_selector.setVisible(False)
 
     def _build_panes(self) -> None:
         self.card_sidebar = CardSidebar(self.controller)
@@ -203,16 +212,16 @@ class MainWindow(QMainWindow):
         empty_canvas.setObjectName("emptyCanvas")
         empty_layout = QVBoxLayout(empty_canvas)
         empty_layout.addStretch(1)
-        empty_title = QLabel("Create your first card")
-        empty_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        empty_title.setStyleSheet("font-size: 20px; font-weight: 600;")
-        empty_layout.addWidget(empty_title)
-        empty_description = QLabel(
+        self.empty_canvas_title = QLabel("Create your first card")
+        self.empty_canvas_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.empty_canvas_title.setStyleSheet("font-size: 20px; font-weight: 600;")
+        empty_layout.addWidget(self.empty_canvas_title)
+        self.empty_canvas_description = QLabel(
             "Cards are the scenes readers visit. Start with one, then add its background and links."
         )
-        empty_description.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        empty_description.setWordWrap(True)
-        empty_layout.addWidget(empty_description)
+        self.empty_canvas_description.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.empty_canvas_description.setWordWrap(True)
+        empty_layout.addWidget(self.empty_canvas_description)
         self.create_first_card_button = QPushButton("Create Your First Card")
         self.create_first_card_button.setObjectName("createFirstCardButton")
         empty_layout.addWidget(
@@ -232,10 +241,10 @@ class MainWindow(QMainWindow):
         self.fit_canvas_button.setObjectName("fitCanvasButton")
         canvas_toolbar.addWidget(self.fit_canvas_button)
         canvas_layout.addLayout(canvas_toolbar)
-        canvas_title = QLabel("Card Canvas")
-        canvas_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        canvas_title.setStyleSheet("font-size: 18px; font-weight: 600;")
-        canvas_layout.addWidget(canvas_title)
+        self.canvas_title = QLabel("Card Canvas")
+        self.canvas_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.canvas_title.setStyleSheet("font-size: 18px; font-weight: 600;")
+        canvas_layout.addWidget(self.canvas_title)
         self.canvas_card_name = QLabel()
         self.canvas_card_name.setObjectName("canvasCardName")
         self.canvas_card_name.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -274,6 +283,9 @@ class MainWindow(QMainWindow):
             self._delete_hotspot_interaction
         )
         self.card_canvas.editing_error.connect(self.inspector.set_hotspot_error)
+        self.card_canvas.interaction_activated.connect(
+            self._run_interaction_activated
+        )
         if self.background_workflow is not None:
             self.background_workflow.candidate_changed.connect(
                 self._background_candidate_changed
@@ -301,6 +313,10 @@ class MainWindow(QMainWindow):
         self.service_status_label = QLabel("Checking local AI services…")
         self.service_status_label.setObjectName("serviceStatusLabel")
         self.statusBar().addPermanentWidget(self.service_status_label, 1)
+        self.check_services_button = QPushButton("Check AI Services")
+        self.check_services_button.setObjectName("checkServicesButton")
+        self.check_services_button.clicked.connect(self.run_availability_checks)
+        self.statusBar().addPermanentWidget(self.check_services_button)
         self.review_settings_button = QPushButton("Review Settings…")
         self.review_settings_button.setObjectName("reviewSettingsButton")
         self.review_settings_button.setVisible(False)
@@ -311,6 +327,11 @@ class MainWindow(QMainWindow):
         self.document_status_label = QLabel()
         self.document_status_label.setObjectName("documentStatusLabel")
         self.statusBar().addWidget(self.document_status_label, 1)
+        self.run_status_label = QLabel()
+        self.run_status_label.setObjectName("runStatusLabel")
+        self.run_status_label.setStyleSheet("color: #d8a657;")
+        self.run_status_label.setVisible(False)
+        self.statusBar().addWidget(self.run_status_label, 2)
 
     def _build_menu(self) -> None:
         file_menu = self.menuBar().addMenu("File")
@@ -357,7 +378,9 @@ class MainWindow(QMainWindow):
         """Refresh all panes from the controller's authoritative snapshot."""
         snapshot = self.controller.document
         card_ids = {card.id for card in snapshot.cards}
-        if self._selected_card_id not in card_ids:
+        if self._is_running:
+            self._selected_card_id = self._run_session.state.current_card_id
+        elif self._selected_card_id not in card_ids:
             self._selected_card_id = snapshot.cards[0].id if snapshot.cards else None
         self._rendering = True
         try:
@@ -376,7 +399,7 @@ class MainWindow(QMainWindow):
                 self.canvas_card_name.setText(selected_card.name)
                 candidate = (
                     self.background_workflow.candidate
-                    if self.background_workflow is not None
+                    if self.background_workflow is not None and not self._is_running
                     else None
                 )
                 self.inspector.show_background_candidate(
@@ -392,8 +415,11 @@ class MainWindow(QMainWindow):
         self._update_document_actions()
         self._update_window_title()
         self._update_generation_actions()
+        self._update_run_actions()
 
     def select_card(self, card_id: object) -> None:
+        if self._is_running:
+            return
         self._selected_card_id = card_id if isinstance(card_id, UUID) else None
         if self.card_sidebar.selected_card_id != self._selected_card_id:
             self.card_sidebar.select_card(self._selected_card_id)
@@ -494,6 +520,8 @@ class MainWindow(QMainWindow):
             self.render_document()
 
     def _primary_empty_action(self) -> None:
+        if self._is_running:
+            return
         if self.document_session is not None and self.document_session.store is None:
             self.new_stack()
         else:
@@ -549,7 +577,11 @@ class MainWindow(QMainWindow):
         return dialog.clickedButton() is delete_button
 
     def _document_replaced(self, _document: object) -> None:
-        self._selected_card_id = None
+        if self._is_running:
+            state = self._run_session.start(self.controller.document)
+            self._selected_card_id = state.current_card_id
+        else:
+            self._selected_card_id = None
         self.render_document()
 
     def _session_state_changed(self, state: object) -> None:
@@ -594,10 +626,23 @@ class MainWindow(QMainWindow):
         self.save_as_action.setEnabled(
             self.document_session is not None and self.document_session.store is not None
         )
-        self.undo_action.setEnabled(bound and self.controller.can_undo)
-        self.redo_action.setEnabled(bound and self.controller.can_redo)
+        self.new_stack_action.setEnabled(not self._is_running)
+        self.open_stack_action.setEnabled(not self._is_running)
+        self.save_as_action.setEnabled(
+            not self._is_running
+            and self.document_session is not None
+            and self.document_session.store is not None
+        )
+        self.undo_action.setEnabled(
+            bound and not self._is_running and self.controller.can_undo
+        )
+        self.redo_action.setEnabled(
+            bound and not self._is_running and self.controller.can_redo
+        )
+        self.advanced_settings_action.setEnabled(not self._is_running)
         self.mode_selector.setEnabled(bound)
-        self.overlay_selector.setEnabled(bound)
+        self.overlay_selector.setEnabled(bound and self._is_running)
+        self.card_sidebar.set_document_editable(bound and not self._is_running)
 
     def _update_window_title(self) -> None:
         dirty = self.document_session is not None and self.document_session.state.dirty
@@ -614,6 +659,8 @@ class MainWindow(QMainWindow):
 
     def run_availability_checks(self) -> None:
         """Submit injected service checks without blocking the UI thread."""
+        if self._is_running:
+            return
         checks = (
             dict(self._availability_checks_factory())
             if self._availability_checks_factory is not None
@@ -849,6 +896,7 @@ class MainWindow(QMainWindow):
             workflow_available
             and bound
             and self._selected_card_id is not None
+            and not self._is_running
         )
         mflux_available = self._availability[AdapterKind.MFLUX] is True
         ollama_available = self._availability[AdapterKind.OLLAMA] is True
@@ -899,8 +947,11 @@ class MainWindow(QMainWindow):
         unavailable = [
             adapter for adapter, available in self._availability.items() if available is False
         ]
-        if pending:
+        diagnostics_running = bool(self._diagnostic_operations)
+        if pending and diagnostics_running:
             summary = "Checking local AI services…"
+        elif pending:
+            summary = "AI services not checked"
         elif unavailable:
             labels = {
                 AdapterKind.OLLAMA: "Ollama",
@@ -920,7 +971,17 @@ class MainWindow(QMainWindow):
                 for adapter in AdapterKind
             )
         )
-        self.review_settings_button.setVisible(bool(unavailable))
+        self.review_settings_button.setVisible(
+            bool(unavailable) and not self._is_running
+        )
+        self.check_services_button.setText(
+            "Check Again" if unavailable else "Check AI Services"
+        )
+        self.check_services_button.setVisible(
+            not self._is_running
+            and not diagnostics_running
+            and bool(pending or unavailable)
+        )
 
     def _render_card_canvas(self, card: object) -> None:
         from hypergen.domain.models import Card
@@ -930,7 +991,7 @@ class MainWindow(QMainWindow):
         self.card_canvas.set_canvas_size(self.controller.document.canvas)
         candidate = (
             self.background_workflow.candidate
-            if self.background_workflow is not None
+            if self.background_workflow is not None and not self._is_running
             else None
         )
         if candidate is not None and candidate.card_id == card.id:
@@ -947,16 +1008,39 @@ class MainWindow(QMainWindow):
         )
         if revision is None:
             self.card_canvas.show_message("No background revision")
+            if self._is_running:
+                self._set_run_warning(
+                    f'"{card.name}" has no active background revision.'
+                )
             return
         if self.document_session is None or self.document_session.store is None:
             self.card_canvas.show_message("Background bundle is unavailable")
+            if self._is_running:
+                self._set_run_warning(
+                    f'The background for "{card.name}" is unavailable.'
+                )
             return
         try:
             asset_path = self.document_session.store.asset_path(revision.image_path)
         except StackStoreError as error:
             self.card_canvas.show_message(str(error))
+            if self._is_running:
+                self._set_run_warning(str(error))
             return
         self.card_canvas.show_image(asset_path)
+        if self._is_running:
+            self.card_canvas.set_run_hotspots(
+                revision.hotspot_set,
+                self.controller.document.run_overlay_mode,
+            )
+            if (
+                revision.hotspot_set is None
+                or not revision.hotspot_set.interactions
+            ):
+                self._set_run_warning(
+                    f'"{card.name}" has no hotspots to navigate.'
+                )
+            return
         self.card_canvas.set_hotspots(
             revision.hotspot_set,
             self.inspector.selected_interaction_id,
@@ -1132,6 +1216,114 @@ class MainWindow(QMainWindow):
             return
         changed = self.controller.execute(SetRunOverlayModeCommand(mode=overlay_mode))
         self.render_document(changed)
+
+    def _mode_changed(self, index: int) -> None:
+        if self._rendering:
+            return
+        should_run = self.mode_selector.itemText(index) == "Run"
+        if should_run == self._is_running:
+            return
+        if should_run:
+            self.inspector.commit_card_metadata()
+            self.card_canvas.cancel_drawing()
+            self._cancel_ai_activity_for_run()
+            self._is_running = True
+            state = self._run_session.start(
+                self.controller.document,
+                self._selected_card_id,
+            )
+            self._selected_card_id = state.current_card_id
+        else:
+            self._is_running = False
+            self._run_session.clear()
+            state = None
+        self._apply_mode_chrome()
+        self._set_run_warning("")
+        self.render_document()
+        if state is not None and state.warning is not None:
+            self._set_run_warning(state.warning)
+
+    def _run_interaction_activated(self, interaction_id: object) -> None:
+        if not self._is_running or not isinstance(interaction_id, UUID):
+            return
+        state = self._run_session.navigate(
+            self.controller.document,
+            interaction_id,
+        )
+        self._apply_run_state(state)
+
+    def _run_back(self) -> None:
+        if self._is_running:
+            self._apply_run_state(self._run_session.back())
+
+    def _run_restart(self) -> None:
+        if self._is_running:
+            self._apply_run_state(self._run_session.restart())
+
+    def _apply_run_state(self, state: RunSessionState) -> None:
+        self._selected_card_id = state.current_card_id
+        self._set_run_warning("")
+        self.render_document()
+        if state.warning is not None:
+            self._set_run_warning(state.warning)
+
+    def _apply_mode_chrome(self) -> None:
+        authoring = not self._is_running
+        self.card_sidebar.setVisible(authoring)
+        self.inspector.setVisible(authoring)
+        self.fit_canvas_button.setVisible(authoring)
+        self.canvas_title.setVisible(authoring)
+        self.create_first_card_button.setVisible(authoring)
+        self.empty_canvas_title.setText(
+            "Create your first card" if authoring else "No cards to run"
+        )
+        self.empty_canvas_description.setText(
+            "Cards are the scenes readers visit. Start with one, then add its background and links."
+            if authoring
+            else "Switch to Author mode to create the first card."
+        )
+        self.overlay_label.setVisible(self._is_running)
+        self.overlay_selector.setVisible(self._is_running)
+        for action in self.player_navigation_actions:
+            action.setVisible(self._is_running)
+        self.service_status_label.setVisible(authoring)
+        pending = any(
+            available is None
+            for available in self._availability.values()
+        )
+        unavailable = any(
+            available is False
+            for available in self._availability.values()
+        )
+        self.check_services_button.setVisible(
+            authoring
+            and not self._diagnostic_operations
+            and (pending or unavailable)
+        )
+        self.review_settings_button.setVisible(
+            authoring and unavailable
+        )
+        self.run_status_label.setVisible(self._is_running)
+
+    def _update_run_actions(self) -> None:
+        state = self._run_session.state
+        self.back_action.setEnabled(
+            self._is_running and bool(state.history)
+        )
+        self.restart_action.setEnabled(
+            self._is_running and state.current_card_id is not None
+        )
+
+    def _set_run_warning(self, message: str) -> None:
+        self.run_status_label.setText(message)
+        self.run_status_label.setToolTip(message)
+
+    def _cancel_ai_activity_for_run(self) -> None:
+        self._diagnostic_generation += 1
+        for operation in tuple(self._diagnostic_operations):
+            operation.cancel()
+        if self.background_workflow is not None and self.background_workflow.busy:
+            self.background_workflow.cancel()
 
     def open_advanced_settings(self) -> None:
         dialog = self._settings_dialog_factory(self.settings, self)

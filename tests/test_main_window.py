@@ -72,6 +72,14 @@ class FakeOperation(QObject):
     failed = Signal(object)
     finished = Signal()
 
+    def __init__(self) -> None:
+        super().__init__()
+        self.cancelled = False
+
+    def cancel(self) -> None:
+        self.cancelled = True
+        self.finished.emit()
+
 
 class FakeWorkers(QObject):
     availability_changed = Signal(object)
@@ -862,7 +870,7 @@ def test_settings_round_trip_excludes_credentials_and_stack(
     dialog.close()
 
 
-def test_toolbar_has_modes_overlay_and_disabled_navigation_placeholders(
+def test_toolbar_switches_between_authoring_and_run_controls(
     application: QApplication,
 ) -> None:
     window, controller, _workers, _settings = make_window()
@@ -871,12 +879,59 @@ def test_toolbar_has_modes_overlay_and_disabled_navigation_placeholders(
         "Author",
         "Run",
     ]
+    assert window.service_status_label.text() == "AI services not checked"
+    assert not window.check_services_button.isHidden()
     before = controller.document
     window.mode_selector.setCurrentText("Run")
     assert controller.document == before
-    assert all(not action.isEnabled() for action in window.player_navigation_actions)
+    assert [action.text() for action in window.player_navigation_actions] == [
+        "Back",
+        "Restart",
+    ]
+    assert not window.back_action.isEnabled()
+    assert window.restart_action.isEnabled()
+    assert window.back_action.isVisible()
+    assert window.restart_action.isVisible()
+    assert window.card_sidebar.isHidden()
+    assert window.inspector.isHidden()
+    assert not window.overlay_selector.isHidden()
+    assert window.check_services_button.isHidden()
+    assert "unavailable" in window.run_status_label.text()
     window.overlay_selector.setCurrentText("Visible")
     assert controller.document.run_overlay_mode.value == "visible"
+    window.mode_selector.setCurrentText("Author")
+    assert not window.card_sidebar.isHidden()
+    assert not window.inspector.isHidden()
+    assert window.overlay_selector.isHidden()
+    window.close()
+
+
+def test_run_mode_blocks_empty_document_mutation_and_cancels_ai_work(
+    application: QApplication,
+) -> None:
+    window, controller, workers, _settings = make_window(
+        Stack(name="Empty"),
+        start_diagnostics=True,
+    )
+    workflow = window.background_workflow
+    assert isinstance(workflow, FakeBackgroundWorkflow)
+    workflow.busy = True
+
+    window.mode_selector.setCurrentText("Run")
+    window._primary_empty_action()
+
+    assert controller.document.cards == ()
+    assert window.create_first_card_button.isHidden()
+    assert window.empty_canvas_title.text() == "No cards to run"
+    assert all(
+        operation.cancelled
+        for operation in (
+            *workers.ollama_operations,
+            *workers.mflux_operations,
+        )
+    )
+    assert not workflow.busy
+    assert window.run_status_label.text() == "This stack has no cards to run."
     window.close()
 
 

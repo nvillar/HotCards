@@ -18,8 +18,9 @@ autosaved atomically after creation or opening.
 
 The current Author workflow supports card metadata, generated or imported
 background candidates, revision history, and manual multi-area polygon hotspot
-editing with explicit card destinations. AI hotspot generation and Run mode are
-still under development.
+editing with explicit card destinations. Run mode supports deterministic
+hotspot navigation, Back/Restart history, and configurable overlays. AI hotspot
+generation is still under development.
 
 ## Setup and run
 

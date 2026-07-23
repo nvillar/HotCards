@@ -113,7 +113,7 @@ def main() -> int:
     window = build_main_window(
         settings=settings,
         availability_checks_factory=lambda: build_availability_checks(settings),
-        start_diagnostics=True,
+        start_diagnostics=False,
     )
     window.show()
     return application.exec()
