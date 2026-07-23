@@ -21,10 +21,11 @@ Card tab keeps Scene, background revisions, and a collapsible Style editor
 together. Background prompts are composed directly from the author-visible
 Scene plus either the stack's global Style or a card-specific replacement;
 interaction intent does not alter the image. Authors can review generated or
-imported background candidates, manage revision history, and edit manual
-multi-area polygon hotspots with explicit card destinations. Run mode supports
-deterministic hotspot navigation, Back/Restart history, and configurable
-overlays. AI hotspot generation is still under development.
+imported card-local background drafts, switch cards without losing them, manage
+revision history, and edit manual multi-area polygon hotspots with explicit card
+destinations. Run mode supports deterministic hotspot navigation, Back/Restart
+history, and configurable overlays. AI hotspot generation is still under
+development.
 
 ## Setup and run
 

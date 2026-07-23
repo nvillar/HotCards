@@ -41,7 +41,7 @@ class FakeWorkers(QObject):
 
 
 class FakeBackgroundWorkflow(QObject):
-    candidate_changed = Signal(object)
+    drafts_changed = Signal()
     busy_changed = Signal(bool)
     progress_changed = Signal(str)
     failed = Signal(object)
@@ -49,11 +49,24 @@ class FakeBackgroundWorkflow(QObject):
 
     def __init__(self) -> None:
         super().__init__()
-        self.candidate = None
         self.busy = False
 
-    def discard_candidate(self) -> None:
-        self.candidate = None
+    @property
+    def drafts(self) -> tuple[object, ...]:
+        return ()
+
+    @property
+    def draft_card_ids(self) -> frozenset[object]:
+        return frozenset()
+
+    def draft_for(self, _card_id: object) -> None:
+        return None
+
+    def discard_all_drafts(self) -> None:
+        pass
+
+    def discard_orphaned_drafts(self, _valid_card_ids: object) -> None:
+        pass
 
     def close(self) -> None:
         pass

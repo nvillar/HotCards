@@ -14,11 +14,11 @@ import pytest
 from PIL import Image
 from PySide6.QtCore import QModelIndex, QObject, Qt, Signal
 from PySide6.QtGui import QAction, QCloseEvent
-from PySide6.QtWidgets import QApplication, QDialog, QLabel
+from PySide6.QtWidgets import QApplication, QDialog, QLabel, QMessageBox
 
 import hypergen.ui.inspector as inspector_module
 import hypergen.ui.main_window as main_window_module
-from hypergen.application.background_workflow import BackgroundCandidate
+from hypergen.application.background_workflow import BackgroundDraft
 from hypergen.application.commands import CreateCardCommand
 from hypergen.application.document_controller import DocumentController
 from hypergen.application.document_session import DocumentSession
@@ -121,7 +121,7 @@ class FakeWorkers(QObject):
 
 
 class FakeBackgroundWorkflow(QObject):
-    candidate_changed = Signal(object)
+    drafts_changed = Signal()
     busy_changed = Signal(bool)
     progress_changed = Signal(str)
     failed = Signal(object)
@@ -129,7 +129,7 @@ class FakeBackgroundWorkflow(QObject):
 
     def __init__(self) -> None:
         super().__init__()
-        self.candidate = None
+        self._drafts: dict[object, BackgroundDraft] = {}
         self.busy = False
         self.closed = False
         self.generate_calls: list[object] = []
@@ -137,9 +137,39 @@ class FakeBackgroundWorkflow(QObject):
     def close(self) -> None:
         self.closed = True
 
-    def discard_candidate(self) -> None:
-        self.candidate = None
-        self.candidate_changed.emit(None)
+    @property
+    def drafts(self) -> tuple[BackgroundDraft, ...]:
+        return tuple(self._drafts.values())
+
+    @property
+    def draft_card_ids(self) -> frozenset[object]:
+        return frozenset(self._drafts)
+
+    def draft_for(self, card_id: object) -> BackgroundDraft | None:
+        return self._drafts.get(card_id)
+
+    def set_draft(self, draft: BackgroundDraft) -> None:
+        self._drafts[draft.card_id] = draft
+        self.drafts_changed.emit()
+
+    def discard_draft(self, card_id: object) -> None:
+        self._drafts.pop(card_id, None)
+        self.drafts_changed.emit()
+
+    def discard_all_drafts(self) -> None:
+        self._drafts.clear()
+        self.drafts_changed.emit()
+
+    def discard_orphaned_drafts(self, valid_card_ids: object) -> None:
+        valid_ids = set(valid_card_ids)  # type: ignore[arg-type]
+        self._drafts = {
+            card_id: draft
+            for card_id, draft in self._drafts.items()
+            if card_id in valid_ids
+        }
+
+    def apply_draft(self, card_id: object) -> None:
+        self.discard_draft(card_id)
 
     def is_generating_for(self, _card_id: object) -> bool:
         return False
@@ -148,8 +178,8 @@ class FakeBackgroundWorkflow(QObject):
         self.busy = False
         self.busy_changed.emit(False)
 
-    def generate(self, card_id: object) -> None:
-        self.generate_calls.append(card_id)
+    def generate(self, card_id: object, *, replace_draft: bool = False) -> None:
+        self.generate_calls.append((card_id, replace_draft))
 
 
 @pytest.fixture(scope="module")
@@ -582,7 +612,7 @@ def test_generation_aborts_when_pending_metadata_is_invalid(
     window.close()
 
 
-def test_background_candidate_is_contextual_and_previews_on_canvas(
+def test_background_draft_is_contextual_and_previews_on_canvas(
     application: QApplication,
     tmp_path: Path,
 ) -> None:
@@ -591,7 +621,8 @@ def test_background_candidate_is_contextual_and_previews_on_canvas(
     assert isinstance(workflow, FakeBackgroundWorkflow)
     image_path = tmp_path / "candidate.png"
     Image.new("RGB", (1024, 768), "navy").save(image_path)
-    candidate = BackgroundCandidate(
+    draft = BackgroundDraft(
+        stack_id=controller.document.id,
         card_id=controller.document.cards[0].id,
         revision_id=uuid4(),
         image_path=image_path,
@@ -600,19 +631,136 @@ def test_background_candidate_is_contextual_and_previews_on_canvas(
         created_at=datetime.now(UTC),
     )
 
-    workflow.candidate = candidate
-    workflow.candidate_changed.emit(candidate)
+    workflow.set_draft(draft)
 
-    assert not window.inspector.candidate_widget.isHidden()
+    assert not window.inspector.draft_widget.isHidden()
     assert window.inspector.inspector_tabs.tabText(0) == "Card ●"
-    assert not window.inspector.generate_background_button.isEnabled()
+    assert window.inspector.generate_background_button.text() == "Generate Replacement..."
     assert not window.inspector.import_background_button.isEnabled()
+    assert "Draft" in window.card_sidebar.card_list.item(0).text()
     assert window.card_canvas._border_item is not None
     assert window.card_canvas._border_item.pen().style() == Qt.PenStyle.DashLine
 
-    workflow.candidate = None
-    workflow.candidate_changed.emit(None)
-    assert window.inspector.candidate_widget.isHidden()
+    workflow.discard_draft(draft.card_id)
+    assert window.inspector.draft_widget.isHidden()
+    window.close()
+
+
+def test_other_card_draft_does_not_block_generation_or_import(
+    application: QApplication,
+    tmp_path: Path,
+) -> None:
+    window, controller, _workers, _settings = make_window()
+    workflow = window.background_workflow
+    assert isinstance(workflow, FakeBackgroundWorkflow)
+    first, second = controller.document.cards
+    image_path = tmp_path / "draft.png"
+    Image.new("RGB", (1024, 768), "navy").save(image_path)
+    workflow.set_draft(
+        BackgroundDraft(
+            stack_id=controller.document.id,
+            card_id=first.id,
+            revision_id=uuid4(),
+            image_path=image_path,
+            origin=ImageOrigin.IMPORTED,
+            source_filename="draft.png",
+            created_at=datetime.now(UTC),
+        )
+    )
+    window._availability[AdapterKind.MFLUX] = True
+    window.select_card(second.id)
+    window.inspector.scene_edit.setPlainText("A long gallery")
+    application.processEvents()
+
+    assert window.inspector.draft_widget.isHidden()
+    assert window.inspector.generate_background_button.isEnabled()
+    assert window.inspector.import_background_button.isEnabled()
+    assert "Draft" in window.card_sidebar.card_list.item(0).text()
+    assert "Draft" not in window.card_sidebar.card_list.item(1).text()
+    workflow.discard_all_drafts()
+    window.close()
+
+
+def test_generate_replacement_requires_confirmation_and_keeps_draft(
+    application: QApplication,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window, controller, _workers, _settings = make_window()
+    workflow = window.background_workflow
+    assert isinstance(workflow, FakeBackgroundWorkflow)
+    card = controller.document.cards[0]
+    image_path = tmp_path / "draft.png"
+    Image.new("RGB", (1024, 768), "navy").save(image_path)
+    draft = BackgroundDraft(
+        stack_id=controller.document.id,
+        card_id=card.id,
+        revision_id=uuid4(),
+        image_path=image_path,
+        origin=ImageOrigin.IMPORTED,
+        source_filename="draft.png",
+        created_at=datetime.now(UTC),
+    )
+    workflow.set_draft(draft)
+    window._availability[AdapterKind.MFLUX] = True
+    window._update_generation_actions()
+    monkeypatch.setattr(window, "_confirm_draft_replacement", lambda: False)
+
+    window.inspector.generate_background_button.click()
+    assert workflow.generate_calls == []
+    assert workflow.draft_for(card.id) == draft
+
+    monkeypatch.setattr(window, "_confirm_draft_replacement", lambda: True)
+    window.inspector.generate_background_button.click()
+    assert workflow.generate_calls == [(card.id, True)]
+    assert workflow.draft_for(card.id) == draft
+    workflow.discard_all_drafts()
+    window.close()
+
+
+def test_close_summarizes_all_drafts_and_can_be_cancelled(
+    application: QApplication,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window, controller, _workers, _settings = make_window()
+    workflow = window.background_workflow
+    assert isinstance(workflow, FakeBackgroundWorkflow)
+    for index, card in enumerate(controller.document.cards):
+        image_path = tmp_path / f"draft-{index}.png"
+        Image.new("RGB", (1024, 768), "navy").save(image_path)
+        workflow.set_draft(
+            BackgroundDraft(
+                stack_id=controller.document.id,
+                card_id=card.id,
+                revision_id=uuid4(),
+                image_path=image_path,
+                origin=ImageOrigin.IMPORTED,
+                source_filename=image_path.name,
+                created_at=datetime.now(UTC),
+            )
+        )
+    messages: list[str] = []
+
+    def cancel_close(
+        _parent: object,
+        _title: str,
+        message: str,
+        *_args: object,
+    ) -> QMessageBox.StandardButton:
+        messages.append(message)
+        return QMessageBox.StandardButton.Cancel
+
+    monkeypatch.setattr(main_window_module.QMessageBox, "question", cancel_close)
+    event = QCloseEvent()
+    window.closeEvent(event)
+
+    assert not event.isAccepted()
+    assert len(messages) == 1
+    assert "2 background drafts" in messages[0]
+    assert all(card.name in messages[0] for card in controller.document.cards)
+    assert len(workflow.drafts) == 2
+    workflow.discard_all_drafts()
     window.close()
 
 
@@ -646,11 +794,11 @@ def test_import_and_apply_background_through_contextual_inspector(
 
     window.inspector.import_background_button.click()
     assert window.background_workflow is not None
-    assert window.background_workflow.candidate is not None
-    assert not window.inspector.candidate_widget.isHidden()
+    assert window.background_workflow.draft_for(card.id) is not None
+    assert not window.inspector.draft_widget.isHidden()
 
-    window.inspector.apply_background_button.click()
-    assert window.background_workflow.candidate is None
+    window.inspector.accept_draft_button.click()
+    assert window.background_workflow.draft_for(card.id) is None
     revision = controller.document.cards[0].image_revisions[0]
     assert revision.source_filename == "source.png"
     assert window.inspector.hotspots_placeholder.text() == "No hotspots yet."

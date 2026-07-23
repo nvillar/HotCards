@@ -264,8 +264,12 @@ class MainWindow(QMainWindow):
         )
         self.inspector.generate_background_requested.connect(self._generate_background)
         self.inspector.import_background_requested.connect(self._import_background)
-        self.inspector.apply_background_requested.connect(self._apply_background)
-        self.inspector.discard_background_requested.connect(self._discard_background)
+        self.inspector.accept_background_draft_requested.connect(
+            self._accept_background_draft
+        )
+        self.inspector.discard_background_draft_requested.connect(
+            self._discard_background_draft
+        )
         self.inspector.revision_activation_requested.connect(self._activate_revision)
         self.inspector.revision_deletion_requested.connect(self._delete_revision)
         self.inspector.hotspot_selected.connect(
@@ -293,8 +297,8 @@ class MainWindow(QMainWindow):
             self._run_interaction_activated
         )
         if self.background_workflow is not None:
-            self.background_workflow.candidate_changed.connect(
-                self._background_candidate_changed
+            self.background_workflow.drafts_changed.connect(
+                self._background_drafts_changed
             )
             self.background_workflow.busy_changed.connect(
                 lambda _busy: self._update_generation_actions()
@@ -384,13 +388,24 @@ class MainWindow(QMainWindow):
         """Refresh all panes from the controller's authoritative snapshot."""
         snapshot = self.controller.document
         card_ids = {card.id for card in snapshot.cards}
+        if self.background_workflow is not None:
+            self.background_workflow.discard_orphaned_drafts(card_ids)
         if self._is_running:
             self._selected_card_id = self._run_session.state.current_card_id
         elif self._selected_card_id not in card_ids:
             self._selected_card_id = snapshot.cards[0].id if snapshot.cards else None
         self._rendering = True
         try:
-            self.card_sidebar.render(snapshot, self._selected_card_id)
+            draft_card_ids = (
+                self.background_workflow.draft_card_ids
+                if self.background_workflow is not None
+                else ()
+            )
+            self.card_sidebar.render(
+                snapshot,
+                self._selected_card_id,
+                draft_card_ids=draft_card_ids,
+            )
             self.inspector.render(snapshot, self._selected_card_id)
             selected_card = next(
                 (card for card in snapshot.cards if card.id == self._selected_card_id),
@@ -399,20 +414,16 @@ class MainWindow(QMainWindow):
             if selected_card is None:
                 self.canvas_pages.setCurrentIndex(0)
                 self.canvas_card_name.clear()
-                self.inspector.show_background_candidate(None)
+                self.inspector.show_background_draft(None)
             else:
                 self.canvas_pages.setCurrentIndex(1)
                 self.canvas_card_name.setText(selected_card.name)
-                candidate = (
-                    self.background_workflow.candidate
+                draft = (
+                    self.background_workflow.draft_for(selected_card.id)
                     if self.background_workflow is not None and not self._is_running
                     else None
                 )
-                self.inspector.show_background_candidate(
-                    candidate
-                    if candidate is not None and candidate.card_id == selected_card.id
-                    else None
-                )
+                self.inspector.show_background_draft(draft)
                 self._render_card_canvas(selected_card)
             overlay_index = self.overlay_selector.findData(snapshot.run_overlay_mode)
             self.overlay_selector.setCurrentIndex(overlay_index)
@@ -449,7 +460,7 @@ class MainWindow(QMainWindow):
         )
         if not selected_path:
             return
-        if not self._confirm_candidate_discard("creating a new stack"):
+        if not self._confirm_drafts_discard("creating a new stack"):
             return
         if not self._confirm_generation_cancel("creating a new stack"):
             return
@@ -459,7 +470,7 @@ class MainWindow(QMainWindow):
             self._show_document_error("Could Not Create Stack", str(error))
         else:
             if self.background_workflow is not None:
-                self.background_workflow.discard_candidate()
+                self.background_workflow.discard_all_drafts()
 
     def open_stack(self) -> None:
         """Open a validated bundle without replacing the current session on failure."""
@@ -472,7 +483,7 @@ class MainWindow(QMainWindow):
         )
         if not selected_path:
             return
-        if not self._confirm_candidate_discard("opening another stack"):
+        if not self._confirm_drafts_discard("opening another stack"):
             return
         if not self._confirm_generation_cancel("opening another stack"):
             return
@@ -482,7 +493,7 @@ class MainWindow(QMainWindow):
             self._show_document_error("Could Not Open Stack", str(error))
         else:
             if self.background_workflow is not None:
-                self.background_workflow.discard_candidate()
+                self.background_workflow.discard_all_drafts()
 
     def save_document(self) -> bool:
         """Flush accepted mutations and keep a failed save visible."""
@@ -552,8 +563,8 @@ class MainWindow(QMainWindow):
             f"{start_warning}"
         )
         if self._ask_delete_card(message):
-            candidate = (
-                self.background_workflow.candidate
+            draft = (
+                self.background_workflow.draft_for(card.id)
                 if self.background_workflow is not None
                 else None
             )
@@ -564,8 +575,8 @@ class MainWindow(QMainWindow):
             ):
                 return
             self.card_sidebar.delete_card(card.id)
-            if candidate is not None and candidate.card_id == card.id:
-                self.background_workflow.discard_candidate()
+            if draft is not None:
+                self.background_workflow.discard_draft(card.id)
 
     def _ask_delete_card(self, message: str) -> bool:
         dialog = QMessageBox(
@@ -697,8 +708,11 @@ class MainWindow(QMainWindow):
             return
         if not self.inspector.commit_card_metadata():
             return
+        replacing_draft = workflow.draft_for(card_id) is not None
+        if replacing_draft and not self._confirm_draft_replacement():
+            return
         try:
-            workflow.generate(card_id)
+            workflow.generate(card_id, replace_draft=replacing_draft)
         except BackgroundWorkflowError as error:
             self.inspector.set_background_status(str(error), detail=str(error))
         self._update_generation_actions()
@@ -739,17 +753,17 @@ class MainWindow(QMainWindow):
             self.inspector.set_background_status(str(error), detail=str(error))
         self._update_generation_actions()
 
-    def _apply_background(self) -> None:
-        if self.background_workflow is None:
+    def _accept_background_draft(self) -> None:
+        if self.background_workflow is None or self._selected_card_id is None:
             return
         try:
-            self.background_workflow.apply_candidate()
+            self.background_workflow.apply_draft(self._selected_card_id)
         except (BackgroundWorkflowError, StackStoreError, CommandError) as error:
             self.inspector.set_background_status(str(error), detail=str(error))
 
-    def _discard_background(self) -> None:
-        if self.background_workflow is not None:
-            self.background_workflow.discard_candidate()
+    def _discard_background_draft(self) -> None:
+        if self.background_workflow is not None and self._selected_card_id is not None:
+            self.background_workflow.discard_draft(self._selected_card_id)
 
     def _activate_revision(self, revision_id: object) -> None:
         if (
@@ -795,25 +809,47 @@ class MainWindow(QMainWindow):
         except (BackgroundWorkflowError, CommandError) as error:
             self.inspector.set_background_status(str(error), detail=str(error))
 
-    def _background_candidate_changed(self, candidate: object) -> None:
+    def _background_drafts_changed(self) -> None:
         self.render_document()
 
-    def _confirm_candidate_discard(self, action: str) -> bool:
-        if (
-            self.background_workflow is None
-            or self.background_workflow.candidate is None
-        ):
+    def _confirm_drafts_discard(self, action: str) -> bool:
+        workflow = self.background_workflow
+        if workflow is None or not workflow.drafts:
             return True
+        draft_ids = workflow.draft_card_ids
+        card_names = [
+            card.name
+            for card in self.controller.document.cards
+            if card.id in draft_ids
+        ]
+        affected = ", ".join(card_names)
         answer = QMessageBox.question(
             self,
-            "Discard Background Candidate?",
-            f"A background candidate has not been applied. Discard it before {action}?",
+            "Discard Background Drafts?",
+            (
+                f"Discard {len(workflow.drafts)} background "
+                f"{'draft' if len(workflow.drafts) == 1 else 'drafts'} before {action}?"
+                f"\n\nCards: {affected}"
+            ),
             QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.Cancel,
         )
         if answer != QMessageBox.StandardButton.Discard:
             return False
         return True
+
+    def _confirm_draft_replacement(self) -> bool:
+        answer = QMessageBox.question(
+            self,
+            "Generate Replacement?",
+            (
+                "Generate a replacement for this card's current background draft? "
+                "The current draft will be kept if generation fails."
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        return answer == QMessageBox.StandardButton.Yes
 
     def _confirm_generation_cancel(self, action: str) -> bool:
         if (
@@ -913,37 +949,52 @@ class MainWindow(QMainWindow):
             if self.background_workflow is not None
             else False
         )
-        has_candidate = (
+        selected_has_draft = (
             self.background_workflow is not None
-            and self.background_workflow.candidate is not None
+            and self._selected_card_id is not None
+            and self.background_workflow.draft_for(self._selected_card_id) is not None
         )
         generate_reason = "Ready to generate"
         if not has_card:
             generate_reason = "Select a card in a saved stack"
-        elif has_candidate:
-            generate_reason = "Apply or discard the current candidate first"
+        elif workflow_busy:
+            generate_reason = (
+                "Background generation is running for this card"
+                if self.background_workflow is not None
+                and self._selected_card_id is not None
+                and self.background_workflow.is_generating_for(self._selected_card_id)
+                else (
+                    "Background generation is running for another card; "
+                    "MFLUX runs one job at a time"
+                )
+            )
         elif not has_render_prompt:
             generate_reason = "Enter a Scene or Style before generating"
         elif not mflux_available:
             generate_reason = self._action_diagnostic(AdapterKind.MFLUX)
+        elif selected_has_draft:
+            generate_reason = "Ready to generate a replacement draft"
         import_reason = (
             "Ready to import"
-            if has_card and not has_candidate
+            if has_card and not selected_has_draft and not workflow_busy
             else (
-                "Apply or discard the current candidate first"
-                if has_candidate
-                else "Select a card in a saved stack"
+                "Accept or discard this card's draft before importing"
+                if selected_has_draft
+                else (
+                    "Background generation is running; MFLUX runs one job at a time"
+                    if workflow_busy
+                    else "Select a card in a saved stack"
+                )
             )
         )
         self.inspector.set_background_capabilities(
             can_generate=(
                 has_card
-                and not has_candidate
                 and has_render_prompt
                 and mflux_available
             ),
             generate_reason=generate_reason,
-            can_import=has_card and not has_candidate,
+            can_import=has_card and not selected_has_draft,
             import_reason=import_reason,
             busy=workflow_busy,
         )
@@ -995,13 +1046,13 @@ class MainWindow(QMainWindow):
         if not isinstance(card, Card):
             return
         self.card_canvas.set_canvas_size(self.controller.document.canvas)
-        candidate = (
-            self.background_workflow.candidate
+        draft = (
+            self.background_workflow.draft_for(card.id)
             if self.background_workflow is not None and not self._is_running
             else None
         )
-        if candidate is not None and candidate.card_id == card.id:
-            self.card_canvas.show_image(candidate.image_path, candidate=True)
+        if draft is not None:
+            self.card_canvas.show_image(draft.image_path, candidate=True)
             self.card_canvas.set_hotspots(None, None, editable=False)
             return
         revision = next(
@@ -1343,7 +1394,7 @@ class MainWindow(QMainWindow):
             self.run_availability_checks()
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        if not self._confirm_candidate_discard("closing the stack"):
+        if not self._confirm_drafts_discard("closing the stack"):
             event.ignore()
             return
         if not self._confirm_generation_cancel("closing the stack"):
@@ -1366,8 +1417,6 @@ class MainWindow(QMainWindow):
             else:
                 event.ignore()
                 return
-        if self.background_workflow is not None:
-            self.background_workflow.discard_candidate()
         if self.background_workflow is not None:
             self.background_workflow.close()
         if self._owns_workers:

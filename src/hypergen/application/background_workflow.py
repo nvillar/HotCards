@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import secrets
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
@@ -64,9 +64,10 @@ class _GenerationTarget:
 GenerationSettingsProvider = Callable[[], BackgroundGenerationSettings]
 
 
-class BackgroundCandidate(DomainModel):
-    """One transient candidate that has not entered the stack document."""
+class BackgroundDraft(DomainModel):
+    """One card-local transient background that has not entered the stack."""
 
+    stack_id: UUID
     card_id: UUID
     revision_id: UUID
     image_path: Path
@@ -138,9 +139,9 @@ def prepare_import_image(
 
 
 class BackgroundWorkflow(QObject):
-    """Coordinate transient candidates, workers, storage, and typed commands."""
+    """Coordinate card-local drafts, workers, storage, and typed commands."""
 
-    candidate_changed = Signal(object)
+    drafts_changed = Signal()
     busy_changed = Signal(bool)
     progress_changed = Signal(str)
     failed = Signal(object)
@@ -175,23 +176,35 @@ class BackgroundWorkflow(QObject):
         )
         assert self._temporary_directory is not None
         self._temporary_directory.mkdir(parents=True, exist_ok=True)
-        self._candidate: BackgroundCandidate | None = None
+        self._drafts: dict[UUID, BackgroundDraft] = {}
         self._operation: WorkerOperation | None = None
         self._request_id: UUID | None = None
         self._request_target: _GenerationTarget | None = None
         self._busy = False
 
     @property
-    def candidate(self) -> BackgroundCandidate | None:
-        return self._candidate
+    def drafts(self) -> tuple[BackgroundDraft, ...]:
+        return tuple(self._drafts.values())
+
+    @property
+    def draft_card_ids(self) -> frozenset[UUID]:
+        return frozenset(self._drafts)
+
+    def draft_for(self, card_id: UUID) -> BackgroundDraft | None:
+        return self._drafts.get(card_id)
 
     @property
     def busy(self) -> bool:
         return self._busy
 
-    def generate(self, card_id: UUID) -> WorkerOperation:
+    def generate(
+        self,
+        card_id: UUID,
+        *,
+        replace_draft: bool = False,
+    ) -> WorkerOperation:
         """Start serialized MFLUX generation from author-controlled text."""
-        self._require_ready_for_candidate()
+        self._require_ready_for_draft(card_id, replace_draft=replace_draft)
         document = self.controller.document
         card = self._card(document, card_id)
         settings = self._settings_provider()
@@ -255,9 +268,9 @@ class BackgroundWorkflow(QObject):
         *,
         position_x: float = 0.5,
         position_y: float = 0.5,
-    ) -> BackgroundCandidate:
-        """Create one transient imported candidate at the stack canvas size."""
-        self._require_ready_for_candidate()
+    ) -> BackgroundDraft:
+        """Create one transient imported draft at the stack canvas size."""
+        self._require_ready_for_draft(card_id, replace_draft=False)
         document = self.controller.document
         self._card(document, card_id)
         revision_id = uuid4()
@@ -270,7 +283,8 @@ class BackgroundWorkflow(QObject):
             position_x=position_x,
             position_y=position_y,
         )
-        candidate = BackgroundCandidate(
+        draft = BackgroundDraft(
+            stack_id=document.id,
             card_id=card_id,
             revision_id=revision_id,
             image_path=output_path,
@@ -278,47 +292,70 @@ class BackgroundWorkflow(QObject):
             source_filename=source_path.name,
             created_at=datetime.now(UTC),
         )
-        self._set_candidate(candidate)
-        return candidate
+        self._set_draft(draft)
+        return draft
 
-    def apply_candidate(self) -> Stack:
-        """Durably copy and atomically apply the current candidate revision."""
-        candidate = self._candidate
-        if candidate is None:
-            raise BackgroundWorkflowError("there is no background candidate to apply")
+    def apply_draft(self, card_id: UUID) -> Stack:
+        """Durably copy and atomically apply one card's draft revision."""
+        draft = self._drafts.get(card_id)
+        if draft is None:
+            raise BackgroundWorkflowError("this card has no background draft to accept")
         store = self.session.store
         if store is None:
             raise BackgroundWorkflowError("save the stack before applying a background")
-        self._card(self.controller.document, candidate.card_id)
+        document = self.controller.document
+        if document.id != draft.stack_id:
+            raise BackgroundWorkflowError("the background draft belongs to another stack")
+        self._card(document, draft.card_id)
         image_path = store.import_image(
-            candidate.image_path,
-            card_id=candidate.card_id,
-            revision_id=candidate.revision_id,
+            draft.image_path,
+            card_id=draft.card_id,
+            revision_id=draft.revision_id,
         )
         revision = ImageRevision(
-            id=candidate.revision_id,
+            id=draft.revision_id,
             image_path=image_path,
-            origin=candidate.origin,
-            source_filename=candidate.source_filename,
-            generation_metadata=candidate.generation_metadata,
-            created_at=candidate.created_at,
+            origin=draft.origin,
+            source_filename=draft.source_filename,
+            generation_metadata=draft.generation_metadata,
+            created_at=draft.created_at,
         )
         changed = self.controller.execute(
             AddImageRevisionCommand(
-                card_id=candidate.card_id,
+                card_id=draft.card_id,
                 revision=revision,
             )
         )
-        self._clear_candidate()
+        self._clear_draft(card_id)
         self.progress_changed.emit("Background revision applied")
         self.document_changed.emit(changed)
         return changed
 
-    def discard_candidate(self) -> None:
-        """Discard only transient candidate state."""
-        if self._candidate is not None:
-            self._clear_candidate()
-            self.progress_changed.emit("Background candidate discarded")
+    def discard_draft(self, card_id: UUID) -> None:
+        """Discard only the selected card's transient draft."""
+        if card_id in self._drafts:
+            self._clear_draft(card_id)
+            self.progress_changed.emit("Background draft discarded")
+
+    def discard_all_drafts(self) -> None:
+        """Discard all transient drafts in one observable state change."""
+        if not self._drafts:
+            return
+        drafts = tuple(self._drafts.values())
+        self._drafts.clear()
+        for draft in drafts:
+            draft.image_path.unlink(missing_ok=True)
+        self.drafts_changed.emit()
+
+    def discard_orphaned_drafts(self, valid_card_ids: Collection[UUID]) -> None:
+        """Remove drafts whose cards disappeared through undo or replacement."""
+        valid_ids = frozenset(valid_card_ids)
+        orphaned_ids = [
+            card_id for card_id in self._drafts if card_id not in valid_ids
+        ]
+        for card_id in orphaned_ids:
+            draft = self._drafts.pop(card_id)
+            draft.image_path.unlink(missing_ok=True)
 
     def activate_revision(self, card_id: UUID, revision_id: UUID) -> Stack:
         changed = self.controller.execute(
@@ -346,7 +383,7 @@ class BackgroundWorkflow(QObject):
 
     def close(self) -> None:
         self.cancel()
-        self.discard_candidate()
+        self.discard_all_drafts()
         if self._owned_temporary_directory is not None:
             self._owned_temporary_directory.cleanup()
 
@@ -375,7 +412,8 @@ class BackgroundWorkflow(QObject):
                 BackgroundWorkflowError("image generation returned an unexpected result")
             )
             return
-        candidate = BackgroundCandidate(
+        draft = BackgroundDraft(
+            stack_id=target.stack_id,
             card_id=target.card_id,
             revision_id=revision_id,
             image_path=result.output_path,
@@ -386,8 +424,8 @@ class BackgroundWorkflow(QObject):
         self._operation = None
         self._request_id = None
         self._request_target = None
-        self._set_busy(False, "Background candidate ready")
-        self._set_candidate(candidate)
+        self._set_busy(False, "Background draft ready")
+        self._set_draft(draft)
 
     def _operation_failed(self, request_id: UUID, failure: object) -> None:
         if request_id != self._request_id:
@@ -401,29 +439,34 @@ class BackgroundWorkflow(QObject):
         self._set_busy(False, "Background generation failed")
         self.failed.emit(failure)
 
-    def _set_candidate(self, candidate: BackgroundCandidate) -> None:
-        self._candidate = candidate
-        self.candidate_changed.emit(candidate)
+    def _set_draft(self, draft: BackgroundDraft) -> None:
+        previous = self._drafts.get(draft.card_id)
+        self._drafts[draft.card_id] = draft
+        if previous is not None:
+            previous.image_path.unlink(missing_ok=True)
+        self.drafts_changed.emit()
 
-    def _clear_candidate(self) -> None:
-        candidate = self._candidate
-        self._candidate = None
-        if candidate is not None:
-            candidate.image_path.unlink(missing_ok=True)
-        self.candidate_changed.emit(None)
+    def _clear_draft(self, card_id: UUID) -> None:
+        draft = self._drafts.pop(card_id, None)
+        if draft is not None:
+            draft.image_path.unlink(missing_ok=True)
+            self.drafts_changed.emit()
 
     def _set_busy(self, busy: bool, progress: str) -> None:
         self._busy = busy
         self.busy_changed.emit(busy)
         self.progress_changed.emit(progress)
 
-    def _require_ready_for_candidate(self) -> None:
+    def _require_ready_for_draft(
+        self,
+        card_id: UUID,
+        *,
+        replace_draft: bool,
+    ) -> None:
         if self._busy:
             raise BackgroundWorkflowError("background generation is already running")
-        if self._candidate is not None:
-            raise BackgroundWorkflowError(
-                "apply or discard the current background candidate first"
-            )
+        if card_id in self._drafts and not replace_draft:
+            raise BackgroundWorkflowError("this card already has a background draft")
         if self.session.store is None:
             raise BackgroundWorkflowError("save the stack before creating a background")
 
@@ -454,7 +497,7 @@ class BackgroundWorkflow(QObject):
 
 
 __all__ = [
-    "BackgroundCandidate",
+    "BackgroundDraft",
     "BackgroundGenerationSettings",
     "BackgroundWorkflow",
     "BackgroundWorkflowError",

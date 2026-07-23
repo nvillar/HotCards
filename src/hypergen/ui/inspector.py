@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from hypergen.application.background_workflow import BackgroundCandidate
+from hypergen.application.background_workflow import BackgroundDraft
 from hypergen.application.commands import (
     ChangeHotspotDestinationCommand,
     CommandError,
@@ -82,8 +82,8 @@ class Inspector(QWidget):
     document_changed = Signal(object)
     generate_background_requested = Signal()
     import_background_requested = Signal()
-    apply_background_requested = Signal()
-    discard_background_requested = Signal()
+    accept_background_draft_requested = Signal()
+    discard_background_draft_requested = Signal()
     revision_activation_requested = Signal(object)
     revision_deletion_requested = Signal(object)
     hotspot_selected = Signal(object)
@@ -103,7 +103,7 @@ class Inspector(QWidget):
         self._image_path_resolver = image_path_resolver
         self.selected_card_id: UUID | None = None
         self._rendering = False
-        self._has_background_candidate = False
+        self._has_background_draft = False
         self.setObjectName("inspector")
         self.setMinimumWidth(300)
 
@@ -236,23 +236,29 @@ class Inspector(QWidget):
         self.background_status.setWordWrap(True)
         card_layout.addWidget(self.background_status)
 
-        self.candidate_widget = QWidget()
-        candidate_layout = QVBoxLayout(self.candidate_widget)
-        candidate_layout.setContentsMargins(0, 4, 0, 4)
-        self.candidate_value = QLabel()
-        self.candidate_value.setObjectName("backgroundCandidateValue")
-        self.candidate_value.setWordWrap(True)
-        candidate_layout.addWidget(self.candidate_value)
-        candidate_actions = QHBoxLayout()
-        self.apply_background_button = QPushButton("Apply")
-        self.apply_background_button.setObjectName("applyBackgroundButton")
-        self.discard_background_button = QPushButton("Discard")
-        self.discard_background_button.setObjectName("discardBackgroundButton")
-        candidate_actions.addWidget(self.apply_background_button)
-        candidate_actions.addWidget(self.discard_background_button)
-        candidate_layout.addLayout(candidate_actions)
-        card_layout.addWidget(self.candidate_widget)
-        self.candidate_widget.setVisible(False)
+        self.draft_widget = QWidget()
+        draft_layout = QVBoxLayout(self.draft_widget)
+        draft_layout.setContentsMargins(0, 4, 0, 4)
+        self.draft_badge = QLabel("Draft")
+        self.draft_badge.setObjectName("backgroundDraftBadge")
+        self.draft_badge.setStyleSheet(
+            "font-weight: 600; color: palette(mid);"
+        )
+        draft_layout.addWidget(self.draft_badge)
+        self.draft_value = QLabel()
+        self.draft_value.setObjectName("backgroundDraftValue")
+        self.draft_value.setWordWrap(True)
+        draft_layout.addWidget(self.draft_value)
+        draft_actions = QHBoxLayout()
+        self.accept_draft_button = QPushButton("Accept as Revision")
+        self.accept_draft_button.setObjectName("acceptBackgroundDraftButton")
+        self.discard_draft_button = QPushButton("Discard Draft")
+        self.discard_draft_button.setObjectName("discardBackgroundDraftButton")
+        draft_actions.addWidget(self.accept_draft_button)
+        draft_actions.addWidget(self.discard_draft_button)
+        draft_layout.addLayout(draft_actions)
+        card_layout.addWidget(self.draft_widget)
+        self.draft_widget.setVisible(False)
         card_layout.addStretch(1)
         card_scroll.setWidget(card_page)
         self.inspector_tabs.addTab(card_scroll, "Card")
@@ -372,11 +378,11 @@ class Inspector(QWidget):
         self.import_background_button.clicked.connect(
             self.import_background_requested
         )
-        self.apply_background_button.clicked.connect(
-            self.apply_background_requested
+        self.accept_draft_button.clicked.connect(
+            self.accept_background_draft_requested
         )
-        self.discard_background_button.clicked.connect(
-            self.discard_background_requested
+        self.discard_draft_button.clicked.connect(
+            self.discard_background_draft_requested
         )
         self.revision_combo.currentIndexChanged.connect(self._revision_selected)
         self.revision_details_button.toggled.connect(
@@ -609,25 +615,28 @@ class Inspector(QWidget):
         self.hotspot_error.setText(message)
         self.hotspot_error.setVisible(bool(message))
 
-    def show_background_candidate(
+    def show_background_draft(
         self,
-        candidate: BackgroundCandidate | None,
+        draft: BackgroundDraft | None,
     ) -> None:
-        self._has_background_candidate = candidate is not None
-        self.candidate_widget.setVisible(candidate is not None)
-        self._update_card_tab_label()
-        if candidate is None:
-            self.candidate_value.clear()
-            return
-        origin = "Generated" if candidate.origin.value == "generated" else "Imported"
-        detail = (
-            candidate.generation_metadata.render_prompt
-            if candidate.generation_metadata is not None
-            else candidate.source_filename or ""
+        self._has_background_draft = draft is not None
+        self.draft_widget.setVisible(draft is not None)
+        self.generate_background_button.setText(
+            "Generate Replacement..." if draft is not None else "Generate"
         )
-        self.candidate_value.setText(f"{origin} candidate ready for review")
-        self.candidate_value.setToolTip(detail)
-        self._set_revision_thumbnail(candidate.image_path)
+        self._update_card_tab_label()
+        if draft is None:
+            self.draft_value.clear()
+            return
+        origin = "Generated" if draft.origin.value == "generated" else "Imported"
+        detail = (
+            draft.generation_metadata.render_prompt
+            if draft.generation_metadata is not None
+            else draft.source_filename or ""
+        )
+        self.draft_value.setText(f"{origin} background ready for review")
+        self.draft_value.setToolTip(detail)
+        self._set_revision_thumbnail(draft.image_path)
 
     def _render_revisions(self, document: Stack, card: Card) -> None:
         active_revision = self._active_revision(card)
@@ -753,7 +762,7 @@ class Inspector(QWidget):
     def _update_card_tab_label(self) -> None:
         self.inspector_tabs.setTabText(
             0,
-            "Card ●" if self._has_background_candidate else "Card",
+            "Card ●" if self._has_background_draft else "Card",
         )
 
     def _revision_selected(self, index: int) -> None:

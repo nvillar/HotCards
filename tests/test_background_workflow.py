@@ -1,4 +1,4 @@
-"""Tests for transient background candidates and durable revision application."""
+"""Tests for card-local background drafts and durable revision application."""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ from hypergen.application.background_workflow import (
     BackgroundWorkflowError,
     prepare_import_image,
 )
+from hypergen.application.commands import CreateCardCommand
 from hypergen.application.document_controller import DocumentController
 from hypergen.application.document_session import DocumentSession
 from hypergen.domain.models import Card, ImageGenerationInputs, Stack
@@ -130,19 +131,19 @@ def test_generate_then_apply_creates_durable_revision(tmp_path: Path) -> None:
     generated = workers.mflux_calls[0]()  # type: ignore[operator]
     workers.mflux_operations[0].succeeded.emit(generated)
 
-    candidate = workflow.candidate
-    assert candidate is not None
-    assert candidate.image_path.is_file()
+    draft = workflow.draft_for(card.id)
+    assert draft is not None
+    assert draft.image_path.is_file()
     assert generated.metadata.inputs == ImageGenerationInputs(
         scene_description="A garden",
         global_style="Storybook",
         card_style="Pencil",
     )
 
-    workflow.apply_candidate()
-    assert workflow.candidate is None
+    workflow.apply_draft(card.id)
+    assert workflow.draft_for(card.id) is None
     revision = controller.document.cards[0].image_revisions[0]
-    assert revision.id == candidate.revision_id
+    assert revision.id == draft.revision_id
     assert revision.generation_metadata is not None
     assert revision.generation_metadata.render_prompt == "A garden\n\nPencil"
     assert revision.generation_metadata.seed == 42
@@ -185,17 +186,17 @@ def test_import_crop_positions_and_discard_remain_transient(tmp_path: Path) -> N
 
     workflow, controller, session, _workers, card = bound_workflow(tmp_path)
     original = controller.document
-    candidate = workflow.import_image(card.id, source, position_x=0.25)
-    assert candidate.source_filename == "wide.png"
+    draft = workflow.import_image(card.id, source, position_x=0.25)
+    assert draft.source_filename == "wide.png"
     assert controller.document == original
     bundle_path = session.state.bundle_path
     assert bundle_path is not None
     assert StackStore(bundle_path).load() == original
-    with pytest.raises(BackgroundWorkflowError, match="apply or discard"):
+    with pytest.raises(BackgroundWorkflowError, match="already has"):
         workflow.import_image(card.id, source)
-    workflow.discard_candidate()
-    assert workflow.candidate is None
-    assert not candidate.image_path.exists()
+    workflow.discard_draft(card.id)
+    assert workflow.draft_for(card.id) is None
+    assert not draft.image_path.exists()
     assert controller.document == original
 
 
@@ -206,18 +207,18 @@ def test_revision_switch_delete_and_undo_restore_association(tmp_path: Path) -> 
     Image.new("RGB", (1024, 768), "red").save(first_source)
     Image.new("RGB", (1024, 768), "blue").save(second_source)
 
-    first_candidate = workflow.import_image(card.id, first_source)
-    workflow.apply_candidate()
-    second_candidate = workflow.import_image(card.id, second_source)
-    workflow.apply_candidate()
-    assert controller.document.cards[0].active_revision_id == second_candidate.revision_id
+    first_draft = workflow.import_image(card.id, first_source)
+    workflow.apply_draft(card.id)
+    second_draft = workflow.import_image(card.id, second_source)
+    workflow.apply_draft(card.id)
+    assert controller.document.cards[0].active_revision_id == second_draft.revision_id
 
-    workflow.activate_revision(card.id, first_candidate.revision_id)
-    assert controller.document.cards[0].active_revision_id == first_candidate.revision_id
-    workflow.delete_revision(card.id, first_candidate.revision_id)
-    assert controller.document.cards[0].active_revision_id == second_candidate.revision_id
+    workflow.activate_revision(card.id, first_draft.revision_id)
+    assert controller.document.cards[0].active_revision_id == first_draft.revision_id
+    workflow.delete_revision(card.id, first_draft.revision_id)
+    assert controller.document.cards[0].active_revision_id == second_draft.revision_id
     assert controller.undo()
-    assert controller.document.cards[0].active_revision_id == first_candidate.revision_id
+    assert controller.document.cards[0].active_revision_id == first_draft.revision_id
     assert session.flush()
 
 
@@ -233,7 +234,7 @@ def test_generation_failure_preserves_document(tmp_path: Path) -> None:
 
     assert failures == [error]
     assert not workflow.busy
-    assert workflow.candidate is None
+    assert workflow.draft_for(card.id) is None
     assert controller.document == before
 
 
@@ -250,7 +251,7 @@ def test_generation_result_is_discarded_after_document_identity_changes(
     controller.replace_document(Stack(name="Other", cards=(card,)))
     workers.mflux_operations[0].succeeded.emit(generated)
 
-    assert workflow.candidate is None
+    assert workflow.draft_for(card.id) is None
     assert not generated.output_path.exists()
     assert failures
     assert "stack or card changed" in str(failures[0])
@@ -272,3 +273,67 @@ def test_new_candidate_requires_bound_stack_and_resolved_prior_candidate(
 
     with pytest.raises(BackgroundWorkflowError, match="save the stack"):
         workflow.import_image(card.id, tmp_path / "missing.png")
+
+
+def test_drafts_are_card_local_and_replacement_is_atomic(tmp_path: Path) -> None:
+    workflow, controller, _session, workers, first_card = bound_workflow(tmp_path)
+    second_card = Card(name="Courtyard", scene_description="A courtyard")
+    controller.execute(CreateCardCommand(name=second_card.name, card_id=second_card.id))
+    first_source = tmp_path / "first.png"
+    second_source = tmp_path / "second.png"
+    Image.new("RGB", (1024, 768), "red").save(first_source)
+    Image.new("RGB", (1024, 768), "blue").save(second_source)
+
+    first_draft = workflow.import_image(first_card.id, first_source)
+    second_draft = workflow.import_image(second_card.id, second_source)
+
+    assert workflow.draft_for(first_card.id) == first_draft
+    assert workflow.draft_for(second_card.id) == second_draft
+    assert workflow.draft_card_ids == {first_card.id, second_card.id}
+
+    workflow.generate(first_card.id, replace_draft=True)
+    workers.mflux_operations[0].failed.emit(BackgroundWorkflowError("render failed"))
+    assert workflow.draft_for(first_card.id) == first_draft
+    assert first_draft.image_path.is_file()
+
+    workflow.generate(first_card.id, replace_draft=True)
+    generated = workers.mflux_calls[1]()  # type: ignore[operator]
+    workers.mflux_operations[1].succeeded.emit(generated)
+    replacement = workflow.draft_for(first_card.id)
+    assert replacement is not None and replacement != first_draft
+    assert not first_draft.image_path.exists()
+    assert workflow.draft_for(second_card.id) == second_draft
+
+
+def test_save_as_preserves_compatible_draft_for_acceptance(tmp_path: Path) -> None:
+    workflow, controller, session, _workers, card = bound_workflow(tmp_path)
+    source = tmp_path / "draft.png"
+    Image.new("RGB", (1024, 768), "green").save(source)
+    draft = workflow.import_image(card.id, source)
+
+    destination = tmp_path / "Copy.hypergen"
+    session.save_as(destination)
+
+    assert workflow.draft_for(card.id) == draft
+    workflow.apply_draft(card.id)
+    revision = controller.document.cards[0].image_revisions[0]
+    assert session.store is not None
+    assert session.store.bundle_path == destination
+    assert session.store.asset_path(revision.image_path).is_file()
+
+
+def test_orphaned_draft_is_removed_after_card_creation_is_undone(
+    tmp_path: Path,
+) -> None:
+    workflow, controller, _session, _workers, _card = bound_workflow(tmp_path)
+    command = CreateCardCommand(name="Temporary")
+    controller.execute(command)
+    source = tmp_path / "temporary.png"
+    Image.new("RGB", (1024, 768), "purple").save(source)
+    draft = workflow.import_image(command.card_id, source)
+
+    assert controller.undo()
+    workflow.discard_orphaned_drafts(card.id for card in controller.document.cards)
+
+    assert workflow.draft_for(command.card_id) is None
+    assert not draft.image_path.exists()

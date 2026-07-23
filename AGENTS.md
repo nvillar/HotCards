@@ -51,6 +51,8 @@ for live Ollama and MFLUX runs.
   intent feeds hotspot generation only and must not alter the image prompt.
 - Store each hotspot set under exactly one image revision. Never silently reuse
   hotspots against another image revision.
+- Keep pending background drafts session-only, with at most one per card. They
+  must not enter stack JSON, autosave, or Undo/Redo before acceptance.
 - Represent an image revision's applied hotspot set as `HotspotSet | None`.
   `None` means no set has been applied; an empty `HotspotSet` means an applied
   set currently contains no interactions.

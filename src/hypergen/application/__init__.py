@@ -1,7 +1,7 @@
 """Document commands, controllers, and workers."""
 
 from hypergen.application.background_workflow import (
-    BackgroundCandidate,
+    BackgroundDraft,
     BackgroundGenerationSettings,
     BackgroundWorkflow,
     BackgroundWorkflowError,
@@ -49,7 +49,7 @@ __all__ = [
     "AdapterWorkers",
     "AutosaveHook",
     "AvailabilityDiagnostic",
-    "BackgroundCandidate",
+    "BackgroundDraft",
     "BackgroundGenerationSettings",
     "BackgroundWorkflow",
     "BackgroundWorkflowError",
