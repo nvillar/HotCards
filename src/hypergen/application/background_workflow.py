@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
-from typing import Protocol
 from uuid import UUID, uuid4
 
 from PIL import Image, ImageOps, UnidentifiedImageError
@@ -32,16 +31,12 @@ from hypergen.domain.models import (
     ImageRevision,
     Stack,
 )
-from hypergen.generation.image_prompts import (
-    DerivedRenderPrompt,
-    OllamaImagePromptDeriver,
-)
+from hypergen.generation.image_prompts import compose_image_prompt
 from hypergen.generation.mflux_generator import (
     MfluxGenerationRequest,
     MfluxGenerationResult,
     MfluxGenerator,
 )
-from hypergen.generation.ollama_client import OllamaRuntime, OllamaSettings
 
 
 class BackgroundWorkflowError(ValueError):
@@ -52,8 +47,6 @@ class BackgroundWorkflowError(ValueError):
 class BackgroundGenerationSettings:
     """Machine-local effective settings captured before worker submission."""
 
-    ollama_endpoint: str
-    ollama_model: str
     mflux_model: str
     step_count: int
     quantization: int | None
@@ -68,11 +61,6 @@ class _GenerationTarget:
     bundle_path: Path
 
 
-class PromptDeriverProtocol(Protocol):
-    def derive(self, inputs: ImageGenerationInputs) -> DerivedRenderPrompt: ...
-
-
-PromptDeriverFactory = Callable[[BackgroundGenerationSettings], PromptDeriverProtocol]
 GenerationSettingsProvider = Callable[[], BackgroundGenerationSettings]
 
 
@@ -86,18 +74,6 @@ class BackgroundCandidate(DomainModel):
     source_filename: str | None = None
     generation_metadata: ImageGenerationMetadata | None = None
     created_at: datetime
-
-
-def _default_prompt_deriver(
-    settings: BackgroundGenerationSettings,
-) -> PromptDeriverProtocol:
-    runtime = OllamaRuntime(
-        OllamaSettings(
-            endpoint=settings.ollama_endpoint,
-            model=settings.ollama_model,
-        )
-    )
-    return OllamaImagePromptDeriver(runtime)
 
 
 def _crop_box(
@@ -177,7 +153,6 @@ class BackgroundWorkflow(QObject):
         workers: AdapterWorkers,
         settings_provider: GenerationSettingsProvider,
         *,
-        prompt_deriver_factory: PromptDeriverFactory = _default_prompt_deriver,
         mflux_generator: MfluxGenerator | None = None,
         temporary_directory: Path | None = None,
         parent: QObject | None = None,
@@ -187,7 +162,6 @@ class BackgroundWorkflow(QObject):
         self.session = session
         self.workers = workers
         self._settings_provider = settings_provider
-        self._prompt_deriver_factory = prompt_deriver_factory
         self._mflux_generator = mflux_generator or MfluxGenerator()
         self._owned_temporary_directory = (
             tempfile.TemporaryDirectory(prefix="hypergen-background-")
@@ -216,17 +190,20 @@ class BackgroundWorkflow(QObject):
         return self._busy
 
     def generate(self, card_id: UUID) -> WorkerOperation:
-        """Start Ollama prompt derivation followed by serialized MFLUX generation."""
+        """Start serialized MFLUX generation from author-controlled text."""
         self._require_ready_for_candidate()
         document = self.controller.document
         card = self._card(document, card_id)
         settings = self._settings_provider()
         inputs = ImageGenerationInputs(
             scene_description=card.scene_description,
-            interaction_description=card.interaction_description,
-            stack_art_direction=document.art_direction,
+            global_style=document.global_style,
             card_style=card.card_style,
         )
+        try:
+            render_prompt = compose_image_prompt(inputs)
+        except ValueError as error:
+            raise BackgroundWorkflowError(str(error)) from error
         request_id = uuid4()
         assert self.session.state.bundle_path is not None
         target = _GenerationTarget(
@@ -236,19 +213,36 @@ class BackgroundWorkflow(QObject):
         )
         self._request_id = request_id
         self._request_target = target
-        self._set_busy(True, "Deriving image prompt...")
-        operation = self.workers.run_ollama(
-            lambda: self._prompt_deriver_factory(settings).derive(inputs),
-            stage="deriving background image prompt",
+        seed = (
+            secrets.randbelow(2_147_483_648)
+            if settings.random_seed
+            else settings.fixed_seed
+        )
+        revision_id = uuid4()
+        output_path = self._temporary_directory / f"generated-{revision_id}.png"
+        request = MfluxGenerationRequest(
+            inputs=inputs,
+            render_prompt=render_prompt,
+            output_path=output_path,
+            model_identifier=settings.mflux_model,
+            seed=seed,
+            width=document.canvas.width,
+            height=document.canvas.height,
+            step_count=settings.step_count,
+            quantization=settings.quantization,
+        )
+        self._set_busy(True, "Generating background image...")
+        operation = self.workers.run_mflux(
+            lambda: self._mflux_generator.generate(request),
+            stage="generating background image",
         )
         self._operation = operation
         operation.succeeded.connect(
             partial(
-                self._prompt_derived,
+                self._image_generated,
                 request_id,
                 target,
-                inputs,
-                settings,
+                revision_id,
             )
         )
         operation.failed.connect(partial(self._operation_failed, request_id))
@@ -355,63 +349,6 @@ class BackgroundWorkflow(QObject):
         self.discard_candidate()
         if self._owned_temporary_directory is not None:
             self._owned_temporary_directory.cleanup()
-
-    def _prompt_derived(
-        self,
-        request_id: UUID,
-        target: _GenerationTarget,
-        inputs: ImageGenerationInputs,
-        settings: BackgroundGenerationSettings,
-        result: object,
-    ) -> None:
-        if request_id != self._request_id:
-            return
-        if not self._target_is_current(target):
-            self._finish_with_error(
-                BackgroundWorkflowError(
-                    "the stack or card changed before prompt derivation completed"
-                )
-            )
-            return
-        if not isinstance(result, DerivedRenderPrompt):
-            self._finish_with_error(
-                BackgroundWorkflowError("prompt derivation returned an unexpected result")
-            )
-            return
-        seed = (
-            secrets.randbelow(2_147_483_648)
-            if settings.random_seed
-            else settings.fixed_seed
-        )
-        document = self.controller.document
-        revision_id = uuid4()
-        output_path = self._temporary_directory / f"generated-{revision_id}.png"
-        request = MfluxGenerationRequest(
-            inputs=inputs,
-            derived_prompt=result.prompt,
-            output_path=output_path,
-            model_identifier=settings.mflux_model,
-            seed=seed,
-            width=document.canvas.width,
-            height=document.canvas.height,
-            step_count=settings.step_count,
-            quantization=settings.quantization,
-        )
-        self.progress_changed.emit("Generating background image...")
-        operation = self.workers.run_mflux(
-            lambda: self._mflux_generator.generate(request),
-            stage="generating background image",
-        )
-        self._operation = operation
-        operation.succeeded.connect(
-            partial(
-                self._image_generated,
-                request_id,
-                target,
-                revision_id,
-            )
-        )
-        operation.failed.connect(partial(self._operation_failed, request_id))
 
     def _image_generated(
         self,

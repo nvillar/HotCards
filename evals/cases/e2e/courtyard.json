@@ -1,12 +1,12 @@
 {
-  "case_version": "e2e-case-v1",
+  "case_version": "e2e-case-v2",
   "case_id": "courtyard",
   "inputs": {
     "scene_description": "A quiet stone castle courtyard at dusk with an arched wooden gate, a red travel chest, and a leafy tree.",
-    "interaction_description": "The gate leads to the moonlit garden. The travel chest opens the treasure room.",
-    "stack_art_direction": "Restrained storybook ink and watercolor illustration.",
-    "card_style": "Cool twilight shadows with warm lantern light."
+    "global_style": "Restrained storybook ink and watercolor illustration.",
+    "card_style": "Restrained storybook ink and watercolor illustration with cool twilight shadows and warm lantern light."
   },
+  "interaction_description": "The gate leads to the moonlit garden. The travel chest opens the treasure room.",
   "card_catalogue": [
     {
       "token": "C1",

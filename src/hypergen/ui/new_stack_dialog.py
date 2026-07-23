@@ -26,12 +26,12 @@ class NewStackDialog(QDialog):
 
         self.name_edit = QLineEdit("Untitled Stack")
         self.name_edit.setObjectName("newStackNameEdit")
-        self.art_direction_edit = QPlainTextEdit()
-        self.art_direction_edit.setObjectName("newStackArtDirectionEdit")
-        self.art_direction_edit.setPlaceholderText(
+        self.global_style_edit = QPlainTextEdit()
+        self.global_style_edit.setObjectName("newStackGlobalStyleEdit")
+        self.global_style_edit.setPlaceholderText(
             "Visual style shared by generated backgrounds"
         )
-        self.art_direction_edit.setMaximumHeight(90)
+        self.global_style_edit.setMaximumHeight(90)
         self.width_spin = QSpinBox()
         self.width_spin.setObjectName("newStackWidthSpin")
         self.width_spin.setRange(64, 8192)
@@ -43,7 +43,7 @@ class NewStackDialog(QDialog):
 
         form = QFormLayout()
         form.addRow("Name", self.name_edit)
-        form.addRow("Art direction", self.art_direction_edit)
+        form.addRow("Global style", self.global_style_edit)
         form.addRow("Canvas width", self.width_spin)
         form.addRow("Canvas height", self.height_spin)
 
@@ -63,7 +63,7 @@ class NewStackDialog(QDialog):
         first_card = Card(name="Card 1")
         return Stack(
             name=self.name_edit.text(),
-            art_direction=self.art_direction_edit.toPlainText(),
+            global_style=self.global_style_edit.toPlainText(),
             canvas=CanvasSize(
                 width=self.width_spin.value(),
                 height=self.height_spin.value(),

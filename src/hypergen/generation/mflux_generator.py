@@ -51,7 +51,7 @@ class MfluxGenerationRequest(DomainModel):
     """Effective request for one transient background candidate."""
 
     inputs: ImageGenerationInputs
-    derived_prompt: NonEmptyString
+    render_prompt: NonEmptyString
     output_path: Path
     model_identifier: NonEmptyString = "flux2-klein-4b"
     seed: int
@@ -134,7 +134,7 @@ class MfluxGenerator:
         try:
             image = model.generate_image(
                 seed=request.seed,
-                prompt=request.derived_prompt,
+                prompt=request.render_prompt,
                 num_inference_steps=request.step_count,
                 height=request.height,
                 width=request.width,
@@ -175,7 +175,7 @@ class MfluxGenerator:
             )
         metadata = ImageGenerationMetadata(
             inputs=request.inputs,
-            derived_prompt=request.derived_prompt,
+            render_prompt=request.render_prompt,
             model_identifier=request.model_identifier,
             mflux_version=_package_version("mflux"),
             dependency_versions={"mlx": _package_version("mlx")},

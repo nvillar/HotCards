@@ -37,12 +37,7 @@ from hypergen.generation.hotspot_prompts import (
     build_hotspot_prompt,
     build_hotspot_response_schema,
 )
-from hypergen.generation.image_prompts import (
-    IMAGE_PROMPT_VERSION,
-    OllamaImagePromptDeriver,
-    RenderPromptModelOutput,
-    build_image_prompt_request,
-)
+from hypergen.generation.image_prompts import IMAGE_PROMPT_VERSION, compose_image_prompt
 from hypergen.generation.mflux_generator import (
     MfluxGenerationRequest,
     MfluxGenerator,
@@ -128,8 +123,7 @@ def run_smoke(
                 "version": IMAGE_PROMPT_VERSION,
                 "sha256": contract_digest(
                     IMAGE_PROMPT_VERSION,
-                    inspect.getsource(build_image_prompt_request),
-                    RenderPromptModelOutput.model_json_schema(),
+                    inspect.getsource(compose_image_prompt),
                 ),
             },
             "hotspot_prompt": {
@@ -211,42 +205,21 @@ def run_smoke(
                 "A quiet stone castle courtyard at dusk with an arched wooden gate, "
                 "a red travel chest, and a leafy tree."
             ),
-            interaction_description=(
-                "The gate leads to the moonlit garden. The travel chest opens the treasure room."
-            ),
-            stack_art_direction="Restrained storybook ink and watercolor illustration.",
+            global_style="Restrained storybook ink and watercolor illustration.",
             card_style="Cool twilight shadows with warm lantern light.",
         )
-        prompt_deriver = OllamaImagePromptDeriver(runtime)
-        stage = "prompt_derivation_cold"
-        lifecycle.set_stage(stage)
-        prompt_cold = prompt_deriver.derive(inputs)
-        (raw_dir / "prompt-cold.json").write_text(prompt_cold.raw_response, encoding="utf-8")
-        result["stages"] = {
-            "prompt_derivation": {
-                "cold": prompt_cold.model_dump(mode="json"),
-            }
-        }
-        _write_result(settings.output_dir, result)
-        lifecycle.complete_stage(stage)
-        stage = "prompt_derivation_warm"
-        lifecycle.set_stage(stage)
-        prompt_warm = prompt_deriver.derive(inputs)
-        (raw_dir / "prompt-warm.json").write_text(prompt_warm.raw_response, encoding="utf-8")
-        result["stages"]["prompt_derivation"]["warm"] = prompt_warm.model_dump(mode="json")  # type: ignore[index]
-        _write_result(settings.output_dir, result)
-        lifecycle.complete_stage(stage)
-        stage = "hotspot_cold_reset"
-        lifecycle.set_stage(stage)
-        runtime.unload_model()
-        lifecycle.complete_stage(stage)
+        interaction_description = (
+            "The gate leads to the moonlit garden. The travel chest opens the treasure room."
+        )
+        render_prompt = compose_image_prompt(inputs)
+        result["render_prompt"] = render_prompt
 
         stage = "image_generation_cold"
         lifecycle.set_stage(stage)
         image_cold = mflux.generate(
             MfluxGenerationRequest(
                 inputs=inputs,
-                derived_prompt=prompt_cold.prompt,
+                render_prompt=render_prompt,
                 output_path=settings.output_dir / "generated-cold.png",
                 model_identifier=settings.mflux_model,
                 seed=settings.seed,
@@ -266,7 +239,7 @@ def run_smoke(
         image_warm = mflux.generate(
             MfluxGenerationRequest(
                 inputs=inputs,
-                derived_prompt=prompt_warm.prompt,
+                render_prompt=render_prompt,
                 output_path=settings.output_dir / "generated-warm.png",
                 model_identifier=settings.mflux_model,
                 seed=settings.seed,
@@ -284,7 +257,7 @@ def run_smoke(
         lifecycle.set_stage(stage)
         hotspot_request = HotspotGenerationRequest(
             image_path=fixture_copy,
-            interaction_description=inputs.interaction_description,
+            interaction_description=interaction_description,
             card_catalogue=(
                 CardCatalogueEntry(
                     token="C1",

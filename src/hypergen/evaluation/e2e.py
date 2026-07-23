@@ -44,20 +44,15 @@ from hypergen.generation.hotspot_prompts import (
     build_hotspot_prompt,
     build_hotspot_response_schema,
 )
-from hypergen.generation.image_prompts import (
-    IMAGE_PROMPT_VERSION,
-    OllamaImagePromptDeriver,
-    RenderPromptModelOutput,
-    build_image_prompt_request,
-)
+from hypergen.generation.image_prompts import IMAGE_PROMPT_VERSION, compose_image_prompt
 from hypergen.generation.mflux_generator import (
     MfluxGenerationRequest,
     MfluxGenerator,
 )
 from hypergen.generation.ollama_client import OllamaRuntime, OllamaSettings
 
-E2E_CASE_VERSION = "e2e-case-v1"
-E2E_RESULT_VERSION = "e2e-result-v1"
+E2E_CASE_VERSION = "e2e-case-v2"
+E2E_RESULT_VERSION = "e2e-result-v2"
 E2E_OLLAMA_MODELS = ("qwen3.5:4b", "qwen3.5:9b", "qwen3.6:35b")
 E2E_MFLUX_MODEL = "flux2-klein-4b"
 
@@ -65,9 +60,10 @@ E2E_MFLUX_MODEL = "flux2-klein-4b"
 class E2EEvaluationCase(DomainModel):
     """Tracked author input, destination contract, and provenance."""
 
-    case_version: Literal["e2e-case-v1"] = E2E_CASE_VERSION
+    case_version: Literal["e2e-case-v2"] = E2E_CASE_VERSION
     case_id: SafeCaseId
     inputs: ImageGenerationInputs
+    interaction_description: NonEmptyString
     card_catalogue: tuple[CardCatalogueEntry, ...]
     expected_hotspots: tuple[ExpectedHotspot, ...] = Field(min_length=1)
     provenance: NonEmptyString
@@ -185,6 +181,50 @@ def _execute_e2e(
     _write_result(settings.output_dir, result)
     mflux = mflux_factory()
     for case in cases:
+        render_prompt = compose_image_prompt(case.inputs)
+        stage_name = "image_generation"
+        lifecycle.set_stage(f"{case.case_id}:{stage_name}")
+        image_path = images_dir / case.case_id / "background.png"
+        started = perf_counter()
+        try:
+            generated = mflux.generate(
+                MfluxGenerationRequest(
+                    inputs=case.inputs,
+                    render_prompt=render_prompt,
+                    output_path=image_path,
+                    model_identifier=E2E_MFLUX_MODEL,
+                    seed=settings.seed,
+                    width=settings.width,
+                    height=settings.height,
+                    step_count=settings.step_count,
+                    quantization=settings.quantization,
+                )
+            )
+        except Exception as error:
+            artifact_path = None
+            image_stage = _failure_stage(
+                stage_name,
+                error,
+                perf_counter() - started,
+            )
+        else:
+            artifact_path = image_path.relative_to(settings.output_dir).as_posix()
+            image_stage = {
+                "name": stage_name,
+                "status": "success",
+                "elapsed_seconds": generated.metadata.duration_seconds,
+                "completed_at": datetime.now(UTC).isoformat(),
+                "artifact_path": artifact_path,
+                "timings": {
+                    "load_seconds": generated.load_duration_seconds,
+                    "inference_seconds": generated.generation_duration_seconds,
+                    "serialization_seconds": generated.serialization_duration_seconds,
+                },
+                "metadata": generated.metadata.model_dump(mode="json"),
+                "warnings": [],
+                "human_rubric": {field: None for field in IMAGE_RUBRIC_FIELDS},
+            }
+            lifecycle.complete_stage(f"{case.case_id}:{stage_name}")
         for model in E2E_OLLAMA_MODELS:
             model_name = _safe_name(model)
             raw_case_dir = raw_dir / case.case_id / model_name
@@ -193,13 +233,18 @@ def _execute_e2e(
                 "case_id": case.case_id,
                 "ollama_model": model,
                 "mflux_model": E2E_MFLUX_MODEL,
-                "stages": [],
-                "artifact_path": None,
+                "prompt_version": IMAGE_PROMPT_VERSION,
+                "render_prompt": render_prompt,
+                "stages": [image_stage],
+                "artifact_path": artifact_path,
                 "hotspot_proposals": None,
                 "image_human_rubric": {field: None for field in IMAGE_RUBRIC_FIELDS},
                 "hotspot_human_rubric": {field: None for field in HOTSPOT_RUBRIC_FIELDS},
             }
             candidates.append(candidate)
+            if artifact_path is None:
+                _write_result(settings.output_dir, result)
+                continue
             runtime = runtime_factory(
                 OllamaSettings(
                     endpoint=settings.ollama_endpoint,
@@ -236,87 +281,6 @@ def _execute_e2e(
             _write_result(settings.output_dir, result)
             lifecycle.complete_stage(f"{case.case_id}:{model}:{stage_name}")
 
-            stage_name = "prompt_derivation"
-            lifecycle.set_stage(f"{case.case_id}:{model}:{stage_name}")
-            started = perf_counter()
-            try:
-                runtime.unload_model()
-                prompt = OllamaImagePromptDeriver(runtime).derive(case.inputs)
-            except Exception as error:
-                if isinstance(error, ModelResponseError) and error.raw_response is not None:
-                    (raw_case_dir / "partial-prompt.json").write_text(
-                        error.raw_response, encoding="utf-8"
-                    )
-                candidate["stages"].append(  # type: ignore[union-attr]
-                    _failure_stage(stage_name, error, perf_counter() - started)
-                )
-                _write_result(settings.output_dir, result)
-                continue
-            (raw_case_dir / "prompt.json").write_text(prompt.raw_response, encoding="utf-8")
-            candidate["stages"].append(  # type: ignore[union-attr]
-                {
-                    "name": stage_name,
-                    "status": "success",
-                    "elapsed_seconds": prompt.duration_seconds,
-                    "completed_at": datetime.now(UTC).isoformat(),
-                    "result": prompt.model_dump(mode="json", exclude={"raw_response"}),
-                    "token_usage": {
-                        "prompt_tokens": prompt.prompt_eval_count,
-                        "output_tokens": prompt.eval_count,
-                    },
-                    "warnings": [],
-                    "human_rubric": None,
-                }
-            )
-            _write_result(settings.output_dir, result)
-            lifecycle.complete_stage(f"{case.case_id}:{model}:{stage_name}")
-
-            stage_name = "image_generation"
-            lifecycle.set_stage(f"{case.case_id}:{model}:{stage_name}")
-            image_path = images_dir / case.case_id / f"{model_name}.png"
-            started = perf_counter()
-            try:
-                generated = mflux.generate(
-                    MfluxGenerationRequest(
-                        inputs=case.inputs,
-                        derived_prompt=prompt.prompt,
-                        output_path=image_path,
-                        model_identifier=E2E_MFLUX_MODEL,
-                        seed=settings.seed,
-                        width=settings.width,
-                        height=settings.height,
-                        step_count=settings.step_count,
-                        quantization=settings.quantization,
-                    )
-                )
-            except Exception as error:
-                candidate["stages"].append(  # type: ignore[union-attr]
-                    _failure_stage(stage_name, error, perf_counter() - started)
-                )
-                _write_result(settings.output_dir, result)
-                continue
-            artifact_path = image_path.relative_to(settings.output_dir).as_posix()
-            candidate["artifact_path"] = artifact_path
-            candidate["stages"].append(  # type: ignore[union-attr]
-                {
-                    "name": stage_name,
-                    "status": "success",
-                    "elapsed_seconds": generated.metadata.duration_seconds,
-                    "completed_at": datetime.now(UTC).isoformat(),
-                    "artifact_path": artifact_path,
-                    "timings": {
-                        "load_seconds": generated.load_duration_seconds,
-                        "inference_seconds": generated.generation_duration_seconds,
-                        "serialization_seconds": generated.serialization_duration_seconds,
-                    },
-                    "metadata": generated.metadata.model_dump(mode="json"),
-                    "warnings": [],
-                    "human_rubric": candidate["image_human_rubric"],
-                }
-            )
-            _write_result(settings.output_dir, result)
-            lifecycle.complete_stage(f"{case.case_id}:{model}:{stage_name}")
-
             stage_name = "hotspot_generation"
             lifecycle.set_stage(f"{case.case_id}:{model}:{stage_name}")
             started = perf_counter()
@@ -324,7 +288,7 @@ def _execute_e2e(
                 hotspots = OllamaHotspotGenerator(runtime).generate(
                     HotspotGenerationRequest(
                         image_path=image_path,
-                        interaction_description=case.inputs.interaction_description,
+                        interaction_description=case.interaction_description,
                         card_catalogue=case.card_catalogue,
                         coordinate_extent=settings.coordinate_extent,
                     )
@@ -397,8 +361,7 @@ def run_e2e_evaluation(
                 "version": IMAGE_PROMPT_VERSION,
                 "sha256": contract_digest(
                     IMAGE_PROMPT_VERSION,
-                    inspect.getsource(build_image_prompt_request),
-                    RenderPromptModelOutput.model_json_schema(),
+                    inspect.getsource(compose_image_prompt),
                 ),
             },
             "hotspot_prompt": {

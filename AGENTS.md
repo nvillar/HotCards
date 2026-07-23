@@ -46,6 +46,9 @@ for live Ollama and MFLUX runs.
 - Keep image actions, model actions, and storage out of widgets.
 - Reuse production prompt builders, schemas, adapters, and geometry validation
   in the evaluation harness. Do not fork generation behavior.
+- Compose background prompts deterministically from Scene plus effective Style
+  (`Card.card_style` replaces `Stack.global_style` when present). Interaction
+  intent feeds hotspot generation only and must not alter the image prompt.
 - Store each hotspot set under exactly one image revision. Never silently reuse
   hotspots against another image revision.
 - Represent an image revision's applied hotspot set as `HotspotSet | None`.

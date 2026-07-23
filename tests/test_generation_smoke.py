@@ -61,15 +61,6 @@ class FakeOllamaClient:
         )
 
 
-def prompt_response() -> str:
-    return json.dumps(
-        {
-            "render_prompt": "Watercolor courtyard with a distinct gate and chest",
-            "interactive_subjects": ["gate", "chest"],
-        }
-    )
-
-
 def hotspot_response(*, left_edge: int = 100) -> str:
     return json.dumps(
         {
@@ -98,9 +89,7 @@ def test_smoke_runner_writes_cold_and_warm_stage_results(tmp_path: Path) -> None
     fixture = tmp_path / "fixture.png"
     fixture.write_bytes(b"fixture")
     output_dir = tmp_path / "run"
-    client = FakeOllamaClient(
-        [prompt_response(), prompt_response(), hotspot_response(), hotspot_response()]
-    )
+    client = FakeOllamaClient([hotspot_response(), hotspot_response()])
     runtime = OllamaRuntime(OllamaSettings(), client=client)
     mflux = MfluxGenerator(model_factory=lambda *_: FakeMfluxModel())
 
@@ -113,10 +102,14 @@ def test_smoke_runner_writes_cold_and_warm_stage_results(tmp_path: Path) -> None
     result = json.loads(result_path.read_text(encoding="utf-8"))
     assert result["status"] == "success"
     assert set(result["stages"]) == {
-        "prompt_derivation",
         "image_generation",
         "hotspot_generation",
     }
+    assert result["render_prompt"] == (
+        "A quiet stone castle courtyard at dusk with an arched wooden gate, "
+        "a red travel chest, and a leafy tree.\n\n"
+        "Cool twilight shadows with warm lantern light."
+    )
     assert result["stages"]["image_generation"]["cold"]["metadata"]["width"] == 1024
     assert result["settings"]["ollama"]["think"] is False
     assert result["settings"]["ollama"]["temperature"] == 0.0
@@ -163,8 +156,6 @@ def test_smoke_failure_promotes_retained_hotspot_warnings(tmp_path: Path) -> Non
         OllamaSettings(),
         client=FakeOllamaClient(
             [
-                prompt_response(),
-                prompt_response(),
                 hotspot_response(left_edge=-10),
                 '{"interactions":',
             ]

@@ -263,6 +263,16 @@ class EditCardTextCommand:
 
 
 @dataclass(frozen=True, slots=True)
+class EditGlobalStyleCommand:
+    """Commit the stack-wide image style as one editing undo boundary."""
+
+    value: str
+
+    def apply(self, document: Stack) -> Stack:
+        return validated_copy(document.model_copy(update={"global_style": self.value}))
+
+
+@dataclass(frozen=True, slots=True)
 class ActivateRevisionCommand:
     """Select a card's active image revision, or clear it."""
 
@@ -651,6 +661,7 @@ __all__ = [
     "DeletePolygonCommand",
     "DocumentCommand",
     "EditCardTextCommand",
+    "EditGlobalStyleCommand",
     "RenameCardCommand",
     "RenameInteractionCommand",
     "ReorderCardCommand",

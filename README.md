@@ -16,11 +16,14 @@ authoring shell remains usable when either service is unavailable.
 Stacks are stored as self-contained `.hypergen` directory bundles and
 autosaved atomically after creation or opening.
 
-The current Author workflow supports card metadata, generated or imported
-background candidates, revision history, and manual multi-area polygon hotspot
-editing with explicit card destinations. Run mode supports deterministic
-hotspot navigation, Back/Restart history, and configurable overlays. AI hotspot
-generation is still under development.
+The current Author workflow uses Card, Background, and Interactivity inspector
+tabs. Background prompts are composed directly from the author-visible Scene
+plus either the stack's global Style or a card-specific replacement; interaction
+intent does not alter the image. Authors can review generated or imported
+background candidates, manage revision history, and edit manual multi-area
+polygon hotspots with explicit card destinations. Run mode supports
+deterministic hotspot navigation, Back/Restart history, and configurable
+overlays. AI hotspot generation is still under development.
 
 ## Setup and run
 
@@ -53,7 +56,8 @@ tradeoffs are in [`evals/DECISION.md`](evals/DECISION.md).
 
 - `domain/` — in-memory stack model, geometry, validation.
 - `storage/` — human-readable `*.hypergen` bundle storage.
-- `generation/` — MFLUX image and Ollama hotspot adapters and prompt builders.
+- `generation/` — deterministic MFLUX prompt composition, image generation, and
+  Ollama hotspot adapters.
 - `application/` — document controller, typed commands, session undo, workers.
 - `ui/` — PySide6 Author and Run interface.
 - `evaluation/` — `hypergen-eval` harness reusing production adapters.

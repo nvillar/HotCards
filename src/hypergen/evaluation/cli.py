@@ -12,13 +12,13 @@ from hypergen.evaluation.e2e import (
     run_e2e_evaluation,
 )
 from hypergen.evaluation.hotspots import (
+    DEFAULT_OLLAMA_MODELS,
     HotspotEvaluationSettings,
     default_hotspot_output_dir,
     run_hotspot_evaluation,
 )
 from hypergen.evaluation.images import (
     DEFAULT_MFLUX_MODELS,
-    DEFAULT_OLLAMA_MODELS,
     ImageEvaluationSettings,
     default_image_output_dir,
     run_image_evaluation,
@@ -70,29 +70,18 @@ def build_parser() -> argparse.ArgumentParser:
     smoke.add_argument("--ollama-context-length", type=_positive_int, default=8192)
     images = subparsers.add_parser(
         "images",
-        help="compare Ollama render prompts and MFLUX image models",
+        help="compare MFLUX models with deterministic author-controlled prompts",
     )
     images.add_argument("--output-dir", type=Path)
     images.add_argument("--case-dir", type=Path, default=Path("evals/cases/images"))
-    images.add_argument("--ollama-endpoint", default="http://localhost:11434")
-    images.add_argument(
-        "--ollama-model",
-        action="append",
-        dest="ollama_models",
-        default=None,
-    )
     images.add_argument(
         "--mflux-model",
         action="append",
         dest="mflux_models",
         default=None,
     )
-    images.add_argument("--downstream-mflux-model", default="flux2-klein-4b")
     images.add_argument("--seed", type=int, default=42)
     images.add_argument("--quantization", type=int)
-    images.add_argument("--ollama-timeout", type=_positive_float, default=300.0)
-    images.add_argument("--ollama-num-predict", type=_positive_int, default=2048)
-    images.add_argument("--ollama-context-length", type=_positive_int, default=8192)
     hotspots = subparsers.add_parser(
         "hotspots",
         help="compare structured hotspot generation across Ollama models",
@@ -151,15 +140,9 @@ def run_cli(arguments: Sequence[str] | None = None) -> int:
                 ImageEvaluationSettings(
                     output_dir=args.output_dir or default_image_output_dir(),
                     case_dir=args.case_dir,
-                    ollama_endpoint=args.ollama_endpoint,
-                    ollama_models=tuple(args.ollama_models or DEFAULT_OLLAMA_MODELS),
                     mflux_models=tuple(args.mflux_models or DEFAULT_MFLUX_MODELS),
-                    downstream_mflux_model=args.downstream_mflux_model,
                     seed=args.seed,
                     quantization=args.quantization,
-                    ollama_timeout_seconds=args.ollama_timeout,
-                    ollama_num_predict=args.ollama_num_predict,
-                    ollama_context_length=args.ollama_context_length,
                 )
             )
         elif args.command == "hotspots":

@@ -30,10 +30,9 @@ def image_metadata() -> ImageGenerationMetadata:
     return ImageGenerationMetadata(
         inputs=ImageGenerationInputs(
             scene_description="A moonlit courtyard",
-            interaction_description="The iron gate leads to the garden",
-            stack_art_direction="Ink and watercolor",
+            global_style="Ink and watercolor",
         ),
-        derived_prompt="Moonlit ink courtyard with a clearly visible iron gate",
+        render_prompt="A moonlit courtyard\n\nInk and watercolor",
         model_identifier="flux2-klein-4b",
         mflux_version="0.18.0",
         dependency_versions={"mlx": "0.31.2"},
@@ -53,6 +52,17 @@ def test_stack_defaults_match_document_contract() -> None:
     assert (stack.canvas.width, stack.canvas.height) == (1024, 768)
     assert stack.run_overlay_mode is RunOverlayMode.HIDDEN
     assert stack.cards == ()
+
+
+def test_stack_serializes_only_the_global_style_key() -> None:
+    stack = Stack(name="Castle", global_style="Ink wash")
+
+    values = stack.model_dump(mode="json")
+
+    assert values["global_style"] == "Ink wash"
+    assert "art_direction" not in values
+    with pytest.raises(ValidationError, match="art_direction"):
+        Stack.model_validate({"name": "Castle", "art_direction": "Legacy"})
 
 
 def test_revalidated_dump_preserves_pydantic_field_selection() -> None:

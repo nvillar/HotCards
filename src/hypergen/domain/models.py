@@ -147,16 +147,20 @@ class ImageGenerationInputs(DomainModel):
     """Author-controlled inputs captured for a generated image."""
 
     scene_description: str
-    interaction_description: str
-    stack_art_direction: str
+    global_style: str
     card_style: str | None = None
+
+    @property
+    def effective_style(self) -> str:
+        """Return the per-card replacement or the stack-wide default."""
+        return self.card_style if self.card_style is not None else self.global_style
 
 
 class ImageGenerationMetadata(DomainModel):
     """Reproducibility metadata for an accepted generated image."""
 
     inputs: ImageGenerationInputs
-    derived_prompt: NonEmptyString
+    render_prompt: NonEmptyString
     model_identifier: NonEmptyString
     mflux_version: NonEmptyString
     dependency_versions: dict[str, str] = Field(default_factory=dict)
@@ -264,7 +268,7 @@ class Stack(DomainModel):
     schema_version: int = Field(default=CURRENT_SCHEMA_VERSION, strict=True)
     id: UUID = Field(default_factory=uuid4)
     name: NonEmptyString
-    art_direction: str = ""
+    global_style: str = ""
     canvas: CanvasSize = Field(default_factory=CanvasSize)
     run_overlay_mode: RunOverlayMode = RunOverlayMode.HIDDEN
     start_card_id: UUID | None = None

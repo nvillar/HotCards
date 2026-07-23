@@ -19,6 +19,7 @@ from hypergen.application.commands import (
     DeleteInteractionCommand,
     DeletePolygonCommand,
     EditCardTextCommand,
+    EditGlobalStyleCommand,
     RenameCardCommand,
     RenameInteractionCommand,
     ReorderCardCommand,
@@ -123,6 +124,9 @@ def test_text_edits_are_individual_typed_field_changes() -> None:
     assert changed.scene_description == "A quiet library"
     assert changed.interaction_description == "The ladder can be climbed"
     assert changed.card_style == "Woodcut"
+
+    document = EditGlobalStyleCommand(value="Watercolor").apply(document)
+    assert document.global_style == "Watercolor"
 
 
 def test_revision_activation_and_complete_hotspot_replacement() -> None:

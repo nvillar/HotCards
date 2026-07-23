@@ -20,7 +20,6 @@ from hypergen.application.background_workflow import (
 from hypergen.application.document_controller import DocumentController
 from hypergen.application.document_session import DocumentSession
 from hypergen.domain.models import Card, ImageGenerationInputs, Stack
-from hypergen.generation.image_prompts import DerivedRenderPrompt
 from hypergen.generation.mflux_generator import MfluxGenerator
 from hypergen.storage.stack_store import StackStore
 
@@ -44,17 +43,11 @@ class FakeOperation(QObject):
 
 class FakeWorkers:
     def __init__(self) -> None:
-        self.ollama_calls: list[object] = []
         self.mflux_calls: list[object] = []
-        self.ollama_operations: list[FakeOperation] = []
         self.mflux_operations: list[FakeOperation] = []
 
     def run_ollama(self, operation: object, *, stage: str) -> FakeOperation:
-        assert stage == "deriving background image prompt"
-        self.ollama_calls.append(operation)
-        handle = FakeOperation()
-        self.ollama_operations.append(handle)
-        return handle
+        raise AssertionError(f"background generation must not call Ollama: {stage}")
 
     def run_mflux(self, operation: object, *, stage: str) -> FakeOperation:
         assert stage == "generating background image"
@@ -82,25 +75,8 @@ class FakeMfluxModel:
         )
 
 
-class FakePromptDeriver:
-    def __init__(self) -> None:
-        self.inputs: list[ImageGenerationInputs] = []
-
-    def derive(self, inputs: ImageGenerationInputs) -> DerivedRenderPrompt:
-        self.inputs.append(inputs)
-        return DerivedRenderPrompt(
-            prompt="Storybook garden with a visible gate",
-            interactive_subjects=("gate",),
-            raw_response='{"render_prompt":"garden"}',
-            model_identifier="qwen3.5:9b",
-            duration_seconds=0.1,
-        )
-
-
 def settings() -> BackgroundGenerationSettings:
     return BackgroundGenerationSettings(
-        ollama_endpoint="http://localhost:11434",
-        ollama_model="qwen3.5:9b",
         mflux_model="flux2-klein-4b",
         step_count=4,
         quantization=None,
@@ -116,7 +92,6 @@ def bound_workflow(
     DocumentController,
     DocumentSession,
     FakeWorkers,
-    FakePromptDeriver,
     Card,
 ]:
     card = Card(
@@ -128,7 +103,7 @@ def bound_workflow(
     controller = DocumentController(
         Stack(
             name="Stack",
-            art_direction="Storybook",
+            global_style="Storybook",
             cards=(card,),
             start_card_id=card.id,
         )
@@ -136,50 +111,40 @@ def bound_workflow(
     session = DocumentSession(controller)
     session.create(controller.document, tmp_path / "Stack.hypergen")
     workers = FakeWorkers()
-    deriver = FakePromptDeriver()
     generator = MfluxGenerator(model_factory=lambda *_args: FakeMfluxModel())
     workflow = BackgroundWorkflow(
         controller,
         session,
         workers,  # type: ignore[arg-type]
         settings,
-        prompt_deriver_factory=lambda _settings: deriver,
         mflux_generator=generator,
         temporary_directory=tmp_path / "candidates",
     )
-    return workflow, controller, session, workers, deriver, card
+    return workflow, controller, session, workers, card
 
 
 def test_generate_then_apply_creates_durable_revision(tmp_path: Path) -> None:
-    workflow, controller, session, workers, deriver, card = bound_workflow(tmp_path)
+    workflow, controller, session, workers, card = bound_workflow(tmp_path)
 
     workflow.generate(card.id)
-    prompt_call = workers.ollama_calls[0]
-    derived = prompt_call()  # type: ignore[operator]
-    workers.ollama_operations[0].succeeded.emit(derived)
     generated = workers.mflux_calls[0]()  # type: ignore[operator]
     workers.mflux_operations[0].succeeded.emit(generated)
 
     candidate = workflow.candidate
     assert candidate is not None
     assert candidate.image_path.is_file()
-    assert deriver.inputs == [
-        ImageGenerationInputs(
-            scene_description="A garden",
-            interaction_description="The gate opens",
-            stack_art_direction="Storybook",
-            card_style="Pencil",
-        )
-    ]
+    assert generated.metadata.inputs == ImageGenerationInputs(
+        scene_description="A garden",
+        global_style="Storybook",
+        card_style="Pencil",
+    )
 
     workflow.apply_candidate()
     assert workflow.candidate is None
     revision = controller.document.cards[0].image_revisions[0]
     assert revision.id == candidate.revision_id
     assert revision.generation_metadata is not None
-    assert revision.generation_metadata.derived_prompt == (
-        "Storybook garden with a visible gate"
-    )
+    assert revision.generation_metadata.render_prompt == "A garden\n\nPencil"
     assert revision.generation_metadata.seed == 42
     assert revision.hotspot_set is None
     assert session.flush()
@@ -218,7 +183,7 @@ def test_import_crop_positions_and_discard_remain_transient(tmp_path: Path) -> N
     with Image.open(right) as right_image:
         assert right_image.getpixel((50, 50))[2] > 200
 
-    workflow, controller, session, _workers, _deriver, card = bound_workflow(tmp_path)
+    workflow, controller, session, _workers, card = bound_workflow(tmp_path)
     original = controller.document
     candidate = workflow.import_image(card.id, source, position_x=0.25)
     assert candidate.source_filename == "wide.png"
@@ -235,7 +200,7 @@ def test_import_crop_positions_and_discard_remain_transient(tmp_path: Path) -> N
 
 
 def test_revision_switch_delete_and_undo_restore_association(tmp_path: Path) -> None:
-    workflow, controller, session, _workers, _deriver, card = bound_workflow(tmp_path)
+    workflow, controller, session, _workers, card = bound_workflow(tmp_path)
     first_source = tmp_path / "first.png"
     second_source = tmp_path / "second.png"
     Image.new("RGB", (1024, 768), "red").save(first_source)
@@ -257,14 +222,14 @@ def test_revision_switch_delete_and_undo_restore_association(tmp_path: Path) -> 
 
 
 def test_generation_failure_preserves_document(tmp_path: Path) -> None:
-    workflow, controller, _session, workers, _deriver, card = bound_workflow(tmp_path)
+    workflow, controller, _session, workers, card = bound_workflow(tmp_path)
     failures: list[object] = []
     workflow.failed.connect(failures.append)
     before = controller.document
 
     workflow.generate(card.id)
-    error = BackgroundWorkflowError("prompt failed")
-    workers.ollama_operations[0].failed.emit(error)
+    error = BackgroundWorkflowError("render failed")
+    workers.mflux_operations[0].failed.emit(error)
 
     assert failures == [error]
     assert not workflow.busy
@@ -275,12 +240,10 @@ def test_generation_failure_preserves_document(tmp_path: Path) -> None:
 def test_generation_result_is_discarded_after_document_identity_changes(
     tmp_path: Path,
 ) -> None:
-    workflow, controller, _session, workers, _deriver, card = bound_workflow(tmp_path)
+    workflow, controller, _session, workers, card = bound_workflow(tmp_path)
     failures: list[object] = []
     workflow.failed.connect(failures.append)
     workflow.generate(card.id)
-    derived = workers.ollama_calls[0]()  # type: ignore[operator]
-    workers.ollama_operations[0].succeeded.emit(derived)
     generated = workers.mflux_calls[0]()  # type: ignore[operator]
     assert generated.output_path.is_file()
 

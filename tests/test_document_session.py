@@ -34,7 +34,7 @@ def test_create_binds_bundle_before_mutations_and_flushes_autosave(
     first_card = Card(name="Card 1")
     created = Stack(
         name="Garden",
-        art_direction="Pencil sketch",
+        global_style="Pencil sketch",
         cards=(first_card,),
         start_card_id=first_card.id,
     )

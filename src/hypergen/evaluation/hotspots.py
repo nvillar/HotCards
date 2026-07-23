@@ -20,7 +20,6 @@ from pydantic import Field
 from hypergen.domain.geometry import validate_polygon
 from hypergen.domain.models import DomainModel, NonEmptyString, PositiveInt
 from hypergen.evaluation.contracts import SafeCaseId
-from hypergen.evaluation.images import DEFAULT_OLLAMA_MODELS
 from hypergen.evaluation.manifest import (
     EnvironmentProvider,
     RunLifecycle,
@@ -56,6 +55,7 @@ from hypergen.generation.ollama_client import (
 
 HOTSPOT_CASE_VERSION = "hotspot-case-v1"
 HOTSPOT_RESULT_VERSION = "hotspot-result-v1"
+DEFAULT_OLLAMA_MODELS = ("qwen3.5:4b", "qwen3.5:9b", "qwen3.6:35b")
 HUMAN_RUBRIC_FIELDS = (
     "missing_hotspots",
     "invented_hotspots",

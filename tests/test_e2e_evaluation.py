@@ -31,7 +31,12 @@ class FakeGeneratedImage:
 
 
 class FakeMfluxModel:
+    def __init__(self, calls: list[dict[str, object]] | None = None) -> None:
+        self.calls = calls
+
     def generate_image(self, **kwargs: object) -> FakeGeneratedImage:
+        if self.calls is not None:
+            self.calls.append(kwargs)
         return FakeGeneratedImage(
             kwargs["width"],  # type: ignore[arg-type]
             kwargs["height"],  # type: ignore[arg-type]
@@ -54,14 +59,7 @@ class FakeOllamaClient:
 
     def chat(self, **kwargs: object) -> SimpleNamespace:
         self.call_count += 1
-        if self.call_count == 1:
-            content = json.dumps(
-                {
-                    "render_prompt": f"Watercolor gate rendered by {self.model}",
-                    "interactive_subjects": ["gate"],
-                }
-            )
-        elif self.model == "qwen3.5:9b":
+        if self.model == "qwen3.5:9b":
             content = '{"interactions":'
         else:
             far_edge = 1_500 if self.model == "qwen3.6:35b" else 500
@@ -100,13 +98,14 @@ def _write_case(case_dir: Path) -> None:
     (case_dir / "one.json").write_text(
         json.dumps(
             {
-                "case_version": "e2e-case-v1",
+                "case_version": "e2e-case-v2",
                 "case_id": "one",
                 "inputs": {
                     "scene_description": "Courtyard with gate",
-                    "interaction_description": "Gate leads to garden",
-                    "stack_art_direction": "Watercolor",
+                    "global_style": "Watercolor",
+                    "card_style": None,
                 },
+                "interaction_description": "Gate leads to garden",
                 "card_catalogue": [{"token": "C1", "name": "Garden"}],
                 "expected_hotspots": [{"label": "Gate", "target_token": "C1"}],
                 "provenance": "Project-authored synthetic input.",
@@ -122,6 +121,7 @@ def test_e2e_uses_exact_models_fixed_mflux_and_preserves_partial_stages(
     case_dir = tmp_path / "cases"
     _write_case(case_dir)
     requested_models: list[str] = []
+    mflux_calls: list[dict[str, object]] = []
 
     def runtime_factory(settings: OllamaSettings) -> OllamaRuntime:
         requested_models.append(settings.model)
@@ -130,14 +130,25 @@ def test_e2e_uses_exact_models_fixed_mflux_and_preserves_partial_stages(
     result_path = run_e2e_evaluation(
         E2EEvaluationSettings(output_dir=tmp_path / "run", case_dir=case_dir),
         runtime_factory=runtime_factory,
-        mflux_factory=lambda: MfluxGenerator(model_factory=lambda *_: FakeMfluxModel()),
+        mflux_factory=lambda: MfluxGenerator(
+            model_factory=lambda *_: FakeMfluxModel(mflux_calls)
+        ),
         environment_provider=lambda: {"git_sha": "test"},
     )
 
     result = json.loads(result_path.read_text())
     assert requested_models == list(E2E_OLLAMA_MODELS)
+    assert len(mflux_calls) == 1
     assert {row["mflux_model"] for row in result["candidates"]} == {E2E_MFLUX_MODEL}
     assert len(result["candidates"]) == 3
+    assert {row["render_prompt"] for row in result["candidates"]} == {
+        "Courtyard with gate\n\nWatercolor"
+    }
+    assert all(
+        stage["name"] != "prompt_derivation"
+        for row in result["candidates"]
+        for stage in row["stages"]
+    )
     failed = next(row for row in result["candidates"] if row["ollama_model"] == "qwen3.5:9b")
     assert failed["artifact_path"]
     assert failed["stages"][-1]["failure"]["classification"] == "structured_output_validation"

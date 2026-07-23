@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import json
+from collections.abc import Callable
+from pathlib import Path
 from uuid import UUID
 
 from pydantic import ValidationError
 from PySide6.QtCore import QSignalBlocker, Qt, QTimer, Signal
-from PySide6.QtGui import QFocusEvent
+from PySide6.QtGui import QFocusEvent, QPixmap
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QFormLayout,
-    QFrame,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -21,8 +24,10 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
-    QScrollArea,
+    QRadioButton,
     QStackedWidget,
+    QTabWidget,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -35,6 +40,7 @@ from hypergen.application.commands import (
     DeleteInteractionCommand,
     DocumentCommand,
     EditCardTextCommand,
+    EditGlobalStyleCommand,
     RenameCardCommand,
     RenameInteractionCommand,
     ReorderHotspotCommand,
@@ -59,28 +65,6 @@ class _CommitPlainTextEdit(QPlainTextEdit):
         self.editing_finished.emit()
 
 
-class InspectorSection(QWidget):
-    """An always-visible titled inspector section."""
-
-    def __init__(self, title: str, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.title_label = QLabel(title)
-        self.title_label.setStyleSheet("font-weight: 600; margin-top: 6px;")
-        separator = QFrame()
-        separator.setFrameShape(QFrame.Shape.HLine)
-        separator.setFrameShadow(QFrame.Shadow.Sunken)
-        self.content = QWidget()
-        self.content_layout = QVBoxLayout(self.content)
-        self.content_layout.setContentsMargins(8, 4, 0, 10)
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(2)
-        layout.addWidget(self.title_label)
-        layout.addWidget(separator)
-        layout.addWidget(self.content)
-
-
 class Inspector(QWidget):
     """Render selected-card snapshots and issue typed metadata commands."""
 
@@ -94,58 +78,138 @@ class Inspector(QWidget):
     hotspot_selected = Signal(object)
     add_hotspot_requested = Signal()
     add_hotspot_component_requested = Signal(object)
+    render_inputs_changed = Signal()
 
-    def __init__(self, controller: DocumentController, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        controller: DocumentController,
+        parent: QWidget | None = None,
+        *,
+        image_path_resolver: Callable[[str], Path | None] | None = None,
+    ) -> None:
         super().__init__(parent)
         self.controller = controller
+        self._image_path_resolver = image_path_resolver
         self.selected_card_id: UUID | None = None
         self._rendering = False
+        self._has_background_candidate = False
         self.setObjectName("inspector")
-        self.setMinimumWidth(240)
+        self.setMinimumWidth(300)
 
         heading = QLabel("Inspector")
         heading.setObjectName("inspectorHeading")
 
-        self.card_section, card_layout = self._section("Card")
-        self.card_section.setObjectName("cardInspectorSection")
+        self.inspector_tabs = QTabWidget()
+        self.inspector_tabs.setObjectName("inspectorTabs")
+
+        card_page = QWidget()
+        card_page.setObjectName("cardInspectorTab")
+        card_layout = QVBoxLayout(card_page)
         self.card_name_edit = QLineEdit()
         self.card_name_edit.setObjectName("cardNameEdit")
+        name_form = QFormLayout()
+        name_form.addRow("Name", self.card_name_edit)
+        card_layout.addLayout(name_form)
+        scene_heading = QHBoxLayout()
+        scene_heading.addWidget(QLabel("Scene"))
+        scene_heading.addStretch(1)
+        self.enrich_scene_button = QPushButton("Enrich")
+        self.enrich_scene_button.setObjectName("enrichSceneButton")
+        self.enrich_scene_button.setEnabled(False)
+        self.enrich_scene_button.setToolTip("Scene enrichment is planned in issue #25")
+        scene_heading.addWidget(self.enrich_scene_button)
+        card_layout.addLayout(scene_heading)
         self.scene_edit = _CommitPlainTextEdit()
         self.scene_edit.setObjectName("sceneDescriptionEdit")
-        self.scene_edit.setMaximumHeight(90)
-        self.interactions_edit = _CommitPlainTextEdit()
-        self.interactions_edit.setObjectName("interactionDescriptionEdit")
-        self.interactions_edit.setMaximumHeight(90)
-        self.card_style_edit = QLineEdit()
-        self.card_style_edit.setObjectName("cardStyleEdit")
+        self.scene_edit.setPlaceholderText("Describe the image to generate")
+        self.scene_edit.setMaximumHeight(150)
+        card_layout.addWidget(self.scene_edit)
         self.start_card_check = QCheckBox("Use as start card")
         self.start_card_check.setObjectName("startCardCheck")
+        card_layout.addWidget(self.start_card_check)
         self.validation_error = QLabel()
         self.validation_error.setObjectName("inspectorValidationError")
         self.validation_error.setWordWrap(True)
         self.validation_error.setVisible(False)
-        card_form = QFormLayout()
-        card_form.addRow("Name", self.card_name_edit)
-        card_form.addRow("Scene", self.scene_edit)
-        card_form.addRow("Interactions", self.interactions_edit)
-        card_form.addRow("Style", self.card_style_edit)
-        card_layout.addLayout(card_form)
-        card_layout.addWidget(self.start_card_check)
         card_layout.addWidget(self.validation_error)
+        card_layout.addStretch(1)
+        self.inspector_tabs.addTab(card_page, "Card")
 
-        self.background_section, background_layout = self._section("Background")
-        self.background_section.setObjectName("backgroundInspectorSection")
+        background_page = QWidget()
+        background_page.setObjectName("backgroundInspectorTab")
+        background_layout = QVBoxLayout(background_page)
+        revision_header = QHBoxLayout()
+        self.revision_thumbnail = QLabel("No image")
+        self.revision_thumbnail.setObjectName("backgroundRevisionThumbnail")
+        self.revision_thumbnail.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.revision_thumbnail.setFixedSize(120, 90)
+        self.revision_thumbnail.setStyleSheet(
+            "border: 1px solid palette(mid); color: palette(mid);"
+        )
+        revision_header.addWidget(self.revision_thumbnail)
+        revision_summary = QVBoxLayout()
         self.background_value = QLabel("No background revision")
         self.background_value.setObjectName("backgroundRevisionValue")
         self.background_value.setWordWrap(True)
-        background_layout.addWidget(self.background_value)
+        revision_summary.addWidget(self.background_value)
+        self.revision_combo = QComboBox()
+        self.revision_combo.setObjectName("backgroundRevisionCombo")
+        revision_summary.addWidget(self.revision_combo)
+        revision_header.addLayout(revision_summary, 1)
+        background_layout.addLayout(revision_header)
+        self.revision_metadata = QLabel()
+        self.revision_metadata.setObjectName("backgroundRevisionMetadata")
+        background_layout.addWidget(self.revision_metadata)
+        self.revision_details_button = QToolButton()
+        self.revision_details_button.setObjectName("backgroundRevisionDetailsButton")
+        self.revision_details_button.setText("Details ▸")
+        self.revision_details_button.setCheckable(True)
+        self.revision_details_button.setVisible(False)
+        background_layout.addWidget(self.revision_details_button)
+        self.revision_details = QLabel()
+        self.revision_details.setObjectName("backgroundRevisionDetails")
+        self.revision_details.setWordWrap(True)
+        self.revision_details.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self.revision_details.setVisible(False)
+        background_layout.addWidget(self.revision_details)
+
+        style_heading = QLabel("Style")
+        style_heading.setStyleSheet("font-weight: 600; margin-top: 8px;")
+        background_layout.addWidget(style_heading)
+        style_modes = QHBoxLayout()
+        self.global_style_radio = QRadioButton("Global")
+        self.global_style_radio.setObjectName("globalStyleRadio")
+        self.card_style_radio = QRadioButton("This card only")
+        self.card_style_radio.setObjectName("cardStyleRadio")
+        self.style_mode_group = QButtonGroup(self)
+        self.style_mode_group.addButton(self.global_style_radio)
+        self.style_mode_group.addButton(self.card_style_radio)
+        style_modes.addWidget(self.global_style_radio)
+        style_modes.addWidget(self.card_style_radio)
+        style_modes.addStretch(1)
+        background_layout.addLayout(style_modes)
+        self.style_edit = _CommitPlainTextEdit()
+        self.style_edit.setObjectName("styleEdit")
+        self.style_edit.setMaximumHeight(100)
+        self.style_edit.setPlaceholderText("Visual style for generated backgrounds")
+        background_layout.addWidget(self.style_edit)
+        self.style_scope_caption = QLabel()
+        self.style_scope_caption.setObjectName("styleScopeCaption")
+        self.style_scope_caption.setWordWrap(True)
+        background_layout.addWidget(self.style_scope_caption)
+
         background_actions = QHBoxLayout()
         self.generate_background_button = QPushButton("Generate")
         self.generate_background_button.setObjectName("generateBackgroundButton")
         self.import_background_button = QPushButton("Import...")
         self.import_background_button.setObjectName("importBackgroundButton")
+        self.delete_revision_button = QPushButton("Delete Revision...")
+        self.delete_revision_button.setObjectName("deleteRevisionButton")
         background_actions.addWidget(self.generate_background_button)
         background_actions.addWidget(self.import_background_button)
+        background_actions.addWidget(self.delete_revision_button)
         background_layout.addLayout(background_actions)
         self.background_status = QLabel()
         self.background_status.setObjectName("backgroundStatus")
@@ -169,22 +233,36 @@ class Inspector(QWidget):
         candidate_layout.addLayout(candidate_actions)
         background_layout.addWidget(self.candidate_widget)
         self.candidate_widget.setVisible(False)
+        background_layout.addStretch(1)
+        self.inspector_tabs.addTab(background_page, "Background")
 
-        revision_form = QFormLayout()
-        self.revision_combo = QComboBox()
-        self.revision_combo.setObjectName("backgroundRevisionCombo")
-        revision_form.addRow("Revision", self.revision_combo)
-        background_layout.addLayout(revision_form)
-        self.revision_metadata = QLabel()
-        self.revision_metadata.setObjectName("backgroundRevisionMetadata")
-        self.revision_metadata.setWordWrap(True)
-        background_layout.addWidget(self.revision_metadata)
-        self.delete_revision_button = QPushButton("Delete Revision...")
-        self.delete_revision_button.setObjectName("deleteRevisionButton")
-        background_layout.addWidget(self.delete_revision_button)
-
-        self.hotspots_section, hotspots_layout = self._section("Hotspots")
-        self.hotspots_section.setObjectName("hotspotsInspectorSection")
+        interactivity_page = QWidget()
+        interactivity_page.setObjectName("interactivityInspectorTab")
+        hotspots_layout = QVBoxLayout(interactivity_page)
+        hotspots_layout.addWidget(QLabel("Intent"))
+        self.interactions_edit = _CommitPlainTextEdit()
+        self.interactions_edit.setObjectName("interactionDescriptionEdit")
+        self.interactions_edit.setPlaceholderText(
+            "Describe what people can interact with and where it leads"
+        )
+        self.interactions_edit.setMaximumHeight(110)
+        hotspots_layout.addWidget(self.interactions_edit)
+        hotspots_heading = QHBoxLayout()
+        hotspots_title = QLabel("Hotspots")
+        hotspots_title.setStyleSheet("font-weight: 600; margin-top: 8px;")
+        hotspots_heading.addWidget(hotspots_title)
+        hotspots_heading.addStretch(1)
+        self.hotspot_help_button = QToolButton()
+        self.hotspot_help_button.setObjectName("hotspotHelpButton")
+        self.hotspot_help_button.setText("ⓘ")
+        self.hotspot_help_button.setToolTip(
+            "Click to add vertices; double-click or Return to close. "
+            "Drag vertices or a selected area. Double-click an edge to insert a vertex. "
+            "Delete removes the selected vertex or area; Escape cancels drawing. "
+            "Use the middle mouse button to pan."
+        )
+        hotspots_heading.addWidget(self.hotspot_help_button)
+        hotspots_layout.addLayout(hotspots_heading)
         self.hotspots_placeholder = QLabel(
             "Apply a background before adding hotspots."
         )
@@ -210,29 +288,26 @@ class Inspector(QWidget):
         hotspot_form.addRow("Destination", self.hotspot_destination_combo)
         hotspots_layout.addLayout(hotspot_form)
         order_actions = QHBoxLayout()
-        self.move_hotspot_up_button = QPushButton("Move Up")
+        self.move_hotspot_up_button = QPushButton("↑")
         self.move_hotspot_up_button.setObjectName("moveHotspotUpButton")
-        self.move_hotspot_down_button = QPushButton("Move Down")
+        self.move_hotspot_up_button.setToolTip("Move hotspot up")
+        self.move_hotspot_down_button = QPushButton("↓")
         self.move_hotspot_down_button.setObjectName("moveHotspotDownButton")
+        self.move_hotspot_down_button.setToolTip("Move hotspot down")
+        self.delete_hotspot_button = QPushButton("🗑")
+        self.delete_hotspot_button.setObjectName("deleteHotspotButton")
+        self.delete_hotspot_button.setToolTip("Delete hotspot")
         order_actions.addWidget(self.move_hotspot_up_button)
         order_actions.addWidget(self.move_hotspot_down_button)
+        order_actions.addWidget(self.delete_hotspot_button)
+        order_actions.addStretch(1)
         hotspots_layout.addLayout(order_actions)
-        self.delete_hotspot_button = QPushButton("Delete Hotspot...")
-        self.delete_hotspot_button.setObjectName("deleteHotspotButton")
-        hotspots_layout.addWidget(self.delete_hotspot_button)
-        self.hotspot_help = QLabel(
-            "Click to add vertices; double-click or Return to close. "
-            "Drag vertices or a selected area. Double-click an edge to insert a vertex. "
-            "Delete removes the selected vertex or area; Escape cancels drawing. "
-            "Use the middle mouse button to pan."
-        )
-        self.hotspot_help.setWordWrap(True)
-        hotspots_layout.addWidget(self.hotspot_help)
         self.hotspot_error = QLabel()
         self.hotspot_error.setObjectName("hotspotValidationError")
         self.hotspot_error.setWordWrap(True)
         self.hotspot_error.setVisible(False)
         hotspots_layout.addWidget(self.hotspot_error)
+        self.inspector_tabs.addTab(interactivity_page, "Interactivity")
 
         self.pages = QStackedWidget()
         empty_page = QWidget()
@@ -249,16 +324,8 @@ class Inspector(QWidget):
         form_page = QWidget()
         form_layout = QVBoxLayout(form_page)
         form_layout.addWidget(heading)
-        form_layout.addWidget(self.card_section)
-        form_layout.addWidget(self.background_section)
-        form_layout.addWidget(self.hotspots_section)
-        form_layout.addStretch(1)
-        form_scroll = QScrollArea()
-        form_scroll.setObjectName("inspectorScrollArea")
-        form_scroll.setWidgetResizable(True)
-        form_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        form_scroll.setWidget(form_page)
-        self.pages.addWidget(form_scroll)
+        form_layout.addWidget(self.inspector_tabs, 1)
+        self.pages.addWidget(form_page)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -267,7 +334,15 @@ class Inspector(QWidget):
         self.card_name_edit.editingFinished.connect(self.commit_card_metadata)
         self.scene_edit.editing_finished.connect(self.commit_card_metadata)
         self.interactions_edit.editing_finished.connect(self.commit_card_metadata)
-        self.card_style_edit.editingFinished.connect(self.commit_card_metadata)
+        self.style_edit.editing_finished.connect(self._commit_style_text)
+        self.scene_edit.textChanged.connect(self._render_input_edited)
+        self.style_edit.textChanged.connect(self._render_input_edited)
+        self.global_style_radio.toggled.connect(
+            lambda checked: checked and self._set_style_mode(use_override=False)
+        )
+        self.card_style_radio.toggled.connect(
+            lambda checked: checked and self._set_style_mode(use_override=True)
+        )
         self.start_card_check.toggled.connect(self._set_start_card)
         self.generate_background_button.clicked.connect(
             self.generate_background_requested
@@ -282,6 +357,9 @@ class Inspector(QWidget):
             self.discard_background_requested
         )
         self.revision_combo.currentIndexChanged.connect(self._revision_selected)
+        self.revision_details_button.toggled.connect(
+            self._toggle_revision_details
+        )
         self.delete_revision_button.clicked.connect(self._delete_selected_revision)
         self.hotspot_list.currentItemChanged.connect(
             self._hotspot_selection_changed
@@ -303,12 +381,19 @@ class Inspector(QWidget):
         self.delete_hotspot_button.clicked.connect(self._delete_hotspot)
         self.render(controller.document, None)
 
-    @staticmethod
-    def _section(
-        title: str,
-    ) -> tuple[InspectorSection, QVBoxLayout]:
-        section = InspectorSection(title)
-        return section, section.content_layout
+    def _render_input_edited(self) -> None:
+        if not self._rendering:
+            self.render_inputs_changed.emit()
+
+    def has_render_prompt_input(self) -> bool:
+        """Return whether the visible Scene or effective Style can render."""
+        return bool(
+            self.selected_card_id is not None
+            and (
+                self.scene_edit.toPlainText().strip()
+                or self.style_edit.toPlainText().strip()
+            )
+        )
 
     def render(self, document: Stack, selected_card_id: UUID | None) -> None:
         """Render only data from the supplied authoritative snapshot."""
@@ -324,30 +409,45 @@ class Inspector(QWidget):
                 self.card_name_edit.clear()
                 self.scene_edit.clear()
                 self.interactions_edit.clear()
-                self.card_style_edit.clear()
+                self.style_edit.clear()
                 self.start_card_check.setChecked(False)
                 self.background_value.setText("No card selected")
                 self.revision_combo.clear()
                 self.revision_metadata.clear()
+                self.revision_details.clear()
+                self._set_revision_thumbnail(None)
                 self.hotspots_placeholder.setText("Select a card to view hotspots.")
                 self.hotspots_placeholder.setVisible(True)
                 self.hotspot_list.clear()
                 self._render_hotspot_properties(document, None, None)
+                self._update_tab_labels(0)
                 return
             self.pages.setCurrentIndex(1)
             self.card_name_edit.setText(card.name)
             self.scene_edit.setPlainText(card.scene_description)
             self.interactions_edit.setPlainText(card.interaction_description)
-            self.card_style_edit.setText(card.card_style or "")
+            use_override = card.card_style is not None
+            with QSignalBlocker(self.global_style_radio):
+                self.global_style_radio.setChecked(not use_override)
+            with QSignalBlocker(self.card_style_radio):
+                self.card_style_radio.setChecked(use_override)
+            self.style_edit.setPlainText(
+                card.card_style if use_override else document.global_style
+            )
+            self.style_scope_caption.setText(
+                "This card only — overrides the global style"
+                if use_override
+                else "Global — edits apply to all cards"
+            )
             self.start_card_check.setChecked(card.id == document.start_card_id)
             self._render_revisions(document, card)
         finally:
             self._rendering = False
 
-    def commit_card_metadata(self) -> None:
-        """Commit displayed basic metadata through typed controller commands."""
+    def commit_card_metadata(self) -> bool:
+        """Commit displayed metadata and report whether validation succeeded."""
         if self._rendering or self.selected_card_id is None:
-            return
+            return False
         card_id = self.selected_card_id
         card = next(card for card in self.controller.document.cards if card.id == card_id)
         changed = self.controller.document
@@ -359,7 +459,6 @@ class Inspector(QWidget):
             field_values = (
                 ("scene_description", self.scene_edit.toPlainText()),
                 ("interaction_description", self.interactions_edit.toPlainText()),
-                ("card_style", self.card_style_edit.text() or None),
             )
             for field, value in field_values:
                 if getattr(card, field) != value:
@@ -371,14 +470,75 @@ class Inspector(QWidget):
                         )
                     )
                     card = next(card for card in changed.cards if card.id == card_id)
+            style_value = self.style_edit.toPlainText()
+            if card.card_style is None and style_value != changed.global_style:
+                changed = self.controller.execute(
+                    EditGlobalStyleCommand(value=style_value)
+                )
+            elif card.card_style is not None and style_value != card.card_style:
+                changed = self.controller.execute(
+                    EditCardTextCommand(
+                        card_id=card_id,
+                        field="card_style",
+                        value=style_value,
+                    )
+                )
         except (CommandError, ValidationError) as error:
             self.validation_error.setText(str(error))
             self.validation_error.setVisible(True)
             self.render(self.controller.document, card_id)
-            return
+            return False
         self.validation_error.clear()
         self.validation_error.setVisible(False)
         self.render(changed, card_id)
+        self.document_changed.emit(changed)
+        return True
+
+    def _set_style_mode(self, *, use_override: bool) -> None:
+        if self._rendering or self.selected_card_id is None:
+            return
+        card = next(
+            card
+            for card in self.controller.document.cards
+            if card.id == self.selected_card_id
+        )
+        if use_override and card.card_style is None:
+            value: str | None = self.controller.document.global_style
+        elif not use_override and card.card_style is not None:
+            value = None
+        else:
+            return
+        changed = self.controller.execute(
+            EditCardTextCommand(
+                card_id=card.id,
+                field="card_style",
+                value=value,
+            )
+        )
+        self.render(changed, card.id)
+        self.document_changed.emit(changed)
+
+    def _commit_style_text(self) -> None:
+        if self._rendering or self.selected_card_id is None:
+            return
+        document = self.controller.document
+        card = next(card for card in document.cards if card.id == self.selected_card_id)
+        value = self.style_edit.toPlainText()
+        if card.card_style is None:
+            if value == document.global_style:
+                return
+            changed = self.controller.execute(EditGlobalStyleCommand(value=value))
+        else:
+            if value == card.card_style:
+                return
+            changed = self.controller.execute(
+                EditCardTextCommand(
+                    card_id=card.id,
+                    field="card_style",
+                    value=value,
+                )
+            )
+        self.render(changed, card.id)
         self.document_changed.emit(changed)
 
     def _set_start_card(self, checked: bool) -> None:
@@ -432,21 +592,21 @@ class Inspector(QWidget):
         self,
         candidate: BackgroundCandidate | None,
     ) -> None:
+        self._has_background_candidate = candidate is not None
         self.candidate_widget.setVisible(candidate is not None)
+        self._update_background_tab_label()
         if candidate is None:
             self.candidate_value.clear()
             return
         origin = "Generated" if candidate.origin.value == "generated" else "Imported"
         detail = (
-            candidate.generation_metadata.derived_prompt
+            candidate.generation_metadata.render_prompt
             if candidate.generation_metadata is not None
             else candidate.source_filename or ""
         )
-        self.candidate_value.setText(
-            f"{origin} candidate ready for review"
-            + (f"\nPrompt: {detail}" if detail and candidate.generation_metadata else "")
-        )
+        self.candidate_value.setText(f"{origin} candidate ready for review")
         self.candidate_value.setToolTip(detail)
+        self._set_revision_thumbnail(candidate.image_path)
 
     def _render_revisions(self, document: Stack, card: Card) -> None:
         active_revision = self._active_revision(card)
@@ -475,11 +635,16 @@ class Inspector(QWidget):
         if revision is None:
             self.background_value.setText("No background revision")
             self.revision_metadata.clear()
+            self.revision_details.clear()
+            self.revision_details_button.setVisible(False)
+            self.revision_details_button.setChecked(False)
+            self._set_revision_thumbnail(None)
             self.hotspots_placeholder.setText(
                 "Apply a background before adding hotspots."
             )
             self.hotspots_placeholder.setVisible(True)
             self._render_hotspot_properties(document, None, None)
+            self._update_tab_labels(0)
             return
         self.hotspots_placeholder.setText("No hotspots yet.")
         self.hotspots_placeholder.setVisible(
@@ -494,16 +659,32 @@ class Inspector(QWidget):
         if revision.generation_metadata is not None:
             metadata = revision.generation_metadata
             self.revision_metadata.setText(
-                f"{metadata.model_identifier} | seed {metadata.seed} | "
-                f"{metadata.width}x{metadata.height} | {metadata.step_count} steps"
-                f"\nPrompt: {metadata.derived_prompt}"
+                f"{metadata.model_identifier} · seed {metadata.seed} · "
+                f"{metadata.width}×{metadata.height} · {metadata.step_count} steps"
             )
-            self.revision_metadata.setToolTip(metadata.derived_prompt)
+            self.revision_metadata.setToolTip(metadata.render_prompt)
+            self.revision_details.setText(
+                json.dumps(
+                    metadata.model_dump(mode="json"),
+                    indent=2,
+                    ensure_ascii=False,
+                )
+            )
+            self.revision_details_button.setVisible(True)
         else:
             self.revision_metadata.setText(
                 f"Imported from {revision.source_filename or 'image'}"
             )
             self.revision_metadata.setToolTip("")
+            self.revision_details.clear()
+            self.revision_details_button.setChecked(False)
+            self.revision_details_button.setVisible(False)
+        image_path = (
+            self._image_path_resolver(revision.image_path)
+            if self._image_path_resolver is not None
+            else None
+        )
+        self._set_revision_thumbnail(image_path)
         interactions = (
             revision.hotspot_set.interactions
             if revision.hotspot_set is not None
@@ -529,6 +710,43 @@ class Inspector(QWidget):
             self.hotspot_list.setCurrentRow(selected_row)
         selected = interactions[selected_row] if selected_row >= 0 else None
         self._render_hotspot_properties(document, revision, selected)
+        self._update_tab_labels(len(interactions))
+
+    def _toggle_revision_details(self, visible: bool) -> None:
+        self.revision_details.setVisible(visible)
+        self.revision_details_button.setText(
+            "Details ▾" if visible else "Details ▸"
+        )
+
+    def _set_revision_thumbnail(self, image_path: Path | None) -> None:
+        if image_path is None:
+            self.revision_thumbnail.setPixmap(QPixmap())
+            self.revision_thumbnail.setText("No image")
+            return
+        pixmap = QPixmap(str(image_path))
+        if pixmap.isNull():
+            self.revision_thumbnail.setPixmap(QPixmap())
+            self.revision_thumbnail.setText("Unavailable")
+            return
+        self.revision_thumbnail.setText("")
+        self.revision_thumbnail.setPixmap(
+            pixmap.scaled(
+                self.revision_thumbnail.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        )
+
+    def _update_tab_labels(self, hotspot_count: int) -> None:
+        self.inspector_tabs.setTabText(0, "Card")
+        self._update_background_tab_label()
+        self.inspector_tabs.setTabText(2, f"Interactivity ({hotspot_count})")
+
+    def _update_background_tab_label(self) -> None:
+        self.inspector_tabs.setTabText(
+            1,
+            "Background ●" if self._has_background_candidate else "Background",
+        )
 
     def _revision_selected(self, index: int) -> None:
         if self._rendering or index < 0:
@@ -583,7 +801,7 @@ class Inspector(QWidget):
             and self.hotspot_list.currentRow() < self.hotspot_list.count() - 1
         )
         self.delete_hotspot_button.setEnabled(has_interaction)
-        self.hotspot_help.setVisible(has_revision)
+        self.hotspot_help_button.setEnabled(has_revision)
         with QSignalBlocker(self.hotspot_label_edit):
             self.hotspot_label_edit.setText(
                 interaction.label if interaction is not None else ""

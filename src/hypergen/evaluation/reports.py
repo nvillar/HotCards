@@ -123,11 +123,16 @@ def _phase_row(
     timings = {key: value for key, value in record.items() if "duration" in key or key == "timings"}
     if isinstance(nested_result, Mapping):
         timings.update({key: value for key, value in nested_result.items() if "duration" in key})
-    derived_prompt = record.get("prompt")
+    render_prompt = record.get("render_prompt") or record.get("prompt")
     interactive_subjects = record.get("interactive_subjects")
     if isinstance(nested_result, Mapping):
-        derived_prompt = derived_prompt or nested_result.get("prompt")
+        render_prompt = (
+            render_prompt or nested_result.get("render_prompt") or nested_result.get("prompt")
+        )
         interactive_subjects = interactive_subjects or nested_result.get("interactive_subjects")
+    metadata = record.get("metadata")
+    if isinstance(metadata, Mapping):
+        render_prompt = render_prompt or metadata.get("render_prompt")
     return {
         "suite": suite,
         "axis": axis,
@@ -143,7 +148,7 @@ def _phase_row(
         "timings": timings,
         "prompt_tokens": prompt_tokens,
         "output_tokens": output_tokens,
-        "derived_prompt": derived_prompt,
+        "render_prompt": render_prompt,
         "interactive_subjects": interactive_subjects,
         "structured_valid": record.get("structured_valid"),
         "repetition": record.get("repetition"),
@@ -195,7 +200,11 @@ def _summary_rows(result: Mapping[str, object]) -> list[dict[str, object]]:
                         case_id=item["case_id"],
                         mflux_model=item["model"],
                         phase=phase,
-                        record={**item[phase], "rubric": item.get("rubric")},
+                        record={
+                            **item[phase],
+                            "render_prompt": item.get("render_prompt") or item.get("fixed_prompt"),
+                            "rubric": item.get("rubric"),
+                        },
                     )
                 )
     elif version.startswith("hotspot-result"):
@@ -241,7 +250,10 @@ def _summary_rows(result: Mapping[str, object]) -> list[dict[str, object]]:
                         ollama_model=item["ollama_model"],
                         mflux_model=item["mflux_model"],
                         phase=str(stage["name"]),
-                        record=stage,
+                        record={
+                            **stage,
+                            "render_prompt": item.get("render_prompt"),
+                        },
                     )
                 )
     elif version.startswith("smoke-result"):

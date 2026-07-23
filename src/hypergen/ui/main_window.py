@@ -254,8 +254,14 @@ class MainWindow(QMainWindow):
         self.canvas_pages.addWidget(card_canvas)
         self.fit_canvas_button.clicked.connect(self.card_canvas.fit_to_window)
 
-        self.inspector = Inspector(self.controller)
+        self.inspector = Inspector(
+            self.controller,
+            image_path_resolver=self._resolve_revision_image_path,
+        )
         self.inspector.document_changed.connect(self.render_document)
+        self.inspector.render_inputs_changed.connect(
+            self._update_generation_actions
+        )
         self.inspector.generate_background_requested.connect(self._generate_background)
         self.inspector.import_background_requested.connect(self._import_background)
         self.inspector.apply_background_requested.connect(self._apply_background)
@@ -689,7 +695,8 @@ class MainWindow(QMainWindow):
         card_id = self._selected_card_id
         if workflow is None or card_id is None:
             return
-        self.inspector.commit_card_metadata()
+        if not self.inspector.commit_card_metadata():
+            return
         try:
             workflow.generate(card_id)
         except BackgroundWorkflowError as error:
@@ -701,7 +708,8 @@ class MainWindow(QMainWindow):
         card_id = self._selected_card_id
         if workflow is None or card_id is None:
             return
-        self.inspector.commit_card_metadata()
+        if not self.inspector.commit_card_metadata():
+            return
         selected_path, _filter = QFileDialog.getOpenFileName(
             self,
             "Import Background",
@@ -898,8 +906,8 @@ class MainWindow(QMainWindow):
             and self._selected_card_id is not None
             and not self._is_running
         )
+        has_render_prompt = self.inspector.has_render_prompt_input()
         mflux_available = self._availability[AdapterKind.MFLUX] is True
-        ollama_available = self._availability[AdapterKind.OLLAMA] is True
         workflow_busy = (
             self.background_workflow.busy
             if self.background_workflow is not None
@@ -914,12 +922,10 @@ class MainWindow(QMainWindow):
             generate_reason = "Select a card in a saved stack"
         elif has_candidate:
             generate_reason = "Apply or discard the current candidate first"
-        elif not ollama_available or not mflux_available:
-            generate_reason = " · ".join(
-                self._action_diagnostic(adapter)
-                for adapter in (AdapterKind.OLLAMA, AdapterKind.MFLUX)
-                if self._availability[adapter] is not True
-            )
+        elif not has_render_prompt:
+            generate_reason = "Enter a Scene or Style before generating"
+        elif not mflux_available:
+            generate_reason = self._action_diagnostic(AdapterKind.MFLUX)
         import_reason = (
             "Ready to import"
             if has_card and not has_candidate
@@ -933,7 +939,7 @@ class MainWindow(QMainWindow):
             can_generate=(
                 has_card
                 and not has_candidate
-                and ollama_available
+                and has_render_prompt
                 and mflux_available
             ),
             generate_reason=generate_reason,
@@ -1046,6 +1052,14 @@ class MainWindow(QMainWindow):
             self.inspector.selected_interaction_id,
             editable=True,
         )
+
+    def _resolve_revision_image_path(self, image_path: str) -> Path | None:
+        if self.document_session is None or self.document_session.store is None:
+            return None
+        try:
+            return self.document_session.store.asset_path(image_path)
+        except StackStoreError:
+            return None
 
     def _create_hotspot_polygon(
         self,
@@ -1189,8 +1203,6 @@ class MainWindow(QMainWindow):
     def _background_generation_settings(self) -> BackgroundGenerationSettings:
         values = load_machine_settings(self.settings)
         return BackgroundGenerationSettings(
-            ollama_endpoint=values.ollama_endpoint,
-            ollama_model=values.ollama_model,
             mflux_model=values.mflux_model,
             step_count=values.step_count,
             quantization=values.quantization,

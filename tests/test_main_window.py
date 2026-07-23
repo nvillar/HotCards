@@ -132,6 +132,7 @@ class FakeBackgroundWorkflow(QObject):
         self.candidate = None
         self.busy = False
         self.closed = False
+        self.generate_calls: list[object] = []
 
     def close(self) -> None:
         self.closed = True
@@ -146,6 +147,9 @@ class FakeBackgroundWorkflow(QObject):
     def cancel(self) -> None:
         self.busy = False
         self.busy_changed.emit(False)
+
+    def generate(self, card_id: object) -> None:
+        self.generate_calls.append(card_id)
 
 
 @pytest.fixture(scope="module")
@@ -245,7 +249,8 @@ def test_empty_document_presents_first_card_path(
     assert window.inspector.selected_card_id == controller.document.cards[0].id
     assert window.inspector.pages.currentIndex() == 1
     assert window.canvas_pages.currentIndex() == 1
-    assert window.inspector.generate_background_button.isEnabled()
+    assert not window.inspector.generate_background_button.isEnabled()
+    assert "Scene or Style" in window.inspector.generate_background_button.toolTip()
     assert window.inspector.import_background_button.isEnabled()
     window.close()
 
@@ -272,14 +277,14 @@ def test_sidebar_actions_fit_at_minimum_width(application: QApplication) -> None
 def test_new_stack_dialog_builds_initial_saved_shape(application: QApplication) -> None:
     dialog = NewStackDialog()
     dialog.name_edit.setText("Garden")
-    dialog.art_direction_edit.setPlainText("Pencil sketch")
+    dialog.global_style_edit.setPlainText("Pencil sketch")
     dialog.width_spin.setValue(1280)
     dialog.height_spin.setValue(720)
 
     stack = dialog.stack()
 
     assert stack.name == "Garden"
-    assert stack.art_direction == "Pencil sketch"
+    assert stack.global_style == "Pencil sketch"
     assert (stack.canvas.width, stack.canvas.height) == (1280, 720)
     assert [card.name for card in stack.cards] == ["Card 1"]
     assert stack.start_card_id == stack.cards[0].id
@@ -301,7 +306,7 @@ def test_bound_new_stack_flow_enables_editing_and_persists(
         document_session=session,
         start_diagnostics=False,
     )
-    created = Stack(name="Garden", art_direction="Pencil sketch", cards=(Card(name="Card 1"),))
+    created = Stack(name="Garden", global_style="Pencil sketch", cards=(Card(name="Card 1"),))
 
     class AcceptedNewStackDialog:
         def __init__(self, _parent: object) -> None:
@@ -469,20 +474,112 @@ def test_invalid_card_name_is_rejected_and_inspector_is_restored(
     window.close()
 
 
-def test_inspector_sections_are_always_open_and_scrollable(
+def test_inspector_uses_pipeline_tabs_and_groups_fields_by_stage(
     application: QApplication,
 ) -> None:
     window, _controller, _workers, _settings = make_window()
 
-    assert window.inspector.pages.widget(1).objectName() == "inspectorScrollArea"
-    sections = (
-        (window.inspector.card_section, "Card"),
-        (window.inspector.background_section, "Background"),
-        (window.inspector.hotspots_section, "Hotspots"),
+    tabs = window.inspector.inspector_tabs
+    assert tabs.count() == 3
+    assert [tabs.tabText(index) for index in range(3)] == [
+        "Card",
+        "Background",
+        "Interactivity (1)",
+    ]
+    assert tabs.indexOf(window.inspector.scene_edit.parentWidget()) == 0
+    assert tabs.indexOf(window.inspector.style_edit.parentWidget()) == 1
+    assert tabs.indexOf(window.inspector.interactions_edit.parentWidget()) == 2
+    assert not window.inspector.enrich_scene_button.isEnabled()
+    assert not window.inspector.hotspot_help_button.toolTip() == ""
+    window.close()
+
+
+def test_background_style_switches_between_global_and_card_override(
+    application: QApplication,
+) -> None:
+    card = Card(name="Garden", scene_description="A garden")
+    window, controller, _workers, _settings = make_window(
+        Stack(name="Demo", global_style="Watercolor", cards=(card,))
     )
-    for section, title in sections:
-        assert section.title_label.text() == title
-        assert not section.content.isHidden()
+
+    assert window.inspector.global_style_radio.isChecked()
+    assert window.inspector.style_edit.toPlainText() == "Watercolor"
+    assert controller.document.cards[0].card_style is None
+
+    window.inspector.card_style_radio.click()
+    assert controller.document.cards[0].card_style == "Watercolor"
+    window.inspector.style_edit.setPlainText("Photographic night scene")
+    window.inspector.style_edit.editing_finished.emit()
+    assert controller.document.cards[0].card_style == "Photographic night scene"
+    assert controller.document.global_style == "Watercolor"
+
+    window.inspector.global_style_radio.click()
+    assert controller.document.cards[0].card_style is None
+    assert window.inspector.style_edit.toPlainText() == "Watercolor"
+    window.inspector.style_edit.setPlainText("Ink wash")
+    window.inspector.style_edit.editing_finished.emit()
+    assert controller.document.global_style == "Ink wash"
+    assert controller.undo()
+    assert controller.document.global_style == "Watercolor"
+    window.close()
+
+
+def test_global_style_enables_generation_when_scene_is_only_whitespace(
+    application: QApplication,
+) -> None:
+    card = Card(name="Garden", scene_description="   ")
+    window, _controller, _workers, _settings = make_window(
+        Stack(name="Demo", global_style="Watercolor", cards=(card,))
+    )
+    window._availability[AdapterKind.MFLUX] = True
+    window._update_generation_actions()
+
+    assert window.inspector.generate_background_button.isEnabled()
+    window.close()
+
+
+def test_pending_style_text_enables_generation_before_focus_changes(
+    application: QApplication,
+) -> None:
+    card = Card(name="Garden")
+    window, controller, _workers, _settings = make_window(
+        Stack(name="Demo", cards=(card,))
+    )
+    window._availability[AdapterKind.MFLUX] = True
+    window._update_generation_actions()
+    assert not window.inspector.generate_background_button.isEnabled()
+
+    window.inspector.style_edit.setFocus()
+    window.inspector.style_edit.setPlainText("Watercolor")
+    application.processEvents()
+
+    assert window.inspector.generate_background_button.isEnabled()
+    assert controller.document.global_style == ""
+    window.inspector.commit_card_metadata()
+    assert controller.document.global_style == "Watercolor"
+    window.close()
+
+
+def test_generation_aborts_when_pending_metadata_is_invalid(
+    application: QApplication,
+) -> None:
+    card = Card(name="Garden")
+    window, controller, _workers, _settings = make_window(
+        Stack(name="Demo", cards=(card,))
+    )
+    workflow = window.background_workflow
+    assert isinstance(workflow, FakeBackgroundWorkflow)
+    window._availability[AdapterKind.MFLUX] = True
+    window.inspector.scene_edit.setPlainText("New scene")
+    window.inspector.card_name_edit.clear()
+    application.processEvents()
+
+    assert window.inspector.generate_background_button.isEnabled()
+    window.inspector.generate_background_button.click()
+
+    assert workflow.generate_calls == []
+    assert controller.document.cards[0].scene_description == ""
+    assert not window.inspector.validation_error.isHidden()
     window.close()
 
 
@@ -508,6 +605,7 @@ def test_background_candidate_is_contextual_and_previews_on_canvas(
     workflow.candidate_changed.emit(candidate)
 
     assert not window.inspector.candidate_widget.isHidden()
+    assert window.inspector.inspector_tabs.tabText(1) == "Background ●"
     assert not window.inspector.generate_background_button.isEnabled()
     assert not window.inspector.import_background_button.isEnabled()
     assert window.card_canvas._border_item is not None
