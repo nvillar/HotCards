@@ -130,6 +130,32 @@ def test_interactivity_tab_uses_compact_controls_and_on_demand_help(
     inspector.close()
 
 
+def test_hotspot_generation_controls_follow_list_before_manual_actions(
+    application: QApplication,
+) -> None:
+    card = Card(name="Card")
+    controller = DocumentController(Stack(name="Demo", cards=(card,)))
+    inspector = Inspector(controller)
+    inspector.render(controller.document, card.id)
+    page = inspector.inspector_tabs.widget(1)
+    layout = page.layout()
+    assert layout is not None
+    manual_actions_index = next(
+        index
+        for index in range(layout.count())
+        if layout.itemAt(index).layout() is inspector.hotspot_actions
+    )
+
+    assert layout.indexOf(inspector.hotspot_list) < layout.indexOf(
+        inspector.generate_hotspots_button
+    )
+    assert layout.indexOf(
+        inspector.generate_hotspots_button
+    ) < layout.indexOf(inspector.hotspot_candidate_widget)
+    assert layout.indexOf(inspector.hotspot_candidate_widget) < manual_actions_index
+    inspector.close()
+
+
 def test_card_tab_keeps_revision_button_labels_readable(
     application: QApplication,
 ) -> None:
