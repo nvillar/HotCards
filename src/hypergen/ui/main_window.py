@@ -676,7 +676,7 @@ class MainWindow(QMainWindow):
 
     def run_availability_checks(self) -> None:
         """Submit injected service checks without blocking the UI thread."""
-        if self._is_running:
+        if self._is_running or self._diagnostic_operations:
             return
         checks = (
             dict(self._availability_checks_factory())
@@ -923,6 +923,7 @@ class MainWindow(QMainWindow):
     def _diagnostic_finished(self, operation: WorkerOperation) -> None:
         if operation in self._diagnostic_operations:
             self._diagnostic_operations.remove(operation)
+            self._update_generation_actions()
 
     def apply_availability_diagnostic(
         self,
@@ -1305,6 +1306,8 @@ class MainWindow(QMainWindow):
         self.render_document()
         if state is not None and state.warning is not None:
             self._set_run_warning(state.warning)
+        if not should_run:
+            self.run_availability_checks()
 
     def _run_interaction_activated(self, interaction_id: object) -> None:
         if not self._is_running or not isinstance(interaction_id, UUID):
@@ -1382,16 +1385,23 @@ class MainWindow(QMainWindow):
         self.run_status_label.setToolTip(message)
 
     def _cancel_ai_activity_for_run(self) -> None:
+        self._cancel_diagnostics()
+        if self.background_workflow is not None and self.background_workflow.busy:
+            self.background_workflow.cancel()
+
+    def _cancel_diagnostics(self) -> None:
         self._diagnostic_generation += 1
         for operation in tuple(self._diagnostic_operations):
             operation.cancel()
-        if self.background_workflow is not None and self.background_workflow.busy:
-            self.background_workflow.cancel()
+
+    def _restart_availability_checks(self) -> None:
+        self._cancel_diagnostics()
+        self.run_availability_checks()
 
     def open_advanced_settings(self) -> None:
         dialog = self._settings_dialog_factory(self.settings, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            self.run_availability_checks()
+            self._restart_availability_checks()
 
     def closeEvent(self, event: QCloseEvent) -> None:
         if not self._confirm_drafts_discard("closing the stack"):

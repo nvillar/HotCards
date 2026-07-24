@@ -1118,7 +1118,7 @@ def test_settings_round_trip_excludes_credentials_and_stack(
 def test_toolbar_switches_between_authoring_and_run_controls(
     application: QApplication,
 ) -> None:
-    window, controller, _workers, _settings = make_window()
+    window, controller, workers, _settings = make_window()
 
     assert [window.mode_selector.itemText(index) for index in range(2)] == [
         "Author",
@@ -1148,6 +1148,8 @@ def test_toolbar_switches_between_authoring_and_run_controls(
     assert not window.card_sidebar.isHidden()
     assert not window.inspector.isHidden()
     assert window.overlay_selector.isHidden()
+    assert len(workers.ollama_checks) == 1
+    assert len(workers.mflux_checks) == 1
     window.close()
 
 
@@ -1177,6 +1179,12 @@ def test_run_mode_blocks_empty_document_mutation_and_cancels_ai_work(
     )
     assert not workflow.busy
     assert window.run_status_label.text() == "This stack has no cards to run."
+    check_counts = (len(workers.ollama_checks), len(workers.mflux_checks))
+    window.run_availability_checks()
+    assert (len(workers.ollama_checks), len(workers.mflux_checks)) == check_counts
+    window.mode_selector.setCurrentText("Author")
+    assert len(workers.ollama_checks) == check_counts[0] + 1
+    assert len(workers.mflux_checks) == check_counts[1] + 1
     window.close()
 
 
@@ -1198,9 +1206,13 @@ def test_service_diagnostics_toggle_only_generation_actions(
     )
     workers.mflux_operations[0].failed.emit(unavailable)
     workers.ollama_operations[0].succeeded.emit(None)
+    workers.mflux_operations[0].finished.emit()
+    workers.ollama_operations[0].finished.emit()
     assert not window.inspector.generate_background_button.isEnabled()
     assert window.inspector.import_background_button.isEnabled()
     assert window.card_sidebar.add_button.isEnabled()
+    assert not window.check_services_button.isHidden()
+    assert window.check_services_button.text() == "Check Again"
 
     workers.mflux_operations[0].succeeded.emit(None)
     assert window.inspector.generate_background_button.isEnabled()
@@ -1215,6 +1227,8 @@ def test_service_rechecks_use_latest_completion_and_reenable_actions(
     old_mflux = workers.mflux_operations[0]
     old_ollama.succeeded.emit(None)
     old_mflux.succeeded.emit(None)
+    old_ollama.finished.emit()
+    old_mflux.finished.emit()
     assert window.inspector.generate_background_button.isEnabled()
 
     window.run_availability_checks()
@@ -1233,6 +1247,45 @@ def test_service_rechecks_use_latest_completion_and_reenable_actions(
     )
     old_mflux.failed.emit(stale_failure)
     assert window.inspector.generate_background_button.isEnabled()
+    window.close()
+
+
+def test_active_service_checks_are_deduplicated(
+    application: QApplication,
+) -> None:
+    window, _controller, workers, _settings = make_window(start_diagnostics=True)
+
+    window.run_availability_checks()
+
+    assert len(workers.ollama_checks) == 1
+    assert len(workers.mflux_checks) == 1
+    window.mode_selector.setCurrentText("Run")
+    window.close()
+
+
+def test_settings_acceptance_restarts_service_checks(
+    application: QApplication,
+) -> None:
+    window, _controller, workers, _settings = make_window(start_diagnostics=True)
+
+    class AcceptedSettingsDialog:
+        def exec(self) -> QDialog.DialogCode:
+            return QDialog.DialogCode.Accepted
+
+    window._settings_dialog_factory = (
+        lambda _settings, _parent: AcceptedSettingsDialog()  # type: ignore[assignment]
+    )
+    first_operations = (
+        workers.ollama_operations[0],
+        workers.mflux_operations[0],
+    )
+
+    window.open_advanced_settings()
+
+    assert all(operation.cancelled for operation in first_operations)
+    assert len(workers.ollama_checks) == 2
+    assert len(workers.mflux_checks) == 2
+    window.mode_selector.setCurrentText("Run")
     window.close()
 
 
