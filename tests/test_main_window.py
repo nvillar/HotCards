@@ -434,6 +434,13 @@ def test_sidebar_actions_fit_at_minimum_width(application: QApplication) -> None
         )
     }
     assert sequence_rows == {1}
+    for button, accessible_name in (
+        (window.card_sidebar.move_up_button, "Move card up"),
+        (window.card_sidebar.move_down_button, "Move card down"),
+    ):
+        assert not button.icon().isNull()
+        assert button.accessibleName() == accessible_name
+        assert not button.text()
     window.close()
 
 

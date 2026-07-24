@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QPushButton,
+    QStyle,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -61,12 +62,18 @@ class CardSidebar(QWidget):
         self.start_button.clicked.connect(self.set_selected_as_start)
         self.move_up_button = QToolButton()
         self.move_up_button.setObjectName("moveCardUpButton")
-        self.move_up_button.setText("↑")
+        self.move_up_button.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowUp)
+        )
+        self.move_up_button.setAccessibleName("Move card up")
         self.move_up_button.setToolTip("Move card up")
         self.move_up_button.clicked.connect(lambda: self._move_selected(-1))
         self.move_down_button = QToolButton()
         self.move_down_button.setObjectName("moveCardDownButton")
-        self.move_down_button.setText("↓")
+        self.move_down_button.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowDown)
+        )
+        self.move_down_button.setAccessibleName("Move card down")
         self.move_down_button.setToolTip("Move card down")
         self.move_down_button.clicked.connect(lambda: self._move_selected(1))
         self.delete_button = QPushButton("Delete Card")
