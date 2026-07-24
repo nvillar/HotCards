@@ -525,13 +525,21 @@ class Inspector(QWidget):
             }
             """
         )
-        self.hotspot_form = QFormLayout(self.hotspot_properties_frame)
-        self.hotspot_form.setContentsMargins(8, 8, 8, 8)
-        self.hotspot_form.setLabelAlignment(
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        self.hotspot_properties_layout = QVBoxLayout(
+            self.hotspot_properties_frame
         )
-        self.hotspot_form.addRow("Label", self.hotspot_label_edit)
-        self.hotspot_form.addRow("Destination", self.hotspot_destination_combo)
+        self.hotspot_properties_layout.setContentsMargins(8, 8, 8, 8)
+        self.hotspot_label = QLabel("Label")
+        self.hotspot_label.setObjectName("hotspotLabel")
+        self.hotspot_properties_layout.addWidget(self.hotspot_label)
+        self.hotspot_properties_layout.addWidget(self.hotspot_label_edit)
+        self.hotspot_destination_label = QLabel("Destination")
+        self.hotspot_destination_label.setObjectName("hotspotDestinationLabel")
+        self.hotspot_properties_layout.addWidget(self.hotspot_destination_label)
+        self.hotspot_properties_layout.addWidget(self.hotspot_destination_combo)
+        self.hotspot_areas_label = QLabel("Areas")
+        self.hotspot_areas_label.setObjectName("hotspotAreasLabel")
+        self.hotspot_properties_layout.addWidget(self.hotspot_areas_label)
         self.hotspot_area_controls = QWidget()
         area_controls_layout = QHBoxLayout(self.hotspot_area_controls)
         area_controls_layout.setContentsMargins(0, 0, 0, 0)
@@ -542,7 +550,7 @@ class Inspector(QWidget):
         self.add_component_button = QPushButton("Add Area")
         self.add_component_button.setObjectName("addHotspotComponentButton")
         area_controls_layout.addWidget(self.add_component_button)
-        self.hotspot_form.addRow("Areas", self.hotspot_area_controls)
+        self.hotspot_properties_layout.addWidget(self.hotspot_area_controls)
         hotspots_layout.addWidget(self.hotspot_properties_frame)
         self.hotspot_error = QLabel()
         self.hotspot_error.setObjectName("hotspotValidationError")

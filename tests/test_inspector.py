@@ -9,7 +9,6 @@ from datetime import UTC, datetime
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QFrame
 
 from hypergen.application.document_controller import DocumentController
@@ -172,7 +171,15 @@ def test_hotspot_controls_follow_selection_edit_generation_hierarchy(
     )
     assert properties_index < layout.indexOf(inspector.generate_hotspots_button)
     assert inspector.hotspot_properties_frame.frameShape() == QFrame.Shape.StyledPanel
-    assert inspector.hotspot_form.labelAlignment() & Qt.AlignmentFlag.AlignLeft
+    property_layout = inspector.hotspot_properties_layout
+    for label, control in (
+        (inspector.hotspot_label, inspector.hotspot_label_edit),
+        (inspector.hotspot_destination_label, inspector.hotspot_destination_combo),
+        (inspector.hotspot_areas_label, inspector.hotspot_area_controls),
+    ):
+        label_index = property_layout.indexOf(label)
+        assert label_index >= 0
+        assert property_layout.indexOf(control) == label_index + 1
     assert layout.indexOf(inspector.generate_hotspots_button) < layout.indexOf(
         inspector.hotspot_candidate_widget
     )
