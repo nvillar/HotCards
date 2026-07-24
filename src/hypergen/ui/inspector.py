@@ -16,7 +16,6 @@ from PySide6.QtWidgets import (
     QComboBox,
     QFormLayout,
     QFrame,
-    QGridLayout,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -29,6 +28,7 @@ from PySide6.QtWidgets import (
     QRadioButton,
     QScrollArea,
     QStackedWidget,
+    QStyle,
     QTabWidget,
     QToolButton,
     QVBoxLayout,
@@ -77,6 +77,91 @@ def _section_heading(text: str) -> QLabel:
     font.setBold(True)
     label.setFont(font)
     return label
+
+
+def _compact_icon_button(
+    style: QStyle,
+    *,
+    object_name: str,
+    icon: QStyle.StandardPixmap,
+    accessible_name: str,
+    tooltip: str,
+) -> QToolButton:
+    button = QToolButton()
+    button.setObjectName(object_name)
+    button.setIcon(style.standardIcon(icon))
+    button.setAccessibleName(accessible_name)
+    button.setToolTip(tooltip)
+    return button
+
+
+class _DismissibleMessage(QFrame):
+    def __init__(
+        self,
+        *,
+        object_name: str,
+        label_object_name: str,
+        dismiss_object_name: str,
+    ) -> None:
+        super().__init__()
+        self.setObjectName(object_name)
+        self.setFrameShape(QFrame.Shape.StyledPanel)
+        self.setStyleSheet(
+            f"""
+            QFrame#{object_name} {{
+                background-color: palette(alternate-base);
+                border: 1px solid palette(highlight);
+                border-radius: 4px;
+            }}
+            """
+        )
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 6, 6, 6)
+        self.label = QLabel()
+        self.label.setObjectName(label_object_name)
+        self.label.setWordWrap(True)
+        layout.addWidget(self.label, 1)
+        self.dismiss_button = _compact_icon_button(
+            self.style(),
+            object_name=dismiss_object_name,
+            icon=QStyle.StandardPixmap.SP_DialogCloseButton,
+            accessible_name="Dismiss message",
+            tooltip="Dismiss message",
+        )
+        self.dismiss_button.setAutoRaise(True)
+        layout.addWidget(
+            self.dismiss_button,
+            0,
+            Qt.AlignmentFlag.AlignTop,
+        )
+        self.dismiss_button.clicked.connect(self.dismiss)
+        self.setVisible(False)
+
+    def set_message(self, message: str, *, detail: str = "") -> None:
+        self.label.setText(message)
+        self.label.setToolTip(detail)
+        self.setToolTip(detail)
+        self.setVisible(bool(message))
+
+    def dismiss(self) -> None:
+        self.set_message("")
+
+
+def _review_frame(object_name: str) -> QFrame:
+    frame = QFrame()
+    frame.setObjectName(object_name)
+    frame.setAccessibleName("Review required")
+    frame.setFrameShape(QFrame.Shape.StyledPanel)
+    frame.setStyleSheet(
+        f"""
+        QFrame#{object_name} {{
+            background-color: palette(alternate-base);
+            border: 2px solid palette(highlight);
+            border-radius: 4px;
+        }}
+        """
+    )
+    return frame
 
 
 class Inspector(QWidget):
@@ -191,10 +276,13 @@ class Inspector(QWidget):
         enrichment_layout.addLayout(enrichment_actions)
         card_layout.addWidget(self.scene_enrichment_widget)
         self.scene_enrichment_widget.setVisible(False)
-        self.scene_enrichment_status = QLabel()
-        self.scene_enrichment_status.setObjectName("sceneEnrichmentStatus")
-        self.scene_enrichment_status.setWordWrap(True)
-        card_layout.addWidget(self.scene_enrichment_status)
+        self.scene_enrichment_status_message = _DismissibleMessage(
+            object_name="sceneEnrichmentStatusMessage",
+            label_object_name="sceneEnrichmentStatus",
+            dismiss_object_name="dismissSceneEnrichmentStatusButton",
+        )
+        self.scene_enrichment_status = self.scene_enrichment_status_message.label
+        card_layout.addWidget(self.scene_enrichment_status_message)
         self.start_card_check = QCheckBox("Use as start card")
         self.start_card_check.setObjectName("startCardCheck")
         self.validation_error = QLabel()
@@ -206,6 +294,20 @@ class Inspector(QWidget):
         card_layout.addSpacing(8)
         self.background_heading = _section_heading("Background")
         card_layout.addWidget(self.background_heading)
+        self.revision_selector = QHBoxLayout()
+        self.revision_selector.addWidget(QLabel("Revision"))
+        self.revision_combo = QComboBox()
+        self.revision_combo.setObjectName("backgroundRevisionCombo")
+        self.revision_selector.addWidget(self.revision_combo, 1)
+        self.delete_revision_button = _compact_icon_button(
+            self.style(),
+            object_name="deleteRevisionButton",
+            icon=QStyle.StandardPixmap.SP_TrashIcon,
+            accessible_name="Delete revision",
+            tooltip="Delete revision",
+        )
+        self.revision_selector.addWidget(self.delete_revision_button)
+        card_layout.addLayout(self.revision_selector)
         revision_header = QHBoxLayout()
         self.revision_thumbnail = QLabel("No image")
         self.revision_thumbnail.setObjectName("backgroundRevisionThumbnail")
@@ -266,38 +368,24 @@ class Inspector(QWidget):
         style_layout.addWidget(self.style_scope_caption)
         self.style_details.setVisible(False)
 
-        self.revision_controls = QGridLayout()
-        revision_label = QLabel("Revision")
-        self.revision_combo = QComboBox()
-        self.revision_combo.setObjectName("backgroundRevisionCombo")
-        self.revision_controls.addWidget(revision_label, 0, 0)
-        self.revision_controls.addWidget(self.revision_combo, 0, 1)
-        self.generate_background_button = QPushButton("Generate")
+        card_layout.addWidget(self.style_details_button)
+        card_layout.addWidget(self.style_details)
+        self.generate_background_button = QPushButton("Generate Background")
         self.generate_background_button.setObjectName("generateBackgroundButton")
-        self.import_background_button = QPushButton("Import...")
-        self.import_background_button.setObjectName("importBackgroundButton")
-        self.delete_revision_button = QPushButton("Delete Revision...")
-        self.delete_revision_button.setObjectName("deleteRevisionButton")
-        self.revision_controls.addWidget(self.style_details_button, 1, 0)
-        self.revision_controls.addWidget(self.generate_background_button, 1, 1)
-        self.revision_controls.addWidget(self.style_details, 2, 0, 1, 2)
-        self.revision_controls.addWidget(self.import_background_button, 3, 0, 1, 2)
-        self.revision_controls.addWidget(self.delete_revision_button, 4, 0, 1, 2)
-        self.revision_controls.setColumnStretch(1, 1)
-        card_layout.addLayout(self.revision_controls)
-        self.background_status = QLabel()
-        self.background_status.setObjectName("backgroundStatus")
-        self.background_status.setWordWrap(True)
-        card_layout.addWidget(self.background_status)
-
-        self.draft_widget = QWidget()
-        draft_layout = QVBoxLayout(self.draft_widget)
-        draft_layout.setContentsMargins(0, 4, 0, 4)
-        self.draft_badge = QLabel("Draft")
-        self.draft_badge.setObjectName("backgroundDraftBadge")
-        self.draft_badge.setStyleSheet(
-            "font-weight: 600; color: palette(mid);"
+        card_layout.addWidget(self.generate_background_button)
+        self.background_status_message = _DismissibleMessage(
+            object_name="backgroundStatusMessage",
+            label_object_name="backgroundStatus",
+            dismiss_object_name="dismissBackgroundStatusButton",
         )
+        self.background_status = self.background_status_message.label
+        card_layout.addWidget(self.background_status_message)
+
+        self.draft_widget = _review_frame("backgroundDraftReview")
+        draft_layout = QVBoxLayout(self.draft_widget)
+        draft_layout.setContentsMargins(10, 8, 10, 8)
+        self.draft_badge = _section_heading("Review required")
+        self.draft_badge.setObjectName("backgroundDraftBadge")
         draft_layout.addWidget(self.draft_badge)
         self.draft_value = QLabel()
         self.draft_value.setObjectName("backgroundDraftValue")
@@ -306,13 +394,17 @@ class Inspector(QWidget):
         draft_actions = QHBoxLayout()
         self.accept_draft_button = QPushButton("Accept as Revision")
         self.accept_draft_button.setObjectName("acceptBackgroundDraftButton")
-        self.discard_draft_button = QPushButton("Discard Draft")
+        self.discard_draft_button = QPushButton("Discard")
         self.discard_draft_button.setObjectName("discardBackgroundDraftButton")
         draft_actions.addWidget(self.accept_draft_button)
         draft_actions.addWidget(self.discard_draft_button)
         draft_layout.addLayout(draft_actions)
         card_layout.addWidget(self.draft_widget)
         self.draft_widget.setVisible(False)
+
+        self.import_background_button = QPushButton("Import Background...")
+        self.import_background_button.setObjectName("importBackgroundButton")
+        card_layout.addWidget(self.import_background_button)
         card_layout.addWidget(self.start_card_check)
         card_layout.addStretch(1)
         card_scroll.setWidget(card_page)
@@ -336,10 +428,13 @@ class Inspector(QWidget):
         self.summarize_hotspots_button.setEnabled(False)
         self.intent_actions.addWidget(self.summarize_hotspots_button)
         hotspots_layout.addLayout(self.intent_actions)
-        self.intent_status = QLabel()
-        self.intent_status.setObjectName("intentStatus")
-        self.intent_status.setWordWrap(True)
-        hotspots_layout.addWidget(self.intent_status)
+        self.intent_status_message = _DismissibleMessage(
+            object_name="intentStatusMessage",
+            label_object_name="intentStatus",
+            dismiss_object_name="dismissIntentStatusButton",
+        )
+        self.intent_status = self.intent_status_message.label
+        hotspots_layout.addWidget(self.intent_status_message)
         hotspots_layout.addSpacing(8)
         hotspots_heading = QHBoxLayout()
         self.hotspots_heading = _section_heading("Hotspots")
@@ -358,15 +453,21 @@ class Inspector(QWidget):
         )
         hotspots_heading.addWidget(self.hotspot_help_button)
         hotspots_layout.addLayout(hotspots_heading)
-        self.hotspot_generation_status = QLabel()
-        self.hotspot_generation_status.setObjectName("hotspotGenerationStatus")
-        self.hotspot_generation_status.setWordWrap(True)
-        self.hotspot_candidate_widget = QWidget()
-        self.hotspot_candidate_widget.setObjectName("hotspotCandidateReview")
+        self.hotspot_generation_status_message = _DismissibleMessage(
+            object_name="hotspotGenerationStatusMessage",
+            label_object_name="hotspotGenerationStatus",
+            dismiss_object_name="dismissHotspotGenerationStatusButton",
+        )
+        self.hotspot_generation_status = self.hotspot_generation_status_message.label
+        self.hotspot_candidate_widget = _review_frame("hotspotCandidateReview")
         candidate_layout = QVBoxLayout(self.hotspot_candidate_widget)
-        candidate_layout.setContentsMargins(0, 4, 0, 4)
-        self.hotspot_candidate_label = QLabel("Generated candidate")
+        candidate_layout.setContentsMargins(10, 8, 10, 8)
+        self.hotspot_candidate_heading = _section_heading("Review required")
+        self.hotspot_candidate_heading.setObjectName("hotspotCandidateHeading")
+        candidate_layout.addWidget(self.hotspot_candidate_heading)
+        self.hotspot_candidate_label = QLabel()
         self.hotspot_candidate_label.setObjectName("hotspotCandidateLabel")
+        self.hotspot_candidate_label.setWordWrap(True)
         candidate_layout.addWidget(self.hotspot_candidate_label)
         self.hotspot_candidate_warnings = QLabel()
         self.hotspot_candidate_warnings.setObjectName("hotspotCandidateWarnings")
@@ -398,45 +499,63 @@ class Inspector(QWidget):
         self.hotspot_list = QListWidget()
         self.hotspot_list.setObjectName("hotspotList")
         hotspots_layout.addWidget(self.hotspot_list)
-        hotspots_layout.addWidget(self.generate_hotspots_button)
-        hotspots_layout.addWidget(self.hotspot_generation_status)
-        hotspots_layout.addWidget(self.hotspot_candidate_widget)
-        self.hotspot_actions = QHBoxLayout()
-        self.add_hotspot_button = QPushButton("Draw Hotspot")
-        self.add_hotspot_button.setObjectName("addHotspotButton")
-        self.add_component_button = QPushButton("Add Area")
-        self.add_component_button.setObjectName("addHotspotComponentButton")
-        self.hotspot_actions.addWidget(self.add_hotspot_button)
-        self.hotspot_actions.addWidget(self.add_component_button)
-        hotspots_layout.addLayout(self.hotspot_actions)
+        self.hotspot_order_actions = QHBoxLayout()
+        self.move_hotspot_up_button = _compact_icon_button(
+            self.style(),
+            object_name="moveHotspotUpButton",
+            icon=QStyle.StandardPixmap.SP_ArrowUp,
+            accessible_name="Move hotspot up",
+            tooltip="Move hotspot up",
+        )
+        self.move_hotspot_down_button = _compact_icon_button(
+            self.style(),
+            object_name="moveHotspotDownButton",
+            icon=QStyle.StandardPixmap.SP_ArrowDown,
+            accessible_name="Move hotspot down",
+            tooltip="Move hotspot down",
+        )
+        self.delete_hotspot_button = _compact_icon_button(
+            self.style(),
+            object_name="deleteHotspotButton",
+            icon=QStyle.StandardPixmap.SP_TrashIcon,
+            accessible_name="Delete hotspot",
+            tooltip="Delete hotspot",
+        )
+        self.hotspot_order_actions.addWidget(self.move_hotspot_up_button)
+        self.hotspot_order_actions.addWidget(self.move_hotspot_down_button)
+        self.hotspot_order_actions.addStretch(1)
+        self.hotspot_order_actions.addWidget(self.delete_hotspot_button)
+        hotspots_layout.addLayout(self.hotspot_order_actions)
         self.hotspot_label_edit = QLineEdit()
         self.hotspot_label_edit.setObjectName("hotspotLabelEdit")
         self.hotspot_destination_combo = QComboBox()
         self.hotspot_destination_combo.setObjectName("hotspotDestinationCombo")
-        hotspot_form = QFormLayout()
-        hotspot_form.addRow("Label", self.hotspot_label_edit)
-        hotspot_form.addRow("Destination", self.hotspot_destination_combo)
-        hotspots_layout.addLayout(hotspot_form)
-        order_actions = QHBoxLayout()
-        self.move_hotspot_up_button = QPushButton("↑")
-        self.move_hotspot_up_button.setObjectName("moveHotspotUpButton")
-        self.move_hotspot_up_button.setToolTip("Move hotspot up")
-        self.move_hotspot_down_button = QPushButton("↓")
-        self.move_hotspot_down_button.setObjectName("moveHotspotDownButton")
-        self.move_hotspot_down_button.setToolTip("Move hotspot down")
-        self.delete_hotspot_button = QPushButton("🗑")
-        self.delete_hotspot_button.setObjectName("deleteHotspotButton")
-        self.delete_hotspot_button.setToolTip("Delete hotspot")
-        order_actions.addWidget(self.move_hotspot_up_button)
-        order_actions.addWidget(self.move_hotspot_down_button)
-        order_actions.addWidget(self.delete_hotspot_button)
-        order_actions.addStretch(1)
-        hotspots_layout.addLayout(order_actions)
+        self.hotspot_form = QFormLayout()
+        self.hotspot_form.addRow("Label", self.hotspot_label_edit)
+        self.hotspot_form.addRow("Destination", self.hotspot_destination_combo)
+        self.hotspot_area_controls = QWidget()
+        area_controls_layout = QHBoxLayout(self.hotspot_area_controls)
+        area_controls_layout.setContentsMargins(0, 0, 0, 0)
+        self.hotspot_area_count = QLabel("0")
+        self.hotspot_area_count.setObjectName("hotspotAreaCount")
+        area_controls_layout.addWidget(self.hotspot_area_count)
+        area_controls_layout.addStretch(1)
+        self.add_component_button = QPushButton("Add Area")
+        self.add_component_button.setObjectName("addHotspotComponentButton")
+        area_controls_layout.addWidget(self.add_component_button)
+        self.hotspot_form.addRow("Areas", self.hotspot_area_controls)
+        hotspots_layout.addLayout(self.hotspot_form)
         self.hotspot_error = QLabel()
         self.hotspot_error.setObjectName("hotspotValidationError")
         self.hotspot_error.setWordWrap(True)
         self.hotspot_error.setVisible(False)
         hotspots_layout.addWidget(self.hotspot_error)
+        hotspots_layout.addWidget(self.generate_hotspots_button)
+        hotspots_layout.addWidget(self.hotspot_generation_status_message)
+        hotspots_layout.addWidget(self.hotspot_candidate_widget)
+        self.add_hotspot_button = QPushButton("Draw Hotspot")
+        self.add_hotspot_button.setObjectName("addHotspotButton")
+        hotspots_layout.addWidget(self.add_hotspot_button)
         self.inspector_tabs.addTab(interactivity_page, "Interactivity")
 
         self.pages = QStackedWidget()
@@ -724,8 +843,7 @@ class Inspector(QWidget):
         self.import_background_button.setToolTip(import_reason)
 
     def set_background_status(self, message: str, *, detail: str = "") -> None:
-        self.background_status.setText(message)
-        self.background_status.setToolTip(detail)
+        self.background_status_message.set_message(message, detail=detail)
 
     def set_scene_enrichment_capabilities(
         self,
@@ -755,8 +873,7 @@ class Inspector(QWidget):
         self.summarize_hotspots_button.setToolTip(reason)
 
     def set_intent_status(self, message: str, *, detail: str = "") -> None:
-        self.intent_status.setText(message)
-        self.intent_status.setToolTip(detail)
+        self.intent_status_message.set_message(message, detail=detail)
 
     def show_scene_enrichment(
         self,
@@ -767,6 +884,7 @@ class Inspector(QWidget):
             self._scene_enrichment_identity = None
             self.enriched_scene_edit.clear()
             return
+        self.scene_enrichment_status_message.dismiss()
         identity = (
             draft.stack_id,
             draft.card_id,
@@ -786,8 +904,7 @@ class Inspector(QWidget):
         *,
         detail: str = "",
     ) -> None:
-        self.scene_enrichment_status.setText(message)
-        self.scene_enrichment_status.setToolTip(detail)
+        self.scene_enrichment_status_message.set_message(message, detail=detail)
 
     def set_hotspot_generation_capabilities(
         self,
@@ -804,8 +921,7 @@ class Inspector(QWidget):
         *,
         detail: str = "",
     ) -> None:
-        self.hotspot_generation_status.setText(message)
-        self.hotspot_generation_status.setToolTip(detail)
+        self.hotspot_generation_status_message.set_message(message, detail=detail)
 
     def show_hotspot_candidate(
         self,
@@ -816,7 +932,9 @@ class Inspector(QWidget):
         if candidate is None:
             self._candidate_selected_interaction_id = None
             self.hotspot_candidate_warnings.clear()
+            self._update_tab_labels(self.hotspot_list.count())
             return
+        self.hotspot_generation_status_message.dismiss()
         revision = self._active_revision_for_selected_card()
         has_applied_set = revision is not None and revision.hotspot_set is not None
         self.apply_hotspot_candidate_button.setText(
@@ -839,6 +957,11 @@ class Inspector(QWidget):
             bool(candidate.warnings) and not warnings_dismissed
         )
         interactions = candidate.hotspot_set.interactions
+        self.hotspot_candidate_label.setText(
+            f"{len(interactions)} generated "
+            f"{'hotspot is' if len(interactions) == 1 else 'hotspots are'} "
+            "ready to review."
+        )
         desired_id = self._candidate_selected_interaction_id
         with QSignalBlocker(self.hotspot_list):
             self.hotspot_list.clear()
@@ -911,20 +1034,18 @@ class Inspector(QWidget):
     ) -> None:
         self._has_background_draft = draft is not None
         self.draft_widget.setVisible(draft is not None)
-        self.generate_background_button.setText(
-            "Generate Replacement..." if draft is not None else "Generate"
-        )
         self._update_card_tab_label()
         if draft is None:
             self.draft_value.clear()
             return
+        self.background_status_message.dismiss()
         origin = "Generated" if draft.origin.value == "generated" else "Imported"
         detail = (
             draft.generation_metadata.render_prompt
             if draft.generation_metadata is not None
             else draft.source_filename or ""
         )
-        self.draft_value.setText(f"{origin} background ready for review")
+        self.draft_value.setText(f"{origin} background is ready to review.")
         self.draft_value.setToolTip(detail)
         self._set_revision_thumbnail(draft.image_path)
 
@@ -1047,12 +1168,16 @@ class Inspector(QWidget):
 
     def _update_tab_labels(self, hotspot_count: int) -> None:
         self._update_card_tab_label()
-        self.inspector_tabs.setTabText(1, f"Interactivity ({hotspot_count})")
+        review_suffix = " • Review" if self._hotspot_candidate is not None else ""
+        self.inspector_tabs.setTabText(
+            1,
+            f"Interactivity ({hotspot_count}){review_suffix}",
+        )
 
     def _update_card_tab_label(self) -> None:
         self.inspector_tabs.setTabText(
             0,
-            "Card ●" if self._has_background_draft else "Card",
+            "Card • Review" if self._has_background_draft else "Card",
         )
 
     def _revision_selected(self, index: int) -> None:
@@ -1113,6 +1238,9 @@ class Inspector(QWidget):
         )
         self.delete_hotspot_button.setEnabled(has_interaction)
         self.hotspot_help_button.setEnabled(has_revision)
+        self.hotspot_area_count.setText(
+            str(len(interaction.polygons)) if interaction is not None else "0"
+        )
         with QSignalBlocker(self.hotspot_label_edit):
             self.hotspot_label_edit.setText(
                 interaction.label if interaction is not None else ""
@@ -1133,10 +1261,8 @@ class Inspector(QWidget):
                     interaction.id
                 )
                 if isinstance(target, ExistingCandidateTarget):
-                    target_card_id = (
-                        self._hotspot_candidate.card_ids_by_token.get(
-                            target.card_token
-                        )
+                    target_card_id = self._hotspot_candidate.card_ids_by_token.get(
+                        target.card_token
                     )
                     self.hotspot_destination_combo.setCurrentIndex(
                         self._combo_index_for_data(

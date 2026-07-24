@@ -14,7 +14,7 @@ import pytest
 from PIL import Image
 from PySide6.QtCore import QModelIndex, QObject, Qt, Signal
 from PySide6.QtGui import QAction, QCloseEvent
-from PySide6.QtWidgets import QApplication, QDialog, QLabel, QMessageBox
+from PySide6.QtWidgets import QApplication, QDialog, QFrame, QLabel, QMessageBox
 
 import hypergen.ui.inspector as inspector_module
 import hypergen.ui.main_window as main_window_module
@@ -910,8 +910,12 @@ def test_background_draft_is_contextual_and_previews_on_canvas(
     workflow.set_draft(draft)
 
     assert not window.inspector.draft_widget.isHidden()
-    assert window.inspector.inspector_tabs.tabText(0) == "Card ●"
-    assert window.inspector.generate_background_button.text() == "Generate Replacement..."
+    assert window.inspector.inspector_tabs.tabText(0) == "Card • Review"
+    assert window.inspector.generate_background_button.text() == "Generate Background"
+    assert window.inspector.draft_widget.frameShape() == QFrame.Shape.StyledPanel
+    assert window.inspector.draft_widget.accessibleName() == "Review required"
+    assert window.inspector.draft_badge.text() == "Review required"
+    assert window.inspector.discard_draft_button.text() == "Discard"
     assert not window.inspector.import_background_button.isEnabled()
     assert "Draft" in window.card_sidebar.card_list.item(0).text()
     assert window.card_canvas._border_item is not None
@@ -1077,11 +1081,43 @@ def test_import_and_apply_background_through_contextual_inspector(
     assert window.background_workflow.draft_for(card.id) is None
     revision = controller.document.cards[0].image_revisions[0]
     assert revision.source_filename == "source.png"
+    assert window.inspector.background_status.text() == "Background revision applied"
+    assert not window.inspector.background_status_message.isHidden()
+    window.inspector.background_status_message.dismiss_button.click()
+    assert window.inspector.background_status_message.isHidden()
     assert window.inspector.hotspots_placeholder.text() == "No hotspots yet."
     assert not window.inspector.hotspots_placeholder.isHidden()
     assert session.flush()
     assert session.store is not None
     assert session.store.asset_path(revision.image_path).is_file()
+    window.close()
+
+
+def test_initial_generated_hotspots_still_require_review(
+    application: QApplication,
+    tmp_path: Path,
+) -> None:
+    window, controller, workers, workflow = make_hotspot_window(tmp_path)
+    stack = controller.document
+    source = stack.cards[0]
+    revision = source.image_revisions[0].model_copy(update={"hotspot_set": None})
+    source = source.model_copy(update={"image_revisions": (revision,)})
+    controller.replace_document(
+        stack.model_copy(update={"cards": (source, stack.cards[1])})
+    )
+    window.render_document()
+    window._availability[AdapterKind.OLLAMA] = True
+    window._update_generation_actions()
+
+    window.inspector.generate_hotspots_button.click()
+    workers.ollama_run_operations[-1].succeeded.emit(
+        hotspot_generation_result()
+    )
+
+    assert workflow.candidate is not None
+    assert not window.inspector.hotspot_candidate_widget.isHidden()
+    assert window.inspector.apply_hotspot_candidate_button.text() == "Apply Hotspots"
+    assert controller.document.cards[0].image_revisions[0].hotspot_set is None
     window.close()
 
 
@@ -1105,6 +1141,14 @@ def test_generated_hotspot_candidate_reuses_editor_and_applies_atomically(
     candidate = workflow.candidate
     assert candidate is not None
     assert not window.inspector.hotspot_candidate_widget.isHidden()
+    assert window.inspector.hotspot_candidate_widget.frameShape() == (
+        QFrame.Shape.StyledPanel
+    )
+    assert window.inspector.hotspot_candidate_heading.text() == "Review required"
+    assert window.inspector.inspector_tabs.tabText(1).endswith("• Review")
+    assert window.inspector.hotspot_candidate_label.text() == (
+        "1 generated hotspot is ready to review."
+    )
     assert not window.inspector.summarize_hotspots_button.isEnabled()
     assert window.inspector.apply_hotspot_candidate_button.text() == "Replace Hotspots"
     assert window.inspector.hotspot_list.item(0).text().startswith("Generated gate")
