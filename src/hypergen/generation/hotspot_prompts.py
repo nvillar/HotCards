@@ -93,10 +93,22 @@ class ModelInteractionOutput(DomainModel):
     )
 
 
+class ModelUnlocatedInteractionOutput(DomainModel):
+    """One author-described subject the model cannot locate in the image."""
+
+    source_interaction_index: int = Field(ge=1, le=MAX_INTERACTIONS)
+    label: NonEmptyString
+    reason: NonEmptyString
+
+
 class HotspotModelOutput(DomainModel):
     """Complete structured response requested from Ollama."""
 
     interactions: tuple[ModelInteractionOutput, ...] = Field(
+        default_factory=tuple,
+        max_length=MAX_INTERACTIONS,
+    )
+    unlocated_interactions: tuple[ModelUnlocatedInteractionOutput, ...] = Field(
         default_factory=tuple,
         max_length=MAX_INTERACTIONS,
     )
@@ -161,11 +173,30 @@ class HotspotProposal(DomainModel):
     polygons: tuple[CandidatePolygon, ...]
 
 
+class HotspotReconciliationWarning(DomainModel):
+    """Actionable warning for an interaction subject absent from the image."""
+
+    source_interaction_index: int = Field(ge=1, le=MAX_INTERACTIONS)
+    label: NonEmptyString
+    reason: NonEmptyString
+
+    @property
+    def message(self) -> str:
+        return (
+            f'Could not locate "{self.label}" in the image: {self.reason}. '
+            "Edit Scene and regenerate the background, draw a manual hotspot, "
+            "or adjust/remove the interaction."
+        )
+
+
 class HotspotGenerationResult(DomainModel):
     """Strict candidate output with diagnostics and raw response access."""
 
     proposals: tuple[HotspotProposal, ...]
     warnings: tuple[str, ...]
+    reconciliation_warnings: tuple[HotspotReconciliationWarning, ...] = Field(
+        default_factory=tuple
+    )
     raw_response: NonEmptyString
     model_identifier: NonEmptyString
     prompt_version: NonEmptyString
@@ -202,6 +233,9 @@ Return JSON matching the supplied schema.
 - Use one interaction per semantic action and one or more polygon components per interaction.
 - The interaction description is authoritative. Return each described interaction exactly once.
   Do not add interactions merely because another object is visible.
+- If a described subject cannot be located in the image, do not invent geometry. Omit it from
+  interactions and return it once in unlocated_interactions with its source index, short label,
+  and a concrete reason.
 - Number the semantic actions in the interaction description from 1 in textual order. Return that
   number as source_interaction_index so every result remains tied to its author-described action.
 - Return only the interactions needed, not the maximum allowed. The safety bounds are at most
@@ -363,6 +397,30 @@ def normalize_hotspot_response(
                 f"{proposal.source_interaction_index}: {proposal.label!r}"
             )
         seen_source_interactions.add(proposal.source_interaction_index)
+    reconciliation_warnings: list[HotspotReconciliationWarning] = []
+    seen_unlocated_interactions: set[int] = set()
+    for warning in output.unlocated_interactions:
+        if warning.source_interaction_index in seen_source_interactions:
+            warnings.append(
+                "model both located and marked source interaction "
+                f"{warning.source_interaction_index} as unlocated; "
+                "the contradictory unlocated warning was ignored"
+            )
+            continue
+        if warning.source_interaction_index in seen_unlocated_interactions:
+            warnings.append(
+                "model repeated unlocated source interaction "
+                f"{warning.source_interaction_index}: {warning.label!r}"
+            )
+            continue
+        seen_unlocated_interactions.add(warning.source_interaction_index)
+        reconciliation_warnings.append(
+            HotspotReconciliationWarning(
+                source_interaction_index=warning.source_interaction_index,
+                label=warning.label,
+                reason=warning.reason,
+            )
+        )
     if len(output.interactions) == MAX_INTERACTIONS:
         warnings.append(
             f"model response reached the {MAX_INTERACTIONS}-interaction safety limit; "
@@ -371,6 +429,7 @@ def normalize_hotspot_response(
     return HotspotGenerationResult(
         proposals=proposals,
         warnings=tuple(warnings),
+        reconciliation_warnings=tuple(reconciliation_warnings),
         raw_response=call.content,
         model_identifier=model_identifier,
         prompt_version=request.prompt_version,

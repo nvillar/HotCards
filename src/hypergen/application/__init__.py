@@ -32,6 +32,11 @@ from hypergen.application.document_session import (
     DocumentSessionError,
     DocumentSessionState,
 )
+from hypergen.application.hotspot_generation_workflow import (
+    HotspotGenerationDraft,
+    HotspotGenerationWorkflow,
+    HotspotGenerationWorkflowError,
+)
 from hypergen.application.scene_enrichment_workflow import (
     SceneEnrichmentDraft,
     SceneEnrichmentWorkflow,
@@ -70,6 +75,9 @@ __all__ = [
     "DocumentSessionError",
     "DocumentSessionState",
     "EditCardTextCommand",
+    "HotspotGenerationDraft",
+    "HotspotGenerationWorkflow",
+    "HotspotGenerationWorkflowError",
     "OperationStatus",
     "RenameCardCommand",
     "ReorderCardCommand",

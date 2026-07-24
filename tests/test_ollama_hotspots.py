@@ -179,6 +179,59 @@ def test_repeated_hotspot_proposals_are_flagged(tmp_path: Path) -> None:
     assert any("repeated source interaction" in warning for warning in result.warnings)
 
 
+def test_unlocated_subject_returns_actionable_reconciliation_warning(
+    tmp_path: Path,
+) -> None:
+    image_path = tmp_path / "fixture.png"
+    image_path.write_bytes(b"fixture")
+    response = json.dumps(
+        {
+            "interactions": [],
+            "unlocated_interactions": [
+                {
+                    "source_interaction_index": 1,
+                    "label": "Hidden gate",
+                    "reason": "no gate is visible",
+                }
+            ],
+        }
+    )
+    runtime = OllamaRuntime(
+        OllamaSettings(),
+        client=FakeOllamaClient([response]),
+    )
+
+    result = OllamaHotspotGenerator(runtime).generate(request(image_path))
+
+    warning = result.reconciliation_warnings[0]
+    assert warning.label == "Hidden gate"
+    assert "Edit Scene and regenerate" in warning.message
+    assert "draw a manual hotspot" in warning.message
+    assert "adjust/remove the interaction" in warning.message
+
+
+def test_contradictory_unlocated_subject_is_ignored(tmp_path: Path) -> None:
+    image_path = tmp_path / "fixture.png"
+    image_path.write_bytes(b"fixture")
+    response = json.loads(hotspot_response())
+    response["unlocated_interactions"] = [
+        {
+            "source_interaction_index": 1,
+            "label": "Gate",
+            "reason": "no gate is visible",
+        }
+    ]
+    runtime = OllamaRuntime(
+        OllamaSettings(),
+        client=FakeOllamaClient([json.dumps(response)]),
+    )
+
+    result = OllamaHotspotGenerator(runtime).generate(request(image_path))
+
+    assert result.reconciliation_warnings == ()
+    assert any("both located and marked" in warning for warning in result.warnings)
+
+
 def test_invalid_structured_response_is_rejected(tmp_path: Path) -> None:
     image_path = tmp_path / "fixture.png"
     image_path.write_bytes(b"fixture")
