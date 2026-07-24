@@ -49,6 +49,10 @@ from hypergen.application.document_session import (
     DocumentSessionState,
 )
 from hypergen.application.run_session import RunSession, RunSessionState
+from hypergen.application.scene_enrichment_workflow import (
+    SceneEnrichmentWorkflow,
+    SceneEnrichmentWorkflowError,
+)
 from hypergen.application.workers import (
     AdapterKind,
     AdapterWorkers,
@@ -65,6 +69,7 @@ from hypergen.domain.models import (
     Stack,
     UnresolvedCardReference,
 )
+from hypergen.generation.ollama_client import OllamaSettings
 from hypergen.storage.stack_store import StackStoreError
 from hypergen.ui.card_canvas import CardCanvas
 from hypergen.ui.card_sidebar import CardSidebar
@@ -96,6 +101,7 @@ class MainWindow(QMainWindow):
         settings_dialog_factory: SettingsDialogFactory = SettingsDialog,
         document_session: DocumentSession | None = None,
         background_workflow: BackgroundWorkflow | None = None,
+        scene_enrichment_workflow: SceneEnrichmentWorkflow | None = None,
         start_diagnostics: bool = True,
         owns_workers: bool = False,
     ) -> None:
@@ -105,6 +111,7 @@ class MainWindow(QMainWindow):
         self.settings = settings if settings is not None else QSettings()
         self.document_session = document_session
         self.background_workflow = background_workflow
+        self.scene_enrichment_workflow = scene_enrichment_workflow
         self._availability_checks = dict(availability_checks or {})
         self._availability_checks_factory = availability_checks_factory
         self._settings_dialog_factory = settings_dialog_factory
@@ -128,6 +135,13 @@ class MainWindow(QMainWindow):
                 self.document_session,
                 workers,
                 self._background_generation_settings,
+                parent=self,
+            )
+        if self.scene_enrichment_workflow is None:
+            self.scene_enrichment_workflow = SceneEnrichmentWorkflow(
+                controller,
+                workers,
+                self._ollama_settings,
                 parent=self,
             )
 
@@ -262,6 +276,13 @@ class MainWindow(QMainWindow):
         self.inspector.render_inputs_changed.connect(
             self._update_generation_actions
         )
+        self.inspector.enrich_scene_requested.connect(self._enrich_scene)
+        self.inspector.accept_scene_enrichment_requested.connect(
+            self._accept_scene_enrichment
+        )
+        self.inspector.discard_scene_enrichment_requested.connect(
+            self._discard_scene_enrichment
+        )
         self.inspector.generate_background_requested.connect(self._generate_background)
         self.inspector.import_background_requested.connect(self._import_background)
         self.inspector.accept_background_draft_requested.connect(
@@ -308,6 +329,21 @@ class MainWindow(QMainWindow):
             )
             self.background_workflow.failed.connect(self._background_failed)
             self.background_workflow.document_changed.connect(self.render_document)
+        self.scene_enrichment_workflow.draft_changed.connect(
+            self._scene_enrichment_changed
+        )
+        self.scene_enrichment_workflow.busy_changed.connect(
+            lambda _busy: self._update_generation_actions()
+        )
+        self.scene_enrichment_workflow.progress_changed.connect(
+            self._scene_enrichment_progress_changed
+        )
+        self.scene_enrichment_workflow.failed.connect(
+            self._scene_enrichment_failed
+        )
+        self.scene_enrichment_workflow.document_changed.connect(
+            self.render_document
+        )
 
         self.pane_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.pane_splitter.setObjectName("threePaneSplitter")
@@ -415,6 +451,7 @@ class MainWindow(QMainWindow):
                 self.canvas_pages.setCurrentIndex(0)
                 self.canvas_card_name.clear()
                 self.inspector.show_background_draft(None)
+                self.inspector.show_scene_enrichment(None)
             else:
                 self.canvas_pages.setCurrentIndex(1)
                 self.canvas_card_name.setText(selected_card.name)
@@ -424,6 +461,16 @@ class MainWindow(QMainWindow):
                     else None
                 )
                 self.inspector.show_background_draft(draft)
+                enrichment = self.scene_enrichment_workflow.draft
+                self.inspector.show_scene_enrichment(
+                    enrichment
+                    if (
+                        enrichment is not None
+                        and enrichment.card_id == selected_card.id
+                        and not self._is_running
+                    )
+                    else None
+                )
                 self._render_card_canvas(selected_card)
             overlay_index = self.overlay_selector.findData(snapshot.run_overlay_mode)
             self.overlay_selector.setCurrentIndex(overlay_index)
@@ -437,7 +484,10 @@ class MainWindow(QMainWindow):
     def select_card(self, card_id: object) -> None:
         if self._is_running:
             return
-        self._selected_card_id = card_id if isinstance(card_id, UUID) else None
+        selected_card_id = card_id if isinstance(card_id, UUID) else None
+        if selected_card_id != self._selected_card_id:
+            self.scene_enrichment_workflow.cancel()
+        self._selected_card_id = selected_card_id
         if self.card_sidebar.selected_card_id != self._selected_card_id:
             self.card_sidebar.select_card(self._selected_card_id)
         self.render_document()
@@ -574,6 +624,7 @@ class MainWindow(QMainWindow):
                 and not self._confirm_generation_cancel("deleting this card")
             ):
                 return
+            self.scene_enrichment_workflow.cancel()
             self.card_sidebar.delete_card(card.id)
             if draft is not None:
                 self.background_workflow.discard_draft(card.id)
@@ -594,6 +645,7 @@ class MainWindow(QMainWindow):
         return dialog.clickedButton() is delete_button
 
     def _document_replaced(self, _document: object) -> None:
+        self.scene_enrichment_workflow.cancel()
         if self._is_running:
             state = self._run_session.start(self.controller.document)
             self._selected_card_id = state.current_card_id
@@ -715,6 +767,46 @@ class MainWindow(QMainWindow):
             workflow.generate(card_id, replace_draft=replacing_draft)
         except BackgroundWorkflowError as error:
             self.inspector.set_background_status(str(error), detail=str(error))
+        self._update_generation_actions()
+
+    def _enrich_scene(self) -> None:
+        card_id = self._selected_card_id
+        if card_id is None or not self.inspector.commit_card_metadata():
+            return
+        try:
+            self.scene_enrichment_workflow.start(card_id)
+        except SceneEnrichmentWorkflowError as error:
+            self.inspector.set_scene_enrichment_status(str(error), detail=str(error))
+        self._update_generation_actions()
+
+    def _accept_scene_enrichment(self) -> None:
+        card_id = self._selected_card_id
+        if card_id is None:
+            return
+        try:
+            self.scene_enrichment_workflow.apply(
+                card_id,
+                self.inspector.enriched_scene_edit.toPlainText(),
+            )
+        except SceneEnrichmentWorkflowError as error:
+            self.inspector.set_scene_enrichment_status(str(error), detail=str(error))
+
+    def _discard_scene_enrichment(self) -> None:
+        self.scene_enrichment_workflow.discard()
+
+    def _scene_enrichment_changed(self) -> None:
+        self.render_document()
+
+    def _scene_enrichment_progress_changed(self, message: str) -> None:
+        self.inspector.set_scene_enrichment_status(message)
+        self._update_generation_actions()
+
+    def _scene_enrichment_failed(self, failure: object) -> None:
+        detail = failure.message if isinstance(failure, WorkerFailure) else str(failure)
+        self.inspector.set_scene_enrichment_status(
+            "Scene enrichment failed",
+            detail=detail,
+        )
         self._update_generation_actions()
 
     def _import_background(self) -> None:
@@ -999,6 +1091,31 @@ class MainWindow(QMainWindow):
             import_reason=import_reason,
             busy=workflow_busy,
         )
+        enrichment_busy = self.scene_enrichment_workflow.busy
+        enrichment_draft = self.scene_enrichment_workflow.draft
+        ollama_available = self._availability[AdapterKind.OLLAMA] is True
+        can_enrich = (
+            has_card
+            and self.inspector.has_scene_input()
+            and ollama_available
+            and not enrichment_busy
+            and enrichment_draft is None
+        )
+        enrich_reason = "Ready to enrich Scene"
+        if not has_card:
+            enrich_reason = "Select a card in a saved stack"
+        elif not self.inspector.has_scene_input():
+            enrich_reason = "Enter a Scene before enriching"
+        elif enrichment_busy:
+            enrich_reason = "Scene enrichment is running"
+        elif enrichment_draft is not None:
+            enrich_reason = "Accept or discard the current enriched Scene"
+        elif not ollama_available:
+            enrich_reason = self._action_diagnostic(AdapterKind.OLLAMA)
+        self.inspector.set_scene_enrichment_capabilities(
+            can_enrich=can_enrich,
+            reason=enrich_reason,
+        )
         pending = [
             adapter for adapter, available in self._availability.items() if available is None
         ]
@@ -1262,6 +1379,13 @@ class MainWindow(QMainWindow):
             fixed_seed=values.fixed_seed,
         )
 
+    def _ollama_settings(self) -> OllamaSettings:
+        values = load_machine_settings(self.settings)
+        return OllamaSettings(
+            endpoint=values.ollama_endpoint,
+            model=values.ollama_model,
+        )
+
     def _action_diagnostic(self, adapter: AdapterKind) -> str:
         if self._availability[adapter] is True:
             return f"{adapter.value} is available"
@@ -1386,6 +1510,7 @@ class MainWindow(QMainWindow):
 
     def _cancel_ai_activity_for_run(self) -> None:
         self._cancel_diagnostics()
+        self.scene_enrichment_workflow.cancel()
         if self.background_workflow is not None and self.background_workflow.busy:
             self.background_workflow.cancel()
 
@@ -1429,6 +1554,7 @@ class MainWindow(QMainWindow):
                 return
         if self.background_workflow is not None:
             self.background_workflow.close()
+        self.scene_enrichment_workflow.close()
         if self._owns_workers:
             self.workers.shutdown(wait_milliseconds=100)
         super().closeEvent(event)

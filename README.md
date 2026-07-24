@@ -20,13 +20,15 @@ The current Author workflow uses Card and Interactivity inspector tabs. The
 Card tab keeps Scene, background revisions, and a collapsible Style editor
 together. Background prompts are composed directly from the author-visible
 Scene plus either the stack's global Style or a card-specific replacement;
-interaction intent does not alter the image. Authors can review generated or
-imported card-local background drafts, switch cards without losing them, manage
-revision history, and edit manual multi-area polygon hotspots with explicit card
-destinations. Run mode supports deterministic hotspot navigation, Back/Restart
-history, and configurable overlays. Local AI services are checked automatically
-when Author mode is entered; Run mode starts no AI work. AI hotspot generation
-is still under development.
+interaction intent does not alter the image. An optional Enrich action can
+rewrite Scene text through Ollama for explicit review, editing, acceptance, or
+discard; accepted text remains an ordinary undoable Scene edit. Authors can
+review generated or imported card-local background drafts, switch cards without
+losing them, manage revision history, and edit manual multi-area polygon
+hotspots with explicit card destinations. Run mode supports deterministic
+hotspot navigation, Back/Restart history, and configurable overlays. Local AI
+services are checked automatically when Author mode is entered; Run mode starts
+no AI work. AI hotspot generation is still under development.
 
 ## Setup and run
 

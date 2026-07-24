@@ -32,6 +32,11 @@ from hypergen.application.document_session import (
     DocumentSessionError,
     DocumentSessionState,
 )
+from hypergen.application.scene_enrichment_workflow import (
+    SceneEnrichmentDraft,
+    SceneEnrichmentWorkflow,
+    SceneEnrichmentWorkflowError,
+)
 from hypergen.application.workers import (
     AdapterKind,
     AdapterWorkers,
@@ -74,6 +79,9 @@ __all__ = [
     "ReplacePolygonCommand",
     "SetRunOverlayModeCommand",
     "SetStartCardCommand",
+    "SceneEnrichmentDraft",
+    "SceneEnrichmentWorkflow",
+    "SceneEnrichmentWorkflowError",
     "WorkerFailure",
     "WorkerFailureKind",
     "WorkerOperation",

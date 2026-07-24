@@ -41,6 +41,7 @@ from hypergen.domain.models import (
     UnresolvedCardReference,
 )
 from hypergen.generation.errors import ModelUnavailableError
+from hypergen.generation.scene_enrichment import SceneEnrichmentResult
 from hypergen.main import build_availability_checks, build_main_window
 from hypergen.storage.stack_store import StackStore, StackStoreError
 from hypergen.ui.main_window import MainWindow
@@ -80,6 +81,10 @@ class FakeOperation(QObject):
         self.cancelled = True
         self.finished.emit()
 
+    @property
+    def is_finished(self) -> bool:
+        return self.cancelled
+
 
 class FakeWorkers(QObject):
     availability_changed = Signal(object)
@@ -90,6 +95,8 @@ class FakeWorkers(QObject):
         self.mflux_checks: list[object] = []
         self.ollama_operations: list[FakeOperation] = []
         self.mflux_operations: list[FakeOperation] = []
+        self.ollama_run_calls: list[object] = []
+        self.ollama_run_operations: list[FakeOperation] = []
         self.shutdown_calls = 0
 
     def check_ollama(
@@ -115,6 +122,18 @@ class FakeWorkers(QObject):
         operation = FakeOperation()
         self.mflux_operations.append(operation)
         return operation
+
+    def run_ollama(
+        self,
+        operation: object,
+        *,
+        stage: str,
+    ) -> FakeOperation:
+        assert stage in {"enriching Scene", "generating hotspots"}
+        self.ollama_run_calls.append(operation)
+        handle = FakeOperation()
+        self.ollama_run_operations.append(handle)
+        return handle
 
     def shutdown(self, *, wait_milliseconds: int = 0) -> None:
         self.shutdown_calls += 1
@@ -520,6 +539,109 @@ def test_inspector_combines_card_and_background_authoring(
     assert not window.inspector.style_details_button.isChecked()
     assert not window.inspector.enrich_scene_button.isEnabled()
     assert not window.inspector.hotspot_help_button.toolTip() == ""
+    window.close()
+
+
+def test_scene_enrichment_requires_scene_and_available_ollama(
+    application: QApplication,
+) -> None:
+    window, _controller, _workers, _settings = make_window()
+
+    assert not window.inspector.enrich_scene_button.isEnabled()
+    window._availability[AdapterKind.OLLAMA] = True
+    window._update_generation_actions()
+    assert window.inspector.enrich_scene_button.isEnabled()
+
+    window.inspector.scene_edit.clear()
+    application.processEvents()
+    assert not window.inspector.enrich_scene_button.isEnabled()
+    assert "Enter a Scene" in window.inspector.enrich_scene_button.toolTip()
+    window.close()
+
+
+def test_scene_enrichment_accept_discard_and_undo(
+    application: QApplication,
+) -> None:
+    window, controller, workers, _settings = make_window()
+    window._availability[AdapterKind.OLLAMA] = True
+    window._update_generation_actions()
+
+    window.inspector.enrich_scene_button.click()
+    assert len(workers.ollama_run_calls) == 1
+    result = SceneEnrichmentResult(
+        scene="A richly detailed quiet entrance",
+        raw_response='{"scene":"A richly detailed quiet entrance"}',
+        model_identifier="qwen3.5:9b",
+        prompt_version="scene-enrichment-v1",
+        duration_seconds=1.0,
+    )
+    workers.ollama_run_operations[-1].succeeded.emit(result)
+    assert not window.inspector.scene_enrichment_widget.isHidden()
+    assert controller.document.cards[0].scene_description == "A quiet entrance"
+
+    window.inspector.enriched_scene_edit.setPlainText(
+        "An edited richly detailed quiet entrance"
+    )
+    window.inspector.card_name_edit.setText("Renamed Foyer")
+    window.inspector.card_name_edit.editingFinished.emit()
+    assert (
+        window.inspector.enriched_scene_edit.toPlainText()
+        == "An edited richly detailed quiet entrance"
+    )
+    window.inspector.accept_scene_enrichment_button.click()
+    assert (
+        controller.document.cards[0].scene_description
+        == "An edited richly detailed quiet entrance"
+    )
+    assert controller.undo()
+    window.render_document()
+    assert controller.document.cards[0].scene_description == "A quiet entrance"
+
+    window.inspector.enrich_scene_button.click()
+    workers.ollama_run_operations[-1].succeeded.emit(result)
+    window.inspector.discard_scene_enrichment_button.click()
+    assert controller.document.cards[0].scene_description == "A quiet entrance"
+    assert window.inspector.scene_enrichment_widget.isHidden()
+    window.close()
+
+
+def test_scene_enrichment_is_cancelled_on_card_switch_and_run(
+    application: QApplication,
+) -> None:
+    window, controller, workers, _settings = make_window()
+    window._availability[AdapterKind.OLLAMA] = True
+    window._update_generation_actions()
+
+    window.inspector.enrich_scene_button.click()
+    first_operation = workers.ollama_run_operations[-1]
+    window.select_card(controller.document.cards[1].id)
+    assert first_operation.cancelled
+
+    window.select_card(controller.document.cards[0].id)
+    window.inspector.enrich_scene_button.click()
+    second_operation = workers.ollama_run_operations[-1]
+    window.mode_selector.setCurrentText("Run")
+    assert second_operation.cancelled
+    assert controller.document.cards[0].scene_description == "A quiet entrance"
+    window.close()
+
+
+def test_scene_enrichment_is_cancelled_when_card_is_deleted(
+    application: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window, controller, workers, _settings = make_window()
+    window._availability[AdapterKind.OLLAMA] = True
+    window._update_generation_actions()
+    card_id = controller.document.cards[0].id
+
+    window.inspector.enrich_scene_button.click()
+    operation = workers.ollama_run_operations[-1]
+    monkeypatch.setattr(window, "_ask_delete_card", lambda _message: True)
+    window._confirm_delete_card(card_id)
+
+    assert operation.cancelled
+    assert all(card.id != card_id for card in controller.document.cards)
     window.close()
 
 

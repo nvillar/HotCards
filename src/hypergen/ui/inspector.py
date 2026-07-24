@@ -50,6 +50,7 @@ from hypergen.application.commands import (
     SetStartCardCommand,
 )
 from hypergen.application.document_controller import DocumentController
+from hypergen.application.scene_enrichment_workflow import SceneEnrichmentDraft
 from hypergen.domain.models import (
     Card,
     ImageRevision,
@@ -90,6 +91,9 @@ class Inspector(QWidget):
     add_hotspot_requested = Signal()
     add_hotspot_component_requested = Signal(object)
     render_inputs_changed = Signal()
+    enrich_scene_requested = Signal()
+    accept_scene_enrichment_requested = Signal()
+    discard_scene_enrichment_requested = Signal()
 
     def __init__(
         self,
@@ -104,6 +108,7 @@ class Inspector(QWidget):
         self.selected_card_id: UUID | None = None
         self._rendering = False
         self._has_background_draft = False
+        self._scene_enrichment_identity: tuple[UUID, UUID, str, str] | None = None
         self.setObjectName("inspector")
         self.setMinimumWidth(300)
 
@@ -132,7 +137,6 @@ class Inspector(QWidget):
         self.enrich_scene_button = QPushButton("Enrich")
         self.enrich_scene_button.setObjectName("enrichSceneButton")
         self.enrich_scene_button.setEnabled(False)
-        self.enrich_scene_button.setToolTip("Scene enrichment is planned in issue #25")
         scene_heading.addWidget(self.enrich_scene_button)
         card_layout.addLayout(scene_heading)
         self.scene_edit = _CommitPlainTextEdit()
@@ -140,6 +144,33 @@ class Inspector(QWidget):
         self.scene_edit.setPlaceholderText("Describe the image to generate")
         self.scene_edit.setMaximumHeight(150)
         card_layout.addWidget(self.scene_edit)
+        self.scene_enrichment_widget = QWidget()
+        self.scene_enrichment_widget.setObjectName("sceneEnrichmentReview")
+        enrichment_layout = QVBoxLayout(self.scene_enrichment_widget)
+        enrichment_layout.setContentsMargins(0, 4, 0, 4)
+        enrichment_layout.addWidget(_section_heading("Enriched Scene"))
+        self.enriched_scene_edit = QPlainTextEdit()
+        self.enriched_scene_edit.setObjectName("enrichedSceneEdit")
+        self.enriched_scene_edit.setMaximumHeight(150)
+        enrichment_layout.addWidget(self.enriched_scene_edit)
+        enrichment_actions = QHBoxLayout()
+        self.accept_scene_enrichment_button = QPushButton("Accept")
+        self.accept_scene_enrichment_button.setObjectName(
+            "acceptSceneEnrichmentButton"
+        )
+        self.discard_scene_enrichment_button = QPushButton("Discard")
+        self.discard_scene_enrichment_button.setObjectName(
+            "discardSceneEnrichmentButton"
+        )
+        enrichment_actions.addWidget(self.accept_scene_enrichment_button)
+        enrichment_actions.addWidget(self.discard_scene_enrichment_button)
+        enrichment_layout.addLayout(enrichment_actions)
+        card_layout.addWidget(self.scene_enrichment_widget)
+        self.scene_enrichment_widget.setVisible(False)
+        self.scene_enrichment_status = QLabel()
+        self.scene_enrichment_status.setObjectName("sceneEnrichmentStatus")
+        self.scene_enrichment_status.setWordWrap(True)
+        card_layout.addWidget(self.scene_enrichment_status)
         self.start_card_check = QCheckBox("Use as start card")
         self.start_card_check.setObjectName("startCardCheck")
         card_layout.addWidget(self.start_card_check)
@@ -408,6 +439,13 @@ class Inspector(QWidget):
             lambda: self._move_hotspot(1)
         )
         self.delete_hotspot_button.clicked.connect(self._delete_hotspot)
+        self.enrich_scene_button.clicked.connect(self.enrich_scene_requested)
+        self.accept_scene_enrichment_button.clicked.connect(
+            self.accept_scene_enrichment_requested
+        )
+        self.discard_scene_enrichment_button.clicked.connect(
+            self.discard_scene_enrichment_requested
+        )
         self.render(controller.document, None)
 
     def _render_input_edited(self) -> None:
@@ -422,6 +460,13 @@ class Inspector(QWidget):
                 self.scene_edit.toPlainText().strip()
                 or self.style_edit.toPlainText().strip()
             )
+        )
+
+    def has_scene_input(self) -> bool:
+        """Return whether the visible Scene can be enriched."""
+        return bool(
+            self.selected_card_id is not None
+            and self.scene_edit.toPlainText().strip()
         )
 
     def render(self, document: Stack, selected_card_id: UUID | None) -> None:
@@ -594,6 +639,46 @@ class Inspector(QWidget):
     def set_background_status(self, message: str, *, detail: str = "") -> None:
         self.background_status.setText(message)
         self.background_status.setToolTip(detail)
+
+    def set_scene_enrichment_capabilities(
+        self,
+        *,
+        can_enrich: bool,
+        reason: str,
+    ) -> None:
+        self.enrich_scene_button.setEnabled(can_enrich)
+        self.enrich_scene_button.setToolTip(reason)
+
+    def show_scene_enrichment(
+        self,
+        draft: SceneEnrichmentDraft | None,
+    ) -> None:
+        self.scene_enrichment_widget.setVisible(draft is not None)
+        if draft is None:
+            self._scene_enrichment_identity = None
+            self.enriched_scene_edit.clear()
+            return
+        identity = (
+            draft.stack_id,
+            draft.card_id,
+            draft.enriched_scene,
+            draft.prompt_version,
+        )
+        if identity != self._scene_enrichment_identity:
+            self.enriched_scene_edit.setPlainText(draft.enriched_scene)
+            self._scene_enrichment_identity = identity
+        self.enriched_scene_edit.setToolTip(
+            f"Generated by {draft.model_identifier} ({draft.prompt_version})"
+        )
+
+    def set_scene_enrichment_status(
+        self,
+        message: str,
+        *,
+        detail: str = "",
+    ) -> None:
+        self.scene_enrichment_status.setText(message)
+        self.scene_enrichment_status.setToolTip(detail)
 
     @property
     def selected_interaction_id(self) -> UUID | None:
