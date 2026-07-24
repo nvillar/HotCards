@@ -123,10 +123,31 @@ def test_interactivity_tab_uses_compact_controls_and_on_demand_help(
 
     assert inspector.inspector_tabs.tabText(1) == "Interactivity (0)"
     assert inspector.interactions_edit.toPlainText() == "Tap the fox"
+    assert inspector.summarize_hotspots_button.text() == "Summarize Hotspots"
     assert inspector.move_hotspot_up_button.text() == "↑"
     assert inspector.move_hotspot_down_button.text() == "↓"
     assert inspector.delete_hotspot_button.text() == "🗑"
     assert "Click to add vertices" in inspector.hotspot_help_button.toolTip()
+    inspector.close()
+
+
+def test_summarize_hotspots_follows_intent_text(
+    application: QApplication,
+) -> None:
+    card = Card(name="Card", interaction_description="Tap the fox")
+    controller = DocumentController(Stack(name="Demo", cards=(card,)))
+    inspector = Inspector(controller)
+    inspector.render(controller.document, card.id)
+    page = inspector.inspector_tabs.widget(1)
+    layout = page.layout()
+    assert layout is not None
+    intent_actions_index = next(
+        index
+        for index in range(layout.count())
+        if layout.itemAt(index).layout() is inspector.intent_actions
+    )
+
+    assert layout.indexOf(inspector.interactions_edit) < intent_actions_index
     inspector.close()
 
 

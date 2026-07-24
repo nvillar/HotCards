@@ -105,6 +105,7 @@ class Inspector(QWidget):
     candidate_reorder_requested = Signal(object, int)
     candidate_delete_requested = Signal(object)
     describe_image_requested = Signal()
+    summarize_hotspots_requested = Signal()
 
     def __init__(
         self,
@@ -329,6 +330,16 @@ class Inspector(QWidget):
         )
         self.interactions_edit.setMaximumHeight(110)
         hotspots_layout.addWidget(self.interactions_edit)
+        self.intent_actions = QHBoxLayout()
+        self.summarize_hotspots_button = QPushButton("Summarize Hotspots")
+        self.summarize_hotspots_button.setObjectName("summarizeHotspotsButton")
+        self.summarize_hotspots_button.setEnabled(False)
+        self.intent_actions.addWidget(self.summarize_hotspots_button)
+        hotspots_layout.addLayout(self.intent_actions)
+        self.intent_status = QLabel()
+        self.intent_status.setObjectName("intentStatus")
+        self.intent_status.setWordWrap(True)
+        hotspots_layout.addWidget(self.intent_status)
         hotspots_layout.addSpacing(8)
         hotspots_heading = QHBoxLayout()
         self.hotspots_heading = _section_heading("Hotspots")
@@ -513,6 +524,9 @@ class Inspector(QWidget):
         )
         self.enrich_scene_button.clicked.connect(self.enrich_scene_requested)
         self.describe_image_button.clicked.connect(self.describe_image_requested)
+        self.summarize_hotspots_button.clicked.connect(
+            self.summarize_hotspots_requested
+        )
         self.accept_scene_enrichment_button.clicked.connect(
             self.accept_scene_enrichment_requested
         )
@@ -730,6 +744,19 @@ class Inspector(QWidget):
     ) -> None:
         self.describe_image_button.setEnabled(can_describe)
         self.describe_image_button.setToolTip(reason)
+
+    def set_hotspot_summary_capabilities(
+        self,
+        *,
+        can_summarize: bool,
+        reason: str,
+    ) -> None:
+        self.summarize_hotspots_button.setEnabled(can_summarize)
+        self.summarize_hotspots_button.setToolTip(reason)
+
+    def set_intent_status(self, message: str, *, detail: str = "") -> None:
+        self.intent_status.setText(message)
+        self.intent_status.setToolTip(detail)
 
     def show_scene_enrichment(
         self,

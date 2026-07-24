@@ -39,6 +39,7 @@ from hypergen.application.commands import (
     DeleteInteractionCommand,
     DeletePolygonCommand,
     DocumentCommand,
+    EditCardTextCommand,
     ReplacePolygonCommand,
     SetRunOverlayModeCommand,
 )
@@ -77,6 +78,10 @@ from hypergen.domain.models import (
     RunOverlayMode,
     Stack,
     UnresolvedCardReference,
+)
+from hypergen.generation.hotspot_intent import (
+    HotspotIntentError,
+    compose_hotspot_intent,
 )
 from hypergen.generation.ollama_client import OllamaSettings
 from hypergen.storage.stack_store import StackStoreError
@@ -313,6 +318,9 @@ class MainWindow(QMainWindow):
             self._discard_scene_enrichment
         )
         self.inspector.describe_image_requested.connect(self._describe_image)
+        self.inspector.summarize_hotspots_requested.connect(
+            self._summarize_hotspots
+        )
         self.inspector.generate_hotspots_requested.connect(
             self._generate_hotspots
         )
@@ -929,6 +937,25 @@ class MainWindow(QMainWindow):
         )
         self._update_generation_actions()
 
+    def _summarize_hotspots(self) -> None:
+        card_id = self._selected_card_id
+        if card_id is None or not self.inspector.commit_card_metadata():
+            return
+        try:
+            summary = compose_hotspot_intent(self.controller.document, card_id)
+            changed = self.controller.execute(
+                EditCardTextCommand(
+                    card_id=card_id,
+                    field="interaction_description",
+                    value=summary,
+                )
+            )
+        except (HotspotIntentError, CommandError, ValidationError) as error:
+            self.inspector.set_intent_status(str(error), detail=str(error))
+            return
+        self.inspector.set_intent_status("Intent replaced from applied hotspots")
+        self.render_document(changed)
+
     def _generate_hotspots(self) -> None:
         card_id = self._selected_card_id
         if card_id is None or not self.inspector.commit_card_metadata():
@@ -1436,6 +1463,28 @@ class MainWindow(QMainWindow):
         )
         hotspot_busy = self.hotspot_generation_workflow.busy
         hotspot_candidate = self.hotspot_generation_workflow.candidate
+        has_applied_hotspots = (
+            active_revision is not None
+            and active_revision.hotspot_set is not None
+            and bool(active_revision.hotspot_set.interactions)
+        )
+        can_summarize_hotspots = (
+            has_card
+            and has_applied_hotspots
+            and hotspot_candidate is None
+            and not hotspot_busy
+        )
+        summary_reason = "Replace Intent from applied hotspots"
+        if not has_card:
+            summary_reason = "Select a card in a saved stack"
+        elif not has_applied_hotspots:
+            summary_reason = "Apply at least one hotspot before summarizing"
+        elif hotspot_busy or hotspot_candidate is not None:
+            summary_reason = "Apply or discard the hotspot candidate first"
+        self.inspector.set_hotspot_summary_capabilities(
+            can_summarize=can_summarize_hotspots,
+            reason=summary_reason,
+        )
         can_generate_hotspots = (
             has_card
             and has_active_revision

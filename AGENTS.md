@@ -57,6 +57,9 @@ for live Ollama and MFLUX runs.
 - Keep generated hotspot candidates session-only while they are reviewed. The
   previously applied set remains authoritative until one complete candidate is
   applied through a single undoable replacement.
+- Compose Summarize Hotspots output deterministically and offline from only the
+  active revision's applied hotspot labels and destinations. Never summarize a
+  transient candidate as authoritative Intent.
 - Keep pending background drafts session-only, with at most one per card. They
   must not enter stack JSON, autosave, or Undo/Redo before acceptance.
 - Check local AI services on entry to Author mode, with concurrent checks

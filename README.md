@@ -29,10 +29,11 @@ drafts, switch cards without losing them, manage revision history, and edit
 manual multi-area polygon hotspots with explicit card destinations. Authors can
 also generate transient hotspot candidates from the active image and interaction
 intent, correct them with the same geometry and destination controls, review
-absent-subject warnings, then apply or discard the complete set. Run mode
-supports deterministic hotspot navigation, Back/Restart history, and
-configurable overlays. Local AI services are checked automatically when Author
-mode is entered; Run mode starts no AI work.
+absent-subject warnings, then apply or discard the complete set. Summarize
+Hotspots can reconstruct Intent offline from the active revision's applied
+labels and destinations. Run mode supports deterministic hotspot navigation,
+Back/Restart history, and configurable overlays. Local AI services are checked
+automatically when Author mode is entered; Run mode starts no AI work.
 
 ## Setup and run
 

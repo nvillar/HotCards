@@ -1105,6 +1105,7 @@ def test_generated_hotspot_candidate_reuses_editor_and_applies_atomically(
     candidate = workflow.candidate
     assert candidate is not None
     assert not window.inspector.hotspot_candidate_widget.isHidden()
+    assert not window.inspector.summarize_hotspots_button.isEnabled()
     assert window.inspector.apply_hotspot_candidate_button.text() == "Replace Hotspots"
     assert window.inspector.hotspot_list.item(0).text().startswith("Generated gate")
     assert window.card_canvas._hotspot_set == candidate.hotspot_set
@@ -1411,6 +1412,24 @@ def test_existing_destination_survives_card_and_hotspot_reselection(
         window.inspector.hotspot_destination_combo.currentData()
         == destination.id
     )
+    window.close()
+
+
+def test_summarize_hotspots_replaces_intent_offline_and_is_undoable(
+    application: QApplication,
+) -> None:
+    window, controller, _workers, _settings = make_window()
+    original_intent = controller.document.cards[0].interaction_description
+
+    assert window._availability[AdapterKind.OLLAMA] is None
+    assert window.inspector.summarize_hotspots_button.isEnabled()
+    window.inspector.summarize_hotspots_button.click()
+
+    assert controller.document.cards[0].interaction_description == (
+        'Selecting "Door" navigates to unresolved destination "Hall".'
+    )
+    assert controller.undo()
+    assert controller.document.cards[0].interaction_description == original_intent
     window.close()
 
 

@@ -8,6 +8,10 @@ from hypergen.generation.errors import (
     ModelUnavailableError,
     ServiceUnavailableError,
 )
+from hypergen.generation.hotspot_intent import (
+    HotspotIntentError,
+    compose_hotspot_intent,
+)
 from hypergen.generation.image_description import (
     ImageDescriptionRequest,
     ImageDescriptionResult,
@@ -24,6 +28,7 @@ __all__ = [
     "ImageDescriptionRequest",
     "ImageDescriptionResult",
     "ImageGenerationError",
+    "HotspotIntentError",
     "ModelLoadError",
     "ModelResponseError",
     "ModelUnavailableError",
@@ -32,4 +37,5 @@ __all__ = [
     "SceneEnrichmentRequest",
     "SceneEnrichmentResult",
     "ServiceUnavailableError",
+    "compose_hotspot_intent",
 ]
