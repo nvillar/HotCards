@@ -104,6 +104,7 @@ class Inspector(QWidget):
     candidate_create_destination_requested = Signal(object, str)
     candidate_reorder_requested = Signal(object, int)
     candidate_delete_requested = Signal(object)
+    describe_image_requested = Signal()
 
     def __init__(
         self,
@@ -140,6 +141,7 @@ class Inspector(QWidget):
         card_page = QWidget()
         card_page.setObjectName("cardInspectorContent")
         card_layout = QVBoxLayout(card_page)
+        self.card_layout = card_layout
         self.card_name_edit = QLineEdit()
         self.card_name_edit.setObjectName("cardNameEdit")
         name_form = QFormLayout()
@@ -149,16 +151,22 @@ class Inspector(QWidget):
         self.scene_heading = _section_heading("Scene")
         scene_heading.addWidget(self.scene_heading)
         scene_heading.addStretch(1)
-        self.enrich_scene_button = QPushButton("Enrich")
-        self.enrich_scene_button.setObjectName("enrichSceneButton")
-        self.enrich_scene_button.setEnabled(False)
-        scene_heading.addWidget(self.enrich_scene_button)
         card_layout.addLayout(scene_heading)
         self.scene_edit = _CommitPlainTextEdit()
         self.scene_edit.setObjectName("sceneDescriptionEdit")
         self.scene_edit.setPlaceholderText("Describe the image to generate")
         self.scene_edit.setMaximumHeight(150)
         card_layout.addWidget(self.scene_edit)
+        self.scene_actions = QHBoxLayout()
+        self.enrich_scene_button = QPushButton("Enrich")
+        self.enrich_scene_button.setObjectName("enrichSceneButton")
+        self.enrich_scene_button.setEnabled(False)
+        self.describe_image_button = QPushButton("Describe Image")
+        self.describe_image_button.setObjectName("describeImageButton")
+        self.describe_image_button.setEnabled(False)
+        self.scene_actions.addWidget(self.enrich_scene_button)
+        self.scene_actions.addWidget(self.describe_image_button)
+        card_layout.addLayout(self.scene_actions)
         self.scene_enrichment_widget = QWidget()
         self.scene_enrichment_widget.setObjectName("sceneEnrichmentReview")
         enrichment_layout = QVBoxLayout(self.scene_enrichment_widget)
@@ -188,7 +196,6 @@ class Inspector(QWidget):
         card_layout.addWidget(self.scene_enrichment_status)
         self.start_card_check = QCheckBox("Use as start card")
         self.start_card_check.setObjectName("startCardCheck")
-        card_layout.addWidget(self.start_card_check)
         self.validation_error = QLabel()
         self.validation_error.setObjectName("inspectorValidationError")
         self.validation_error.setWordWrap(True)
@@ -305,6 +312,7 @@ class Inspector(QWidget):
         draft_layout.addLayout(draft_actions)
         card_layout.addWidget(self.draft_widget)
         self.draft_widget.setVisible(False)
+        card_layout.addWidget(self.start_card_check)
         card_layout.addStretch(1)
         card_scroll.setWidget(card_page)
         self.inspector_tabs.addTab(card_scroll, "Card")
@@ -504,6 +512,7 @@ class Inspector(QWidget):
             self._dismiss_candidate_warnings
         )
         self.enrich_scene_button.clicked.connect(self.enrich_scene_requested)
+        self.describe_image_button.clicked.connect(self.describe_image_requested)
         self.accept_scene_enrichment_button.clicked.connect(
             self.accept_scene_enrichment_requested
         )
@@ -712,6 +721,15 @@ class Inspector(QWidget):
     ) -> None:
         self.enrich_scene_button.setEnabled(can_enrich)
         self.enrich_scene_button.setToolTip(reason)
+
+    def set_image_description_capabilities(
+        self,
+        *,
+        can_describe: bool,
+        reason: str,
+    ) -> None:
+        self.describe_image_button.setEnabled(can_describe)
+        self.describe_image_button.setToolTip(reason)
 
     def show_scene_enrichment(
         self,

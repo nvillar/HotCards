@@ -193,3 +193,26 @@ def test_card_tab_keeps_revision_button_labels_readable(
     assert import_row > generate_row
     assert import_column_span == 2
     inspector.close()
+
+
+def test_scene_actions_follow_text_and_start_card_is_last_control(
+    application: QApplication,
+) -> None:
+    card = Card(name="Card", scene_description="A scene")
+    controller = DocumentController(Stack(name="Demo", cards=(card,)))
+    inspector = Inspector(controller)
+    inspector.render(controller.document, card.id)
+    layout = inspector.card_layout
+    scene_actions_index = next(
+        index
+        for index in range(layout.count())
+        if layout.itemAt(index).layout() is inspector.scene_actions
+    )
+
+    assert layout.indexOf(inspector.scene_edit) < scene_actions_index
+    assert [
+        inspector.enrich_scene_button.text(),
+        inspector.describe_image_button.text(),
+    ] == ["Enrich", "Describe Image"]
+    assert layout.indexOf(inspector.start_card_check) == layout.count() - 2
+    inspector.close()

@@ -49,6 +49,9 @@ for live Ollama and MFLUX runs.
 - Compose background prompts deterministically from Scene plus effective Style
   (`Card.card_style` replaces `Stack.global_style` when present). Interaction
   intent feeds hotspot generation only and must not alter the image prompt.
+- Keep reverse authoring explicit: Enrich is text-to-text, while Describe Image
+  reads only the active revision image and replaces Scene through one undoable
+  command. Neither assist reads interaction intent.
 - Store each hotspot set under exactly one image revision. Never silently reuse
   hotspots against another image revision.
 - Keep generated hotspot candidates session-only while they are reviewed. The

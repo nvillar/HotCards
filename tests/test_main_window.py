@@ -51,6 +51,7 @@ from hypergen.generation.hotspot_prompts import (
     HotspotProposal,
     HotspotReconciliationWarning,
 )
+from hypergen.generation.image_description import ImageDescriptionResult
 from hypergen.generation.ollama_client import OllamaSettings
 from hypergen.generation.scene_enrichment import SceneEnrichmentResult
 from hypergen.main import build_availability_checks, build_main_window
@@ -140,7 +141,11 @@ class FakeWorkers(QObject):
         *,
         stage: str,
     ) -> FakeOperation:
-        assert stage in {"enriching Scene", "generating hotspots"}
+        assert stage in {
+            "describing image",
+            "enriching Scene",
+            "generating hotspots",
+        }
         self.ollama_run_calls.append(operation)
         handle = FakeOperation()
         self.ollama_run_operations.append(handle)
@@ -740,6 +745,57 @@ def test_scene_enrichment_is_cancelled_when_card_is_deleted(
 
     assert operation.cancelled
     assert all(card.id != card_id for card in controller.document.cards)
+    window.close()
+
+
+def test_describe_image_replaces_scene_and_is_undoable(
+    application: QApplication,
+    tmp_path: Path,
+) -> None:
+    window, controller, workers, _workflow = make_hotspot_window(tmp_path)
+    original_scene = controller.document.cards[0].scene_description
+    window._availability[AdapterKind.OLLAMA] = True
+    window._update_generation_actions()
+
+    assert window.inspector.describe_image_button.isEnabled()
+    window.inspector.describe_image_button.click()
+    assert not window.inspector.describe_image_button.isEnabled()
+    result = ImageDescriptionResult(
+        scene="A moonlit castle framed by dark pines and silver mist",
+        raw_response='{"scene":"A moonlit castle"}',
+        model_identifier="qwen3.5:9b",
+        prompt_version="image-description-v1",
+        duration_seconds=1.0,
+    )
+    workers.ollama_run_operations[-1].succeeded.emit(result)
+
+    assert (
+        controller.document.cards[0].scene_description
+        == "A moonlit castle framed by dark pines and silver mist"
+    )
+    assert controller.undo()
+    assert controller.document.cards[0].scene_description == original_scene
+    window.close()
+
+
+def test_describe_image_cancels_on_card_switch_and_run(
+    application: QApplication,
+    tmp_path: Path,
+) -> None:
+    window, controller, workers, _workflow = make_hotspot_window(tmp_path)
+    window._availability[AdapterKind.OLLAMA] = True
+    window._update_generation_actions()
+
+    window.inspector.describe_image_button.click()
+    first = workers.ollama_run_operations[-1]
+    window.select_card(controller.document.cards[1].id)
+    assert first.cancelled
+
+    window.select_card(controller.document.cards[0].id)
+    window.inspector.describe_image_button.click()
+    second = workers.ollama_run_operations[-1]
+    window.mode_selector.setCurrentText("Run")
+    assert second.cancelled
     window.close()
 
 

@@ -22,16 +22,17 @@ together. Background prompts are composed directly from the author-visible
 Scene plus either the stack's global Style or a card-specific replacement;
 interaction intent does not alter the image. An optional Enrich action can
 rewrite Scene text through Ollama for explicit review, editing, acceptance, or
-discard; accepted text remains an ordinary undoable Scene edit. Authors can
-review generated or imported card-local background drafts, switch cards without
-losing them, manage revision history, and edit manual multi-area polygon
-hotspots with explicit card destinations. Authors can also generate transient
-hotspot candidates from the active image and interaction intent, correct them
-with the same geometry and destination controls, review absent-subject warnings,
-then apply or discard the complete set. Run mode supports deterministic hotspot
-navigation, Back/Restart history, and configurable overlays. Local AI services
-are checked automatically when Author mode is entered; Run mode starts no AI
-work.
+discard; accepted text remains an ordinary undoable Scene edit. Describe Image
+can instead replace Scene with a generation-ready visual description of the
+active revision. Authors can review generated or imported card-local background
+drafts, switch cards without losing them, manage revision history, and edit
+manual multi-area polygon hotspots with explicit card destinations. Authors can
+also generate transient hotspot candidates from the active image and interaction
+intent, correct them with the same geometry and destination controls, review
+absent-subject warnings, then apply or discard the complete set. Run mode
+supports deterministic hotspot navigation, Back/Restart history, and
+configurable overlays. Local AI services are checked automatically when Author
+mode is entered; Run mode starts no AI work.
 
 ## Setup and run
 

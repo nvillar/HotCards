@@ -53,6 +53,10 @@ from hypergen.application.hotspot_generation_workflow import (
     HotspotGenerationWorkflow,
     HotspotGenerationWorkflowError,
 )
+from hypergen.application.image_description_workflow import (
+    ImageDescriptionWorkflow,
+    ImageDescriptionWorkflowError,
+)
 from hypergen.application.run_session import RunSession, RunSessionState
 from hypergen.application.scene_enrichment_workflow import (
     SceneEnrichmentWorkflow,
@@ -108,6 +112,7 @@ class MainWindow(QMainWindow):
         background_workflow: BackgroundWorkflow | None = None,
         scene_enrichment_workflow: SceneEnrichmentWorkflow | None = None,
         hotspot_generation_workflow: HotspotGenerationWorkflow | None = None,
+        image_description_workflow: ImageDescriptionWorkflow | None = None,
         start_diagnostics: bool = True,
         owns_workers: bool = False,
     ) -> None:
@@ -119,6 +124,7 @@ class MainWindow(QMainWindow):
         self.background_workflow = background_workflow
         self.scene_enrichment_workflow = scene_enrichment_workflow
         self.hotspot_generation_workflow = hotspot_generation_workflow
+        self.image_description_workflow = image_description_workflow
         self._availability_checks = dict(availability_checks or {})
         self._availability_checks_factory = availability_checks_factory
         self._settings_dialog_factory = settings_dialog_factory
@@ -153,6 +159,14 @@ class MainWindow(QMainWindow):
             )
         if self.hotspot_generation_workflow is None:
             self.hotspot_generation_workflow = HotspotGenerationWorkflow(
+                controller,
+                workers,
+                self._ollama_settings,
+                self._resolve_revision_image_path,
+                parent=self,
+            )
+        if self.image_description_workflow is None:
+            self.image_description_workflow = ImageDescriptionWorkflow(
                 controller,
                 workers,
                 self._ollama_settings,
@@ -298,6 +312,7 @@ class MainWindow(QMainWindow):
         self.inspector.discard_scene_enrichment_requested.connect(
             self._discard_scene_enrichment
         )
+        self.inspector.describe_image_requested.connect(self._describe_image)
         self.inspector.generate_hotspots_requested.connect(
             self._generate_hotspots
         )
@@ -396,6 +411,18 @@ class MainWindow(QMainWindow):
             self._hotspot_generation_failed
         )
         self.hotspot_generation_workflow.document_changed.connect(
+            self.render_document
+        )
+        self.image_description_workflow.busy_changed.connect(
+            lambda _busy: self._update_generation_actions()
+        )
+        self.image_description_workflow.progress_changed.connect(
+            self._image_description_progress_changed
+        )
+        self.image_description_workflow.failed.connect(
+            self._image_description_failed
+        )
+        self.image_description_workflow.document_changed.connect(
             self.render_document
         )
 
@@ -554,6 +581,7 @@ class MainWindow(QMainWindow):
         if selected_card_id != self._selected_card_id:
             self.scene_enrichment_workflow.cancel()
             self.hotspot_generation_workflow.cancel()
+            self.image_description_workflow.cancel()
         self._selected_card_id = selected_card_id
         if self.card_sidebar.selected_card_id != self._selected_card_id:
             self.card_sidebar.select_card(self._selected_card_id)
@@ -693,6 +721,7 @@ class MainWindow(QMainWindow):
                 return
             self.scene_enrichment_workflow.cancel()
             self.hotspot_generation_workflow.cancel()
+            self.image_description_workflow.cancel()
             self.card_sidebar.delete_card(card.id)
             if draft is not None:
                 self.background_workflow.discard_draft(card.id)
@@ -878,6 +907,28 @@ class MainWindow(QMainWindow):
         )
         self._update_generation_actions()
 
+    def _describe_image(self) -> None:
+        card_id = self._selected_card_id
+        if card_id is None or not self.inspector.commit_card_metadata():
+            return
+        try:
+            self.image_description_workflow.start(card_id)
+        except ImageDescriptionWorkflowError as error:
+            self.inspector.set_scene_enrichment_status(str(error), detail=str(error))
+        self._update_generation_actions()
+
+    def _image_description_progress_changed(self, message: str) -> None:
+        self.inspector.set_scene_enrichment_status(message)
+        self._update_generation_actions()
+
+    def _image_description_failed(self, failure: object) -> None:
+        detail = failure.message if isinstance(failure, WorkerFailure) else str(failure)
+        self.inspector.set_scene_enrichment_status(
+            "Image description failed",
+            detail=detail,
+        )
+        self._update_generation_actions()
+
     def _generate_hotspots(self) -> None:
         card_id = self._selected_card_id
         if card_id is None or not self.inspector.commit_card_metadata():
@@ -1053,6 +1104,7 @@ class MainWindow(QMainWindow):
     def _accept_background_draft(self) -> None:
         if self.background_workflow is None or self._selected_card_id is None:
             return
+        self.image_description_workflow.cancel()
         try:
             self.background_workflow.apply_draft(self._selected_card_id)
         except (BackgroundWorkflowError, StackStoreError, CommandError) as error:
@@ -1069,6 +1121,7 @@ class MainWindow(QMainWindow):
             or not isinstance(revision_id, UUID)
         ):
             return
+        self.image_description_workflow.cancel()
         try:
             self.background_workflow.activate_revision(
                 self._selected_card_id,
@@ -1098,6 +1151,7 @@ class MainWindow(QMainWindow):
         dialog.exec()
         if dialog.clickedButton() is not delete_button:
             return
+        self.image_description_workflow.cancel()
         try:
             self.background_workflow.delete_revision(
                 self._selected_card_id,
@@ -1298,12 +1352,14 @@ class MainWindow(QMainWindow):
         )
         enrichment_busy = self.scene_enrichment_workflow.busy
         enrichment_draft = self.scene_enrichment_workflow.draft
+        description_busy = self.image_description_workflow.busy
         ollama_available = self._availability[AdapterKind.OLLAMA] is True
         can_enrich = (
             has_card
             and self.inspector.has_scene_input()
             and ollama_available
             and not enrichment_busy
+            and not description_busy
             and enrichment_draft is None
         )
         enrich_reason = "Ready to enrich Scene"
@@ -1313,6 +1369,8 @@ class MainWindow(QMainWindow):
             enrich_reason = "Enter a Scene before enriching"
         elif enrichment_busy:
             enrich_reason = "Scene enrichment is running"
+        elif description_busy:
+            enrich_reason = "Image description is running"
         elif enrichment_draft is not None:
             enrich_reason = "Accept or discard the current enriched Scene"
         elif not ollama_available:
@@ -1332,6 +1390,49 @@ class MainWindow(QMainWindow):
         has_active_revision = (
             selected_card is not None
             and selected_card.active_revision_id is not None
+        )
+        active_revision = (
+            next(
+                (
+                    revision
+                    for revision in selected_card.image_revisions
+                    if revision.id == selected_card.active_revision_id
+                ),
+                None,
+            )
+            if selected_card is not None
+            else None
+        )
+        active_image_path = (
+            self._resolve_revision_image_path(active_revision.image_path)
+            if active_revision is not None
+            else None
+        )
+        has_readable_active_image = (
+            active_image_path is not None and active_image_path.is_file()
+        )
+        can_describe_image = (
+            has_card
+            and has_readable_active_image
+            and ollama_available
+            and not description_busy
+            and not enrichment_busy
+            and enrichment_draft is None
+        )
+        describe_reason = "Replace Scene from the active image"
+        if not has_card:
+            describe_reason = "Select a card in a saved stack"
+        elif not has_readable_active_image:
+            describe_reason = "Apply an available background before describing it"
+        elif description_busy:
+            describe_reason = "Image description is running"
+        elif enrichment_busy or enrichment_draft is not None:
+            describe_reason = "Finish or discard the current Scene enrichment"
+        elif not ollama_available:
+            describe_reason = self._action_diagnostic(AdapterKind.OLLAMA)
+        self.inspector.set_image_description_capabilities(
+            can_describe=can_describe_image,
+            reason=describe_reason,
         )
         hotspot_busy = self.hotspot_generation_workflow.busy
         hotspot_candidate = self.hotspot_generation_workflow.candidate
@@ -1834,6 +1935,7 @@ class MainWindow(QMainWindow):
         self._cancel_diagnostics()
         self.scene_enrichment_workflow.cancel()
         self.hotspot_generation_workflow.cancel()
+        self.image_description_workflow.cancel()
         if self.background_workflow is not None and self.background_workflow.busy:
             self.background_workflow.cancel()
 
@@ -1879,6 +1981,7 @@ class MainWindow(QMainWindow):
             self.background_workflow.close()
         self.scene_enrichment_workflow.close()
         self.hotspot_generation_workflow.close()
+        self.image_description_workflow.close()
         if self._owns_workers:
             self.workers.shutdown(wait_milliseconds=100)
         super().closeEvent(event)
