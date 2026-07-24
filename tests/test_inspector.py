@@ -216,11 +216,13 @@ def test_card_tab_uses_revision_edit_generation_hierarchy(
         for index in range(layout.count())
         if layout.itemAt(index).layout() is inspector.revision_selector
     )
-    assert revision_selector_index < layout.indexOf(inspector.style_details_button)
-    assert layout.indexOf(inspector.style_details_button) < layout.indexOf(
+    assert revision_selector_index < layout.indexOf(
         inspector.generate_background_button
     )
     assert layout.indexOf(inspector.generate_background_button) < layout.indexOf(
+        inspector.style_details_button
+    )
+    assert layout.indexOf(inspector.style_details_button) < layout.indexOf(
         inspector.draft_widget
     )
     assert layout.indexOf(inspector.draft_widget) < layout.indexOf(

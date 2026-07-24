@@ -368,11 +368,11 @@ class Inspector(QWidget):
         style_layout.addWidget(self.style_scope_caption)
         self.style_details.setVisible(False)
 
-        card_layout.addWidget(self.style_details_button)
-        card_layout.addWidget(self.style_details)
         self.generate_background_button = QPushButton("Generate Background")
         self.generate_background_button.setObjectName("generateBackgroundButton")
         card_layout.addWidget(self.generate_background_button)
+        card_layout.addWidget(self.style_details_button)
+        card_layout.addWidget(self.style_details)
         self.background_status_message = _DismissibleMessage(
             object_name="backgroundStatusMessage",
             label_object_name="backgroundStatus",
