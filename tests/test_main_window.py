@@ -22,6 +22,9 @@ from hypergen.application.background_workflow import BackgroundDraft
 from hypergen.application.commands import CreateCardCommand
 from hypergen.application.document_controller import DocumentController
 from hypergen.application.document_session import DocumentSession
+from hypergen.application.hotspot_generation_workflow import (
+    HotspotGenerationWorkflow,
+)
 from hypergen.application.workers import (
     AdapterKind,
     WorkerFailure,
@@ -41,6 +44,14 @@ from hypergen.domain.models import (
     UnresolvedCardReference,
 )
 from hypergen.generation.errors import ModelUnavailableError
+from hypergen.generation.hotspot_prompts import (
+    CandidatePolygon,
+    ExistingCandidateTarget,
+    HotspotGenerationResult,
+    HotspotProposal,
+    HotspotReconciliationWarning,
+)
+from hypergen.generation.ollama_client import OllamaSettings
 from hypergen.generation.scene_enrichment import SceneEnrichmentResult
 from hypergen.main import build_availability_checks, build_main_window
 from hypergen.storage.stack_store import StackStore, StackStoreError
@@ -236,6 +247,43 @@ def loaded_stack() -> Stack:
     return Stack(name="Demo", cards=(foyer, hall), start_card_id=foyer.id)
 
 
+def hotspot_generation_result() -> HotspotGenerationResult:
+    return HotspotGenerationResult(
+        proposals=(
+            HotspotProposal(
+                source_interaction_index=1,
+                label="Generated gate",
+                target=ExistingCandidateTarget(
+                    card_token="C2",
+                    card_name="Hall",
+                ),
+                polygons=(
+                    CandidatePolygon(
+                        points=(
+                            Point(x=0.55, y=0.2),
+                            Point(x=0.85, y=0.2),
+                            Point(x=0.7, y=0.55),
+                        )
+                    ),
+                ),
+            ),
+        ),
+        warnings=(),
+        reconciliation_warnings=(
+            HotspotReconciliationWarning(
+                source_interaction_index=2,
+                label="Fox",
+                reason="no fox is visible",
+            ),
+        ),
+        raw_response='{"interactions":[{"label":"Generated gate"}]}',
+        model_identifier="qwen3.5:9b",
+        prompt_version="hotspot-prompt-v2",
+        schema_version="hotspot-schema-v2",
+        duration_seconds=1.0,
+    )
+
+
 def make_window(
     stack: Stack | None = None,
     *,
@@ -257,6 +305,56 @@ def make_window(
         start_diagnostics=start_diagnostics,
     )
     return window, controller, workers, settings
+
+
+def make_hotspot_window(
+    tmp_path: Path,
+) -> tuple[MainWindow, DocumentController, FakeWorkers, HotspotGenerationWorkflow]:
+    image_path = tmp_path / "active.png"
+    Image.new("RGB", (1024, 768), "navy").save(image_path)
+    stack = loaded_stack()
+    source = stack.cards[0]
+    revision = source.image_revisions[0]
+    bundle = tmp_path / "Hotspots.hypergen"
+    store = StackStore(bundle)
+    relative_path = store.import_image(
+        image_path,
+        card_id=source.id,
+        revision_id=revision.id,
+    )
+    revision = revision.model_copy(update={"image_path": relative_path})
+    source = source.model_copy(
+        update={
+            "image_revisions": (revision,),
+            "active_revision_id": revision.id,
+        }
+    )
+    stack = stack.model_copy(update={"cards": (source, stack.cards[1])})
+    store.save(stack)
+    controller = DocumentController(Stack(name="Bootstrap"))
+    session = DocumentSession(controller)
+    session.open(bundle)
+    workers = FakeWorkers()
+    workflow = HotspotGenerationWorkflow(
+        controller,
+        workers,  # type: ignore[arg-type]
+        OllamaSettings,
+        store.asset_path,
+    )
+    window = MainWindow(
+        controller,
+        workers,  # type: ignore[arg-type]
+        FakeSettings(),
+        availability_checks={
+            AdapterKind.OLLAMA: lambda: None,
+            AdapterKind.MFLUX: lambda: None,
+        },
+        document_session=session,
+        background_workflow=FakeBackgroundWorkflow(),  # type: ignore[arg-type]
+        hotspot_generation_workflow=workflow,
+        start_diagnostics=False,
+    )
+    return window, controller, workers, workflow
 
 
 def test_three_panes_render_loaded_stack_in_sidebar_and_inspector(
@@ -928,6 +1026,168 @@ def test_import_and_apply_background_through_contextual_inspector(
     assert session.flush()
     assert session.store is not None
     assert session.store.asset_path(revision.image_path).is_file()
+    window.close()
+
+
+def test_generated_hotspot_candidate_reuses_editor_and_applies_atomically(
+    application: QApplication,
+    tmp_path: Path,
+) -> None:
+    window, controller, workers, workflow = make_hotspot_window(tmp_path)
+    original = controller.document.cards[0].image_revisions[0].hotspot_set
+    window._availability[AdapterKind.OLLAMA] = True
+    window._update_generation_actions()
+
+    assert window.inspector.generate_hotspots_button.isEnabled()
+    window.inspector.generate_hotspots_button.click()
+    assert len(workers.ollama_run_calls) == 1
+    assert controller.document.cards[0].image_revisions[0].hotspot_set == original
+    workers.ollama_run_operations[-1].succeeded.emit(
+        hotspot_generation_result()
+    )
+
+    candidate = workflow.candidate
+    assert candidate is not None
+    assert not window.inspector.hotspot_candidate_widget.isHidden()
+    assert window.inspector.apply_hotspot_candidate_button.text() == "Replace Hotspots"
+    assert window.inspector.hotspot_list.item(0).text().startswith("Generated gate")
+    assert window.card_canvas._hotspot_set == candidate.hotspot_set
+    assert controller.document.cards[0].image_revisions[0].hotspot_set == original
+    warning = window.inspector.hotspot_candidate_warnings.text()
+    assert "Edit Scene and regenerate" in warning
+    assert "draw a manual hotspot" in warning
+    assert "adjust/remove the interaction" in warning
+    window.inspector.dismiss_candidate_warnings_button.click()
+    assert window.inspector.hotspot_candidate_warnings.isHidden()
+
+    interaction_id = candidate.hotspot_set.interactions[0].id
+    window.inspector.hotspot_label_edit.setText("Edited gate")
+    window.inspector.hotspot_label_edit.editingFinished.emit()
+    edited_polygon = Polygon(
+        points=(
+            Point(x=0.5, y=0.15),
+            Point(x=0.9, y=0.15),
+            Point(x=0.7, y=0.6),
+        )
+    )
+    window.card_canvas.polygon_changed.emit(interaction_id, 0, edited_polygon)
+    assert workflow.candidate is not None
+    assert workflow.candidate.hotspot_set.interactions[0].label == "Edited gate"
+    assert workflow.candidate.hotspot_set.interactions[0].polygons[0] == edited_polygon
+    assert hotspot_generation_result().raw_response not in controller.document.model_dump_json()
+
+    window.inspector.apply_hotspot_candidate_button.click()
+    applied = controller.document.cards[0].image_revisions[0].hotspot_set
+    assert applied is not None
+    assert applied.interactions[0].label == "Edited gate"
+    assert applied.interactions[0].action.target == ResolvedCardReference(
+        target_card_id=controller.document.cards[1].id
+    )
+    assert applied.generation_provenance is not None
+    assert applied.generation_provenance.model_identifier == "qwen3.5:9b"
+    assert workflow.candidate is None
+    assert hotspot_generation_result().raw_response not in controller.document.model_dump_json()
+    assert controller.undo()
+    assert controller.document.cards[0].image_revisions[0].hotspot_set == original
+    window.close()
+
+
+def test_hotspot_candidate_discard_failure_and_run_preserve_applied_set(
+    application: QApplication,
+    tmp_path: Path,
+) -> None:
+    window, controller, workers, workflow = make_hotspot_window(tmp_path)
+    destination = controller.document.cards[1]
+    destination_index = window.inspector.hotspot_destination_combo.findData(
+        destination.id
+    )
+    window.inspector.hotspot_destination_combo.setCurrentIndex(destination_index)
+    window.inspector.hotspot_destination_combo.activated.emit(destination_index)
+    application.processEvents()
+    original = controller.document.cards[0].image_revisions[0].hotspot_set
+    window._availability[AdapterKind.OLLAMA] = True
+    window._update_generation_actions()
+
+    window.inspector.generate_hotspots_button.click()
+    workers.ollama_run_operations[-1].succeeded.emit(hotspot_generation_result())
+    window.inspector.discard_hotspot_candidate_button.click()
+    assert workflow.candidate is None
+    assert controller.document.cards[0].image_revisions[0].hotspot_set == original
+    assert window.inspector.hotspot_destination_combo.currentData() == destination.id
+
+    window.inspector.generate_hotspots_button.click()
+    failure = WorkerFailure(
+        adapter=AdapterKind.OLLAMA,
+        stage="generating hotspots",
+        kind=WorkerFailureKind.MODEL_RESPONSE,
+        message="invalid hotspot response",
+    )
+    workers.ollama_run_operations[-1].failed.emit(failure)
+    assert workflow.candidate is None
+    assert controller.document.cards[0].image_revisions[0].hotspot_set == original
+    assert "invalid hotspot response" in window.inspector.hotspot_generation_status.toolTip()
+
+    window.inspector.generate_hotspots_button.click()
+    operation = workers.ollama_run_operations[-1]
+    window.mode_selector.setCurrentText("Run")
+    assert operation.cancelled
+    assert workflow.candidate is None
+    assert controller.document.cards[0].image_revisions[0].hotspot_set == original
+    window.close()
+
+
+def test_candidate_destination_control_can_create_blank_card_explicitly(
+    application: QApplication,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window, controller, workers, workflow = make_hotspot_window(tmp_path)
+    window._availability[AdapterKind.OLLAMA] = True
+    window._update_generation_actions()
+    window.inspector.generate_hotspots_button.click()
+    workers.ollama_run_operations[-1].succeeded.emit(hotspot_generation_result())
+    assert len(controller.document.cards) == 2
+    monkeypatch.setattr(
+        inspector_module.QInputDialog,
+        "getText",
+        lambda *_args, **_kwargs: ("New Destination", True),
+    )
+
+    create_index = window.inspector.hotspot_destination_combo.findData("create")
+    window.inspector.hotspot_destination_combo.setCurrentIndex(create_index)
+    window.inspector.hotspot_destination_combo.activated.emit(create_index)
+    application.processEvents()
+
+    assert [card.name for card in controller.document.cards] == [
+        "Foyer",
+        "Hall",
+        "New Destination",
+    ]
+    candidate = workflow.candidate
+    assert candidate is not None
+    interaction_id = candidate.hotspot_set.interactions[0].id
+    target = candidate.targets_by_interaction_id[interaction_id]
+    assert isinstance(target, ExistingCandidateTarget)
+    assert candidate.card_ids_by_token[target.card_token] == controller.document.cards[-1].id
+    window.close()
+
+
+def test_hotspot_candidate_is_discarded_on_card_switch(
+    application: QApplication,
+    tmp_path: Path,
+) -> None:
+    window, controller, workers, workflow = make_hotspot_window(tmp_path)
+    original = controller.document.cards[0].image_revisions[0].hotspot_set
+    window._availability[AdapterKind.OLLAMA] = True
+    window._update_generation_actions()
+    window.inspector.generate_hotspots_button.click()
+    workers.ollama_run_operations[-1].succeeded.emit(hotspot_generation_result())
+    assert workflow.candidate is not None
+
+    window.select_card(controller.document.cards[1].id)
+
+    assert workflow.candidate is None
+    assert controller.document.cards[0].image_revisions[0].hotspot_set == original
     window.close()
 
 

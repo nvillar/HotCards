@@ -48,6 +48,11 @@ from hypergen.application.document_session import (
     DocumentSessionError,
     DocumentSessionState,
 )
+from hypergen.application.hotspot_generation_workflow import (
+    HotspotGenerationDraft,
+    HotspotGenerationWorkflow,
+    HotspotGenerationWorkflowError,
+)
 from hypergen.application.run_session import RunSession, RunSessionState
 from hypergen.application.scene_enrichment_workflow import (
     SceneEnrichmentWorkflow,
@@ -102,6 +107,7 @@ class MainWindow(QMainWindow):
         document_session: DocumentSession | None = None,
         background_workflow: BackgroundWorkflow | None = None,
         scene_enrichment_workflow: SceneEnrichmentWorkflow | None = None,
+        hotspot_generation_workflow: HotspotGenerationWorkflow | None = None,
         start_diagnostics: bool = True,
         owns_workers: bool = False,
     ) -> None:
@@ -112,6 +118,7 @@ class MainWindow(QMainWindow):
         self.document_session = document_session
         self.background_workflow = background_workflow
         self.scene_enrichment_workflow = scene_enrichment_workflow
+        self.hotspot_generation_workflow = hotspot_generation_workflow
         self._availability_checks = dict(availability_checks or {})
         self._availability_checks_factory = availability_checks_factory
         self._settings_dialog_factory = settings_dialog_factory
@@ -142,6 +149,14 @@ class MainWindow(QMainWindow):
                 controller,
                 workers,
                 self._ollama_settings,
+                parent=self,
+            )
+        if self.hotspot_generation_workflow is None:
+            self.hotspot_generation_workflow = HotspotGenerationWorkflow(
+                controller,
+                workers,
+                self._ollama_settings,
+                self._resolve_revision_image_path,
                 parent=self,
             )
 
@@ -283,6 +298,30 @@ class MainWindow(QMainWindow):
         self.inspector.discard_scene_enrichment_requested.connect(
             self._discard_scene_enrichment
         )
+        self.inspector.generate_hotspots_requested.connect(
+            self._generate_hotspots
+        )
+        self.inspector.apply_hotspot_candidate_requested.connect(
+            self._apply_hotspot_candidate
+        )
+        self.inspector.discard_hotspot_candidate_requested.connect(
+            self._discard_hotspot_candidate
+        )
+        self.inspector.candidate_label_changed.connect(
+            self._rename_hotspot_candidate
+        )
+        self.inspector.candidate_destination_changed.connect(
+            self._set_hotspot_candidate_destination
+        )
+        self.inspector.candidate_create_destination_requested.connect(
+            self._create_hotspot_candidate_destination
+        )
+        self.inspector.candidate_reorder_requested.connect(
+            self._reorder_hotspot_candidate
+        )
+        self.inspector.candidate_delete_requested.connect(
+            self._delete_hotspot_candidate
+        )
         self.inspector.generate_background_requested.connect(self._generate_background)
         self.inspector.import_background_requested.connect(self._import_background)
         self.inspector.accept_background_draft_requested.connect(
@@ -342,6 +381,21 @@ class MainWindow(QMainWindow):
             self._scene_enrichment_failed
         )
         self.scene_enrichment_workflow.document_changed.connect(
+            self.render_document
+        )
+        self.hotspot_generation_workflow.candidate_changed.connect(
+            self._hotspot_candidate_changed
+        )
+        self.hotspot_generation_workflow.busy_changed.connect(
+            lambda _busy: self._update_generation_actions()
+        )
+        self.hotspot_generation_workflow.progress_changed.connect(
+            self._hotspot_generation_progress_changed
+        )
+        self.hotspot_generation_workflow.failed.connect(
+            self._hotspot_generation_failed
+        )
+        self.hotspot_generation_workflow.document_changed.connect(
             self.render_document
         )
 
@@ -422,6 +476,7 @@ class MainWindow(QMainWindow):
 
     def render_document(self, _document: Stack | None = None) -> None:
         """Refresh all panes from the controller's authoritative snapshot."""
+        self.hotspot_generation_workflow.discard_if_stale()
         snapshot = self.controller.document
         card_ids = {card.id for card in snapshot.cards}
         if self.background_workflow is not None:
@@ -452,6 +507,7 @@ class MainWindow(QMainWindow):
                 self.canvas_card_name.clear()
                 self.inspector.show_background_draft(None)
                 self.inspector.show_scene_enrichment(None)
+                self.inspector.show_hotspot_candidate(None)
             else:
                 self.canvas_pages.setCurrentIndex(1)
                 self.canvas_card_name.setText(selected_card.name)
@@ -467,6 +523,16 @@ class MainWindow(QMainWindow):
                     if (
                         enrichment is not None
                         and enrichment.card_id == selected_card.id
+                        and not self._is_running
+                    )
+                    else None
+                )
+                candidate = self.hotspot_generation_workflow.candidate
+                self.inspector.show_hotspot_candidate(
+                    candidate
+                    if (
+                        candidate is not None
+                        and candidate.card_id == selected_card.id
                         and not self._is_running
                     )
                     else None
@@ -487,6 +553,7 @@ class MainWindow(QMainWindow):
         selected_card_id = card_id if isinstance(card_id, UUID) else None
         if selected_card_id != self._selected_card_id:
             self.scene_enrichment_workflow.cancel()
+            self.hotspot_generation_workflow.cancel()
         self._selected_card_id = selected_card_id
         if self.card_sidebar.selected_card_id != self._selected_card_id:
             self.card_sidebar.select_card(self._selected_card_id)
@@ -625,6 +692,7 @@ class MainWindow(QMainWindow):
             ):
                 return
             self.scene_enrichment_workflow.cancel()
+            self.hotspot_generation_workflow.cancel()
             self.card_sidebar.delete_card(card.id)
             if draft is not None:
                 self.background_workflow.discard_draft(card.id)
@@ -646,6 +714,7 @@ class MainWindow(QMainWindow):
 
     def _document_replaced(self, _document: object) -> None:
         self.scene_enrichment_workflow.cancel()
+        self.hotspot_generation_workflow.cancel()
         if self._is_running:
             state = self._run_session.start(self.controller.document)
             self._selected_card_id = state.current_card_id
@@ -805,6 +874,142 @@ class MainWindow(QMainWindow):
         detail = failure.message if isinstance(failure, WorkerFailure) else str(failure)
         self.inspector.set_scene_enrichment_status(
             "Scene enrichment failed",
+            detail=detail,
+        )
+        self._update_generation_actions()
+
+    def _generate_hotspots(self) -> None:
+        card_id = self._selected_card_id
+        if card_id is None or not self.inspector.commit_card_metadata():
+            return
+        try:
+            self.hotspot_generation_workflow.start(card_id)
+        except HotspotGenerationWorkflowError as error:
+            self.inspector.set_hotspot_generation_status(
+                str(error),
+                detail=str(error),
+            )
+        self._update_generation_actions()
+
+    def _apply_hotspot_candidate(self) -> None:
+        try:
+            self.hotspot_generation_workflow.apply()
+        except (HotspotGenerationWorkflowError, CommandError, ValidationError) as error:
+            self.inspector.set_hotspot_error(str(error))
+
+    def _discard_hotspot_candidate(self) -> None:
+        self.hotspot_generation_workflow.discard()
+
+    def _rename_hotspot_candidate(
+        self,
+        interaction_id: object,
+        label: str,
+    ) -> None:
+        if not isinstance(interaction_id, UUID):
+            return
+        self._edit_hotspot_candidate(
+            lambda: self.hotspot_generation_workflow.rename_interaction(
+                interaction_id,
+                label,
+            )
+        )
+
+    def _set_hotspot_candidate_destination(
+        self,
+        interaction_id: object,
+        card_id: object,
+    ) -> None:
+        if not isinstance(interaction_id, UUID):
+            return
+        self._edit_hotspot_candidate(
+            lambda: self.hotspot_generation_workflow.set_destination(
+                interaction_id,
+                card_id if isinstance(card_id, UUID) else None,
+            )
+        )
+
+    def _create_hotspot_candidate_destination(
+        self,
+        interaction_id: object,
+        name: str,
+    ) -> None:
+        if not isinstance(interaction_id, UUID):
+            return
+        self._edit_hotspot_candidate(
+            lambda: self.hotspot_generation_workflow.create_destination_card(
+                interaction_id,
+                name,
+            )
+        )
+
+    def _reorder_hotspot_candidate(
+        self,
+        interaction_id: object,
+        new_index: int,
+    ) -> None:
+        if not isinstance(interaction_id, UUID):
+            return
+        self._edit_hotspot_candidate(
+            lambda: self.hotspot_generation_workflow.reorder_interaction(
+                interaction_id,
+                new_index,
+            )
+        )
+
+    def _delete_hotspot_candidate(self, interaction_id: object) -> None:
+        if not isinstance(interaction_id, UUID):
+            return
+        self._edit_hotspot_candidate(
+            lambda: self.hotspot_generation_workflow.delete_interaction(
+                interaction_id
+            )
+        )
+
+    def _edit_hotspot_candidate(self, edit: Callable[[], object]) -> None:
+        try:
+            edit()
+        except (HotspotGenerationWorkflowError, ValidationError, CommandError) as error:
+            self.inspector.set_hotspot_error(str(error))
+        else:
+            self.inspector.set_hotspot_error("")
+
+    def _hotspot_candidate_changed(self) -> None:
+        candidate = self.hotspot_generation_workflow.candidate
+        if candidate is None:
+            self.inspector.show_hotspot_candidate(None)
+            self.inspector.render(
+                self.controller.document,
+                self._selected_card_id,
+            )
+        else:
+            self.inspector.show_hotspot_candidate(
+                candidate
+                if (
+                    candidate.card_id == self._selected_card_id
+                    and not self._is_running
+                )
+                else None
+            )
+        card = next(
+            (
+                card
+                for card in self.controller.document.cards
+                if card.id == self._selected_card_id
+            ),
+            None,
+        )
+        if card is not None:
+            self._render_card_canvas(card)
+        self._update_generation_actions()
+
+    def _hotspot_generation_progress_changed(self, message: str) -> None:
+        self.inspector.set_hotspot_generation_status(message)
+        self._update_generation_actions()
+
+    def _hotspot_generation_failed(self, failure: object) -> None:
+        detail = failure.message if isinstance(failure, WorkerFailure) else str(failure)
+        self.inspector.set_hotspot_generation_status(
+            "Hotspot generation failed",
             detail=detail,
         )
         self._update_generation_actions()
@@ -1116,6 +1321,42 @@ class MainWindow(QMainWindow):
             can_enrich=can_enrich,
             reason=enrich_reason,
         )
+        selected_card = next(
+            (
+                card
+                for card in self.controller.document.cards
+                if card.id == self._selected_card_id
+            ),
+            None,
+        )
+        has_active_revision = (
+            selected_card is not None
+            and selected_card.active_revision_id is not None
+        )
+        hotspot_busy = self.hotspot_generation_workflow.busy
+        hotspot_candidate = self.hotspot_generation_workflow.candidate
+        can_generate_hotspots = (
+            has_card
+            and has_active_revision
+            and ollama_available
+            and not hotspot_busy
+            and hotspot_candidate is None
+        )
+        hotspot_reason = "Ready to generate hotspot candidates"
+        if not has_card:
+            hotspot_reason = "Select a card in a saved stack"
+        elif not has_active_revision:
+            hotspot_reason = "Apply a background before generating hotspots"
+        elif hotspot_busy:
+            hotspot_reason = "Hotspot generation is running"
+        elif hotspot_candidate is not None:
+            hotspot_reason = "Apply or discard the current hotspot candidate"
+        elif not ollama_available:
+            hotspot_reason = self._action_diagnostic(AdapterKind.OLLAMA)
+        self.inspector.set_hotspot_generation_capabilities(
+            can_generate=can_generate_hotspots,
+            reason=hotspot_reason,
+        )
         pending = [
             adapter for adapter, available in self._availability.items() if available is None
         ]
@@ -1216,11 +1457,35 @@ class MainWindow(QMainWindow):
                     f'"{card.name}" has no hotspots to navigate.'
                 )
             return
+        candidate = self._active_hotspot_candidate()
+        if candidate is not None:
+            self.card_canvas.set_hotspots(
+                candidate.hotspot_set,
+                self.inspector.selected_interaction_id,
+                editable=True,
+            )
+            return
         self.card_canvas.set_hotspots(
             revision.hotspot_set,
             self.inspector.selected_interaction_id,
             editable=True,
         )
+
+    def _active_hotspot_candidate(self) -> HotspotGenerationDraft | None:
+        candidate = self.hotspot_generation_workflow.candidate
+        if candidate is None or candidate.card_id != self._selected_card_id:
+            return None
+        card = next(
+            (
+                card
+                for card in self.controller.document.cards
+                if card.id == candidate.card_id
+            ),
+            None,
+        )
+        if card is None or card.active_revision_id != candidate.revision_id:
+            return None
+        return candidate
 
     def _resolve_revision_image_path(self, image_path: str) -> Path | None:
         if self.document_session is None or self.document_session.store is None:
@@ -1235,6 +1500,25 @@ class MainWindow(QMainWindow):
         interaction_id: object,
         polygon: object,
     ) -> None:
+        candidate = self._active_hotspot_candidate()
+        if candidate is not None and isinstance(polygon, Polygon):
+            selected_id = interaction_id if isinstance(interaction_id, UUID) else None
+            try:
+                if selected_id is None:
+                    selected_id = self.hotspot_generation_workflow.add_interaction(
+                        polygon
+                    )
+                else:
+                    self.hotspot_generation_workflow.add_polygon(
+                        selected_id,
+                        polygon,
+                    )
+            except (HotspotGenerationWorkflowError, ValidationError) as error:
+                self.inspector.set_hotspot_error(str(error))
+                return
+            self.inspector.select_interaction(selected_id)
+            self.card_canvas.select_interaction(selected_id)
+            return
         context = self._active_hotspot_context()
         if context is None or not isinstance(polygon, Polygon):
             return
@@ -1274,6 +1558,21 @@ class MainWindow(QMainWindow):
         polygon_index: int,
         polygon: object,
     ) -> None:
+        if (
+            self._active_hotspot_candidate() is not None
+            and isinstance(interaction_id, UUID)
+            and isinstance(polygon, Polygon)
+        ):
+            self._edit_hotspot_candidate(
+                lambda: self.hotspot_generation_workflow.replace_polygon(
+                    interaction_id,
+                    polygon_index,
+                    polygon,
+                )
+            )
+            self.inspector.select_interaction(interaction_id)
+            self.card_canvas.select_interaction(interaction_id)
+            return
         context = self._active_hotspot_context()
         if (
             context is None
@@ -1298,6 +1597,19 @@ class MainWindow(QMainWindow):
         interaction_id: object,
         polygon_index: int,
     ) -> None:
+        if (
+            self._active_hotspot_candidate() is not None
+            and isinstance(interaction_id, UUID)
+        ):
+            self._edit_hotspot_candidate(
+                lambda: self.hotspot_generation_workflow.delete_polygon(
+                    interaction_id,
+                    polygon_index,
+                )
+            )
+            self.inspector.select_interaction(interaction_id)
+            self.card_canvas.select_interaction(interaction_id)
+            return
         context = self._active_hotspot_context()
         if context is None or not isinstance(interaction_id, UUID):
             return
@@ -1313,6 +1625,16 @@ class MainWindow(QMainWindow):
         )
 
     def _delete_hotspot_interaction(self, interaction_id: object) -> None:
+        if (
+            self._active_hotspot_candidate() is not None
+            and isinstance(interaction_id, UUID)
+        ):
+            self._edit_hotspot_candidate(
+                lambda: self.hotspot_generation_workflow.delete_interaction(
+                    interaction_id
+                )
+            )
+            return
         context = self._active_hotspot_context()
         if context is None or not isinstance(interaction_id, UUID):
             return
@@ -1511,6 +1833,7 @@ class MainWindow(QMainWindow):
     def _cancel_ai_activity_for_run(self) -> None:
         self._cancel_diagnostics()
         self.scene_enrichment_workflow.cancel()
+        self.hotspot_generation_workflow.cancel()
         if self.background_workflow is not None and self.background_workflow.busy:
             self.background_workflow.cancel()
 
@@ -1555,6 +1878,7 @@ class MainWindow(QMainWindow):
         if self.background_workflow is not None:
             self.background_workflow.close()
         self.scene_enrichment_workflow.close()
+        self.hotspot_generation_workflow.close()
         if self._owns_workers:
             self.workers.shutdown(wait_milliseconds=100)
         super().closeEvent(event)

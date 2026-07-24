@@ -50,6 +50,7 @@ from hypergen.application.commands import (
     SetStartCardCommand,
 )
 from hypergen.application.document_controller import DocumentController
+from hypergen.application.hotspot_generation_workflow import HotspotGenerationDraft
 from hypergen.application.scene_enrichment_workflow import SceneEnrichmentDraft
 from hypergen.domain.models import (
     Card,
@@ -59,6 +60,7 @@ from hypergen.domain.models import (
     Stack,
     UnresolvedCardReference,
 )
+from hypergen.generation.hotspot_prompts import ExistingCandidateTarget
 
 
 class _CommitPlainTextEdit(QPlainTextEdit):
@@ -94,6 +96,14 @@ class Inspector(QWidget):
     enrich_scene_requested = Signal()
     accept_scene_enrichment_requested = Signal()
     discard_scene_enrichment_requested = Signal()
+    generate_hotspots_requested = Signal()
+    apply_hotspot_candidate_requested = Signal()
+    discard_hotspot_candidate_requested = Signal()
+    candidate_label_changed = Signal(object, str)
+    candidate_destination_changed = Signal(object, object)
+    candidate_create_destination_requested = Signal(object, str)
+    candidate_reorder_requested = Signal(object, int)
+    candidate_delete_requested = Signal(object)
 
     def __init__(
         self,
@@ -109,6 +119,11 @@ class Inspector(QWidget):
         self._rendering = False
         self._has_background_draft = False
         self._scene_enrichment_identity: tuple[UUID, UUID, str, str] | None = None
+        self._hotspot_candidate: HotspotGenerationDraft | None = None
+        self._candidate_selected_interaction_id: UUID | None = None
+        self._dismissed_warning_identity: (
+            tuple[UUID, UUID, str, tuple[str, ...]] | None
+        ) = None
         self.setObjectName("inspector")
         self.setMinimumWidth(300)
 
@@ -311,6 +326,9 @@ class Inspector(QWidget):
         self.hotspots_heading = _section_heading("Hotspots")
         hotspots_heading.addWidget(self.hotspots_heading)
         hotspots_heading.addStretch(1)
+        self.generate_hotspots_button = QPushButton("Generate Hotspots")
+        self.generate_hotspots_button.setObjectName("generateHotspotsButton")
+        hotspots_heading.addWidget(self.generate_hotspots_button)
         self.hotspot_help_button = QToolButton()
         self.hotspot_help_button.setObjectName("hotspotHelpButton")
         self.hotspot_help_button.setText("ⓘ")
@@ -322,6 +340,40 @@ class Inspector(QWidget):
         )
         hotspots_heading.addWidget(self.hotspot_help_button)
         hotspots_layout.addLayout(hotspots_heading)
+        self.hotspot_generation_status = QLabel()
+        self.hotspot_generation_status.setObjectName("hotspotGenerationStatus")
+        self.hotspot_generation_status.setWordWrap(True)
+        hotspots_layout.addWidget(self.hotspot_generation_status)
+        self.hotspot_candidate_widget = QWidget()
+        self.hotspot_candidate_widget.setObjectName("hotspotCandidateReview")
+        candidate_layout = QVBoxLayout(self.hotspot_candidate_widget)
+        candidate_layout.setContentsMargins(0, 4, 0, 4)
+        self.hotspot_candidate_label = QLabel("Generated candidate")
+        self.hotspot_candidate_label.setObjectName("hotspotCandidateLabel")
+        candidate_layout.addWidget(self.hotspot_candidate_label)
+        self.hotspot_candidate_warnings = QLabel()
+        self.hotspot_candidate_warnings.setObjectName("hotspotCandidateWarnings")
+        self.hotspot_candidate_warnings.setWordWrap(True)
+        candidate_layout.addWidget(self.hotspot_candidate_warnings)
+        self.dismiss_candidate_warnings_button = QPushButton("Dismiss Warnings")
+        self.dismiss_candidate_warnings_button.setObjectName(
+            "dismissHotspotCandidateWarningsButton"
+        )
+        candidate_layout.addWidget(self.dismiss_candidate_warnings_button)
+        candidate_actions = QHBoxLayout()
+        self.apply_hotspot_candidate_button = QPushButton("Apply Hotspots")
+        self.apply_hotspot_candidate_button.setObjectName(
+            "applyHotspotCandidateButton"
+        )
+        self.discard_hotspot_candidate_button = QPushButton("Discard")
+        self.discard_hotspot_candidate_button.setObjectName(
+            "discardHotspotCandidateButton"
+        )
+        candidate_actions.addWidget(self.apply_hotspot_candidate_button)
+        candidate_actions.addWidget(self.discard_hotspot_candidate_button)
+        candidate_layout.addLayout(candidate_actions)
+        hotspots_layout.addWidget(self.hotspot_candidate_widget)
+        self.hotspot_candidate_widget.setVisible(False)
         self.hotspots_placeholder = QLabel(
             "Apply a background before adding hotspots."
         )
@@ -439,6 +491,18 @@ class Inspector(QWidget):
             lambda: self._move_hotspot(1)
         )
         self.delete_hotspot_button.clicked.connect(self._delete_hotspot)
+        self.generate_hotspots_button.clicked.connect(
+            self.generate_hotspots_requested
+        )
+        self.apply_hotspot_candidate_button.clicked.connect(
+            self.apply_hotspot_candidate_requested
+        )
+        self.discard_hotspot_candidate_button.clicked.connect(
+            self.discard_hotspot_candidate_requested
+        )
+        self.dismiss_candidate_warnings_button.clicked.connect(
+            self._dismiss_candidate_warnings
+        )
         self.enrich_scene_button.clicked.connect(self.enrich_scene_requested)
         self.accept_scene_enrichment_button.clicked.connect(
             self.accept_scene_enrichment_requested
@@ -680,6 +744,102 @@ class Inspector(QWidget):
         self.scene_enrichment_status.setText(message)
         self.scene_enrichment_status.setToolTip(detail)
 
+    def set_hotspot_generation_capabilities(
+        self,
+        *,
+        can_generate: bool,
+        reason: str,
+    ) -> None:
+        self.generate_hotspots_button.setEnabled(can_generate)
+        self.generate_hotspots_button.setToolTip(reason)
+
+    def set_hotspot_generation_status(
+        self,
+        message: str,
+        *,
+        detail: str = "",
+    ) -> None:
+        self.hotspot_generation_status.setText(message)
+        self.hotspot_generation_status.setToolTip(detail)
+
+    def show_hotspot_candidate(
+        self,
+        candidate: HotspotGenerationDraft | None,
+    ) -> None:
+        self._hotspot_candidate = candidate
+        self.hotspot_candidate_widget.setVisible(candidate is not None)
+        if candidate is None:
+            self._candidate_selected_interaction_id = None
+            self.hotspot_candidate_warnings.clear()
+            return
+        revision = self._active_revision_for_selected_card()
+        has_applied_set = revision is not None and revision.hotspot_set is not None
+        self.apply_hotspot_candidate_button.setText(
+            "Replace Hotspots" if has_applied_set else "Apply Hotspots"
+        )
+        warning_identity = (
+            candidate.card_id,
+            candidate.revision_id,
+            candidate.raw_response,
+            candidate.warnings,
+        )
+        warnings_dismissed = warning_identity == self._dismissed_warning_identity
+        self.hotspot_candidate_warnings.setText(
+            "" if warnings_dismissed else "\n\n".join(candidate.warnings)
+        )
+        self.hotspot_candidate_warnings.setVisible(
+            bool(candidate.warnings) and not warnings_dismissed
+        )
+        self.dismiss_candidate_warnings_button.setVisible(
+            bool(candidate.warnings) and not warnings_dismissed
+        )
+        interactions = candidate.hotspot_set.interactions
+        desired_id = self._candidate_selected_interaction_id
+        with QSignalBlocker(self.hotspot_list):
+            self.hotspot_list.clear()
+            for interaction in interactions:
+                item = QListWidgetItem(
+                    f"{interaction.label} ({len(interaction.polygons)} "
+                    f"{'area' if len(interaction.polygons) == 1 else 'areas'})"
+                )
+                item.setData(Qt.ItemDataRole.UserRole, interaction.id)
+                self.hotspot_list.addItem(item)
+            selected_row = next(
+                (
+                    row
+                    for row in range(self.hotspot_list.count())
+                    if self.hotspot_list.item(row).data(Qt.ItemDataRole.UserRole)
+                    == desired_id
+                ),
+                0 if interactions else -1,
+            )
+            self.hotspot_list.setCurrentRow(selected_row)
+        selected = interactions[selected_row] if selected_row >= 0 else None
+        self._candidate_selected_interaction_id = (
+            selected.id if selected is not None else None
+        )
+        self.hotspots_placeholder.setText("Candidate contains no hotspots.")
+        self.hotspots_placeholder.setVisible(not interactions)
+        self._render_hotspot_properties(
+            self.controller.document,
+            revision,
+            selected,
+        )
+        self._update_tab_labels(len(interactions))
+
+    def _dismiss_candidate_warnings(self) -> None:
+        candidate = self._hotspot_candidate
+        if candidate is None:
+            return
+        self._dismissed_warning_identity = (
+            candidate.card_id,
+            candidate.revision_id,
+            candidate.raw_response,
+            candidate.warnings,
+        )
+        self.hotspot_candidate_warnings.setVisible(False)
+        self.dismiss_candidate_warnings_button.setVisible(False)
+
     @property
     def selected_interaction_id(self) -> UUID | None:
         item = self.hotspot_list.currentItem()
@@ -874,6 +1034,10 @@ class Inspector(QWidget):
             if current is not None
             else None
         )
+        if self._hotspot_candidate is not None:
+            self._candidate_selected_interaction_id = (
+                interaction_id if isinstance(interaction_id, UUID) else None
+            )
         revision = self._active_revision_for_selected_card()
         interaction = self._selected_interaction()
         self._render_hotspot_properties(
@@ -919,6 +1083,24 @@ class Inspector(QWidget):
             )
             if interaction is None:
                 self.hotspot_destination_combo.setCurrentIndex(-1)
+            elif self._hotspot_candidate is not None:
+                target = self._hotspot_candidate.targets_by_interaction_id.get(
+                    interaction.id
+                )
+                if isinstance(target, ExistingCandidateTarget):
+                    target_card_id = (
+                        self._hotspot_candidate.card_ids_by_token.get(
+                            target.card_token
+                        )
+                    )
+                    self.hotspot_destination_combo.setCurrentIndex(
+                        self._combo_index_for_data(
+                            self.hotspot_destination_combo,
+                            target_card_id,
+                        )
+                    )
+                else:
+                    self.hotspot_destination_combo.setCurrentIndex(0)
             elif isinstance(
                 interaction.action.target,
                 ResolvedCardReference,
@@ -954,6 +1136,12 @@ class Inspector(QWidget):
             or self.selected_card_id is None
             or self.hotspot_label_edit.text() == interaction.label
         ):
+            return
+        if self._hotspot_candidate is not None:
+            self.candidate_label_changed.emit(
+                interaction.id,
+                self.hotspot_label_edit.text(),
+            )
             return
         self._execute_hotspot_command(
             RenameInteractionCommand(
@@ -1006,7 +1194,16 @@ class Inspector(QWidget):
                 "Card name",
             )
             if not accepted:
-                self.render(self.controller.document, self.selected_card_id)
+                if self._hotspot_candidate is not None:
+                    self.show_hotspot_candidate(self._hotspot_candidate)
+                else:
+                    self.render(self.controller.document, self.selected_card_id)
+                return
+            if self._hotspot_candidate is not None:
+                self.candidate_create_destination_requested.emit(
+                    interaction_id,
+                    name,
+                )
                 return
             command = CreateCardAndResolveCommand(
                 source_card_id=card_id,
@@ -1015,6 +1212,12 @@ class Inspector(QWidget):
                 card_name=name,
             )
         else:
+            if self._hotspot_candidate is not None:
+                self.candidate_destination_changed.emit(
+                    interaction_id,
+                    destination if isinstance(destination, UUID) else None,
+                )
+                return
             target = (
                 ResolvedCardReference(target_card_id=destination)
                 if isinstance(destination, UUID)
@@ -1041,6 +1244,9 @@ class Inspector(QWidget):
             or card_id is None
             or not 0 <= destination < self.hotspot_list.count()
         ):
+            return
+        if self._hotspot_candidate is not None:
+            self.candidate_reorder_requested.emit(interaction_id, destination)
             return
         self._execute_hotspot_command(
             ReorderHotspotCommand(
@@ -1071,6 +1277,9 @@ class Inspector(QWidget):
         dialog.exec()
         if dialog.clickedButton() is not delete_button:
             return
+        if self._hotspot_candidate is not None:
+            self.candidate_delete_requested.emit(interaction_id)
+            return
         self._execute_hotspot_command(
             DeleteInteractionCommand(
                 card_id=card_id,
@@ -1095,6 +1304,15 @@ class Inspector(QWidget):
 
     def _selected_interaction(self) -> Interaction | None:
         interaction_id = self.selected_interaction_id
+        if self._hotspot_candidate is not None:
+            return next(
+                (
+                    interaction
+                    for interaction in self._hotspot_candidate.hotspot_set.interactions
+                    if interaction.id == interaction_id
+                ),
+                None,
+            )
         revision = self._active_revision_for_selected_card()
         if interaction_id is None or revision is None or revision.hotspot_set is None:
             return None
@@ -1113,6 +1331,19 @@ class Inspector(QWidget):
         revision_id: UUID,
         interaction_id: UUID,
     ) -> Interaction | None:
+        if (
+            self._hotspot_candidate is not None
+            and self._hotspot_candidate.card_id == card_id
+            and self._hotspot_candidate.revision_id == revision_id
+        ):
+            return next(
+                (
+                    interaction
+                    for interaction in self._hotspot_candidate.hotspot_set.interactions
+                    if interaction.id == interaction_id
+                ),
+                None,
+            )
         card = next(
             (
                 card

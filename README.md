@@ -25,10 +25,13 @@ rewrite Scene text through Ollama for explicit review, editing, acceptance, or
 discard; accepted text remains an ordinary undoable Scene edit. Authors can
 review generated or imported card-local background drafts, switch cards without
 losing them, manage revision history, and edit manual multi-area polygon
-hotspots with explicit card destinations. Run mode supports deterministic
-hotspot navigation, Back/Restart history, and configurable overlays. Local AI
-services are checked automatically when Author mode is entered; Run mode starts
-no AI work. AI hotspot generation is still under development.
+hotspots with explicit card destinations. Authors can also generate transient
+hotspot candidates from the active image and interaction intent, correct them
+with the same geometry and destination controls, review absent-subject warnings,
+then apply or discard the complete set. Run mode supports deterministic hotspot
+navigation, Back/Restart history, and configurable overlays. Local AI services
+are checked automatically when Author mode is entered; Run mode starts no AI
+work.
 
 ## Setup and run
 
@@ -61,8 +64,8 @@ tradeoffs are in [`evals/DECISION.md`](evals/DECISION.md).
 
 - `domain/` — in-memory stack model, geometry, validation.
 - `storage/` — human-readable `*.hypergen` bundle storage.
-- `generation/` — deterministic MFLUX prompt composition, image generation, and
-  Ollama hotspot adapters.
+- `generation/` — deterministic MFLUX prompt composition, image generation,
+  Scene enrichment, and Ollama hotspot adapters.
 - `application/` — document controller, typed commands, session undo, workers.
 - `ui/` — PySide6 Author and Run interface.
 - `evaluation/` — `hypergen-eval` harness reusing production adapters.

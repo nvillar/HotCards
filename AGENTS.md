@@ -51,6 +51,9 @@ for live Ollama and MFLUX runs.
   intent feeds hotspot generation only and must not alter the image prompt.
 - Store each hotspot set under exactly one image revision. Never silently reuse
   hotspots against another image revision.
+- Keep generated hotspot candidates session-only while they are reviewed. The
+  previously applied set remains authoritative until one complete candidate is
+  applied through a single undoable replacement.
 - Keep pending background drafts session-only, with at most one per card. They
   must not enter stack JSON, autosave, or Undo/Redo before acceptance.
 - Check local AI services on entry to Author mode, with concurrent checks

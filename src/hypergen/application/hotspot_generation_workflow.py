@@ -239,6 +239,16 @@ class HotspotGenerationWorkflow(QObject):
     def close(self) -> None:
         self.cancel()
 
+    def discard_if_stale(self) -> bool:
+        """Discard a review candidate whose source revision or intent changed."""
+        if (
+            self._candidate is not None
+            and not self._target_is_current(self._target_for(self._candidate))
+        ):
+            self.discard()
+            return True
+        return False
+
     def rename_interaction(self, interaction_id: UUID, label: str) -> None:
         self._replace_interaction(
             interaction_id,
