@@ -100,7 +100,9 @@ def test_section_headings_are_bold(
         inspector.hotspots_heading,
     ):
         assert heading.font().bold()
-    assert inspector.style_details_button.font().bold()
+    assert inspector.style_details_button.font().bold() == (
+        inspector.revision_details_button.font().bold()
+    )
     inspector.close()
 
 
@@ -232,7 +234,7 @@ def test_card_tab_uses_revision_edit_generation_hierarchy(
     inspector.close()
 
 
-def test_scene_actions_follow_text_and_start_card_is_last_control(
+def test_scene_actions_follow_text_without_redundant_start_control(
     application: QApplication,
 ) -> None:
     card = Card(name="Card", scene_description="A scene")
@@ -251,7 +253,7 @@ def test_scene_actions_follow_text_and_start_card_is_last_control(
         inspector.enrich_scene_button.text(),
         inspector.describe_image_button.text(),
     ] == ["Enrich", "Describe Image"]
-    assert layout.indexOf(inspector.start_card_check) == layout.count() - 2
+    assert not hasattr(inspector, "start_card_check")
     inspector.close()
 
 

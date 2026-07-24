@@ -423,6 +423,17 @@ def test_sidebar_actions_fit_at_minimum_width(application: QApplication) -> None
     ):
         assert button.width() > 0
         assert button.geometry().right() <= sidebar_right
+    sequence_rows = {
+        window.card_sidebar.card_actions.getItemPosition(
+            window.card_sidebar.card_actions.indexOf(button)
+        )[0]
+        for button in (
+            window.card_sidebar.start_button,
+            window.card_sidebar.move_up_button,
+            window.card_sidebar.move_down_button,
+        )
+    }
+    assert sequence_rows == {1}
     window.close()
 
 
@@ -587,7 +598,7 @@ def test_add_rename_and_start_card_mutations_use_controller(
     window.inspector.card_name_edit.setText("Archive")
     window.inspector.commit_card_metadata()
     assert controller.document.cards[-1].name == "Archive"
-    window.inspector.start_card_check.setChecked(True)
+    window.card_sidebar.start_button.click()
     assert controller.document.start_card_id == created_id
     assert window.card_sidebar.card_list.item(2).text() == "★  Archive"
     window.close()

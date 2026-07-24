@@ -10,7 +10,6 @@ from PySide6.QtCore import QSignalBlocker, Qt, QTimer, Signal
 from PySide6.QtGui import QFocusEvent
 from PySide6.QtWidgets import (
     QButtonGroup,
-    QCheckBox,
     QComboBox,
     QFormLayout,
     QFrame,
@@ -45,7 +44,6 @@ from hypergen.application.commands import (
     RenameCardCommand,
     RenameInteractionCommand,
     ReorderHotspotCommand,
-    SetStartCardCommand,
 )
 from hypergen.application.document_controller import DocumentController
 from hypergen.application.hotspot_generation_workflow import HotspotGenerationDraft
@@ -278,8 +276,6 @@ class Inspector(QWidget):
         )
         self.scene_enrichment_status = self.scene_enrichment_status_message.label
         card_layout.addWidget(self.scene_enrichment_status_message)
-        self.start_card_check = QCheckBox("Use as start card")
-        self.start_card_check.setObjectName("startCardCheck")
         self.validation_error = QLabel()
         self.validation_error.setObjectName("inspectorValidationError")
         self.validation_error.setWordWrap(True)
@@ -322,9 +318,6 @@ class Inspector(QWidget):
         self.style_details_button.setObjectName("styleDetailsButton")
         self.style_details_button.setText("Style ▸")
         self.style_details_button.setCheckable(True)
-        style_heading_font = self.style_details_button.font()
-        style_heading_font.setBold(True)
-        self.style_details_button.setFont(style_heading_font)
         self.style_details = QWidget()
         self.style_details.setObjectName("styleDetails")
         style_layout = QVBoxLayout(self.style_details)
@@ -389,7 +382,6 @@ class Inspector(QWidget):
         self.import_background_button = QPushButton("Import Background...")
         self.import_background_button.setObjectName("importBackgroundButton")
         card_layout.addWidget(self.import_background_button)
-        card_layout.addWidget(self.start_card_check)
         card_layout.addStretch(1)
         card_scroll.setWidget(card_page)
         self.inspector_tabs.addTab(card_scroll, "Card")
@@ -599,7 +591,6 @@ class Inspector(QWidget):
         self.card_style_radio.toggled.connect(
             lambda checked: checked and self._set_style_mode(use_override=True)
         )
-        self.start_card_check.toggled.connect(self._set_start_card)
         self.generate_background_button.clicked.connect(
             self.generate_background_requested
         )
@@ -697,7 +688,6 @@ class Inspector(QWidget):
                 self.scene_edit.clear()
                 self.interactions_edit.clear()
                 self.style_edit.clear()
-                self.start_card_check.setChecked(False)
                 self.revision_combo.clear()
                 self.revision_details.clear()
                 self.hotspots_placeholder.setText("Select a card to view hotspots.")
@@ -723,7 +713,6 @@ class Inspector(QWidget):
                 if use_override
                 else "Global — edits apply to all cards"
             )
-            self.start_card_check.setChecked(card.id == document.start_card_id)
             self._render_revisions(document, card)
         finally:
             self._rendering = False
@@ -823,15 +812,6 @@ class Inspector(QWidget):
                 )
             )
         self.render(changed, card.id)
-        self.document_changed.emit(changed)
-
-    def _set_start_card(self, checked: bool) -> None:
-        if self._rendering or self.selected_card_id is None:
-            return
-        changed = self.controller.execute(
-            SetStartCardCommand(card_id=self.selected_card_id if checked else None)
-        )
-        self.render(changed, self.selected_card_id)
         self.document_changed.emit(changed)
 
     def set_background_capabilities(

@@ -78,18 +78,19 @@ class CardSidebar(QWidget):
         self.empty_label.setObjectName("emptyCardListLabel")
         self.empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        buttons = QGridLayout()
-        buttons.addWidget(self.add_button, 0, 0)
-        buttons.addWidget(self.start_button, 0, 1)
-        buttons.addWidget(self.move_up_button, 1, 0)
-        buttons.addWidget(self.move_down_button, 1, 1)
-        buttons.addWidget(self.delete_button, 2, 0, 1, 2)
+        self.card_actions = QGridLayout()
+        self.card_actions.addWidget(self.add_button, 0, 0, 1, 3)
+        self.card_actions.addWidget(self.start_button, 1, 0)
+        self.card_actions.addWidget(self.move_up_button, 1, 1)
+        self.card_actions.addWidget(self.move_down_button, 1, 2)
+        self.card_actions.addWidget(self.delete_button, 2, 0, 1, 3)
+        self.card_actions.setColumnStretch(0, 1)
 
         layout = QVBoxLayout(self)
         layout.addWidget(heading)
         layout.addWidget(self.card_list, 1)
         layout.addWidget(self.empty_label)
-        layout.addLayout(buttons)
+        layout.addLayout(self.card_actions)
         self.render(controller.document)
 
     @property
