@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
-from pathlib import Path
 from uuid import UUID
 
 from pydantic import ValidationError
 from PySide6.QtCore import QSignalBlocker, Qt, QTimer, Signal
-from PySide6.QtGui import QFocusEvent, QPixmap
+from PySide6.QtGui import QFocusEvent
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
@@ -196,12 +194,9 @@ class Inspector(QWidget):
         self,
         controller: DocumentController,
         parent: QWidget | None = None,
-        *,
-        image_path_resolver: Callable[[str], Path | None] | None = None,
     ) -> None:
         super().__init__(parent)
         self.controller = controller
-        self._image_path_resolver = image_path_resolver
         self.selected_card_id: UUID | None = None
         self._rendering = False
         self._has_background_draft = False
@@ -308,17 +303,6 @@ class Inspector(QWidget):
         )
         self.revision_selector.addWidget(self.delete_revision_button)
         card_layout.addLayout(self.revision_selector)
-        revision_header = QHBoxLayout()
-        self.revision_thumbnail = QLabel("No image")
-        self.revision_thumbnail.setObjectName("backgroundRevisionThumbnail")
-        self.revision_thumbnail.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.revision_thumbnail.setFixedSize(120, 90)
-        self.revision_thumbnail.setStyleSheet(
-            "border: 1px solid palette(mid); color: palette(mid);"
-        )
-        revision_header.addWidget(self.revision_thumbnail)
-        revision_header.addStretch(1)
-        card_layout.addLayout(revision_header)
         self.revision_details_button = QToolButton()
         self.revision_details_button.setObjectName("backgroundRevisionDetailsButton")
         self.revision_details_button.setText("Details ▸")
@@ -530,7 +514,22 @@ class Inspector(QWidget):
         self.hotspot_label_edit.setObjectName("hotspotLabelEdit")
         self.hotspot_destination_combo = QComboBox()
         self.hotspot_destination_combo.setObjectName("hotspotDestinationCombo")
-        self.hotspot_form = QFormLayout()
+        self.hotspot_properties_frame = QFrame()
+        self.hotspot_properties_frame.setObjectName("hotspotProperties")
+        self.hotspot_properties_frame.setFrameShape(QFrame.Shape.StyledPanel)
+        self.hotspot_properties_frame.setStyleSheet(
+            """
+            QFrame#hotspotProperties {
+                border: 1px solid palette(mid);
+                border-radius: 4px;
+            }
+            """
+        )
+        self.hotspot_form = QFormLayout(self.hotspot_properties_frame)
+        self.hotspot_form.setContentsMargins(8, 8, 8, 8)
+        self.hotspot_form.setLabelAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
         self.hotspot_form.addRow("Label", self.hotspot_label_edit)
         self.hotspot_form.addRow("Destination", self.hotspot_destination_combo)
         self.hotspot_area_controls = QWidget()
@@ -544,7 +543,7 @@ class Inspector(QWidget):
         self.add_component_button.setObjectName("addHotspotComponentButton")
         area_controls_layout.addWidget(self.add_component_button)
         self.hotspot_form.addRow("Areas", self.hotspot_area_controls)
-        hotspots_layout.addLayout(self.hotspot_form)
+        hotspots_layout.addWidget(self.hotspot_properties_frame)
         self.hotspot_error = QLabel()
         self.hotspot_error.setObjectName("hotspotValidationError")
         self.hotspot_error.setWordWrap(True)
@@ -693,7 +692,6 @@ class Inspector(QWidget):
                 self.start_card_check.setChecked(False)
                 self.revision_combo.clear()
                 self.revision_details.clear()
-                self._set_revision_thumbnail(None)
                 self.hotspots_placeholder.setText("Select a card to view hotspots.")
                 self.hotspots_placeholder.setVisible(True)
                 self.hotspot_list.clear()
@@ -1047,7 +1045,6 @@ class Inspector(QWidget):
         )
         self.draft_value.setText(f"{origin} background is ready to review.")
         self.draft_value.setToolTip(detail)
-        self._set_revision_thumbnail(draft.image_path)
 
     def _render_revisions(self, document: Stack, card: Card) -> None:
         active_revision = self._active_revision(card)
@@ -1077,7 +1074,6 @@ class Inspector(QWidget):
             self.revision_details.clear()
             self.revision_details_button.setVisible(False)
             self.revision_details_button.setChecked(False)
-            self._set_revision_thumbnail(None)
             self.hotspots_placeholder.setText(
                 "Apply a background before adding hotspots."
             )
@@ -1104,12 +1100,6 @@ class Inspector(QWidget):
             self.revision_details.clear()
             self.revision_details_button.setChecked(False)
             self.revision_details_button.setVisible(False)
-        image_path = (
-            self._image_path_resolver(revision.image_path)
-            if self._image_path_resolver is not None
-            else None
-        )
-        self._set_revision_thumbnail(image_path)
         interactions = (
             revision.hotspot_set.interactions
             if revision.hotspot_set is not None
@@ -1146,25 +1136,6 @@ class Inspector(QWidget):
     def _toggle_style_details(self, visible: bool) -> None:
         self.style_details.setVisible(visible)
         self.style_details_button.setText("Style ▾" if visible else "Style ▸")
-
-    def _set_revision_thumbnail(self, image_path: Path | None) -> None:
-        if image_path is None:
-            self.revision_thumbnail.setPixmap(QPixmap())
-            self.revision_thumbnail.setText("No image")
-            return
-        pixmap = QPixmap(str(image_path))
-        if pixmap.isNull():
-            self.revision_thumbnail.setPixmap(QPixmap())
-            self.revision_thumbnail.setText("Unavailable")
-            return
-        self.revision_thumbnail.setText("")
-        self.revision_thumbnail.setPixmap(
-            pixmap.scaled(
-                self.revision_thumbnail.size(),
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-        )
 
     def _update_tab_labels(self, hotspot_count: int) -> None:
         self._update_card_tab_label()

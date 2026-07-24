@@ -5,12 +5,11 @@ from __future__ import annotations
 import json
 import os
 from datetime import UTC, datetime
-from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PIL import Image
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QFrame
 
 from hypergen.application.document_controller import DocumentController
@@ -56,10 +55,7 @@ def generated_revision(image_path: str) -> ImageRevision:
 
 def test_card_tab_hides_revision_summary_and_collapses_details_and_style(
     application: QApplication,
-    tmp_path: Path,
 ) -> None:
-    image_path = tmp_path / "sun.png"
-    Image.new("RGB", (1024, 768), "orange").save(image_path)
     revision = generated_revision("assets/cards/sun/background.png")
     card = Card(
         name="Sun",
@@ -70,10 +66,7 @@ def test_card_tab_hides_revision_summary_and_collapses_details_and_style(
     controller = DocumentController(
         Stack(name="Demo", global_style="Scientific storybook", cards=(card,))
     )
-    inspector = Inspector(
-        controller,
-        image_path_resolver=lambda _relative: image_path,
-    )
+    inspector = Inspector(controller)
     inspector.render(controller.document, card.id)
 
     assert inspector.inspector_tabs.count() == 2
@@ -86,8 +79,7 @@ def test_card_tab_hides_revision_summary_and_collapses_details_and_style(
     assert details["render_prompt"] == (
         "The surface of the sun\n\nScientific storybook"
     )
-    thumbnail = inspector.revision_thumbnail.pixmap()
-    assert thumbnail is not None and not thumbnail.isNull()
+    assert not hasattr(inspector, "revision_thumbnail")
     assert inspector.style_details.isHidden()
     inspector.style_details_button.click()
     assert not inspector.style_details.isHidden()
@@ -171,14 +163,16 @@ def test_hotspot_controls_follow_selection_edit_generation_hierarchy(
         for index in range(layout.count())
         if layout.itemAt(index).layout() is inspector.hotspot_order_actions
     )
-    form_index = next(
-        index
-        for index in range(layout.count())
-        if layout.itemAt(index).layout() is inspector.hotspot_form
-    )
+    properties_index = layout.indexOf(inspector.hotspot_properties_frame)
 
-    assert layout.indexOf(inspector.hotspot_list) < order_actions_index < form_index
-    assert form_index < layout.indexOf(inspector.generate_hotspots_button)
+    assert (
+        layout.indexOf(inspector.hotspot_list)
+        < order_actions_index
+        < properties_index
+    )
+    assert properties_index < layout.indexOf(inspector.generate_hotspots_button)
+    assert inspector.hotspot_properties_frame.frameShape() == QFrame.Shape.StyledPanel
+    assert inspector.hotspot_form.labelAlignment() & Qt.AlignmentFlag.AlignLeft
     assert layout.indexOf(inspector.generate_hotspots_button) < layout.indexOf(
         inspector.hotspot_candidate_widget
     )

@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QSplitter,
     QStackedWidget,
     QToolBar,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -283,29 +284,25 @@ class MainWindow(QMainWindow):
         card_canvas = QWidget()
         card_canvas.setObjectName("cardCanvasPanel")
         canvas_layout = QVBoxLayout(card_canvas)
-        canvas_toolbar = QHBoxLayout()
-        canvas_toolbar.addStretch(1)
-        self.fit_canvas_button = QPushButton("Fit")
-        self.fit_canvas_button.setObjectName("fitCanvasButton")
-        canvas_toolbar.addWidget(self.fit_canvas_button)
-        canvas_layout.addLayout(canvas_toolbar)
-        self.canvas_title = QLabel("Card Canvas")
-        self.canvas_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.canvas_title.setStyleSheet("font-size: 18px; font-weight: 600;")
-        canvas_layout.addWidget(self.canvas_title)
         self.canvas_card_name = QLabel()
         self.canvas_card_name.setObjectName("canvasCardName")
         self.canvas_card_name.setAlignment(Qt.AlignmentFlag.AlignCenter)
         canvas_layout.addWidget(self.canvas_card_name)
         self.card_canvas = CardCanvas()
         canvas_layout.addWidget(self.card_canvas, 1)
+        self.canvas_fit_controls = QHBoxLayout()
+        self.canvas_fit_controls.addStretch(1)
+        self.fit_canvas_button = QToolButton()
+        self.fit_canvas_button.setObjectName("fitCanvasButton")
+        self.fit_canvas_button.setText("⛶")
+        self.fit_canvas_button.setAccessibleName("Fit image to window")
+        self.fit_canvas_button.setToolTip("Fit image to window")
+        self.canvas_fit_controls.addWidget(self.fit_canvas_button)
+        canvas_layout.addLayout(self.canvas_fit_controls)
         self.canvas_pages.addWidget(card_canvas)
         self.fit_canvas_button.clicked.connect(self.card_canvas.fit_to_window)
 
-        self.inspector = Inspector(
-            self.controller,
-            image_path_resolver=self._resolve_revision_image_path,
-        )
+        self.inspector = Inspector(self.controller)
         self.inspector.document_changed.connect(self.render_document)
         self.inspector.render_inputs_changed.connect(
             self._update_generation_actions
@@ -1934,7 +1931,6 @@ class MainWindow(QMainWindow):
         self.card_sidebar.setVisible(authoring)
         self.inspector.setVisible(authoring)
         self.fit_canvas_button.setVisible(authoring)
-        self.canvas_title.setVisible(authoring)
         self.create_first_card_button.setVisible(authoring)
         self.empty_canvas_title.setText(
             "Create your first card" if authoring else "No cards to run"

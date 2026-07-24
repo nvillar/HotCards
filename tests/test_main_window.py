@@ -642,6 +642,17 @@ def test_inspector_combines_card_and_background_authoring(
     assert not window.inspector.style_details_button.isChecked()
     assert not window.inspector.enrich_scene_button.isEnabled()
     assert not window.inspector.hotspot_help_button.toolTip() == ""
+    assert not hasattr(window, "canvas_title")
+    assert window.fit_canvas_button.text() == "⛶"
+    assert window.fit_canvas_button.accessibleName() == "Fit image to window"
+    canvas_layout = window.canvas_pages.widget(1).layout()
+    assert canvas_layout is not None
+    fit_controls_index = next(
+        index
+        for index in range(canvas_layout.count())
+        if canvas_layout.itemAt(index).layout() is window.canvas_fit_controls
+    )
+    assert canvas_layout.indexOf(window.card_canvas) < fit_controls_index
     window.close()
 
 
