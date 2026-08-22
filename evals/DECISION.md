@@ -7,8 +7,16 @@
 
 The active runtime uses the locally optimized MLX variant. The selection
 evidence below was gathered with the base `qwen3.5:9b` tag and remains the
-quality rationale for choosing the 9B parameter class; the MLX variant still
-requires final walkthrough validation.
+quality rationale for choosing the 9B parameter class.
+
+The MLX variant completed final live validation on 2026-08-22 with the
+production v3 prompt and v2 schema. Smoke passed in cold and warm phases. In
+the isolated hotspot suite, it achieved 4/4 structured successes, 8/8 correct
+destinations, valid raw geometry, no repetition, and no production limit hits.
+The end-to-end case added 2/2 correct destinations with valid editable geometry.
+Its optional thinking ablation reached the token limit; production keeps
+thinking disabled. Contact-sheet review confirmed that its gate and chest
+polygons were attached to the intended visible subjects.
 
 The final indexed hotspot comparison used the production 4/2/12
 interaction/component/point limits, 1024 output tokens, 8192 context tokens,
@@ -23,7 +31,9 @@ constrained to the exact request tokens plus `UNRESOLVED`. In the subsequent
 live multimodal comparison, every model resolved all expected destinations on
 both cases in cold and warm phases: 24/24 correct. Opaque C1/C2 tokens also
 matched descriptive slugs in the focused ablation, so the simpler opaque
-request-local identifiers remain appropriate.
+request-local identifiers remain appropriate. The v3 prompt now states the
+exact JSON nesting because the MLX variant does not reliably honor Ollama's
+schema transport on its own; Pydantic validation remains strict.
 
 The isolated suite initially favored 4B as the smallest candidate meeting the
 same structured, repetition, limit, and post-cleanup geometry gates. The

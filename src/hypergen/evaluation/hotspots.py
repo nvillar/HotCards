@@ -53,6 +53,7 @@ from hypergen.generation.ollama_client import (
     OllamaRuntime,
     OllamaSettings,
 )
+from hypergen.generation.structured_output import structured_json_content
 
 HOTSPOT_CASE_VERSION = "hotspot-case-v1"
 HOTSPOT_RESULT_VERSION = "hotspot-result-v1"
@@ -234,7 +235,9 @@ def _success_record(
     *,
     extent: int,
 ) -> dict[str, object]:
-    raw = HotspotModelOutput.model_validate_json(result.raw_response)
+    raw = HotspotModelOutput.model_validate_json(
+        structured_json_content(result.raw_response)
+    )
     source_indexes = [interaction.source_interaction_index for interaction in raw.interactions]
     duplicates = sum(count - 1 for count in Counter(source_indexes).values())
     total = len(source_indexes)

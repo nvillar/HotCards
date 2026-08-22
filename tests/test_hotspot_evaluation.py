@@ -24,9 +24,16 @@ from hypergen.generation.ollama_client import OllamaRuntime, OllamaSettings
 
 
 class FakeOllamaClient:
-    def __init__(self, model: str, *, available: bool = True) -> None:
+    def __init__(
+        self,
+        model: str,
+        *,
+        available: bool = True,
+        fenced: bool = False,
+    ) -> None:
         self.model = model
         self.available = available
+        self.fenced = fenced
 
     def list(self) -> SimpleNamespace:
         models = (SimpleNamespace(model=self.model),) if self.available else ()
@@ -60,6 +67,8 @@ class FakeOllamaClient:
                 ]
             }
         )
+        if self.fenced:
+            content = f"```json\n{content}\n```"
         return SimpleNamespace(
             message=SimpleNamespace(content=content),
             total_duration=3_000_000,
@@ -94,7 +103,10 @@ def test_hotspot_suite_records_raw_metrics_and_separate_models(tmp_path: Path) -
     _write_case(case_dir, fixture_root)
 
     def runtime_factory(settings: OllamaSettings) -> OllamaRuntime:
-        return OllamaRuntime(settings, client=FakeOllamaClient(settings.model))
+        return OllamaRuntime(
+            settings,
+            client=FakeOllamaClient(settings.model, fenced=True),
+        )
 
     result_path = run_hotspot_evaluation(
         HotspotEvaluationSettings(
