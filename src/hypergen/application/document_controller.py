@@ -12,9 +12,17 @@ AutosaveHook = Callable[[Stack], None]
 
 
 @dataclass(frozen=True, slots=True)
+class UndoToken:
+    """Opaque identity for one current undo-stack entry."""
+
+    sequence: int
+
+
+@dataclass(frozen=True, slots=True)
 class _HistoryEntry:
     before: Stack
     after: Stack
+    token: UndoToken
 
 
 class DocumentController:
@@ -30,6 +38,7 @@ class DocumentController:
         self._autosave_hook = autosave_hook
         self._undo_stack: list[_HistoryEntry] = []
         self._redo_stack: list[_HistoryEntry] = []
+        self._next_undo_sequence = 1
 
     @property
     def document(self) -> Stack:
@@ -45,6 +54,11 @@ class DocumentController:
     def can_redo(self) -> bool:
         """Return whether this session has an undone command to redo."""
         return bool(self._redo_stack)
+
+    @property
+    def current_undo_token(self) -> UndoToken | None:
+        """Identify the latest command while it remains directly undoable."""
+        return self._undo_stack[-1].token if self._undo_stack else None
 
     def set_autosave_hook(self, hook: AutosaveHook | None) -> None:
         """Replace the callback signaled after each effective document change."""
@@ -62,7 +76,11 @@ class DocumentController:
         after = validated_copy(command.apply(validated_copy(before)))
         if after != before:
             self._document = after
-            self._undo_stack.append(_HistoryEntry(before=before, after=after))
+            token = UndoToken(self._next_undo_sequence)
+            self._next_undo_sequence += 1
+            self._undo_stack.append(
+                _HistoryEntry(before=before, after=after, token=token)
+            )
             self._redo_stack.clear()
             self._signal_autosave()
         return self.document
@@ -76,6 +94,12 @@ class DocumentController:
         self._redo_stack.append(entry)
         self._signal_autosave()
         return True
+
+    def undo_if_current(self, token: UndoToken) -> bool:
+        """Undo only when the identified change is still the latest mutation."""
+        if not self._undo_stack or self._undo_stack[-1].token != token:
+            return False
+        return self.undo()
 
     def redo(self) -> bool:
         """Redo the latest command undone in this session."""
@@ -97,4 +121,4 @@ class DocumentController:
             self._autosave_hook(self.document)
 
 
-__all__ = ["AutosaveHook", "DocumentController"]
+__all__ = ["AutosaveHook", "DocumentController", "UndoToken"]

@@ -10,11 +10,12 @@ from pydantic import ValidationError
 from hypergen.domain.models import (
     CanvasSize,
     Card,
+    CardRevision,
+    GeneratedBackground,
+    GenerationStyle,
     HotspotSet,
     ImageGenerationInputs,
     ImageGenerationMetadata,
-    ImageOrigin,
-    ImageRevision,
     Interaction,
     NavigateAction,
     Point,
@@ -29,8 +30,9 @@ from hypergen.domain.models import (
 def image_metadata() -> ImageGenerationMetadata:
     return ImageGenerationMetadata(
         inputs=ImageGenerationInputs(
-            scene_description="A moonlit courtyard",
-            global_style="Ink and watercolor",
+            description="A moonlit courtyard",
+            style_name="Ink wash",
+            style_prompt="Ink and watercolor",
         ),
         render_prompt="A moonlit courtyard\n\nInk and watercolor",
         model_identifier="flux2-klein-4b",
@@ -48,21 +50,28 @@ def image_metadata() -> ImageGenerationMetadata:
 def test_stack_defaults_match_document_contract() -> None:
     stack = Stack(name="Castle")
 
-    assert stack.schema_version == 1
+    assert stack.schema_version == 2
     assert (stack.canvas.width, stack.canvas.height) == (1024, 768)
     assert stack.run_overlay_mode is RunOverlayMode.HIDDEN
     assert stack.cards == ()
 
 
-def test_stack_serializes_only_the_global_style_key() -> None:
-    stack = Stack(name="Castle", global_style="Ink wash")
+def test_stack_serializes_named_styles_without_legacy_style_keys() -> None:
+    style = GenerationStyle(name="Ink wash", prompt="Loose ink and watercolor")
+    stack = Stack(name="Castle", styles=(style,))
 
     values = stack.model_dump(mode="json")
 
-    assert values["global_style"] == "Ink wash"
-    assert "art_direction" not in values
-    with pytest.raises(ValidationError, match="art_direction"):
-        Stack.model_validate({"name": "Castle", "art_direction": "Legacy"})
+    assert values["styles"] == [
+        {
+            "id": str(style.id),
+            "name": "Ink wash",
+            "prompt": "Loose ink and watercolor",
+        }
+    ]
+    assert "global_style" not in values
+    with pytest.raises(ValidationError, match="global_style"):
+        Stack.model_validate({"name": "Castle", "global_style": "Legacy"})
 
 
 def test_revalidated_dump_preserves_pydantic_field_selection() -> None:
@@ -120,18 +129,9 @@ def test_card_references_are_discriminated_and_consistent() -> None:
 
 
 def test_hotspot_set_distinguishes_never_applied_from_applied_empty() -> None:
-    never_applied = ImageRevision(
-        image_path="assets/cards/card/image-revision.png",
-        origin=ImageOrigin.IMPORTED,
-        source_filename="courtyard.png",
-        created_at=datetime.now(UTC),
-    )
-    applied_empty = ImageRevision(
-        image_path="assets/cards/card/image-revision.png",
-        origin=ImageOrigin.IMPORTED,
-        source_filename="courtyard.png",
+    never_applied = CardRevision()
+    applied_empty = CardRevision(
         hotspot_set=HotspotSet(),
-        created_at=datetime.now(UTC),
     )
 
     assert never_applied.hotspot_set is None
@@ -139,22 +139,15 @@ def test_hotspot_set_distinguishes_never_applied_from_applied_empty() -> None:
     assert applied_empty.hotspot_set.interactions == ()
 
 
-def test_card_rejects_duplicate_revision_names_case_insensitively() -> None:
-    first = ImageRevision(
-        name="Moonlit Moat",
-        image_path="assets/cards/card/first.png",
-        origin=ImageOrigin.IMPORTED,
-        created_at=datetime.now(UTC),
-    )
-    second = ImageRevision(
-        name="moonlit moat",
-        image_path="assets/cards/card/second.png",
-        origin=ImageOrigin.IMPORTED,
-        created_at=datetime.now(UTC),
-    )
-
-    with pytest.raises(ValidationError, match="revision names must be unique"):
-        Card(name="Courtyard", image_revisions=(first, second))
+def test_stack_rejects_duplicate_style_names_case_insensitively() -> None:
+    with pytest.raises(ValidationError, match="style names must be unique"):
+        Stack(
+            name="Castle",
+            styles=(
+                GenerationStyle(name="Moonlit", prompt="First"),
+                GenerationStyle(name="moonlit", prompt="Second"),
+            ),
+        )
 
 
 def test_hotspots_are_nested_in_their_image_revision() -> None:
@@ -173,16 +166,19 @@ def test_hotspots_are_nested_in_their_image_revision() -> None:
             ),
         ),
     )
-    revision = ImageRevision(
-        image_path="assets/cards/card/image-revision.png",
-        origin=ImageOrigin.GENERATED,
-        generation_metadata=image_metadata(),
+    asset_id = uuid4()
+    revision = CardRevision(
+        background=GeneratedBackground(
+            id=asset_id,
+            image_path=f"assets/cards/card/image-{asset_id}.png",
+            generation_metadata=image_metadata(),
+            created_at=datetime.now(UTC),
+        ),
         hotspot_set=HotspotSet(interactions=(interaction,)),
-        created_at=datetime.now(UTC),
     )
     card = Card(
         name="Courtyard",
-        image_revisions=(revision,),
+        revisions=(revision,),
         active_revision_id=revision.id,
     )
     stack = Stack(name="Castle", cards=(card,), start_card_id=card.id)
@@ -190,22 +186,26 @@ def test_hotspots_are_nested_in_their_image_revision() -> None:
     loaded = Stack.model_validate_json(stack.model_dump_json())
 
     assert loaded == stack
-    assert loaded.cards[0].image_revisions[0].hotspot_set is not None
-    assert loaded.cards[0].image_revisions[0].hotspot_set.interactions[0] == interaction
+    assert loaded.cards[0].revisions[0].hotspot_set is not None
+    assert loaded.cards[0].revisions[0].hotspot_set.interactions[0] == interaction
 
 
-def test_generated_revision_requires_reproducibility_metadata() -> None:
+def test_generated_background_requires_reproducibility_metadata() -> None:
     with pytest.raises(ValidationError, match="generation_metadata"):
-        ImageRevision(
+        GeneratedBackground(
             image_path="assets/cards/card/image-revision.png",
-            origin=ImageOrigin.GENERATED,
             created_at=datetime.now(UTC),
         )
 
 
 def test_active_revision_and_start_card_must_exist() -> None:
+    revision = CardRevision()
     with pytest.raises(ValidationError, match="active_revision_id"):
-        Card(name="Courtyard", active_revision_id=uuid4())
+        Card(
+            name="Courtyard",
+            revisions=(revision,),
+            active_revision_id=uuid4(),
+        )
 
     with pytest.raises(ValidationError, match="start_card_id"):
         Stack(name="Castle", start_card_id=uuid4())
@@ -226,18 +226,8 @@ def test_serialized_python_values_are_not_silently_coerced() -> None:
 
 def test_hotspot_sets_are_copied_when_attached_to_revisions() -> None:
     shared = HotspotSet()
-    first = ImageRevision(
-        image_path="assets/cards/card/image-first.png",
-        origin=ImageOrigin.IMPORTED,
-        hotspot_set=shared,
-        created_at=datetime.now(UTC),
-    )
-    second = ImageRevision(
-        image_path="assets/cards/card/image-second.png",
-        origin=ImageOrigin.IMPORTED,
-        hotspot_set=shared,
-        created_at=datetime.now(UTC),
-    )
+    first = CardRevision(hotspot_set=shared)
+    second = CardRevision(hotspot_set=shared)
 
     assert first.hotspot_set is not shared
     assert second.hotspot_set is not shared
@@ -282,31 +272,32 @@ def test_duplicate_card_ids_and_dangling_resolved_targets_are_rejected() -> None
             ),
         ),
     )
-    revision = ImageRevision(
-        image_path="assets/cards/card/image.png",
-        origin=ImageOrigin.IMPORTED,
+    revision = CardRevision(
         hotspot_set=HotspotSet(interactions=(interaction,)),
-        created_at=datetime.now(UTC),
     )
-    card = Card(name="Courtyard", image_revisions=(revision,), active_revision_id=revision.id)
+    card = Card(name="Courtyard", revisions=(revision,), active_revision_id=revision.id)
 
     with pytest.raises(ValidationError, match="resolved card references"):
         Stack(name="Castle", cards=(card,))
 
 
-def test_image_revision_cannot_be_attached_to_multiple_cards() -> None:
-    revision = ImageRevision(
-        image_path="assets/cards/shared/image.png",
-        origin=ImageOrigin.IMPORTED,
-        hotspot_set=HotspotSet(),
-        created_at=datetime.now(UTC),
-    )
+def test_revision_cannot_be_attached_to_multiple_cards() -> None:
+    revision = CardRevision(hotspot_set=HotspotSet())
 
-    with pytest.raises(ValidationError, match="image revision IDs"):
+    with pytest.raises(ValidationError, match="revision IDs"):
         Stack(
             name="Castle",
             cards=(
-                Card(name="One", image_revisions=(revision,), active_revision_id=revision.id),
-                Card(name="Two", image_revisions=(revision,), active_revision_id=revision.id),
+                Card(name="One", revisions=(revision,), active_revision_id=revision.id),
+                Card(name="Two", revisions=(revision,), active_revision_id=revision.id),
             ),
         )
+
+
+def test_blank_hotspot_is_valid_but_has_no_hit_geometry() -> None:
+    interaction = Interaction(
+        label="Hotspot 1",
+        action=NavigateAction(target=UnresolvedCardReference()),
+    )
+
+    assert interaction.polygons == ()

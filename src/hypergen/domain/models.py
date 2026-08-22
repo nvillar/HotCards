@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from enum import StrEnum
 from math import isfinite
 from typing import Annotated, Any, Literal
@@ -20,7 +21,7 @@ from pydantic import (
     model_validator,
 )
 
-CURRENT_SCHEMA_VERSION = 1
+CURRENT_SCHEMA_VERSION = 2
 MAX_REVISION_NAME_LENGTH = 48
 
 NonEmptyString = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
@@ -149,20 +150,60 @@ class Interaction(DomainModel):
     id: UUID = Field(default_factory=uuid4)
     label: NonEmptyString
     action: NavigateAction
-    polygons: tuple[Polygon, ...] = Field(min_length=1)
+    polygons: tuple[Polygon, ...] = Field(default_factory=tuple)
+
+
+class GenerationStyle(DomainModel):
+    """One named, stack-owned image-generation style."""
+
+    id: UUID = Field(default_factory=uuid4)
+    name: NonEmptyString
+    prompt: str = ""
 
 
 class ImageGenerationInputs(DomainModel):
     """Author-controlled inputs captured for a generated image."""
 
-    scene_description: str
-    global_style: str
-    card_style: str | None = None
+    description: str
+    style_name: str | None = None
+    style_prompt: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def accept_v1_inputs(cls, value: Any) -> Any:
+        """Translate legacy construction data without serializing legacy fields."""
+        if not isinstance(value, dict) or "description" in value:
+            return value
+        data = dict(value)
+        if "scene_description" not in data:
+            return value
+        card_style = data.pop("card_style", None)
+        global_style = data.pop("global_style", "")
+        data["description"] = data.pop("scene_description")
+        data["style_prompt"] = (
+            card_style if card_style is not None else global_style
+        )
+        return data
 
     @property
     def effective_style(self) -> str:
-        """Return the per-card replacement or the stack-wide default."""
-        return self.card_style if self.card_style is not None else self.global_style
+        """Return the selected style prompt captured for generation."""
+        return self.style_prompt
+
+    @property
+    def scene_description(self) -> str:
+        """Return the captured Description for transitional callers."""
+        return self.description
+
+    @property
+    def global_style(self) -> str:
+        """Return the captured style prompt for transitional callers."""
+        return self.style_prompt
+
+    @property
+    def card_style(self) -> None:
+        """Return no legacy card override for transitional callers."""
+        return None
 
 
 class ImageGenerationMetadata(DomainModel):
@@ -224,17 +265,40 @@ class HotspotSet(DomainModel):
         return self
 
 
-class ImageRevision(DomainModel):
-    """An immutable accepted image artifact and its associated hotspot set."""
+class GeneratedBackground(DomainModel):
+    """One immutable generated image asset and its provenance."""
 
     id: UUID = Field(default_factory=uuid4)
-    name: RevisionName | None = None
+    type: Literal["generated"] = "generated"
     image_path: NonEmptyString
-    origin: ImageOrigin
-    source_filename: str | None = None
-    generation_metadata: ImageGenerationMetadata | None = None
-    hotspot_set: HotspotSet | None = None
+    generation_metadata: ImageGenerationMetadata
     created_at: AwareDatetime
+
+
+class ImportedBackground(DomainModel):
+    """One immutable imported image asset."""
+
+    id: UUID = Field(default_factory=uuid4)
+    type: Literal["imported"] = "imported"
+    image_path: NonEmptyString
+    source_filename: str | None = None
+    created_at: AwareDatetime
+
+
+Background = Annotated[
+    GeneratedBackground | ImportedBackground,
+    Field(discriminator="type"),
+]
+
+
+class CardRevision(DomainModel):
+    """One complete revision of a card's authored content."""
+
+    id: UUID = Field(default_factory=uuid4)
+    description: str = ""
+    style_id: UUID | None = None
+    background: Background | None = None
+    hotspot_set: HotspotSet | None = None
 
     @field_validator("hotspot_set")
     @classmethod
@@ -242,41 +306,93 @@ class ImageRevision(DomainModel):
         """Prevent one mutable object graph from being attached to two revisions."""
         return value.model_copy(deep=True) if value is not None else None
 
-    @model_validator(mode="after")
-    def require_generated_image_metadata(self) -> ImageRevision:
-        """Ensure generated images always retain their reproducibility metadata."""
-        if self.origin is ImageOrigin.GENERATED and self.generation_metadata is None:
-            raise ValueError("generated image revisions require generation_metadata")
-        return self
+    @property
+    def image_path(self) -> str | None:
+        """Return the active background path for transitional callers."""
+        return self.background.image_path if self.background is not None else None
+
+    @property
+    def origin(self) -> ImageOrigin | None:
+        """Return how the background entered the stack."""
+        if self.background is None:
+            return None
+        return ImageOrigin(self.background.type)
+
+    @property
+    def source_filename(self) -> str | None:
+        """Return imported source provenance when available."""
+        if isinstance(self.background, ImportedBackground):
+            return self.background.source_filename
+        return None
+
+    @property
+    def generation_metadata(self) -> ImageGenerationMetadata | None:
+        """Return generated-image provenance when available."""
+        if isinstance(self.background, GeneratedBackground):
+            return self.background.generation_metadata
+        return None
+
+    @property
+    def created_at(self) -> datetime:
+        """Return background creation time, or a neutral value for blank revisions."""
+        if self.background is not None:
+            return self.background.created_at
+        return datetime.min.replace(tzinfo=UTC)
 
 
 class Card(DomainModel):
-    """One authored card and all of its accepted image revisions."""
+    """One named card and its ordered complete revisions."""
 
     id: UUID = Field(default_factory=uuid4)
     name: NonEmptyString
-    scene_description: str = ""
-    interaction_description: str = ""
-    card_style: str | None = None
-    image_revisions: tuple[ImageRevision, ...] = Field(default_factory=tuple)
+    revisions: tuple[CardRevision, ...] = Field(default_factory=tuple)
     active_revision_id: UUID | None = None
 
     @model_validator(mode="after")
     def require_known_active_revision(self) -> Card:
         """Reject active revision IDs that do not belong to this card."""
-        revision_ids = [revision.id for revision in self.image_revisions]
+        if not self.revisions:
+            first_revision = CardRevision()
+            object.__setattr__(self, "revisions", (first_revision,))
+            object.__setattr__(self, "active_revision_id", first_revision.id)
+        elif self.active_revision_id is None:
+            object.__setattr__(self, "active_revision_id", self.revisions[0].id)
+        revision_ids = [revision.id for revision in self.revisions]
         if len(revision_ids) != len(set(revision_ids)):
-            raise ValueError("image revision IDs must be unique within a card")
-        revision_names = [
-            revision.name.casefold()
-            for revision in self.image_revisions
-            if revision.name is not None
-        ]
-        if len(revision_names) != len(set(revision_names)):
-            raise ValueError("image revision names must be unique within a card")
-        if self.active_revision_id is not None and self.active_revision_id not in set(revision_ids):
+            raise ValueError("revision IDs must be unique within a card")
+        if self.active_revision_id not in set(revision_ids):
             raise ValueError("active_revision_id must identify an image revision on this card")
         return self
+
+    @property
+    def active_revision(self) -> CardRevision:
+        """Return the card's validated active revision."""
+        assert self.active_revision_id is not None
+        return next(
+            revision
+            for revision in self.revisions
+            if revision.id == self.active_revision_id
+        )
+
+    @property
+    def image_revisions(self) -> tuple[CardRevision, ...]:
+        """Return revisions for transitional callers."""
+        return self.revisions
+
+    @property
+    def scene_description(self) -> str:
+        """Return the active revision Description for transitional callers."""
+        return self.active_revision.description
+
+    @property
+    def interaction_description(self) -> str:
+        """Return the removed Intent field as empty for transitional callers."""
+        return ""
+
+    @property
+    def card_style(self) -> None:
+        """Return the removed free-text card style for transitional callers."""
+        return None
 
 
 class Stack(DomainModel):
@@ -285,7 +401,7 @@ class Stack(DomainModel):
     schema_version: int = Field(default=CURRENT_SCHEMA_VERSION, strict=True)
     id: UUID = Field(default_factory=uuid4)
     name: NonEmptyString
-    global_style: str = ""
+    styles: tuple[GenerationStyle, ...] = Field(default_factory=tuple)
     canvas: CanvasSize = Field(default_factory=CanvasSize)
     run_overlay_mode: RunOverlayMode = RunOverlayMode.HIDDEN
     start_card_id: UUID | None = None
@@ -309,13 +425,27 @@ class Stack(DomainModel):
         if len(card_ids) != len(known_card_ids):
             raise ValueError("card IDs must be unique within a stack")
         require_unique_card_names(self.cards)
+        style_ids = [style.id for style in self.styles]
+        if len(style_ids) != len(set(style_ids)):
+            raise ValueError("style IDs must be unique within a stack")
+        style_names = [style.name.casefold() for style in self.styles]
+        if len(style_names) != len(set(style_names)):
+            raise ValueError("style names must be unique within a stack")
+        known_style_ids = set(style_ids)
         if self.start_card_id is not None and self.start_card_id not in known_card_ids:
             raise ValueError("start_card_id must identify a card in this stack")
-        revision_ids = [revision.id for card in self.cards for revision in card.image_revisions]
+        revision_ids = [revision.id for card in self.cards for revision in card.revisions]
         if len(revision_ids) != len(set(revision_ids)):
-            raise ValueError("image revision IDs must be unique within a stack")
+            raise ValueError("revision IDs must be unique within a stack")
         for card in self.cards:
-            for revision in card.image_revisions:
+            for revision in card.revisions:
+                if (
+                    revision.style_id is not None
+                    and revision.style_id not in known_style_ids
+                ):
+                    raise ValueError(
+                        "revision style_id must identify a style in this stack"
+                    )
                 if revision.hotspot_set is None:
                     continue
                 for interaction in revision.hotspot_set.interactions:
@@ -328,3 +458,11 @@ class Stack(DomainModel):
                             "resolved card references must identify a card in this stack"
                         )
         return self
+
+    @property
+    def global_style(self) -> str:
+        """Return the first style prompt for transitional callers."""
+        return self.styles[0].prompt if self.styles else ""
+
+
+ImageRevision = CardRevision

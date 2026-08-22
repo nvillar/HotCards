@@ -8,9 +8,9 @@ from pydantic import ValidationError
 
 from hypergen.application.commands import (
     ActivateRevisionCommand,
-    AddImageRevisionCommand,
     AddInteractionCommand,
     AddPolygonCommand,
+    AddStyleCommand,
     ChangeHotspotDestinationCommand,
     CommandError,
     CreateCardCommand,
@@ -18,8 +18,10 @@ from hypergen.application.commands import (
     DeleteImageRevisionCommand,
     DeleteInteractionCommand,
     DeletePolygonCommand,
-    EditCardTextCommand,
-    EditGlobalStyleCommand,
+    DeleteStyleCommand,
+    DuplicateRevisionCommand,
+    EditRevisionDescriptionCommand,
+    EditStyleCommand,
     RenameCardCommand,
     RenameInteractionCommand,
     ReorderCardCommand,
@@ -27,13 +29,17 @@ from hypergen.application.commands import (
     ReplaceHotspotSetCommand,
     ReplaceInteractionPolygonsCommand,
     ReplacePolygonCommand,
+    ReplaceRevisionBackgroundCommand,
+    SetRevisionStyleCommand,
     SetStartCardCommand,
 )
+from hypergen.application.document_controller import DocumentController
 from hypergen.domain.models import (
     Card,
+    CardRevision,
+    GenerationStyle,
     HotspotSet,
-    ImageOrigin,
-    ImageRevision,
+    ImportedBackground,
     Interaction,
     NavigateAction,
     Point,
@@ -62,17 +68,14 @@ def interaction(label: str, target_name: str) -> Interaction:
     )
 
 
-def card_with_revision(*interactions: Interaction) -> tuple[Card, ImageRevision]:
-    revision = ImageRevision(
-        image_path="assets/cards/source/image.png",
-        origin=ImageOrigin.IMPORTED,
+def card_with_revision(*interactions: Interaction) -> tuple[Card, CardRevision]:
+    revision = CardRevision(
         hotspot_set=HotspotSet(interactions=interactions),
-        created_at=datetime.now(UTC),
     )
     return (
         Card(
             name="Source",
-            image_revisions=(revision,),
+            revisions=(revision,),
             active_revision_id=revision.id,
         ),
         revision,
@@ -100,43 +103,40 @@ def test_card_create_rename_reorder_and_start_selection() -> None:
     assert SetStartCardCommand(card_id=None).apply(document).start_card_id is None
 
 
-def test_text_edits_are_individual_typed_field_changes() -> None:
+def test_revision_description_and_style_edits_are_typed_changes() -> None:
     card = Card(name="Card")
-    document = Stack(name="Stack", cards=(card,))
+    style = GenerationStyle(name="Woodcut", prompt="Strong carved lines")
+    document = Stack(name="Stack", styles=(style,), cards=(card,))
+    revision_id = card.active_revision_id
+    assert revision_id is not None
 
-    document = EditCardTextCommand(
+    document = EditRevisionDescriptionCommand(
         card_id=card.id,
-        field="scene_description",
+        revision_id=revision_id,
         value="A quiet library",
     ).apply(document)
-    document = EditCardTextCommand(
+    document = SetRevisionStyleCommand(
         card_id=card.id,
-        field="interaction_description",
-        value="The ladder can be climbed",
+        revision_id=revision_id,
+        style_id=style.id,
     ).apply(document)
-    document = EditCardTextCommand(
-        card_id=card.id,
-        field="card_style",
-        value="Woodcut",
+    document = EditStyleCommand(
+        style_id=style.id,
+        name="Detailed woodcut",
+        prompt="Fine carved lines",
     ).apply(document)
 
-    changed = document.cards[0]
-    assert changed.scene_description == "A quiet library"
-    assert changed.interaction_description == "The ladder can be climbed"
-    assert changed.card_style == "Woodcut"
-
-    document = EditGlobalStyleCommand(value="Watercolor").apply(document)
-    assert document.global_style == "Watercolor"
+    changed = document.cards[0].active_revision
+    assert changed.description == "A quiet library"
+    assert changed.style_id == style.id
+    assert document.styles[0].name == "Detailed woodcut"
+    assert document.styles[0].prompt == "Fine carved lines"
 
 
 def test_revision_activation_and_complete_hotspot_replacement() -> None:
     source, first_revision = card_with_revision(interaction("Door", "Hall"))
-    second_revision = ImageRevision(
-        image_path="assets/cards/source/image-two.png",
-        origin=ImageOrigin.IMPORTED,
-        created_at=datetime.now(UTC),
-    )
-    source = source.model_copy(update={"image_revisions": (first_revision, second_revision)})
+    second_revision = CardRevision()
+    source = source.model_copy(update={"revisions": (first_revision, second_revision)})
     document = Stack(name="Stack", cards=(source,))
     replacement = HotspotSet(
         interactions=(
@@ -155,7 +155,7 @@ def test_revision_activation_and_complete_hotspot_replacement() -> None:
         hotspot_set=replacement,
     ).apply(document)
 
-    changed_revision = document.cards[0].image_revisions[1]
+    changed_revision = document.cards[0].revisions[1]
     assert document.cards[0].active_revision_id == second_revision.id
     assert changed_revision.hotspot_set == replacement
     assert (
@@ -166,53 +166,36 @@ def test_revision_activation_and_complete_hotspot_replacement() -> None:
         )
         .apply(document)
         .cards[0]
-        .image_revisions[1]
+        .revisions[1]
         .hotspot_set
         is None
     )
 
 
-def test_add_and_delete_image_revisions_choose_safe_active_revision() -> None:
+def test_duplicate_and_delete_revisions_choose_safe_active_revision() -> None:
     card = Card(name="Card")
     document = Stack(name="Stack", cards=(card,))
-    first = ImageRevision(
-        image_path=f"assets/cards/{card.id}/image-{uuid4()}.png",
-        origin=ImageOrigin.IMPORTED,
-        created_at=datetime.now(UTC),
+    first = card.active_revision
+    duplicate = DuplicateRevisionCommand(
+        card_id=card.id,
+        source_revision_id=first.id,
     )
-    first = first.model_copy(
-        update={
-            "image_path": f"assets/cards/{card.id}/image-{first.id}.png",
-        }
-    )
-    second = ImageRevision(
-        image_path=f"assets/cards/{card.id}/image-{uuid4()}.png",
-        origin=ImageOrigin.IMPORTED,
-        created_at=datetime.now(UTC),
-    )
-    second = second.model_copy(
-        update={
-            "image_path": f"assets/cards/{card.id}/image-{second.id}.png",
-        }
-    )
-
-    document = AddImageRevisionCommand(card_id=card.id, revision=first).apply(document)
-    document = AddImageRevisionCommand(card_id=card.id, revision=second).apply(document)
-    assert document.cards[0].active_revision_id == second.id
+    document = duplicate.apply(document)
+    assert document.cards[0].active_revision_id == duplicate.revision_id
+    assert len(document.cards[0].revisions) == 2
 
     document = DeleteImageRevisionCommand(
         card_id=card.id,
-        revision_id=second.id,
+        revision_id=duplicate.revision_id,
     ).apply(document)
     assert document.cards[0].active_revision_id == first.id
-    assert document.cards[0].image_revisions == (first,)
+    assert document.cards[0].revisions == (first,)
 
-    document = DeleteImageRevisionCommand(
-        card_id=card.id,
-        revision_id=first.id,
-    ).apply(document)
-    assert document.cards[0].active_revision_id is None
-    assert document.cards[0].image_revisions == ()
+    with pytest.raises(CommandError, match="at least one revision"):
+        DeleteImageRevisionCommand(
+            card_id=card.id,
+            revision_id=first.id,
+        ).apply(document)
 
 
 def test_polygon_destination_and_hotspot_order_changes() -> None:
@@ -250,7 +233,7 @@ def test_polygon_destination_and_hotspot_order_changes() -> None:
         new_index=1,
     ).apply(document)
 
-    hotspots = document.cards[0].image_revisions[0].hotspot_set
+    hotspots = document.cards[0].revisions[0].hotspot_set
     assert hotspots is not None
     assert [item.id for item in hotspots.interactions] == [second.id, first.id]
     assert hotspots.interactions[1].polygons == (replacement, extra)
@@ -295,25 +278,44 @@ def test_interaction_and_polygon_component_lifecycle() -> None:
         interaction_id=second.id,
     ).apply(document)
 
-    hotspot_set = document.cards[0].image_revisions[0].hotspot_set
+    hotspot_set = document.cards[0].revisions[0].hotspot_set
     assert hotspot_set is not None
     assert len(hotspot_set.interactions) == 1
     assert hotspot_set.interactions[0].label == "Archway"
     assert hotspot_set.interactions[0].polygons == (extra,)
 
 
-def test_polygon_component_deletion_preserves_valid_interactions() -> None:
+def test_polygon_component_deletion_can_leave_an_area_less_interaction() -> None:
     first = interaction("Door", "Hall")
     source, revision = card_with_revision(first)
     document = Stack(name="Stack", cards=(source,))
 
-    with pytest.raises(CommandError, match="only polygon"):
-        DeletePolygonCommand(
-            card_id=source.id,
-            revision_id=revision.id,
-            interaction_id=first.id,
-            polygon_index=0,
-        ).apply(document)
+    changed = DeletePolygonCommand(
+        card_id=source.id,
+        revision_id=revision.id,
+        interaction_id=first.id,
+        polygon_index=0,
+    ).apply(document)
+
+    assert changed.cards[0].active_revision.hotspot_set is not None
+    assert changed.cards[0].active_revision.hotspot_set.interactions[0].polygons == ()
+
+
+def test_targeted_undo_uses_command_identity_not_repeated_document_values() -> None:
+    card = Card(name="Original")
+    controller = DocumentController(Stack(name="Stack", cards=(card,)))
+
+    controller.execute(RenameCardCommand(card_id=card.id, name="Repeated"))
+    old_token = controller.current_undo_token
+    assert old_token is not None
+    controller.execute(RenameCardCommand(card_id=card.id, name="Different"))
+    controller.execute(RenameCardCommand(card_id=card.id, name="Repeated"))
+
+    assert not controller.undo_if_current(old_token)
+    current_token = controller.current_undo_token
+    assert current_token is not None
+    assert controller.undo_if_current(current_token)
+    assert controller.document.cards[0].name == "Different"
 
 
 def test_delete_card_converts_all_inbound_references_and_clears_start() -> None:
@@ -334,7 +336,7 @@ def test_delete_card_converts_all_inbound_references_and_clears_start() -> None:
 
     assert [card.id for card in changed.cards] == [source.id]
     assert changed.start_card_id is None
-    hotspot_set = changed.cards[0].image_revisions[0].hotspot_set
+    hotspot_set = changed.cards[0].revisions[0].hotspot_set
     assert hotspot_set is not None
     target = hotspot_set.interactions[0].action.target
     assert target == UnresolvedCardReference(target_name="Former Hall")
@@ -350,3 +352,48 @@ def test_commands_reject_missing_targets_and_invalid_domain_results() -> None:
         ReorderCardCommand(card_id=card.id, new_index=3).apply(document)
     with pytest.raises(ValidationError):
         CreateCardCommand(name=" card ").apply(document)
+
+
+def test_style_deletion_and_background_replacement_are_guarded() -> None:
+    style = GenerationStyle(name="Watercolor", prompt="Soft washes")
+    card = Card(name="Card")
+    revision_id = card.active_revision_id
+    assert revision_id is not None
+    document = Stack(name="Stack", styles=(style,), cards=(card,))
+    document = SetRevisionStyleCommand(
+        card_id=card.id,
+        revision_id=revision_id,
+        style_id=style.id,
+    ).apply(document)
+
+    with pytest.raises(CommandError, match="used by a revision"):
+        DeleteStyleCommand(style_id=style.id).apply(document)
+
+    background = ImportedBackground(
+        image_path=f"assets/cards/{card.id}/image-{uuid4()}.png",
+        created_at=datetime.now(UTC),
+    )
+    document = ReplaceRevisionBackgroundCommand(
+        card_id=card.id,
+        revision_id=revision_id,
+        background=background,
+    ).apply(document)
+    assert document.cards[0].active_revision.background == background
+
+    document = SetRevisionStyleCommand(
+        card_id=card.id,
+        revision_id=revision_id,
+        style_id=None,
+    ).apply(document)
+    document = DeleteStyleCommand(style_id=style.id).apply(document)
+    assert document.styles == ()
+
+
+def test_add_style_rejects_duplicate_names_case_insensitively() -> None:
+    style = GenerationStyle(name="Watercolor", prompt="Soft washes")
+    document = AddStyleCommand(style=style).apply(Stack(name="Stack"))
+
+    with pytest.raises(CommandError, match="already in use"):
+        AddStyleCommand(
+            style=GenerationStyle(name="watercolor", prompt="Other"),
+        ).apply(document)

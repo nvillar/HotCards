@@ -39,8 +39,8 @@ def _relative_asset_path(value: str) -> PurePosixPath:
     return path
 
 
-def _image_asset_path(card_id: UUID, revision_id: UUID) -> PurePosixPath:
-    return ASSET_ROOT / str(card_id) / f"image-{revision_id}.png"
+def _image_asset_path(card_id: UUID, asset_id: UUID) -> PurePosixPath:
+    return ASSET_ROOT / str(card_id) / f"image-{asset_id}.png"
 
 
 def _fsync_directory(path: Path) -> None:
@@ -103,13 +103,15 @@ class StackStore:
 
     def _validate_assets(self, stack: Stack) -> None:
         for card in stack.cards:
-            for revision in card.image_revisions:
-                relative_path = _relative_asset_path(revision.image_path)
-                expected_path = _image_asset_path(card.id, revision.id)
+            for revision in card.revisions:
+                if revision.background is None:
+                    continue
+                relative_path = _relative_asset_path(revision.background.image_path)
+                expected_path = _image_asset_path(card.id, revision.background.id)
                 if relative_path != expected_path:
                     raise StackStoreError(
                         f"image asset path {relative_path} does not match its "
-                        "card and revision IDs; "
+                        "card and asset IDs; "
                         f"expected {expected_path}"
                     )
                 asset_path = self._resolved_asset(relative_path)
@@ -190,10 +192,14 @@ class StackStore:
         source_path: Path,
         *,
         card_id: UUID,
-        revision_id: UUID,
+        asset_id: UUID | None = None,
+        revision_id: UUID | None = None,
     ) -> str:
         """Copy a validated PNG into its deterministic bundle-owned asset path."""
-        relative_path = _image_asset_path(card_id, revision_id)
+        resolved_asset_id = asset_id if asset_id is not None else revision_id
+        if resolved_asset_id is None:
+            raise StackStoreError("an image asset ID is required")
+        relative_path = _image_asset_path(card_id, resolved_asset_id)
         destination = self._resolved_asset(relative_path)
         if destination.exists():
             raise StackStoreError(f"refusing to overwrite existing image asset: {relative_path}")
@@ -263,13 +269,21 @@ class StackStore:
                 )
             )
             temporary_store = StackStore(temporary_bundle)
+            copied_paths: set[str] = set()
             for card in stack.cards:
-                for revision in card.image_revisions:
+                for revision in card.revisions:
+                    background = revision.background
+                    if (
+                        background is None
+                        or background.image_path in copied_paths
+                    ):
+                        continue
                     temporary_store.import_image(
-                        self.asset_path(revision.image_path),
+                        self.asset_path(background.image_path),
                         card_id=card.id,
-                        revision_id=revision.id,
+                        asset_id=background.id,
                     )
+                    copied_paths.add(background.image_path)
             temporary_store.save(stack)
             os.rename(temporary_bundle, destination)
             _fsync_directory(destination.parent)

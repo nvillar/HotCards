@@ -12,9 +12,9 @@ from PIL import Image
 import hypergen.storage.stack_store as stack_store_module
 from hypergen.domain.models import (
     Card,
+    CardRevision,
     HotspotSet,
-    ImageOrigin,
-    ImageRevision,
+    ImportedBackground,
     Interaction,
     NavigateAction,
     Point,
@@ -51,18 +51,20 @@ def _stack_with_asset(store: StackStore, source: Path) -> Stack:
             ),
         ),
     )
-    revision = ImageRevision(
+    revision = CardRevision(
         id=revision_id,
-        image_path=image_path,
-        origin=ImageOrigin.IMPORTED,
-        source_filename=source.name,
+        background=ImportedBackground(
+            id=revision_id,
+            image_path=image_path,
+            source_filename=source.name,
+            created_at=datetime.now(UTC),
+        ),
         hotspot_set=HotspotSet(interactions=(interaction,)),
-        created_at=datetime.now(UTC),
     )
     source_card = Card(
         id=source_card_id,
         name="Courtyard",
-        image_revisions=(revision,),
+        revisions=(revision,),
         active_revision_id=revision.id,
     )
     return Stack(
@@ -81,10 +83,11 @@ def test_bundle_round_trip_preserves_document_and_relative_asset(tmp_path: Path)
     store.save(stack)
 
     assert store.load() == stack
-    image_path = stack.cards[0].image_revisions[0].image_path
+    image_path = stack.cards[0].revisions[0].image_path
+    assert image_path is not None
     assert image_path.startswith("assets/cards/")
     assert not Path(image_path).is_absolute()
-    assert json.loads(store.stack_path.read_text())["schema_version"] == 1
+    assert json.loads(store.stack_path.read_text())["schema_version"] == 2
 
 
 def test_failed_replace_preserves_active_stack_and_removes_temporary_file(
@@ -129,16 +132,20 @@ def test_create_never_replaces_existing_stack_document(tmp_path: Path) -> None:
 def test_load_rejects_unsafe_asset_paths(tmp_path: Path, unsafe_path: str) -> None:
     store = StackStore(tmp_path / "Castle.hypergen")
     store.bundle_path.mkdir()
+    revision_id = uuid4()
     payload = Stack(
         name="Unsafe",
         cards=(
             Card(
                 name="Card",
-                image_revisions=(
-                    ImageRevision(
-                        image_path=unsafe_path,
-                        origin=ImageOrigin.IMPORTED,
-                        created_at=datetime.now(UTC),
+                revisions=(
+                    CardRevision(
+                        id=revision_id,
+                        background=ImportedBackground(
+                            id=revision_id,
+                            image_path=unsafe_path,
+                            created_at=datetime.now(UTC),
+                        ),
                     ),
                 ),
             ),
@@ -160,12 +167,16 @@ def test_save_requires_asset_before_json_reference(tmp_path: Path) -> None:
             Card(
                 id=card_id,
                 name="Card",
-                image_revisions=(
-                    ImageRevision(
+                revisions=(
+                    CardRevision(
                         id=revision_id,
-                        image_path=f"assets/cards/{card_id}/image-{revision_id}.png",
-                        origin=ImageOrigin.IMPORTED,
-                        created_at=datetime.now(UTC),
+                        background=ImportedBackground(
+                            id=revision_id,
+                            image_path=(
+                                f"assets/cards/{card_id}/image-{revision_id}.png"
+                            ),
+                            created_at=datetime.now(UTC),
+                        ),
                     ),
                 ),
             ),
@@ -194,12 +205,14 @@ def test_save_requires_asset_path_to_match_card_and_revision_ids(tmp_path: Path)
         cards=(
             Card(
                 name="Card",
-                image_revisions=(
-                    ImageRevision(
+                revisions=(
+                    CardRevision(
                         id=revision_id,
-                        image_path=image_path,
-                        origin=ImageOrigin.IMPORTED,
-                        created_at=datetime.now(UTC),
+                        background=ImportedBackground(
+                            id=revision_id,
+                            image_path=image_path,
+                            created_at=datetime.now(UTC),
+                        ),
                     ),
                 ),
             ),
@@ -234,7 +247,7 @@ def test_load_rejects_missing_and_future_versions(tmp_path: Path) -> None:
 
     for payload, message in [
         ({"name": "Missing"}, "missing schema_version"),
-        ({"schema_version": 2, "name": "Future"}, "newer than supported"),
+        ({"schema_version": 3, "name": "Future"}, "newer than supported"),
     ]:
         store.stack_path.write_text(json.dumps(payload))
         with pytest.raises(StackStoreError, match=message):
@@ -268,7 +281,8 @@ def test_clone_to_creates_independent_bundle_with_referenced_assets(tmp_path: Pa
     copied_store = original.clone_to(destination, stack)
 
     assert copied_store.load() == stack
-    image_path = stack.cards[0].image_revisions[0].image_path
+    image_path = stack.cards[0].revisions[0].image_path
+    assert image_path is not None
     assert copied_store.asset_path(image_path).is_file()
     copied_store.asset_path(image_path).unlink()
     assert original.asset_path(image_path).is_file()
