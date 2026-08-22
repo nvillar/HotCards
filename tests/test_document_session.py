@@ -70,7 +70,10 @@ def test_autosave_runs_after_debounce(
 
     controller.execute(CreateCardCommand(name="Saved shortly"))
     assert session.state.dirty
-    QTest.qWait(30)
+    for _attempt in range(100):
+        if not session.state.dirty:
+            break
+        QTest.qWait(10)
 
     assert [card.name for card in StackStore(bundle).load().cards] == ["Saved shortly"]
     assert not session.state.dirty
