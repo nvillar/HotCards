@@ -25,7 +25,7 @@ from hypergen.generation.structured_output import structured_json_content
 
 HOTSPOT_REMAP_PROMPT_VERSION = "hotspot-remap-prompt-v1"
 HOTSPOT_REMAP_SCHEMA_VERSION = "hotspot-remap-schema-v1"
-MAX_INTERACTIONS_PER_CALL = 4
+MAX_INTERACTIONS_PER_CALL = 2
 MAX_COMPONENTS_PER_INTERACTION = 2
 MAX_POINTS_PER_COMPONENT = 12
 HotspotToken = Annotated[str, StringConstraints(pattern=r"^H[1-9][0-9]*$")]

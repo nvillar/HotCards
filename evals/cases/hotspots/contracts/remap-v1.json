@@ -4,7 +4,7 @@
   "schema_version": "hotspot-remap-schema-v1",
   "selected_model": "qwen3.5:9b-mlx",
   "selected_limits": {
-    "hotspots_per_call": 4,
+    "hotspots_per_call": 2,
     "components_per_hotspot": 2,
     "points_per_component": 12,
     "output_tokens": 1024,
@@ -27,7 +27,7 @@
     "observations": [
       "Remap needs only geometry for existing hotspots, so destination selection and new-hotspot invention were removed from the model contract.",
       "Opaque request-local tokens bind returned polygons to authoritative hotspot semantics without exposing persisted UUIDs.",
-      "Batches of four bound schema size while one document command applies the complete remap atomically.",
+      "Batches of two improved authored-polygon overlap for the 9B MLX model while one document command still applies the complete remap atomically.",
       "Invalid, missing, duplicate, or unknown token output cannot replace authoritative geometry.",
       "Out-of-range coordinates are clamped deterministically and reported as warnings."
     ]

@@ -10,7 +10,7 @@ comparisons selected the 9B parameter class; the final revision-centric
 validation below exercised `qwen3.5:9b-mlx` directly.
 
 The revision-centric workflow no longer asks the model to invent hotspot
-semantics or destinations. Production Remap sends at most four existing
+semantics or destinations. Production Remap sends at most two existing
 hotspot labels per call behind opaque `H1`, `H2`, and subsequent tokens. Output
 can contain only token-bound polygons or explicit unlocated results; the
 application preserves IDs, labels, actions, destinations, ordering, and old
@@ -33,6 +33,24 @@ polygon tightness still varies. Retain 9B as the development default: it remains
 the middle resource point, the MLX build is the locally optimized runtime, and
 the bounded Remap contract removes the previous interaction-invention and
 destination-selection risks.
+
+### Coordinate-grounding follow-up
+
+A focused 2026-08-22 experiment used the four authored hotspots on New Worlds,
+Map revision 5 as reference geometry for repeated 9B MLX trials. Native
+1024×768 coordinates regressed from `0.379` to `0.318` mean polygon IoU and
+reduced the mean mapping rate to 80%. Explicit origin, axis, and tight-boundary
+instructions also regressed from `0.385` to `0.189` IoU. Production therefore
+retains the concise prompt and normalized 0–1000 coordinate space.
+
+Two-hotspot batches produced the only improvement: `0.390` mean polygon IoU
+versus `0.379` for four-at-once and `0.323` for one-at-a-time, with 100%
+mapping and no failures in five trials. Mean wall time was effectively
+unchanged (`11.10s` versus `11.05s`), although prompt tokens increased from
+1,314 to 2,426. Production uses batches of two while preserving one atomic
+application and safe Undo across all batches. The experiment is intentionally
+limited to one authored revision, so broader geometry-quality claims remain
+out of scope.
 
 ## MFLUX default: `flux2-klein-4b` (provisional)
 

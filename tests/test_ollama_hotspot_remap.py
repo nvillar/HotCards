@@ -251,23 +251,32 @@ def test_adapter_batches_every_existing_hotspot(tmp_path: Path) -> None:
             "mapped": [],
             "unlocated": [
                 {"token": f"H{index}", "reason": "not visible"}
-                for index in range(1, 5)
+                for index in range(1, 3)
             ],
         }
     )
     second = json.dumps(
         {
             "mapped": [],
+            "unlocated": [
+                {"token": f"H{index}", "reason": "not visible"}
+                for index in range(3, 5)
+            ],
+        }
+    )
+    third = json.dumps(
+        {
+            "mapped": [],
             "unlocated": [{"token": "H5", "reason": "not visible"}],
         }
     )
-    client = FakeClient([first, second])
+    client = FakeClient([first, second, third])
 
     result = OllamaHotspotRemapper(_runtime(client)).remap(
         _request(tmp_path, count=5)
     )
 
-    assert len(client.calls) == 2
+    assert len(client.calls) == 3
     assert {item.token for item in result.unlocated} == {
         "H1",
         "H2",
