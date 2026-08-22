@@ -12,7 +12,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtCore import QObject, Signal
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication
 
 import hypergen.ui.main_window as main_window_module
 from hypergen.application.commands import (
@@ -23,7 +23,7 @@ from hypergen.application.commands import (
     ReplaceRevisionBackgroundCommand,
 )
 from hypergen.application.document_controller import DocumentController
-from hypergen.application.document_session import DocumentSessionState
+from hypergen.application.document_session import DocumentSession, DocumentSessionState
 from hypergen.application.workers import AdapterKind
 from hypergen.domain.models import (
     Card,
@@ -131,6 +131,7 @@ class FakeBackgroundWorkflow(QObject):
         self.generate_calls: list[object] = []
         self.import_calls: list[tuple[object, Path]] = []
         self.clear_calls: list[object] = []
+        self.cancel_calls = 0
         self.closed = False
 
     def generate(self, card_id: object) -> None:
@@ -149,6 +150,7 @@ class FakeBackgroundWorkflow(QObject):
         self.document_changed.emit(changed)
 
     def duplicate_revision(self, card_id: object, revision_id: object) -> None:
+        previous_token = self.controller.current_undo_token
         changed = self.controller.execute(
             DuplicateRevisionCommand(  # type: ignore[arg-type]
                 card_id=card_id,
@@ -156,8 +158,12 @@ class FakeBackgroundWorkflow(QObject):
             )
         )
         self.document_changed.emit(changed)
+        token = self.controller.current_undo_token
+        if token is not None and token != previous_token:
+            self.change_applied.emit("Revision duplicated", token)
 
     def delete_revision(self, card_id: object, revision_id: object) -> None:
+        previous_token = self.controller.current_undo_token
         changed = self.controller.execute(
             DeleteRevisionCommand(  # type: ignore[arg-type]
                 card_id=card_id,
@@ -165,11 +171,15 @@ class FakeBackgroundWorkflow(QObject):
             )
         )
         self.document_changed.emit(changed)
+        token = self.controller.current_undo_token
+        if token is not None and token != previous_token:
+            self.change_applied.emit("Revision deleted", token)
 
     def is_generating_for(self, _card_id: object) -> bool:
-        return False
+        return self.busy
 
     def cancel(self) -> None:
+        self.cancel_calls += 1
         self.busy = False
 
     def close(self) -> None:
@@ -298,9 +308,8 @@ def test_render_preserves_focused_card_name_draft(
 
 def test_revision_selection_duplicate_delete_and_undo(
     application: QApplication,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    window, controller, _workers, _background = _window()
+    window, controller, _workers, background = _window()
     card = controller.document.cards[0]
 
     window.revision_combo.setCurrentIndex(1)
@@ -312,28 +321,12 @@ def test_revision_selection_duplicate_delete_and_undo(
     assert changed.active_revision.description == "Second"
     assert window.revision_combo.currentIndex() == 2
 
-    class ConfirmDelete:
-        Icon = QMessageBox.Icon
-        ButtonRole = QMessageBox.ButtonRole
-        StandardButton = QMessageBox.StandardButton
-
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            self.delete_button = object()
-
-        def addButton(self, value: object, *_args: object) -> object:
-            return self.delete_button if isinstance(value, str) else object()
-
-        def exec(self) -> None:
-            pass
-
-        def clickedButton(self) -> object:
-            return self.delete_button
-
-    monkeypatch.setattr(main_window_module, "QMessageBox", ConfirmDelete)
+    background.busy = True
     window.delete_revision_button.click()
     assert len(controller.document.cards[0].revisions) == 2
-    assert controller.undo()
-    window.render_document()
+    assert background.cancel_calls == 1
+    assert window.notification_bar.message_label.text() == "Revision deleted"
+    window.notification_bar.primary_button.click()
     assert len(controller.document.cards[0].revisions) == 3
     assert card.id == controller.document.cards[0].id
 
@@ -346,6 +339,76 @@ def test_final_revision_cannot_be_deleted(
         Stack(name="Demo", cards=(card,))
     )
     assert not window.delete_revision_button.isEnabled()
+
+
+def test_card_delete_applies_immediately_and_offers_targeted_undo(
+    application: QApplication,
+) -> None:
+    window, controller, _workers, _background = _window()
+
+    window.card_sidebar.delete_button.click()
+    assert controller.document.cards == ()
+    assert window.notification_bar.message_label.text() == (
+        "Card deleted; the start card was cleared"
+    )
+
+    window.notification_bar.primary_button.click()
+    assert len(controller.document.cards) == 1
+    assert controller.document.start_card_id == controller.document.cards[0].id
+
+
+def test_context_change_cancels_background_generation_without_prompt(
+    application: QApplication,
+) -> None:
+    window, _controller, _workers, background = _window()
+    background.busy = True
+
+    window._cancel_background_generation()
+    assert background.cancel_calls == 1
+    assert not background.busy
+
+
+def test_successful_save_as_cancels_generation_and_expires_undo(
+    application: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    controller = DocumentController(_stack())
+    session = DocumentSession(controller)
+    session.create(controller.document, tmp_path / "Original.hypergen")
+    workers = FakeWorkers()
+    background = FakeBackgroundWorkflow(controller)
+    background.busy = True
+    window = MainWindow(
+        controller,
+        workers,  # type: ignore[arg-type]
+        FakeSettings(),
+        document_session=session,
+        background_workflow=background,  # type: ignore[arg-type]
+        start_diagnostics=False,
+    )
+    card = controller.document.cards[0]
+    changed = controller.execute(
+        RenameCardCommand(card_id=card.id, name="Renamed")
+    )
+    window.render_document(changed)
+    token = controller.current_undo_token
+    assert token is not None
+    window._show_undo_notification("Renamed", token)
+    monkeypatch.setattr(
+        main_window_module.QFileDialog,
+        "getSaveFileName",
+        lambda *_args, **_kwargs: (
+            str(tmp_path / "Copy.hypergen"),
+            "HyperGen Stack (*.hypergen)",
+        ),
+    )
+
+    window.save_as()
+
+    assert background.cancel_calls == 1
+    assert window.notification_bar.current_key != "undo"
+    assert not controller.can_undo
 
 
 def test_author_and_run_modes_apply_consistent_read_only_chrome(
@@ -370,9 +433,8 @@ def test_author_and_run_modes_apply_consistent_read_only_chrome(
     assert window.styles_button.isEnabled()
 
 
-def test_generate_replacement_confirms_before_direct_action(
+def test_generate_replacement_starts_without_a_second_confirmation(
     application: QApplication,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     window, controller, _workers, background = _window()
     window._availability[AdapterKind.MFLUX] = True
@@ -396,13 +458,8 @@ def test_generate_replacement_confirms_before_direct_action(
         )
     )
     window.render_document()
-    monkeypatch.setattr(
-        QMessageBox,
-        "question",
-        lambda *args, **kwargs: QMessageBox.StandardButton.Cancel,
-    )
     window._generate_background()
-    assert background.generate_calls == [card_id]
+    assert background.generate_calls == [card_id, card_id]
 
 
 def test_notification_undo_expires_after_another_command(
@@ -476,7 +533,8 @@ def test_background_success_clears_previous_cancellation_notice(
 def test_document_replacement_clears_document_specific_notifications(
     application: QApplication,
 ) -> None:
-    window, _controller, _workers, _background = _window()
+    window, _controller, _workers, background = _window()
+    background.busy = True
     window._show_error(
         "enrichment-error",
         "Description enrichment failed",
@@ -484,6 +542,7 @@ def test_document_replacement_clears_document_specific_notifications(
 
     window._document_replaced(object())
     assert window.notification_bar.isHidden()
+    assert background.cancel_calls == 1
 
 
 def test_clean_session_state_clears_previous_document_error(

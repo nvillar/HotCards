@@ -73,6 +73,7 @@ from hypergen.domain.models import (
     Interaction,
     NavigateAction,
     Polygon,
+    ResolvedCardReference,
     RunOverlayMode,
     Stack,
     UnresolvedCardReference,
@@ -251,7 +252,7 @@ class MainWindow(QMainWindow):
         self.card_sidebar = CardSidebar(self.controller)
         self.card_sidebar.card_selected.connect(self.select_card)
         self.card_sidebar.document_changed.connect(self.render_document)
-        self.card_sidebar.delete_requested.connect(self._confirm_delete_card)
+        self.card_sidebar.delete_requested.connect(self._delete_card)
 
         self.canvas_pages = QStackedWidget()
         self.canvas_pages.setObjectName("canvasPages")
@@ -340,6 +341,7 @@ class MainWindow(QMainWindow):
         self.inspector.generate_background_requested.connect(self._generate_background)
         self.inspector.import_background_requested.connect(self._import_background)
         self.inspector.clear_background_requested.connect(self._clear_background)
+        self.inspector.change_applied.connect(self._show_undo_notification)
         self.inspector.hotspot_selected.connect(
             self.card_canvas.select_interaction
         )
@@ -739,8 +741,6 @@ class MainWindow(QMainWindow):
         )
         if not selected_path:
             return
-        if not self._confirm_generation_cancel("creating a new stack"):
-            return
         try:
             self.document_session.create(stack, self._bundle_path(selected_path))
         except DocumentSessionError as error:
@@ -757,8 +757,6 @@ class MainWindow(QMainWindow):
             str(self.project_directory),
         )
         if not selected_path:
-            return
-        if not self._confirm_generation_cancel("opening another stack"):
             return
         try:
             self.document_session.open(Path(selected_path))
@@ -794,12 +792,15 @@ class MainWindow(QMainWindow):
         )
         if not selected_path:
             return
-        if not self._confirm_generation_cancel("saving the stack under a new name"):
-            return
         try:
             self.document_session.save_as(self._bundle_path(selected_path))
         except DocumentSessionError as error:
             self._show_document_error("Could Not Save Stack As", str(error))
+            return
+        self._cancel_background_generation()
+        self._undo_notification_token = None
+        self.notification_bar.clear_notification("undo")
+        self._update_document_actions()
 
     def undo(self) -> None:
         self.scene_enrichment_workflow.cancel()
@@ -825,7 +826,7 @@ class MainWindow(QMainWindow):
         else:
             self.card_sidebar.add_card()
 
-    def _confirm_delete_card(self, card_id: object) -> None:
+    def _delete_card(self, card_id: object) -> None:
         if not isinstance(card_id, UUID):
             return
         card = next(
@@ -834,42 +835,50 @@ class MainWindow(QMainWindow):
         )
         if card is None:
             return
-        start_warning = (
-            "\n\nThis is the start card; the stack will no longer have a start card."
-            if self.controller.document.start_card_id == card.id
-            else ""
+        was_start_card = self.controller.document.start_card_id == card.id
+        inbound_link_count = sum(
+            1
+            for candidate in self.controller.document.cards
+            if candidate.id != card.id
+            for revision in candidate.revisions
+            if revision.hotspot_set is not None
+            for interaction in revision.hotspot_set.interactions
+            if isinstance(interaction.action.target, ResolvedCardReference)
+            and interaction.action.target.target_card_id == card.id
         )
-        message = (
-            f'Delete "{card.name}"? Inbound links will be kept as unresolved references.'
-            f"{start_warning}"
-        )
-        if self._ask_delete_card(message):
-            if (
-                self.background_workflow is not None
-                and self.background_workflow.is_generating_for(card.id)
-                and not self._confirm_generation_cancel("deleting this card")
-            ):
-                return
-            self.scene_enrichment_workflow.cancel()
-            self.hotspot_remap_workflow.cancel()
-            self.card_sidebar.delete_card(card.id)
+        if (
+            self.background_workflow is not None
+            and self.background_workflow.is_generating_for(card.id)
+        ):
+            self._cancel_background_generation()
+        previous_token = self.controller.current_undo_token
+        self.scene_enrichment_workflow.cancel()
+        self.hotspot_remap_workflow.cancel()
+        self.card_sidebar.delete_card(card.id)
+        consequences: list[str] = []
+        if inbound_link_count:
+            noun = "link is" if inbound_link_count == 1 else "links are"
+            consequences.append(
+                f"{inbound_link_count} inbound {noun} now unresolved"
+            )
+        if was_start_card:
+            consequences.append("the start card was cleared")
+        message = "Card deleted"
+        if consequences:
+            message += "; " + " and ".join(consequences)
+        token = self.controller.current_undo_token
+        if token is not None and token != previous_token:
+            self._show_undo_notification(message, token)
 
-    def _ask_delete_card(self, message: str) -> bool:
-        dialog = QMessageBox(
-            QMessageBox.Icon.Warning,
-            "Delete Card",
-            message,
-            parent=self,
-        )
-        delete_button = dialog.addButton(
-            "Delete Card",
-            QMessageBox.ButtonRole.DestructiveRole,
-        )
-        dialog.addButton(QMessageBox.StandardButton.Cancel)
-        dialog.exec()
-        return dialog.clickedButton() is delete_button
+    def _cancel_background_generation(self) -> None:
+        if (
+            self.background_workflow is not None
+            and self.background_workflow.busy
+        ):
+            self.background_workflow.cancel()
 
     def _document_replaced(self, _document: object) -> None:
+        self._cancel_background_generation()
         self.scene_enrichment_workflow.cancel()
         self.hotspot_remap_workflow.cancel()
         self._undo_notification_token = None
@@ -1003,8 +1012,6 @@ class MainWindow(QMainWindow):
             return
         if not self._commit_authoring_metadata():
             return
-        if not self._confirm_image_replacement("Generate a new image"):
-            return
         try:
             workflow.generate(card_id)
         except BackgroundWorkflowError as error:
@@ -1093,8 +1100,6 @@ class MainWindow(QMainWindow):
             return
         if not self._commit_authoring_metadata():
             return
-        if not self._confirm_image_replacement("Import a new image"):
-            return
         selected_path, _filter = QFileDialog.getOpenFileName(
             self,
             "Import Image",
@@ -1134,8 +1139,6 @@ class MainWindow(QMainWindow):
         if workflow is None or card_id is None:
             return
         self.notification_bar.clear_notification("background-error")
-        if not self._confirm_image_replacement("Clear this image"):
-            return
         self.scene_enrichment_workflow.cancel()
         self.hotspot_remap_workflow.cancel()
         try:
@@ -1180,21 +1183,10 @@ class MainWindow(QMainWindow):
             or not isinstance(revision_id, UUID)
         ):
             return
+        was_generating = self.background_workflow.is_generating_for(
+            self._selected_card_id
+        )
         self.notification_bar.clear_notification("background-error")
-        dialog = QMessageBox(
-            QMessageBox.Icon.Warning,
-            "Delete Revision",
-            "Delete this complete revision?",
-            parent=self,
-        )
-        delete_button = dialog.addButton(
-            "Delete Revision",
-            QMessageBox.ButtonRole.DestructiveRole,
-        )
-        dialog.addButton(QMessageBox.StandardButton.Cancel)
-        dialog.exec()
-        if dialog.clickedButton() is not delete_button:
-            return
         self.scene_enrichment_workflow.cancel()
         self.hotspot_remap_workflow.cancel()
         try:
@@ -1208,47 +1200,9 @@ class MainWindow(QMainWindow):
                 "Could not delete revision",
                 detail=str(error),
             )
-
-    def _confirm_image_replacement(self, action: str) -> bool:
-        card = next(
-            (
-                card
-                for card in self.controller.document.cards
-                if card.id == self._selected_card_id
-            ),
-            None,
-        )
-        if card is None or card.active_revision.background is None:
-            return True
-        answer = QMessageBox.question(
-            self,
-            "Replace Current Image?",
-            (
-                f"{action}? The current revision image will be replaced. "
-                "Description, style, and hotspots will be preserved."
-            ),
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Cancel,
-        )
-        return answer == QMessageBox.StandardButton.Yes
-
-    def _confirm_generation_cancel(self, action: str) -> bool:
-        if (
-            self.background_workflow is None
-            or not self.background_workflow.busy
-        ):
-            return True
-        answer = QMessageBox.question(
-            self,
-            "Cancel Background Generation?",
-            f"Background generation is still running. Cancel it before {action}?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Cancel,
-        )
-        if answer != QMessageBox.StandardButton.Yes:
-            return False
-        self.background_workflow.cancel()
-        return True
+            return
+        if was_generating:
+            self._cancel_background_generation()
 
     def _background_progress_changed(self, message: str) -> None:
         self.notification_bar.clear_notification("background-error")
@@ -1952,9 +1906,6 @@ class MainWindow(QMainWindow):
             self._restart_availability_checks()
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        if not self._confirm_generation_cancel("closing the stack"):
-            event.ignore()
-            return
         self._commit_authoring_metadata()
         if self.document_session is not None and not self.document_session.flush():
             answer = QMessageBox.warning(
@@ -1972,6 +1923,7 @@ class MainWindow(QMainWindow):
             else:
                 event.ignore()
                 return
+        self._cancel_background_generation()
         if self.background_workflow is not None:
             self.background_workflow.close()
         self.scene_enrichment_workflow.close()

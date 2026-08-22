@@ -16,7 +16,6 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
-    QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
@@ -102,6 +101,7 @@ class Inspector(QWidget):
     enrich_scene_requested = Signal()
     remap_hotspots_requested = Signal()
     hotspot_selected = Signal(object)
+    change_applied = Signal(str, object)
     render_inputs_changed = Signal()
 
     def __init__(
@@ -694,24 +694,22 @@ class Inspector(QWidget):
         interaction_id = self.selected_interaction_id
         if card is None or interaction_id is None:
             return
-        answer = QMessageBox.question(
-            self,
-            "Delete Hotspot?",
-            "Delete this hotspot and all of its polygon areas?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Cancel,
-        )
-        if answer != QMessageBox.StandardButton.Yes:
-            return
         self._execute(
             DeleteInteractionCommand(
                 card_id=card.id,
                 revision_id=card.active_revision.id,
                 interaction_id=interaction_id,
-            )
+            ),
+            undo_message="Hotspot deleted",
         )
 
-    def _execute(self, command: DocumentCommand) -> bool:
+    def _execute(
+        self,
+        command: DocumentCommand,
+        *,
+        undo_message: str | None = None,
+    ) -> bool:
+        previous_token = self.controller.current_undo_token
         try:
             changed = self.controller.execute(command)
         except (CommandError, ValidationError) as error:
@@ -721,6 +719,13 @@ class Inspector(QWidget):
         self.set_hotspot_error("")
         self.render(changed, self.selected_card_id)
         self.document_changed.emit(changed)
+        token = self.controller.current_undo_token
+        if (
+            undo_message is not None
+            and token is not None
+            and token != previous_token
+        ):
+            self.change_applied.emit(undo_message, token)
         return True
 
     def _selected_card(self) -> Card | None:

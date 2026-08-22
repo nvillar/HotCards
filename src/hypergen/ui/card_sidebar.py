@@ -186,7 +186,7 @@ class CardSidebar(QWidget):
         self.document_changed.emit(changed)
 
     def delete_card(self, card_id: UUID) -> None:
-        """Delete a confirmed card through one typed controller command."""
+        """Delete one card through a typed, undoable controller command."""
         changed = self.controller.execute(DeleteCardCommand(card_id=card_id))
         self.render(changed)
         self.document_changed.emit(changed)

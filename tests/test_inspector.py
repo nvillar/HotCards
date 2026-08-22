@@ -7,7 +7,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtWidgets import QApplication, QLabel, QMessageBox
+from PySide6.QtWidgets import QApplication, QLabel
 
 from hypergen.application.commands import RenameCardCommand
 from hypergen.application.document_controller import DocumentController
@@ -163,7 +163,6 @@ def test_add_hotspot_persists_and_selects_area_less_entry(
 
 def test_hotspot_properties_reorder_and_delete_use_commands(
     application: QApplication,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     first = _interaction("First")
     second = _interaction("Second")
@@ -205,15 +204,16 @@ def test_hotspot_properties_reorder_and_delete_use_commands(
         target_card_id=destination.id
     )
 
-    monkeypatch.setattr(
-        QMessageBox,
-        "question",
-        lambda *args, **kwargs: QMessageBox.StandardButton.Yes,
+    applied: list[tuple[str, object]] = []
+    inspector.change_applied.connect(
+        lambda message, token: applied.append((message, token))
     )
     inspector.delete_hotspot_button.click()
     remaining = controller.document.cards[0].active_revision.hotspot_set
     assert remaining is not None
     assert [item.label for item in remaining.interactions] == ["First"]
+    assert applied and applied[0][0] == "Hotspot deleted"
+    assert controller.undo_if_current(applied[0][1])  # type: ignore[arg-type]
 
 
 def test_ai_activity_is_reflected_on_the_initiating_buttons(
