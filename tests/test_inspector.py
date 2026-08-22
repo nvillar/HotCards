@@ -216,22 +216,32 @@ def test_hotspot_properties_reorder_and_delete_use_commands(
     assert [item.label for item in remaining.interactions] == ["First"]
 
 
-def test_status_messages_are_dismissible_and_undo_is_actionable(
+def test_ai_activity_is_reflected_on_the_initiating_buttons(
     application: QApplication,
 ) -> None:
     inspector = Inspector(DocumentController(Stack(name="Demo")))
-    undo_requests: list[bool] = []
-    inspector.undo_requested.connect(lambda: undo_requests.append(True))
+    inspector.set_background_capabilities(
+        can_generate=False,
+        generate_reason="Generating",
+        can_import=False,
+        import_reason="Generating",
+        busy=True,
+        generating=True,
+    )
+    inspector.set_scene_enrichment_capabilities(
+        can_enrich=False,
+        reason="Enriching",
+        busy=True,
+    )
+    inspector.set_hotspot_remap_capabilities(
+        can_remap=False,
+        reason="Remapping",
+        busy=True,
+    )
 
-    inspector.set_background_status("Image imported", detail="Done")
-    assert not inspector.background_status_message.isHidden()
-    inspector.background_status_message.dismiss_button.click()
-    assert not inspector.background_status_message.isVisible()
-
-    inspector.show_undo("Image imported")
-    assert inspector.undo_message.action_button.text() == "Undo"
-    inspector.undo_message.action_button.click()
-    assert undo_requests == [True]
+    assert inspector.generate_background_button.text() == "Generating…"
+    assert inspector.enrich_scene_button.text() == "Enriching…"
+    assert inspector.remap_hotspots_button.text() == "Remapping…"
 
 
 def test_styles_dialog_manages_styles_and_blocks_in_use_deletion(

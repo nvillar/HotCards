@@ -92,69 +92,6 @@ def _compact_text_button(
     return button
 
 
-class _DismissibleMessage(QFrame):
-    action_requested = Signal()
-
-    def __init__(
-        self,
-        *,
-        object_name: str,
-        label_object_name: str,
-        dismiss_object_name: str,
-    ) -> None:
-        super().__init__()
-        self.setObjectName(object_name)
-        self.setFrameShape(QFrame.Shape.StyledPanel)
-        self.setStyleSheet(
-            f"""
-            QFrame#{object_name} {{
-                background-color: palette(alternate-base);
-                border: 1px solid palette(highlight);
-                border-radius: 4px;
-            }}
-            """
-        )
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 6, 6, 6)
-        self.label = QLabel()
-        self.label.setObjectName(label_object_name)
-        self.label.setWordWrap(True)
-        layout.addWidget(self.label, 1)
-        self.action_button = QPushButton()
-        self.action_button.setObjectName(f"{object_name}Action")
-        self.action_button.clicked.connect(self.action_requested)
-        self.action_button.setVisible(False)
-        layout.addWidget(self.action_button)
-        self.dismiss_button = _compact_icon_button(
-            self.style(),
-            object_name=dismiss_object_name,
-            icon=QStyle.StandardPixmap.SP_DialogCloseButton,
-            accessible_name="Dismiss message",
-            tooltip="Dismiss message",
-        )
-        self.dismiss_button.setAutoRaise(True)
-        self.dismiss_button.clicked.connect(self.dismiss)
-        layout.addWidget(self.dismiss_button, 0, Qt.AlignmentFlag.AlignTop)
-        self.setVisible(False)
-
-    def set_message(
-        self,
-        message: str,
-        *,
-        detail: str = "",
-        action_text: str = "",
-    ) -> None:
-        self.label.setText(message)
-        self.label.setToolTip(detail)
-        self.setToolTip(detail)
-        self.action_button.setText(action_text)
-        self.action_button.setVisible(bool(message and action_text))
-        self.setVisible(bool(message))
-
-    def dismiss(self) -> None:
-        self.set_message("")
-
-
 class Inspector(QWidget):
     """Render the selected active revision and issue typed commands."""
 
@@ -165,7 +102,6 @@ class Inspector(QWidget):
     enrich_scene_requested = Signal()
     remap_hotspots_requested = Signal()
     hotspot_selected = Signal(object)
-    undo_requested = Signal()
     render_inputs_changed = Signal()
 
     def __init__(
@@ -183,13 +119,6 @@ class Inspector(QWidget):
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
-        self.undo_message = _DismissibleMessage(
-            object_name="undoNotification",
-            label_object_name="undoNotificationLabel",
-            dismiss_object_name="dismissUndoNotificationButton",
-        )
-        self.undo_message.action_requested.connect(self.undo_requested)
-        root.addWidget(self.undo_message)
 
         self.pages = QStackedWidget()
         empty_page = QWidget()
@@ -229,13 +158,6 @@ class Inspector(QWidget):
         self.enrich_scene_button = QPushButton("Enrich")
         self.enrich_scene_button.setObjectName("enrichSceneButton")
         layout.addWidget(self.enrich_scene_button)
-        self.scene_enrichment_status_message = _DismissibleMessage(
-            object_name="sceneEnrichmentStatusMessage",
-            label_object_name="sceneEnrichmentStatus",
-            dismiss_object_name="dismissSceneEnrichmentStatusButton",
-        )
-        self.scene_enrichment_status = self.scene_enrichment_status_message.label
-        layout.addWidget(self.scene_enrichment_status_message)
 
         layout.addSpacing(8)
         self.generate_background_button = QPushButton("Generate Image")
@@ -255,13 +177,6 @@ class Inspector(QWidget):
         self.clear_background_button.setObjectName("clearBackgroundButton")
         layout.addWidget(self.clear_background_button)
 
-        self.background_status_message = _DismissibleMessage(
-            object_name="backgroundStatusMessage",
-            label_object_name="backgroundStatus",
-            dismiss_object_name="dismissBackgroundStatusButton",
-        )
-        self.background_status = self.background_status_message.label
-        layout.addWidget(self.background_status_message)
         self.validation_error = QLabel()
         self.validation_error.setObjectName("inspectorValidationError")
         self.validation_error.setWordWrap(True)
@@ -331,13 +246,6 @@ class Inspector(QWidget):
         self.hotspot_destination_combo.setAccessibleName("Hotspot destination")
         layout.addWidget(self.hotspot_destination_combo)
 
-        self.hotspot_status_message = _DismissibleMessage(
-            object_name="hotspotStatusMessage",
-            label_object_name="hotspotStatus",
-            dismiss_object_name="dismissHotspotStatusButton",
-        )
-        self.hotspot_status = self.hotspot_status_message.label
-        layout.addWidget(self.hotspot_status_message)
         self.hotspot_error = QLabel()
         self.hotspot_error.setObjectName("hotspotValidationError")
         self.hotspot_error.setWordWrap(True)
@@ -497,8 +405,12 @@ class Inspector(QWidget):
         can_clear: bool = False,
         clear_reason: str = "",
         busy: bool,
+        generating: bool,
     ) -> None:
         self.generate_background_button.setEnabled(can_generate and not busy)
+        self.generate_background_button.setText(
+            "Generating…" if generating else "Generate Image"
+        )
         self.generate_background_button.setToolTip(generate_reason)
         self.import_background_button.setEnabled(can_import and not busy)
         self.import_background_button.setToolTip(import_reason)
@@ -510,8 +422,10 @@ class Inspector(QWidget):
         *,
         can_enrich: bool,
         reason: str,
+        busy: bool,
     ) -> None:
         self.enrich_scene_button.setEnabled(can_enrich)
+        self.enrich_scene_button.setText("Enriching…" if busy else "Enrich")
         self.enrich_scene_button.setToolTip(reason)
 
     def set_hotspot_remap_capabilities(
@@ -519,29 +433,11 @@ class Inspector(QWidget):
         *,
         can_remap: bool,
         reason: str,
+        busy: bool,
     ) -> None:
         self.remap_hotspots_button.setEnabled(can_remap)
+        self.remap_hotspots_button.setText("Remapping…" if busy else "Remap")
         self.remap_hotspots_button.setToolTip(reason)
-
-    def set_background_status(self, message: str, *, detail: str = "") -> None:
-        self.background_status_message.set_message(message, detail=detail)
-
-    def set_scene_enrichment_status(
-        self,
-        message: str,
-        *,
-        detail: str = "",
-    ) -> None:
-        self.scene_enrichment_status_message.set_message(message, detail=detail)
-
-    def set_hotspot_status(self, message: str, *, detail: str = "") -> None:
-        self.hotspot_status_message.set_message(message, detail=detail)
-
-    def show_undo(self, message: str) -> None:
-        self.undo_message.set_message(message, action_text="Undo")
-
-    def dismiss_undo(self) -> None:
-        self.undo_message.dismiss()
 
     @property
     def selected_interaction_id(self) -> UUID | None:

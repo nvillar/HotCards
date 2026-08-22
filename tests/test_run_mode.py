@@ -345,7 +345,7 @@ def test_run_canvas_uses_topmost_hit_with_back_and_restart(
         pos=unresolved_point,
     )
     assert window.canvas_card_name.text() == "Third"
-    assert window.run_status_label.text() == (
+    assert window.notification_bar.message_label.text() == (
         'Link to "Missing room" is unresolved.'
     )
 
@@ -392,7 +392,7 @@ def test_run_overlays_persist_and_incomplete_cards_warn(
     assert window.card_canvas._message_item.toPlainText() == (
         "No image"
     )
-    assert window.run_status_label.text() == (
+    assert window.notification_bar.message_label.text() == (
         '"Incomplete" has no image in this revision.'
     )
     window.close()

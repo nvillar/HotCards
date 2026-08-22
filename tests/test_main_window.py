@@ -23,6 +23,7 @@ from hypergen.application.commands import (
     ReplaceRevisionBackgroundCommand,
 )
 from hypergen.application.document_controller import DocumentController
+from hypergen.application.document_session import DocumentSessionState
 from hypergen.application.workers import AdapterKind
 from hypergen.domain.models import (
     Card,
@@ -413,13 +414,93 @@ def test_notification_undo_expires_after_another_command(
     token = controller.current_undo_token
     assert token is not None
     window._show_undo_notification("Renamed", token)
-    assert not window.inspector.undo_message.isHidden()
+    assert not window.notification_bar.isHidden()
+    assert window.notification_bar.message_label.text() == "Renamed"
 
     controller.execute(RenameCardCommand(card_id=card.id, name="Second"))
     window.render_document()
-    assert window.inspector.undo_message.isHidden()
+    assert window.notification_bar.isHidden()
     window._undo_notification()
     assert controller.document.cards[0].name == "Second"
+
+
+def test_notification_undo_cannot_mutate_document_in_run_mode(
+    application: QApplication,
+) -> None:
+    window, controller, _workers, _background = _window()
+    card = controller.document.cards[0]
+    changed = controller.execute(
+        RenameCardCommand(card_id=card.id, name="Renamed")
+    )
+    window.render_document(changed)
+    token = controller.current_undo_token
+    assert token is not None
+    window._show_undo_notification("Renamed", token)
+
+    window.mode_selector.setCurrentText("Run")
+    assert window.notification_bar.current_key != "undo"
+    window._notification_action_requested("undo")
+    assert controller.document.cards[0].name == "Renamed"
+
+
+def test_new_workflow_progress_clears_stale_failure_notification(
+    application: QApplication,
+) -> None:
+    window, controller, _workers, _background = _window()
+    window._show_error(
+        "enrichment-error",
+        "Description enrichment failed",
+        detail="Old failure",
+    )
+    window._scene_enrichment_progress_changed("Enriching Description…")
+
+    card = controller.document.cards[0]
+    controller.execute(RenameCardCommand(card_id=card.id, name="Renamed"))
+    token = controller.current_undo_token
+    assert token is not None
+    window._show_undo_notification("Renamed", token)
+    assert window.notification_bar.current_key == "undo"
+
+
+def test_background_success_clears_previous_cancellation_notice(
+    application: QApplication,
+) -> None:
+    window, _controller, _workers, _background = _window()
+    window._background_progress_changed("Generation cancelled")
+    assert window.notification_bar.current_key == "background-cancelled"
+
+    window._background_progress_changed("Image imported")
+    assert window.notification_bar.isHidden()
+
+
+def test_document_replacement_clears_document_specific_notifications(
+    application: QApplication,
+) -> None:
+    window, _controller, _workers, _background = _window()
+    window._show_error(
+        "enrichment-error",
+        "Description enrichment failed",
+    )
+
+    window._document_replaced(object())
+    assert window.notification_bar.isHidden()
+
+
+def test_clean_session_state_clears_previous_document_error(
+    application: QApplication,
+    tmp_path: Path,
+) -> None:
+    window, _controller, _workers, _background = _window()
+    window._show_document_error("Could Not Save Stack", "Disk is full")
+
+    window._session_state_changed(
+        DocumentSessionState(
+            bundle_path=tmp_path / "Demo.hypergen",
+            dirty=False,
+            error=None,
+        )
+    )
+    assert window.notification_bar.isHidden()
 
 
 def test_hotspot_geometry_change_shows_targeted_undo(
@@ -451,8 +532,8 @@ def test_hotspot_geometry_change_shows_targeted_undo(
     changed = controller.document.cards[0].active_revision.hotspot_set
     assert changed is not None
     assert changed.interactions[0].polygons == ()
-    assert window.inspector.undo_message.label.text() == "Hotspot area deleted"
-    assert not window.inspector.undo_message.isHidden()
+    assert window.notification_bar.message_label.text() == "Hotspot area deleted"
+    assert not window.notification_bar.isHidden()
 
     window._undo_notification()
 

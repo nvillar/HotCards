@@ -84,6 +84,12 @@ from hypergen.ui.card_sidebar import CardSidebar
 from hypergen.ui.crop_dialog import CropDialog
 from hypergen.ui.inspector import Inspector
 from hypergen.ui.new_stack_dialog import NewStackDialog
+from hypergen.ui.notification_bar import (
+    Notification,
+    NotificationAction,
+    NotificationBar,
+    NotificationKind,
+)
 from hypergen.ui.project_paths import bundle_path, default_project_directory
 from hypergen.ui.settings_dialog import (
     SettingsDialog,
@@ -334,7 +340,6 @@ class MainWindow(QMainWindow):
         self.inspector.generate_background_requested.connect(self._generate_background)
         self.inspector.import_background_requested.connect(self._import_background)
         self.inspector.clear_background_requested.connect(self._clear_background)
-        self.inspector.undo_requested.connect(self._undo_notification)
         self.inspector.hotspot_selected.connect(
             self.card_canvas.select_interaction
         )
@@ -407,7 +412,21 @@ class MainWindow(QMainWindow):
         self.pane_splitter.setStretchFactor(1, 1)
         self.pane_splitter.setStretchFactor(2, 0)
         self.pane_splitter.setSizes([220, 700, 280])
-        self.setCentralWidget(self.pane_splitter)
+
+        self.notification_bar = NotificationBar()
+        self.notification_bar.action_requested.connect(
+            self._notification_action_requested
+        )
+        self.notification_bar.notification_dismissed.connect(
+            self._notification_dismissed
+        )
+        central_widget = QWidget()
+        central_layout = QVBoxLayout(central_widget)
+        central_layout.setContentsMargins(0, 0, 0, 0)
+        central_layout.setSpacing(0)
+        central_layout.addWidget(self.notification_bar)
+        central_layout.addWidget(self.pane_splitter, 1)
+        self.setCentralWidget(central_widget)
 
         self.service_status_label = QLabel("Checking local AI services…")
         self.service_status_label.setObjectName("serviceStatusLabel")
@@ -426,11 +445,6 @@ class MainWindow(QMainWindow):
         self.document_status_label = QLabel()
         self.document_status_label.setObjectName("documentStatusLabel")
         self.statusBar().addWidget(self.document_status_label, 1)
-        self.run_status_label = QLabel()
-        self.run_status_label.setObjectName("runStatusLabel")
-        self.run_status_label.setStyleSheet("color: #d8a657;")
-        self.run_status_label.setVisible(False)
-        self.statusBar().addWidget(self.run_status_label, 2)
 
     def _build_menu(self) -> None:
         file_menu = self.menuBar().addMenu("File")
@@ -484,7 +498,7 @@ class MainWindow(QMainWindow):
             and self.controller.current_undo_token != self._undo_notification_token
         ):
             self._undo_notification_token = None
-            self.inspector.dismiss_undo()
+            self.notification_bar.clear_notification("undo")
         card_ids = {card.id for card in snapshot.cards}
         if self._is_running:
             self._selected_card_id = self._run_session.state.current_card_id
@@ -610,12 +624,17 @@ class MainWindow(QMainWindow):
             or not self._commit_authoring_metadata()
         ):
             return
+        self.notification_bar.clear_notification("background-error")
         self.scene_enrichment_workflow.cancel()
         self.hotspot_remap_workflow.cancel()
         try:
             workflow.duplicate_revision(card_id, revision_id)
         except (BackgroundWorkflowError, CommandError, ValidationError) as error:
-            self.inspector.set_background_status(str(error), detail=str(error))
+            self._show_error(
+                "background-error",
+                "Could not duplicate revision",
+                detail=str(error),
+            )
 
     def _delete_active_revision(self) -> None:
         revision_id = self.revision_combo.currentData()
@@ -631,17 +650,76 @@ class MainWindow(QMainWindow):
         self.render_document()
 
     def _show_undo_notification(self, message: str, token: object) -> None:
-        if not isinstance(token, UndoToken):
+        if self._is_running or not isinstance(token, UndoToken):
             return
         self._undo_notification_token = token
-        self.inspector.show_undo(message)
+        self.notification_bar.show_notification(
+            "undo",
+            Notification(
+                message=message,
+                kind=NotificationKind.SUCCESS,
+                primary_action=NotificationAction("undo", "Undo"),
+            ),
+        )
 
     def _undo_notification(self) -> None:
+        if self._is_running:
+            return
         token = self._undo_notification_token
         self._undo_notification_token = None
-        self.inspector.dismiss_undo()
+        self.notification_bar.clear_notification("undo")
         if token is not None and self.controller.undo_if_current(token):
             self.render_document()
+
+    def _notification_action_requested(self, action_id: str) -> None:
+        if action_id == "undo" and not self._is_running:
+            self._undo_notification()
+
+    def _notification_dismissed(self, key: str) -> None:
+        if key == "undo":
+            self._undo_notification_token = None
+
+    def _show_error(
+        self,
+        key: str,
+        message: str,
+        *,
+        detail: str = "",
+    ) -> None:
+        self.notification_bar.show_notification(
+            key,
+            Notification(
+                message=message,
+                kind=NotificationKind.ERROR,
+                detail=detail,
+            ),
+        )
+
+    def _show_warning(
+        self,
+        key: str,
+        message: str,
+        *,
+        detail: str = "",
+    ) -> None:
+        self.notification_bar.show_notification(
+            key,
+            Notification(
+                message=message,
+                kind=NotificationKind.WARNING,
+                detail=detail,
+            ),
+        )
+
+    def _show_info(self, key: str, message: str, *, detail: str = "") -> None:
+        self.notification_bar.show_notification(
+            key,
+            Notification(
+                message=message,
+                kind=NotificationKind.INFO,
+                detail=detail,
+            ),
+        )
 
     def new_stack(self) -> None:
         """Create and bind a new stack before exposing its initial card."""
@@ -727,7 +805,7 @@ class MainWindow(QMainWindow):
         self.scene_enrichment_workflow.cancel()
         self.hotspot_remap_workflow.cancel()
         self._undo_notification_token = None
-        self.inspector.dismiss_undo()
+        self.notification_bar.clear_notification("undo")
         if self.controller.undo():
             self.render_document()
 
@@ -735,7 +813,7 @@ class MainWindow(QMainWindow):
         self.scene_enrichment_workflow.cancel()
         self.hotspot_remap_workflow.cancel()
         self._undo_notification_token = None
-        self.inspector.dismiss_undo()
+        self.notification_bar.clear_notification("undo")
         if self.controller.redo():
             self.render_document()
 
@@ -794,6 +872,8 @@ class MainWindow(QMainWindow):
     def _document_replaced(self, _document: object) -> None:
         self.scene_enrichment_workflow.cancel()
         self.hotspot_remap_workflow.cancel()
+        self._undo_notification_token = None
+        self.notification_bar.clear_all()
         if self._is_running:
             state = self._run_session.start(self.controller.document)
             self._selected_card_id = state.current_card_id
@@ -804,6 +884,8 @@ class MainWindow(QMainWindow):
     def _session_state_changed(self, state: object) -> None:
         if not isinstance(state, DocumentSessionState):
             return
+        if state.error is None:
+            self.notification_bar.clear_notification("document-error")
         bound = state.bundle_path is not None
         self.card_sidebar.set_document_editable(
             self.document_session is None or bound
@@ -816,6 +898,11 @@ class MainWindow(QMainWindow):
             self.create_first_card_button.setText("Create Your First Card")
             self.document_status_label.setText("Save failed")
             self.document_status_label.setToolTip(state.error)
+            self._show_error(
+                "document-error",
+                "Stack could not be saved",
+                detail=state.error,
+            )
         elif state.dirty:
             self.create_first_card_button.setText("Create Your First Card")
             self.document_status_label.setText("Unsaved changes")
@@ -871,7 +958,7 @@ class MainWindow(QMainWindow):
         return bundle_path(selected_path)
 
     def _show_document_error(self, title: str, message: str) -> None:
-        QMessageBox.critical(self, title, message)
+        self._show_error("document-error", title, detail=message)
 
     def run_availability_checks(self) -> None:
         """Submit injected service checks without blocking the UI thread."""
@@ -905,8 +992,12 @@ class MainWindow(QMainWindow):
         card_id = self._selected_card_id
         if workflow is None or card_id is None:
             return
+        self.notification_bar.clear_notification("background-error")
+        self.notification_bar.clear_notification("background-warning")
+        self.notification_bar.clear_notification("background-cancelled")
         if self.hotspot_remap_workflow.busy:
-            self.inspector.set_background_status(
+            self._show_warning(
+                "background-warning",
                 "Wait for hotspot remapping to finish"
             )
             return
@@ -917,28 +1008,37 @@ class MainWindow(QMainWindow):
         try:
             workflow.generate(card_id)
         except BackgroundWorkflowError as error:
-            self.inspector.set_background_status(str(error), detail=str(error))
+            self._show_error(
+                "background-error",
+                "Could not generate image",
+                detail=str(error),
+            )
         self._update_generation_actions()
 
     def _enrich_scene(self) -> None:
         card_id = self._selected_card_id
         if card_id is None or not self._commit_authoring_metadata():
             return
+        self.notification_bar.clear_notification("enrichment-error")
         try:
             self.scene_enrichment_workflow.start(card_id)
         except SceneEnrichmentWorkflowError as error:
-            self.inspector.set_scene_enrichment_status(str(error), detail=str(error))
+            self._show_error(
+                "enrichment-error",
+                "Could not enrich Description",
+                detail=str(error),
+            )
         self._update_generation_actions()
 
-    def _scene_enrichment_progress_changed(self, message: str) -> None:
-        self.inspector.set_scene_enrichment_status(message)
+    def _scene_enrichment_progress_changed(self, _message: str) -> None:
+        self.notification_bar.clear_notification("enrichment-error")
         self._update_generation_actions()
 
     def _scene_enrichment_failed(self, failure: object) -> None:
         detail = failure.message if isinstance(failure, WorkerFailure) else str(failure)
-        self.inspector.set_scene_enrichment_status(
-            self.inspector.scene_enrichment_status.text()
-            or "Description enrichment failed",
+        self._show_error(
+            "enrichment-error",
+            "Description enrichment failed",
             detail=detail,
         )
         self._update_generation_actions()
@@ -947,24 +1047,32 @@ class MainWindow(QMainWindow):
         card_id = self._selected_card_id
         if card_id is None or not self._commit_authoring_metadata():
             return
+        self.notification_bar.clear_notification("hotspot-error")
+        self.notification_bar.clear_notification("hotspot-warning")
         if self.background_workflow is not None and self.background_workflow.busy:
-            self.inspector.set_hotspot_status(
+            self._show_warning(
+                "hotspot-warning",
                 "Wait for background generation to finish"
             )
             return
         try:
             self.hotspot_remap_workflow.start(card_id)
         except HotspotRemapWorkflowError as error:
-            self.inspector.set_hotspot_status(str(error), detail=str(error))
+            self._show_error(
+                "hotspot-error",
+                "Could not remap hotspots",
+                detail=str(error),
+            )
         self._update_generation_actions()
 
-    def _hotspot_remap_progress_changed(self, message: str) -> None:
-        self.inspector.set_hotspot_status(message)
+    def _hotspot_remap_progress_changed(self, _message: str) -> None:
+        self.notification_bar.clear_notification("hotspot-error")
         self._update_generation_actions()
 
     def _hotspot_remap_failed(self, failure: object) -> None:
         detail = failure.message if isinstance(failure, WorkerFailure) else str(failure)
-        self.inspector.set_hotspot_status(
+        self._show_error(
+            "hotspot-error",
             "Hotspot remap failed",
             detail=detail,
         )
@@ -975,8 +1083,11 @@ class MainWindow(QMainWindow):
         card_id = self._selected_card_id
         if workflow is None or card_id is None:
             return
+        self.notification_bar.clear_notification("background-error")
+        self.notification_bar.clear_notification("background-warning")
         if self.hotspot_remap_workflow.busy:
-            self.inspector.set_background_status(
+            self._show_warning(
+                "background-warning",
                 "Wait for hotspot remapping to finish"
             )
             return
@@ -1010,7 +1121,11 @@ class MainWindow(QMainWindow):
                 position_y=position_y,
             )
         except (BackgroundWorkflowError, ValueError) as error:
-            self.inspector.set_background_status(str(error), detail=str(error))
+            self._show_error(
+                "background-error",
+                "Could not import image",
+                detail=str(error),
+            )
         self._update_generation_actions()
 
     def _clear_background(self) -> None:
@@ -1018,6 +1133,7 @@ class MainWindow(QMainWindow):
         card_id = self._selected_card_id
         if workflow is None or card_id is None:
             return
+        self.notification_bar.clear_notification("background-error")
         if not self._confirm_image_replacement("Clear this image"):
             return
         self.scene_enrichment_workflow.cancel()
@@ -1029,7 +1145,11 @@ class MainWindow(QMainWindow):
             CommandError,
             ValidationError,
         ) as error:
-            self.inspector.set_background_status(str(error), detail=str(error))
+            self._show_error(
+                "background-error",
+                "Could not clear image",
+                detail=str(error),
+            )
 
     def _activate_revision(self, revision_id: object) -> None:
         if (
@@ -1038,6 +1158,7 @@ class MainWindow(QMainWindow):
             or not isinstance(revision_id, UUID)
         ):
             return
+        self.notification_bar.clear_notification("background-error")
         self.scene_enrichment_workflow.cancel()
         self.hotspot_remap_workflow.cancel()
         try:
@@ -1046,7 +1167,11 @@ class MainWindow(QMainWindow):
                 revision_id,
             )
         except (BackgroundWorkflowError, CommandError) as error:
-            self.inspector.set_background_status(str(error), detail=str(error))
+            self._show_error(
+                "background-error",
+                "Could not activate revision",
+                detail=str(error),
+            )
 
     def _delete_revision(self, revision_id: object) -> None:
         if (
@@ -1055,6 +1180,7 @@ class MainWindow(QMainWindow):
             or not isinstance(revision_id, UUID)
         ):
             return
+        self.notification_bar.clear_notification("background-error")
         dialog = QMessageBox(
             QMessageBox.Icon.Warning,
             "Delete Revision",
@@ -1077,7 +1203,11 @@ class MainWindow(QMainWindow):
                 revision_id,
             )
         except (BackgroundWorkflowError, CommandError) as error:
-            self.inspector.set_background_status(str(error), detail=str(error))
+            self._show_error(
+                "background-error",
+                "Could not delete revision",
+                detail=str(error),
+            )
 
     def _confirm_image_replacement(self, action: str) -> bool:
         card = next(
@@ -1121,17 +1251,27 @@ class MainWindow(QMainWindow):
         return True
 
     def _background_progress_changed(self, message: str) -> None:
-        self.inspector.set_background_status(message)
+        self.notification_bar.clear_notification("background-error")
+        self.notification_bar.clear_notification("background-warning")
+        if message == "Generation cancelled":
+            self._show_info("background-cancelled", message)
+        else:
+            self.notification_bar.clear_notification("background-cancelled")
         self._update_generation_actions()
 
     def _background_failed(self, failure: object) -> None:
         if isinstance(failure, WorkerFailure):
-            self.inspector.set_background_status(
+            self._show_error(
+                "background-error",
                 "Image generation failed",
                 detail=failure.message,
             )
         else:
-            self.inspector.set_background_status(str(failure), detail=str(failure))
+            self._show_error(
+                "background-error",
+                "Image generation failed",
+                detail=str(failure),
+            )
         self._update_generation_actions()
 
     def _availability_check_succeeded(
@@ -1264,6 +1404,7 @@ class MainWindow(QMainWindow):
                 else "This revision has no image"
             ),
             busy=workflow_busy or hotspot_busy,
+            generating=workflow_busy,
         )
         active_image_path = (
             self._resolve_revision_image_path(active_revision.image_path)
@@ -1298,6 +1439,7 @@ class MainWindow(QMainWindow):
         self.inspector.set_scene_enrichment_capabilities(
             can_enrich=can_enrich,
             reason=enrich_reason,
+            busy=enrichment_busy,
         )
         has_applied_hotspots = (
             active_revision is not None
@@ -1328,6 +1470,7 @@ class MainWindow(QMainWindow):
         self.inspector.set_hotspot_remap_capabilities(
             can_remap=can_remap_hotspots,
             reason=hotspot_reason,
+            busy=hotspot_busy,
         )
         pending = [
             adapter for adapter, available in self._availability.items() if available is None
@@ -1686,6 +1829,8 @@ class MainWindow(QMainWindow):
             self._commit_authoring_metadata()
             self.card_canvas.cancel_drawing()
             self._cancel_ai_activity_for_run()
+            self._undo_notification_token = None
+            self.notification_bar.clear_all()
             self._is_running = True
             state = self._run_session.start(
                 self.controller.document,
@@ -1769,7 +1914,6 @@ class MainWindow(QMainWindow):
         self.review_settings_button.setVisible(
             authoring and unavailable
         )
-        self.run_status_label.setVisible(self._is_running)
 
     def _update_run_actions(self) -> None:
         state = self._run_session.state
@@ -1781,8 +1925,10 @@ class MainWindow(QMainWindow):
         )
 
     def _set_run_warning(self, message: str) -> None:
-        self.run_status_label.setText(message)
-        self.run_status_label.setToolTip(message)
+        if message:
+            self._show_warning("run-warning", message)
+        else:
+            self.notification_bar.clear_notification("run-warning")
 
     def _cancel_ai_activity_for_run(self) -> None:
         self._cancel_diagnostics()

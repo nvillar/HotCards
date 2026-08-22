@@ -1,0 +1,69 @@
+"""Focused tests for the application-wide notification surface."""
+
+from __future__ import annotations
+
+import os
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+import pytest
+from PySide6.QtWidgets import QApplication
+
+from hypergen.ui.notification_bar import (
+    Notification,
+    NotificationAction,
+    NotificationBar,
+    NotificationKind,
+)
+
+
+@pytest.fixture(scope="module")
+def application() -> QApplication:
+    return QApplication.instance() or QApplication([])
+
+
+def test_notifications_are_prioritized_and_restored_after_dismissal(
+    application: QApplication,
+) -> None:
+    bar = NotificationBar()
+    bar.show_notification(
+        "progress",
+        Notification("Generating image"),
+    )
+    bar.show_notification(
+        "failure",
+        Notification(
+            "Image generation failed",
+            kind=NotificationKind.ERROR,
+        ),
+    )
+
+    assert bar.current_key == "failure"
+    assert bar.message_label.text() == "Image generation failed"
+    bar.dismiss_current()
+    assert bar.current_key == "progress"
+    assert bar.message_label.text() == "Generating image"
+
+
+def test_notification_actions_and_dismissal_report_stable_ids(
+    application: QApplication,
+) -> None:
+    bar = NotificationBar()
+    actions: list[str] = []
+    dismissed: list[str] = []
+    bar.action_requested.connect(actions.append)
+    bar.notification_dismissed.connect(dismissed.append)
+    bar.show_notification(
+        "undo",
+        Notification(
+            "Image cleared",
+            kind=NotificationKind.SUCCESS,
+            primary_action=NotificationAction("undo", "Undo"),
+        ),
+    )
+
+    bar.primary_button.click()
+    assert actions == ["undo"]
+    bar.dismiss_button.click()
+    assert dismissed == ["undo"]
+    assert bar.isHidden()
