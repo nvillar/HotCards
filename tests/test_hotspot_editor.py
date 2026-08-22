@@ -177,6 +177,18 @@ def test_drawing_and_minimum_vertex_deletion_are_non_destructive(
     assert not deletions
     assert "at least three vertices" in errors[-1]
 
+    polygon_deletions: list[tuple[object, int]] = []
+    canvas.polygon_deletion_requested.connect(
+        lambda interaction_id, polygon_index: polygon_deletions.append(
+            (interaction_id, polygon_index)
+        )
+    )
+    canvas._selected_vertex_index = None
+    canvas._selected_polygon_index = 0
+    QTest.keyClick(canvas, Qt.Key.Key_Delete)
+    assert polygon_deletions == [(interaction.id, 0)]
+    assert not deletions
+
     canvas.begin_polygon(interaction.id)
     draft_point = canvas.viewport_point_for(QPointF(0.7, 0.7))
     QTest.mouseClick(

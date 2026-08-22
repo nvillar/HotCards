@@ -1,33 +1,19 @@
 {
-  "case_version": "hotspot-case-v1",
+  "case_version": "hotspot-remap-case-v1",
   "case_id": "workshop",
   "image_path": "hotspots/workshop.png",
-  "interaction_description": "The tall blue cabinet opens the hidden observatory. The round rain-streaked window leads to the storm tower.",
-  "card_catalogue": [
+  "hotspots": [
     {
-      "token": "C1",
-      "name": "Hidden Observatory",
-      "description": "A compact observatory filled with brass instruments."
+      "token": "H1",
+      "label": "Tall blue cabinet"
     },
     {
-      "token": "C2",
-      "name": "Storm Tower",
-      "description": "A high stone tower surrounded by rain clouds."
-    }
-  ],
-  "expected_hotspots": [
-    {
-      "label": "Tall blue cabinet",
-      "target_token": "C1"
-    },
-    {
-      "label": "Round window",
-      "target_token": "C2"
+      "token": "H2",
+      "label": "Round window"
     }
   ],
   "regression_tags": [
-    "degenerate-polygon",
-    "self-intersection",
-    "supplied-token-unresolved"
+    "multiple-subjects",
+    "partial-occlusion"
   ]
 }

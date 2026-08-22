@@ -60,16 +60,14 @@ class FakeOllamaClient:
     def chat(self, **kwargs: object) -> SimpleNamespace:
         self.call_count += 1
         if self.model == "qwen3.5:9b-mlx":
-            content = '{"interactions":'
+            content = '{"mapped":'
         else:
             far_edge = 1_500 if self.model == "qwen3.6:35b" else 500
             content = json.dumps(
                 {
-                    "interactions": [
+                    "mapped": [
                         {
-                            "source_interaction_index": 1,
-                            "label": "Gate",
-                            "destination_token": "C1",
+                            "token": "H1",
                             "polygons": [
                                 {
                                     "points": [
@@ -80,7 +78,8 @@ class FakeOllamaClient:
                                 }
                             ],
                         }
-                    ]
+                    ],
+                    "unlocated": [],
                 }
             )
         return SimpleNamespace(
@@ -101,13 +100,11 @@ def _write_case(case_dir: Path) -> None:
                 "case_version": "e2e-case-v2",
                 "case_id": "one",
                 "inputs": {
-                    "scene_description": "Courtyard with gate",
-                    "global_style": "Watercolor",
-                    "card_style": None,
+                    "description": "Courtyard with gate",
+                    "style_name": "Watercolor",
+                    "style_prompt": "Watercolor",
                 },
-                "interaction_description": "Gate leads to garden",
-                "card_catalogue": [{"token": "C1", "name": "Garden"}],
-                "expected_hotspots": [{"label": "Gate", "target_token": "C1"}],
+                "hotspots": [{"token": "H1", "label": "Gate"}],
                 "provenance": "Project-authored synthetic input.",
                 "reuse_terms": "Repository test fixture.",
             }
@@ -165,10 +162,10 @@ def test_e2e_uses_exact_models_fixed_mflux_and_preserves_partial_stages(
     assert len(list((tmp_path / "run" / "annotations").rglob("*.png"))) == 2
     manifest = json.loads((tmp_path / "run" / "manifest.json").read_text())
     assert manifest["warnings"] == [
-        "one:qwen3.6:35b:hotspot_generation: model coordinates were clamped to the canvas"
+        "one:qwen3.6:35b:hotspot_remap: H1 coordinates were clamped to the canvas"
     ]
     assert not any(
-        "qwen3.5:9b-mlx:hotspot_generation" in stage
+        "qwen3.5:9b-mlx:hotspot_remap" in stage
         for stage in manifest["completed_stages"]
     )
 
@@ -211,7 +208,7 @@ def test_e2e_report_failure_finalizes_manifest_without_erasing_stage_data(
     assert manifest["status"] == "completed_with_report_failure"
     assert manifest["failure"]["classification"] == "report_rendering"
     assert manifest["warnings"] == [
-        "one:qwen3.6:35b:hotspot_generation: model coordinates were clamped to the canvas"
+        "one:qwen3.6:35b:hotspot_remap: H1 coordinates were clamped to the canvas"
     ]
 
 

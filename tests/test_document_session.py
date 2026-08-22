@@ -17,7 +17,13 @@ from PySide6.QtWidgets import QApplication
 from hypergen.application.commands import CreateCardCommand, RenameCardCommand
 from hypergen.application.document_controller import DocumentController
 from hypergen.application.document_session import DocumentSession, DocumentSessionError
-from hypergen.domain.models import Card, ImageOrigin, ImageRevision, Stack
+from hypergen.domain.models import (
+    Card,
+    CardRevision,
+    GenerationStyle,
+    ImportedBackground,
+    Stack,
+)
 from hypergen.storage.stack_store import StackStore, StackStoreError
 
 
@@ -32,9 +38,10 @@ def test_create_binds_bundle_before_mutations_and_flushes_autosave(
     controller = DocumentController(Stack(name="Welcome"))
     session = DocumentSession(controller)
     first_card = Card(name="Card 1")
+    style = GenerationStyle(name="Pencil", prompt="Pencil sketch")
     created = Stack(
         name="Garden",
-        global_style="Pencil sketch",
+        styles=(style,),
         cards=(first_card,),
         start_card_id=first_card.id,
     )
@@ -130,20 +137,22 @@ def test_save_as_copies_assets_and_rebinds_autosave(tmp_path: Path) -> None:
     source_bundle = tmp_path / "Source.hypergen"
     source_store = StackStore(source_bundle)
     card = Card(name="Garden")
-    revision = ImageRevision(
-        image_path=source_store.import_image(
-            source_image,
-            card_id=card.id,
-            revision_id=(revision_id := uuid4()),
+    asset_id = uuid4()
+    revision = CardRevision(
+        background=ImportedBackground(
+            id=asset_id,
+            image_path=source_store.import_image(
+                source_image,
+                card_id=card.id,
+                asset_id=asset_id,
+            ),
+            source_filename=source_image.name,
+            created_at=datetime.now(UTC),
         ),
-        id=revision_id,
-        origin=ImageOrigin.IMPORTED,
-        source_filename=source_image.name,
-        created_at=datetime.now(UTC),
     )
     card = card.model_copy(
         update={
-            "image_revisions": (revision,),
+            "revisions": (revision,),
             "active_revision_id": revision.id,
         }
     )

@@ -21,18 +21,9 @@ from pydantic import (
     model_validator,
 )
 
-CURRENT_SCHEMA_VERSION = 2
-MAX_REVISION_NAME_LENGTH = 48
+CURRENT_SCHEMA_VERSION = 3
 
 NonEmptyString = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
-RevisionName = Annotated[
-    str,
-    StringConstraints(
-        strip_whitespace=True,
-        min_length=1,
-        max_length=MAX_REVISION_NAME_LENGTH,
-    ),
-]
 NormalizedCoordinate = Annotated[float, Field(ge=0.0, le=1.0)]
 NonNegativeFiniteFloat = Annotated[FiniteFloat, Field(ge=0.0)]
 
@@ -168,43 +159,6 @@ class ImageGenerationInputs(DomainModel):
     style_name: str | None = None
     style_prompt: str = ""
 
-    @model_validator(mode="before")
-    @classmethod
-    def accept_v1_inputs(cls, value: Any) -> Any:
-        """Translate legacy construction data without serializing legacy fields."""
-        if not isinstance(value, dict) or "description" in value:
-            return value
-        data = dict(value)
-        if "scene_description" not in data:
-            return value
-        card_style = data.pop("card_style", None)
-        global_style = data.pop("global_style", "")
-        data["description"] = data.pop("scene_description")
-        data["style_prompt"] = (
-            card_style if card_style is not None else global_style
-        )
-        return data
-
-    @property
-    def effective_style(self) -> str:
-        """Return the selected style prompt captured for generation."""
-        return self.style_prompt
-
-    @property
-    def scene_description(self) -> str:
-        """Return the captured Description for transitional callers."""
-        return self.description
-
-    @property
-    def global_style(self) -> str:
-        """Return the captured style prompt for transitional callers."""
-        return self.style_prompt
-
-    @property
-    def card_style(self) -> None:
-        """Return no legacy card override for transitional callers."""
-        return None
-
 
 class ImageGenerationMetadata(DomainModel):
     """Reproducibility metadata for an accepted generated image."""
@@ -231,8 +185,8 @@ class ImageGenerationMetadata(DomainModel):
         return value
 
 
-class HotspotGenerationProvenance(DomainModel):
-    """Reproducibility data for an applied generated hotspot set."""
+class HotspotRemapProvenance(DomainModel):
+    """Reproducibility data for an applied hotspot remap."""
 
     model_identifier: NonEmptyString
     ollama_version: str | None = None
@@ -251,10 +205,10 @@ class HotspotGenerationProvenance(DomainModel):
 
 
 class HotspotSet(DomainModel):
-    """The complete applied hotspot set for one image revision."""
+    """The complete applied hotspot set for one card revision."""
 
     interactions: tuple[Interaction, ...] = Field(default_factory=tuple)
-    generation_provenance: HotspotGenerationProvenance | None = None
+    remap_provenance: HotspotRemapProvenance | None = None
 
     @model_validator(mode="after")
     def require_unique_interaction_ids(self) -> HotspotSet:
@@ -361,7 +315,7 @@ class Card(DomainModel):
         if len(revision_ids) != len(set(revision_ids)):
             raise ValueError("revision IDs must be unique within a card")
         if self.active_revision_id not in set(revision_ids):
-            raise ValueError("active_revision_id must identify an image revision on this card")
+            raise ValueError("active_revision_id must identify a revision on this card")
         return self
 
     @property
@@ -373,27 +327,6 @@ class Card(DomainModel):
             for revision in self.revisions
             if revision.id == self.active_revision_id
         )
-
-    @property
-    def image_revisions(self) -> tuple[CardRevision, ...]:
-        """Return revisions for transitional callers."""
-        return self.revisions
-
-    @property
-    def scene_description(self) -> str:
-        """Return the active revision Description for transitional callers."""
-        return self.active_revision.description
-
-    @property
-    def interaction_description(self) -> str:
-        """Return the removed Intent field as empty for transitional callers."""
-        return ""
-
-    @property
-    def card_style(self) -> None:
-        """Return the removed free-text card style for transitional callers."""
-        return None
-
 
 class Stack(DomainModel):
     """The authoritative portable HyperGen stack document."""
@@ -458,11 +391,3 @@ class Stack(DomainModel):
                             "resolved card references must identify a card in this stack"
                         )
         return self
-
-    @property
-    def global_style(self) -> str:
-        """Return the first style prompt for transitional callers."""
-        return self.styles[0].prompt if self.styles else ""
-
-
-ImageRevision = CardRevision

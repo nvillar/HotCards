@@ -50,7 +50,7 @@ def image_metadata() -> ImageGenerationMetadata:
 def test_stack_defaults_match_document_contract() -> None:
     stack = Stack(name="Castle")
 
-    assert stack.schema_version == 2
+    assert stack.schema_version == 3
     assert (stack.canvas.width, stack.canvas.height) == (1024, 768)
     assert stack.run_overlay_mode is RunOverlayMode.HIDDEN
     assert stack.cards == ()

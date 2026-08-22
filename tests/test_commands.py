@@ -15,9 +15,9 @@ from hypergen.application.commands import (
     CommandError,
     CreateCardCommand,
     DeleteCardCommand,
-    DeleteImageRevisionCommand,
     DeleteInteractionCommand,
     DeletePolygonCommand,
+    DeleteRevisionCommand,
     DeleteStyleCommand,
     DuplicateRevisionCommand,
     EditRevisionDescriptionCommand,
@@ -184,7 +184,7 @@ def test_duplicate_and_delete_revisions_choose_safe_active_revision() -> None:
     assert document.cards[0].active_revision_id == duplicate.revision_id
     assert len(document.cards[0].revisions) == 2
 
-    document = DeleteImageRevisionCommand(
+    document = DeleteRevisionCommand(
         card_id=card.id,
         revision_id=duplicate.revision_id,
     ).apply(document)
@@ -192,7 +192,7 @@ def test_duplicate_and_delete_revisions_choose_safe_active_revision() -> None:
     assert document.cards[0].revisions == (first,)
 
     with pytest.raises(CommandError, match="at least one revision"):
-        DeleteImageRevisionCommand(
+        DeleteRevisionCommand(
             card_id=card.id,
             revision_id=first.id,
         ).apply(document)

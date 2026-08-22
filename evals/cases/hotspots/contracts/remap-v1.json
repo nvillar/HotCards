@@ -1,0 +1,36 @@
+{
+  "contract_version": "hotspot-remap-production-v1",
+  "prompt_version": "hotspot-remap-prompt-v1",
+  "schema_version": "hotspot-remap-schema-v1",
+  "selected_model": "qwen3.5:9b-mlx",
+  "selected_limits": {
+    "hotspots_per_call": 4,
+    "components_per_hotspot": 2,
+    "points_per_component": 12,
+    "output_tokens": 1024,
+    "context_tokens": 8192,
+    "timeout_seconds": 120
+  },
+  "semantic_boundary": {
+    "request_tokens": "Opaque H1, H2, and subsequent request-local tokens",
+    "model_output": "Polygons for supplied tokens or an explicit unlocated result",
+    "model_cannot_change": [
+      "hotspot ID",
+      "label",
+      "destination",
+      "action",
+      "order"
+    ],
+    "unmatched_behavior": "Preserve the hotspot's existing geometry"
+  },
+  "selection_evidence": {
+    "observations": [
+      "Remap needs only geometry for existing hotspots, so destination selection and new-hotspot invention were removed from the model contract.",
+      "Opaque request-local tokens bind returned polygons to authoritative hotspot semantics without exposing persisted UUIDs.",
+      "Batches of four bound schema size while one document command applies the complete remap atomically.",
+      "Invalid, missing, duplicate, or unknown token output cannot replace authoritative geometry.",
+      "Out-of-range coordinates are clamped deterministically and reported as warnings."
+    ]
+  },
+  "model_recommendation": "Use qwen3.5:9b-mlx for production remapping and retain the existing geometry whenever a supplied hotspot cannot be located safely."
+}

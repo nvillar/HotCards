@@ -68,11 +68,9 @@ class FakeOllamaClient:
 def hotspot_response(*, left_edge: int = 100) -> str:
     return json.dumps(
         {
-            "interactions": [
+            "mapped": [
                 {
-                    "source_interaction_index": 1,
-                    "label": "Gate",
-                    "destination_token": "C1",
+                    "token": "H1",
                     "polygons": [
                         {
                             "points": [
@@ -84,7 +82,8 @@ def hotspot_response(*, left_edge: int = 100) -> str:
                         }
                     ],
                 }
-            ]
+            ],
+            "unlocated": [],
         }
     )
 
@@ -107,12 +106,13 @@ def test_smoke_runner_writes_cold_and_warm_stage_results(tmp_path: Path) -> None
     assert result["status"] == "success"
     assert set(result["stages"]) == {
         "image_generation",
-        "hotspot_generation",
+        "hotspot_remap",
     }
     assert result["render_prompt"] == (
         "A quiet stone castle courtyard at dusk with an arched wooden gate, "
         "a red travel chest, and a leafy tree.\n\n"
-        "Cool twilight shadows with warm lantern light."
+        "Restrained storybook ink and watercolor illustration with cool "
+        "twilight shadows and warm lantern light."
     )
     assert result["stages"]["image_generation"]["cold"]["metadata"]["width"] == 1024
     assert result["settings"]["ollama"]["think"] is False
@@ -161,12 +161,12 @@ def test_smoke_failure_promotes_retained_hotspot_warnings(tmp_path: Path) -> Non
         client=FakeOllamaClient(
             [
                 hotspot_response(left_edge=-10),
-                '{"interactions":',
+                '{"mapped":',
             ]
         ),
     )
 
-    with pytest.raises(SmokeStageError, match="hotspot_generation_warm"):
+    with pytest.raises(SmokeStageError, match="hotspot_remap_warm"):
         run_smoke(
             SmokeSettings(output_dir=output_dir, fixture_image=fixture),
             ollama_runtime=runtime,
@@ -175,7 +175,7 @@ def test_smoke_failure_promotes_retained_hotspot_warnings(tmp_path: Path) -> Non
 
     result = json.loads((output_dir / "smoke-result.json").read_text(encoding="utf-8"))
     manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
-    assert result["warnings"] == ["model coordinates were clamped to the canvas"]
+    assert result["warnings"] == ["H1 coordinates were clamped to the canvas"]
     assert manifest["warnings"] == result["warnings"]
 
 

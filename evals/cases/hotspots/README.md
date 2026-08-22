@@ -2,14 +2,14 @@
 
 The frozen fixtures are deterministic HyperGen project artwork made from
 simple geometric shapes. They have no external source material or reuse
-restrictions. Case files define expected semantic destinations for automated
-diagnostics; geometry quality and edit cost remain human rubric inputs.
+restrictions. Case files define existing hotspot labels and request-local tokens
+for geometry-only Remap. Geometry quality and edit cost remain human rubric
+inputs.
 
-`recorded/` contains synthetic model responses for deterministic regressions:
-repetition, a supplied destination returned unresolved, invalid geometry, and
-schema saturation. `contracts/production-v1.json` retains the initial union
-target contract; `contracts/production-v2.json` records the current flat,
-request-constrained destination-token contract.
+`contracts/remap-v1.json` records the production Remap contract, safety
+boundary, selected limits, and model recommendation. Deterministic malformed,
+duplicate, unknown-token, unlocated, batching, and clamping regressions live in
+the ordinary test suite rather than frozen model-response files.
 
 - `../smoke/courtyard.png` SHA-256:
   `4ddf55edf2b938c854e4e2e196e261eba845199f7571f5ceacceb87bfebe95b1`

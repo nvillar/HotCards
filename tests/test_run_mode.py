@@ -20,9 +20,9 @@ from hypergen.application.document_session import DocumentSession
 from hypergen.application.run_session import RunSession
 from hypergen.domain.models import (
     Card,
+    CardRevision,
     HotspotSet,
-    ImageOrigin,
-    ImageRevision,
+    ImportedBackground,
     Interaction,
     NavigateAction,
     Point,
@@ -41,34 +41,23 @@ class FakeWorkers(QObject):
 
 
 class FakeBackgroundWorkflow(QObject):
-    drafts_changed = Signal()
     busy_changed = Signal(bool)
     progress_changed = Signal(str)
     failed = Signal(object)
     document_changed = Signal(object)
+    change_applied = Signal(str, object)
 
     def __init__(self) -> None:
         super().__init__()
         self.busy = False
 
-    @property
-    def drafts(self) -> tuple[object, ...]:
-        return ()
-
-    @property
-    def draft_card_ids(self) -> frozenset[object]:
-        return frozenset()
-
-    def draft_for(self, _card_id: object) -> None:
-        return None
-
-    def discard_all_drafts(self) -> None:
-        pass
-
-    def discard_orphaned_drafts(self, _valid_card_ids: object) -> None:
-        pass
-
     def close(self) -> None:
+        pass
+
+    def is_generating_for(self, _card_id: object) -> bool:
+        return False
+
+    def cancel(self) -> None:
         pass
 
 
@@ -124,15 +113,12 @@ def run_stack() -> tuple[Stack, Interaction, Interaction]:
         "Missing",
         UnresolvedCardReference(target_name="Missing room"),
     )
-    revision = ImageRevision(
-        image_path="assets/cards/first/background.png",
-        origin=ImageOrigin.IMPORTED,
+    revision = CardRevision(
         hotspot_set=HotspotSet(interactions=(to_second, unresolved)),
-        created_at=datetime.now(UTC),
     )
     first = Card(
         name="First",
-        image_revisions=(revision,),
+        revisions=(revision,),
         active_revision_id=revision.id,
     )
     return (
@@ -254,21 +240,23 @@ def build_run_window(
         name: str,
         color: str,
         interactions: tuple[Interaction, ...],
-    ) -> ImageRevision:
+    ) -> CardRevision:
         image = tmp_path / f"{name}.png"
         Image.new("RGB", (1024, 768), color).save(image)
-        revision_id = uuid4()
+        asset_id = uuid4()
         image_path = store.import_image(
             image,
             card_id=card.id,
-            revision_id=revision_id,
+            asset_id=asset_id,
         )
-        return ImageRevision(
-            id=revision_id,
-            image_path=image_path,
-            origin=ImageOrigin.IMPORTED,
+        return CardRevision(
+            background=ImportedBackground(
+                id=asset_id,
+                image_path=image_path,
+                source_filename=image.name,
+                created_at=datetime.now(UTC),
+            ),
             hotspot_set=HotspotSet(interactions=interactions),
-            created_at=datetime.now(UTC),
         )
 
     first_revision = revision_for(
@@ -285,13 +273,13 @@ def build_run_window(
     )
     first = first.model_copy(
         update={
-            "image_revisions": (first_revision,),
+            "revisions": (first_revision,),
             "active_revision_id": first_revision.id,
         }
     )
     third = third.model_copy(
         update={
-            "image_revisions": (third_revision,),
+            "revisions": (third_revision,),
             "active_revision_id": third_revision.id,
         }
     )
@@ -402,9 +390,9 @@ def test_run_overlays_persist_and_incomplete_cards_warn(
     assert window.canvas_card_name.text() == "Incomplete"
     assert window.card_canvas._message_item is not None
     assert window.card_canvas._message_item.toPlainText() == (
-        "No background revision"
+        "No image"
     )
     assert window.run_status_label.text() == (
-        '"Incomplete" has no active background revision.'
+        '"Incomplete" has no image in this revision.'
     )
     window.close()

@@ -43,8 +43,9 @@ class CorruptGeneratedImage:
 def request(output_path: Path) -> MfluxGenerationRequest:
     return MfluxGenerationRequest(
         inputs=ImageGenerationInputs(
-            scene_description="Courtyard",
-            global_style="Watercolor",
+            description="Courtyard",
+            style_name="Storybook",
+            style_prompt="Watercolor",
         ),
         render_prompt="Courtyard\n\nWatercolor",
         output_path=output_path,

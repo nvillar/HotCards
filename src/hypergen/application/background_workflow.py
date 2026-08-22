@@ -1,36 +1,35 @@
-"""UI-independent background candidate and revision workflow."""
+"""Direct, revision-local background image workflow."""
 
 from __future__ import annotations
 
 import secrets
 import tempfile
-from collections.abc import Callable, Collection
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
-from typing import Protocol
 from uuid import UUID, uuid4
 
 from PIL import Image, ImageOps, UnidentifiedImageError
+from pydantic import ValidationError
 from PySide6.QtCore import QObject, Signal
 
 from hypergen.application.commands import (
     ActivateRevisionCommand,
-    AddImageRevisionCommand,
-    DeleteImageRevisionCommand,
+    CommandError,
+    DeleteRevisionCommand,
+    DuplicateRevisionCommand,
+    ReplaceRevisionBackgroundCommand,
 )
 from hypergen.application.document_controller import DocumentController
 from hypergen.application.document_session import DocumentSession
 from hypergen.application.workers import AdapterWorkers, WorkerOperation
 from hypergen.domain.models import (
     Card,
-    DomainModel,
+    GeneratedBackground,
     ImageGenerationInputs,
-    ImageGenerationMetadata,
-    ImageOrigin,
-    ImageRevision,
-    RevisionName,
+    ImportedBackground,
     Stack,
 )
 from hypergen.generation.image_prompts import compose_image_prompt
@@ -39,13 +38,7 @@ from hypergen.generation.mflux_generator import (
     MfluxGenerationResult,
     MfluxGenerator,
 )
-from hypergen.generation.ollama_client import OllamaRuntime, OllamaSettings
-from hypergen.generation.revision_naming import (
-    OllamaRevisionNamer,
-    RevisionNamingRequest,
-    RevisionNamingResult,
-    unique_revision_name,
-)
+from hypergen.storage.stack_store import StackStore, StackStoreError
 
 
 class BackgroundWorkflowError(ValueError):
@@ -67,39 +60,15 @@ class BackgroundGenerationSettings:
 class _GenerationTarget:
     stack_id: UUID
     card_id: UUID
+    revision_id: UUID
+    description: str
+    style_id: UUID | None
+    style_prompt: str
+    background_id: UUID | None
     bundle_path: Path
 
 
 GenerationSettingsProvider = Callable[[], BackgroundGenerationSettings]
-OllamaSettingsProvider = Callable[[], OllamaSettings]
-
-
-class RevisionNamerProtocol(Protocol):
-    def name(self, request: RevisionNamingRequest) -> RevisionNamingResult: ...
-
-
-RevisionNamerFactory = Callable[[OllamaSettings], RevisionNamerProtocol]
-
-
-def _default_revision_namer_factory(
-    settings: OllamaSettings,
-) -> RevisionNamerProtocol:
-    return OllamaRevisionNamer(OllamaRuntime(settings))
-
-
-class BackgroundDraft(DomainModel):
-    """One card-local transient background that has not entered the stack."""
-
-    stack_id: UUID
-    card_id: UUID
-    revision_id: UUID
-    name: RevisionName | None = None
-    proposed_name: RevisionName | None = None
-    image_path: Path
-    origin: ImageOrigin
-    source_filename: str | None = None
-    generation_metadata: ImageGenerationMetadata | None = None
-    created_at: datetime
 
 
 def _crop_box(
@@ -131,7 +100,7 @@ def prepare_import_image(
     position_x: float = 0.5,
     position_y: float = 0.5,
 ) -> None:
-    """Decode, orient, crop-to-fill, and write a correctly sized PNG candidate."""
+    """Decode, orient, crop-to-fill, and write a correctly sized PNG."""
     if not 0.0 <= position_x <= 1.0 or not 0.0 <= position_y <= 1.0:
         raise BackgroundWorkflowError("crop positions must be between zero and one")
     if output_path.exists():
@@ -148,14 +117,16 @@ def prepare_import_image(
                 position_x=position_x,
                 position_y=position_y,
             )
-            candidate = image.crop(crop_box).resize(
+            prepared = image.crop(crop_box).resize(
                 (width, height),
                 Image.Resampling.LANCZOS,
             )
-            if candidate.mode not in {"RGB", "RGBA"}:
-                candidate = candidate.convert("RGBA" if "A" in candidate.getbands() else "RGB")
+            if prepared.mode not in {"RGB", "RGBA"}:
+                prepared = prepared.convert(
+                    "RGBA" if "A" in prepared.getbands() else "RGB"
+                )
             output_path.parent.mkdir(parents=True, exist_ok=True)
-            candidate.save(output_path, format="PNG")
+            prepared.save(output_path, format="PNG")
     except (OSError, UnidentifiedImageError, Image.DecompressionBombError) as error:
         output_path.unlink(missing_ok=True)
         raise BackgroundWorkflowError(
@@ -164,13 +135,13 @@ def prepare_import_image(
 
 
 class BackgroundWorkflow(QObject):
-    """Coordinate card-local drafts, workers, storage, and typed commands."""
+    """Generate, import, clear, and manage complete card revisions."""
 
-    drafts_changed = Signal()
     busy_changed = Signal(bool)
     progress_changed = Signal(str)
     failed = Signal(object)
     document_changed = Signal(object)
+    change_applied = Signal(str, object)
 
     def __init__(
         self,
@@ -178,10 +149,8 @@ class BackgroundWorkflow(QObject):
         session: DocumentSession,
         workers: AdapterWorkers,
         settings_provider: GenerationSettingsProvider,
-        ollama_settings_provider: OllamaSettingsProvider,
         *,
         mflux_generator: MfluxGenerator | None = None,
-        revision_namer_factory: RevisionNamerFactory = _default_revision_namer_factory,
         temporary_directory: Path | None = None,
         parent: QObject | None = None,
     ) -> None:
@@ -190,9 +159,7 @@ class BackgroundWorkflow(QObject):
         self.session = session
         self.workers = workers
         self._settings_provider = settings_provider
-        self._ollama_settings_provider = ollama_settings_provider
         self._mflux_generator = mflux_generator or MfluxGenerator()
-        self._revision_namer_factory = revision_namer_factory
         self._owned_temporary_directory = (
             tempfile.TemporaryDirectory(prefix="hypergen-background-")
             if temporary_directory is None
@@ -205,7 +172,6 @@ class BackgroundWorkflow(QObject):
         )
         assert self._temporary_directory is not None
         self._temporary_directory.mkdir(parents=True, exist_ok=True)
-        self._drafts: dict[UUID, BackgroundDraft] = {}
         self._operation: WorkerOperation | None = None
         self._request_id: UUID | None = None
         self._request_target: _GenerationTarget | None = None
@@ -213,82 +179,58 @@ class BackgroundWorkflow(QObject):
         self._busy = False
 
     @property
-    def drafts(self) -> tuple[BackgroundDraft, ...]:
-        return tuple(self._drafts.values())
-
-    @property
-    def draft_card_ids(self) -> frozenset[UUID]:
-        return frozenset(self._drafts)
-
-    def draft_for(self, card_id: UUID) -> BackgroundDraft | None:
-        return self._drafts.get(card_id)
-
-    @property
     def busy(self) -> bool:
         return self._busy
 
-    def generate(
-        self,
-        card_id: UUID,
-        *,
-        replace_draft: bool = False,
-    ) -> WorkerOperation:
-        """Start serialized MFLUX generation from author-controlled text."""
-        self._require_ready_for_draft(card_id, replace_draft=replace_draft)
+    def generate(self, card_id: UUID) -> WorkerOperation:
+        """Generate and directly apply a background to the active revision."""
+        self._require_ready(card_id)
         document = self.controller.document
         card = self._card(document, card_id)
-        settings = self._settings_provider()
-        ollama_settings = self._ollama_settings_provider()
+        revision = card.active_revision
+        style = next(
+            (style for style in document.styles if style.id == revision.style_id),
+            None,
+        )
         inputs = ImageGenerationInputs(
-            scene_description=card.scene_description,
-            global_style=document.global_style,
-            card_style=card.card_style,
+            description=revision.description,
+            style_name=style.name if style is not None else None,
+            style_prompt=style.prompt if style is not None else "",
         )
         try:
             render_prompt = compose_image_prompt(inputs)
         except ValueError as error:
             raise BackgroundWorkflowError(str(error)) from error
+        settings = self._settings_provider()
         request_id = uuid4()
-        assert self.session.state.bundle_path is not None
-        target = _GenerationTarget(
-            stack_id=document.id,
-            card_id=card_id,
-            bundle_path=self.session.state.bundle_path.resolve(),
-        )
+        asset_id = uuid4()
+        target = self._target(document, card)
         self._request_id = request_id
         self._request_target = target
-        seed = (
-            secrets.randbelow(2_147_483_648)
-            if settings.random_seed
-            else settings.fixed_seed
-        )
-        revision_id = uuid4()
-        output_path = self._temporary_directory / f"generated-{revision_id}.png"
+        output_path = self._temporary_directory / f"generated-{asset_id}.png"
         request = MfluxGenerationRequest(
             inputs=inputs,
             render_prompt=render_prompt,
             output_path=output_path,
             model_identifier=settings.mflux_model,
-            seed=seed,
+            seed=(
+                secrets.randbelow(2_147_483_648)
+                if settings.random_seed
+                else settings.fixed_seed
+            ),
             width=document.canvas.width,
             height=document.canvas.height,
             step_count=settings.step_count,
             quantization=settings.quantization,
         )
-        self._set_busy(True, "Generating background image...")
+        self._set_busy(True, "Generating image...")
         operation = self.workers.run_mflux(
             lambda: self._mflux_generator.generate(request),
             stage="generating background image",
         )
         self._operation = operation
         operation.succeeded.connect(
-            partial(
-                self._image_generated,
-                request_id,
-                target,
-                revision_id,
-                ollama_settings,
-            )
+            partial(self._generation_succeeded, request_id, target, asset_id)
         )
         operation.failed.connect(partial(self._operation_failed, request_id))
         return operation
@@ -300,121 +242,84 @@ class BackgroundWorkflow(QObject):
         *,
         position_x: float = 0.5,
         position_y: float = 0.5,
-    ) -> BackgroundDraft:
-        """Create one transient imported draft at the stack canvas size."""
-        self._require_ready_for_draft(card_id, replace_draft=False)
+    ) -> Stack:
+        """Prepare, store, and directly apply one imported image."""
+        self._require_ready(card_id)
         document = self.controller.document
-        self._card(document, card_id)
-        revision_id = uuid4()
-        output_path = self._temporary_directory / f"import-{revision_id}.png"
+        card = self._card(document, card_id)
+        asset_id = uuid4()
+        temporary_path = self._temporary_directory / f"import-{asset_id}.png"
         prepare_import_image(
             source_path,
-            output_path,
+            temporary_path,
             width=document.canvas.width,
             height=document.canvas.height,
             position_x=position_x,
             position_y=position_y,
         )
-        draft = BackgroundDraft(
-            stack_id=document.id,
-            card_id=card_id,
-            revision_id=revision_id,
-            image_path=output_path,
-            origin=ImageOrigin.IMPORTED,
+        try:
+            store = self._require_store()
+            image_path = store.import_image(
+                temporary_path,
+                card_id=card.id,
+                asset_id=asset_id,
+            )
+        finally:
+            temporary_path.unlink(missing_ok=True)
+        background = ImportedBackground(
+            id=asset_id,
+            image_path=image_path,
             source_filename=source_path.name,
             created_at=datetime.now(UTC),
         )
-        self._set_draft(draft)
-        return draft
+        return self._apply_background(
+            card.id,
+            card.active_revision.id,
+            background,
+            "Image imported",
+        )
 
-    def apply_draft(self, card_id: UUID) -> Stack:
-        """Durably copy and atomically apply one card's draft revision."""
-        draft = self._drafts.get(card_id)
-        if draft is None:
-            raise BackgroundWorkflowError("this card has no background draft to accept")
-        store = self.session.store
-        if store is None:
-            raise BackgroundWorkflowError("save the stack before applying a background")
-        document = self.controller.document
-        if document.id != draft.stack_id:
-            raise BackgroundWorkflowError("the background draft belongs to another stack")
-        card = self._card(document, draft.card_id)
-        revision_name = (
-            unique_revision_name(
-                draft.proposed_name or draft.name,
-                (
-                    self._revision_display_name(revision)
-                    for revision in card.image_revisions
-                ),
-            )
-            if draft.name is not None
-            else None
+    def clear_background(self, card_id: UUID) -> Stack:
+        """Clear only the active revision's background."""
+        card = self._card(self.controller.document, card_id)
+        if card.active_revision.background is None:
+            raise BackgroundWorkflowError("this revision has no image to clear")
+        return self._apply_background(
+            card.id,
+            card.active_revision.id,
+            None,
+            "Image cleared",
         )
-        image_path = store.import_image(
-            draft.image_path,
-            card_id=draft.card_id,
-            revision_id=draft.revision_id,
-        )
-        revision = ImageRevision(
-            id=draft.revision_id,
-            name=revision_name,
-            image_path=image_path,
-            origin=draft.origin,
-            source_filename=draft.source_filename,
-            generation_metadata=draft.generation_metadata,
-            created_at=draft.created_at,
-        )
+
+    def duplicate_revision(self, card_id: UUID, revision_id: UUID) -> Stack:
+        previous_token = self.controller.current_undo_token
         changed = self.controller.execute(
-            AddImageRevisionCommand(
-                card_id=draft.card_id,
-                revision=revision,
+            DuplicateRevisionCommand(
+                card_id=card_id,
+                source_revision_id=revision_id,
             )
         )
-        self._clear_draft(card_id)
-        self.progress_changed.emit("Background revision applied")
+        self.progress_changed.emit("Revision duplicated")
         self.document_changed.emit(changed)
+        self._emit_change_applied("Revision duplicated", previous_token)
         return changed
-
-    def discard_draft(self, card_id: UUID) -> None:
-        """Discard only the selected card's transient draft."""
-        if card_id in self._drafts:
-            self._clear_draft(card_id)
-            self.progress_changed.emit("Background draft discarded")
-
-    def discard_all_drafts(self) -> None:
-        """Discard all transient drafts in one observable state change."""
-        if not self._drafts:
-            return
-        drafts = tuple(self._drafts.values())
-        self._drafts.clear()
-        for draft in drafts:
-            draft.image_path.unlink(missing_ok=True)
-        self.drafts_changed.emit()
-
-    def discard_orphaned_drafts(self, valid_card_ids: Collection[UUID]) -> None:
-        """Remove drafts whose cards disappeared through undo or replacement."""
-        valid_ids = frozenset(valid_card_ids)
-        orphaned_ids = [
-            card_id for card_id in self._drafts if card_id not in valid_ids
-        ]
-        for card_id in orphaned_ids:
-            draft = self._drafts.pop(card_id)
-            draft.image_path.unlink(missing_ok=True)
 
     def activate_revision(self, card_id: UUID, revision_id: UUID) -> Stack:
         changed = self.controller.execute(
             ActivateRevisionCommand(card_id=card_id, revision_id=revision_id)
         )
-        self.progress_changed.emit("Background revision activated")
+        self.progress_changed.emit("Revision activated")
         self.document_changed.emit(changed)
         return changed
 
     def delete_revision(self, card_id: UUID, revision_id: UUID) -> Stack:
+        previous_token = self.controller.current_undo_token
         changed = self.controller.execute(
-            DeleteImageRevisionCommand(card_id=card_id, revision_id=revision_id)
+            DeleteRevisionCommand(card_id=card_id, revision_id=revision_id)
         )
-        self.progress_changed.emit("Background revision deleted")
+        self.progress_changed.emit("Revision deleted")
         self.document_changed.emit(changed)
+        self._emit_change_applied("Revision deleted", previous_token)
         return changed
 
     def cancel(self) -> None:
@@ -424,159 +329,13 @@ class BackgroundWorkflow(QObject):
         self._request_target = None
         self._operation = None
         self._discard_pending_image()
-        self._set_busy(False, "Generation cancelled")
+        if self._busy:
+            self._set_busy(False, "Generation cancelled")
 
     def close(self) -> None:
         self.cancel()
-        self.discard_all_drafts()
         if self._owned_temporary_directory is not None:
             self._owned_temporary_directory.cleanup()
-
-    def _image_generated(
-        self,
-        request_id: UUID,
-        target: _GenerationTarget,
-        revision_id: UUID,
-        ollama_settings: OllamaSettings,
-        result: object,
-    ) -> None:
-        if request_id != self._request_id:
-            if isinstance(result, MfluxGenerationResult):
-                result.output_path.unlink(missing_ok=True)
-            return
-        if not self._target_is_current(target):
-            if isinstance(result, MfluxGenerationResult):
-                result.output_path.unlink(missing_ok=True)
-            self._finish_with_error(
-                BackgroundWorkflowError(
-                    "the stack or card changed before image generation completed"
-                )
-            )
-            return
-        if not isinstance(result, MfluxGenerationResult):
-            self._finish_with_error(
-                BackgroundWorkflowError("image generation returned an unexpected result")
-            )
-            return
-        self._pending_image_path = result.output_path
-        card = self._card(self.controller.document, target.card_id)
-        existing_names = tuple(
-            self._revision_display_name(revision) for revision in card.image_revisions
-        )
-        request = RevisionNamingRequest(
-            image_path=result.output_path,
-            render_prompt=result.metadata.render_prompt,
-            existing_names=existing_names,
-        )
-        self.progress_changed.emit("Naming background revision...")
-        operation = self.workers.run_ollama(
-            lambda: self._revision_namer_factory(ollama_settings).name(request),
-            stage="naming background revision",
-        )
-        self._operation = operation
-        operation.succeeded.connect(
-            partial(
-                self._revision_named,
-                request_id,
-                target,
-                revision_id,
-                result,
-            )
-        )
-        operation.failed.connect(partial(self._operation_failed, request_id))
-
-    def _revision_named(
-        self,
-        request_id: UUID,
-        target: _GenerationTarget,
-        revision_id: UUID,
-        generation_result: MfluxGenerationResult,
-        result: object,
-    ) -> None:
-        if request_id != self._request_id:
-            return
-        if not self._target_is_current(target):
-            self._finish_with_error(
-                BackgroundWorkflowError(
-                    "the stack or card changed before revision naming completed"
-                )
-            )
-            return
-        if not isinstance(result, RevisionNamingResult):
-            self._finish_with_error(
-                BackgroundWorkflowError("revision naming returned an unexpected result")
-            )
-            return
-        card = self._card(self.controller.document, target.card_id)
-        existing_names = (
-            self._revision_display_name(revision) for revision in card.image_revisions
-        )
-        draft = BackgroundDraft(
-            stack_id=target.stack_id,
-            card_id=target.card_id,
-            revision_id=revision_id,
-            name=unique_revision_name(result.name, existing_names),
-            proposed_name=result.name,
-            image_path=generation_result.output_path,
-            origin=ImageOrigin.GENERATED,
-            generation_metadata=generation_result.metadata,
-            created_at=generation_result.metadata.generated_at,
-        )
-        self._operation = None
-        self._request_id = None
-        self._request_target = None
-        self._pending_image_path = None
-        self._set_busy(False, "Background draft ready")
-        self._set_draft(draft)
-
-    def _operation_failed(self, request_id: UUID, failure: object) -> None:
-        if request_id != self._request_id:
-            return
-        self._finish_with_error(failure)
-
-    def _finish_with_error(self, failure: object) -> None:
-        self._operation = None
-        self._request_id = None
-        self._request_target = None
-        self._discard_pending_image()
-        self._set_busy(False, "Background generation failed")
-        self.failed.emit(failure)
-
-    def _discard_pending_image(self) -> None:
-        if self._pending_image_path is not None:
-            self._pending_image_path.unlink(missing_ok=True)
-            self._pending_image_path = None
-
-    def _set_draft(self, draft: BackgroundDraft) -> None:
-        previous = self._drafts.get(draft.card_id)
-        self._drafts[draft.card_id] = draft
-        if previous is not None:
-            previous.image_path.unlink(missing_ok=True)
-        self.drafts_changed.emit()
-
-    def _clear_draft(self, card_id: UUID) -> None:
-        draft = self._drafts.pop(card_id, None)
-        if draft is not None:
-            draft.image_path.unlink(missing_ok=True)
-            self.drafts_changed.emit()
-
-    def _set_busy(self, busy: bool, progress: str) -> None:
-        self._busy = busy
-        self.busy_changed.emit(busy)
-        self.progress_changed.emit(progress)
-
-    def _require_ready_for_draft(
-        self,
-        card_id: UUID,
-        *,
-        replace_draft: bool,
-    ) -> None:
-        if self._busy:
-            raise BackgroundWorkflowError("background generation is already running")
-        if card_id in self._drafts and not replace_draft:
-            raise BackgroundWorkflowError("this card already has a background draft")
-        if self.session.store is None:
-            raise BackgroundWorkflowError("save the stack before creating a background")
 
     def is_generating_for(self, card_id: UUID) -> bool:
         return (
@@ -585,39 +344,190 @@ class BackgroundWorkflow(QObject):
             and self._request_target.card_id == card_id
         )
 
-    def _target_is_current(self, target: _GenerationTarget) -> bool:
+    def _generation_succeeded(
+        self,
+        request_id: UUID,
+        target: _GenerationTarget,
+        asset_id: UUID,
+        result: object,
+    ) -> None:
+        if request_id != self._request_id:
+            if isinstance(result, MfluxGenerationResult):
+                result.output_path.unlink(missing_ok=True)
+            return
+        if not isinstance(result, MfluxGenerationResult):
+            self._finish_with_error(
+                BackgroundWorkflowError("image generation returned an unexpected result")
+            )
+            return
+        self._pending_image_path = result.output_path
+        if not self._target_is_current(target):
+            self._finish_with_error(
+                BackgroundWorkflowError(
+                    "the stack, revision, Description, Style, or image changed "
+                    "before generation completed"
+                )
+            )
+            return
+        try:
+            image_path = self._require_store().import_image(
+                result.output_path,
+                card_id=target.card_id,
+                asset_id=asset_id,
+            )
+            background = GeneratedBackground(
+                id=asset_id,
+                image_path=image_path,
+                generation_metadata=result.metadata,
+                created_at=result.metadata.generated_at,
+            )
+            self._apply_background(
+                target.card_id,
+                target.revision_id,
+                background,
+                "Image generated",
+            )
+        except (CommandError, StackStoreError, ValidationError) as error:
+            self._finish_with_error(error)
+            return
+        self._pending_image_path = None
+        result.output_path.unlink(missing_ok=True)
+        self._operation = None
+        self._request_id = None
+        self._request_target = None
+        self._set_busy(False, "Image generated")
+
+    def _apply_background(
+        self,
+        card_id: UUID,
+        revision_id: UUID,
+        background: GeneratedBackground | ImportedBackground | None,
+        message: str,
+    ) -> Stack:
+        previous_token = self.controller.current_undo_token
+        changed = self.controller.execute(
+            ReplaceRevisionBackgroundCommand(
+                card_id=card_id,
+                revision_id=revision_id,
+                background=background,
+            )
+        )
+        self.progress_changed.emit(message)
+        self.document_changed.emit(changed)
+        self._emit_change_applied(message, previous_token)
+        return changed
+
+    def _emit_change_applied(
+        self,
+        message: str,
+        previous_token: object,
+    ) -> None:
+        token = self.controller.current_undo_token
+        if token is not None and token != previous_token:
+            self.change_applied.emit(message, token)
+
+    def _operation_failed(self, request_id: UUID, failure: object) -> None:
+        if request_id == self._request_id:
+            self._finish_with_error(failure)
+
+    def _finish_with_error(self, failure: object) -> None:
+        self._operation = None
+        self._request_id = None
+        self._request_target = None
+        self._discard_pending_image()
+        self._set_busy(False, "Image generation failed")
+        self.failed.emit(failure)
+
+    def _discard_pending_image(self) -> None:
+        if self._pending_image_path is not None:
+            self._pending_image_path.unlink(missing_ok=True)
+            self._pending_image_path = None
+
+    def _set_busy(self, busy: bool, progress: str) -> None:
+        self._busy = busy
+        self.busy_changed.emit(busy)
+        self.progress_changed.emit(progress)
+
+    def _require_ready(self, card_id: UUID) -> None:
+        if self._busy:
+            raise BackgroundWorkflowError("background generation is already running")
+        if self.session.store is None:
+            raise BackgroundWorkflowError("save the stack before changing an image")
+        self._card(self.controller.document, card_id)
+
+    def _require_store(self) -> StackStore:
+        store = self.session.store
+        if store is None:
+            raise BackgroundWorkflowError("save the stack before changing an image")
+        return store
+
+    def _target(self, document: Stack, card: Card) -> _GenerationTarget:
         bundle_path = self.session.state.bundle_path
         if bundle_path is None:
+            raise BackgroundWorkflowError("save the stack before changing an image")
+        revision = card.active_revision
+        style = next(
+            (style for style in document.styles if style.id == revision.style_id),
+            None,
+        )
+        return _GenerationTarget(
+            stack_id=document.id,
+            card_id=card.id,
+            revision_id=revision.id,
+            description=revision.description,
+            style_id=revision.style_id,
+            style_prompt=style.prompt if style is not None else "",
+            background_id=(
+                revision.background.id if revision.background is not None else None
+            ),
+            bundle_path=bundle_path.resolve(),
+        )
+
+    def _target_is_current(self, target: _GenerationTarget) -> bool:
+        bundle_path = self.session.state.bundle_path
+        if bundle_path is None or bundle_path.resolve() != target.bundle_path:
             return False
         document = self.controller.document
+        if document.id != target.stack_id:
+            return False
+        card = next(
+            (card for card in document.cards if card.id == target.card_id),
+            None,
+        )
+        if card is None or card.active_revision_id != target.revision_id:
+            return False
+        revision = card.active_revision
+        style = next(
+            (style for style in document.styles if style.id == revision.style_id),
+            None,
+        )
         return (
-            document.id == target.stack_id
-            and bundle_path.resolve() == target.bundle_path
-            and any(card.id == target.card_id for card in document.cards)
+            revision.description == target.description
+            and revision.style_id == target.style_id
+            and (style.prompt if style is not None else "") == target.style_prompt
+            and (
+                revision.background.id
+                if revision.background is not None
+                else None
+            )
+            == target.background_id
         )
 
     @staticmethod
-    def _revision_display_name(revision: ImageRevision) -> str:
-        if revision.name is not None:
-            return revision.name
-        return "Generated" if revision.origin is ImageOrigin.GENERATED else "Imported"
-
-    @staticmethod
     def _card(document: Stack, card_id: UUID) -> Card:
-        card = next((candidate for candidate in document.cards if candidate.id == card_id), None)
+        card = next(
+            (candidate for candidate in document.cards if candidate.id == card_id),
+            None,
+        )
         if card is None:
             raise BackgroundWorkflowError(f"card {card_id} no longer exists")
         return card
 
 
 __all__ = [
-    "BackgroundDraft",
     "BackgroundGenerationSettings",
     "BackgroundWorkflow",
     "BackgroundWorkflowError",
     "GenerationSettingsProvider",
-    "OllamaSettingsProvider",
-    "RevisionNamerFactory",
-    "RevisionNamerProtocol",
     "prepare_import_image",
 ]

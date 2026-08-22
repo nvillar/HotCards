@@ -1,241 +1,143 @@
-"""Structured hotspot-generation contract and Ollama adapter."""
+"""Strict geometry-only hotspot remapping contract."""
 
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any, Literal
-from uuid import UUID
 
 from pydantic import Field, StringConstraints, ValidationError, model_validator
 
 from hypergen.domain.geometry import (
     DEFAULT_MODEL_COORDINATE_EXTENT,
     model_point_to_document,
-    validate_polygon,
 )
 from hypergen.domain.models import (
-    CardReference,
     DomainModel,
-    Interaction,
-    NavigateAction,
+    HotspotRemapProvenance,
     NonEmptyString,
-    NonNegativeFiniteFloat,
-    Point,
     Polygon,
-    ResolvedCardReference,
-    UnresolvedCardReference,
 )
 from hypergen.generation.errors import ModelResponseError
 from hypergen.generation.ollama_client import OllamaCallResult, OllamaRuntime
 from hypergen.generation.structured_output import structured_json_content
 
-HOTSPOT_PROMPT_VERSION = "hotspot-prompt-v3"
-HOTSPOT_SCHEMA_VERSION = "hotspot-schema-v2"
-UNRESOLVED_DESTINATION_TOKEN = "UNRESOLVED"
-MAX_INTERACTIONS = 4
+HOTSPOT_REMAP_PROMPT_VERSION = "hotspot-remap-prompt-v1"
+HOTSPOT_REMAP_SCHEMA_VERSION = "hotspot-remap-schema-v1"
+MAX_INTERACTIONS_PER_CALL = 4
 MAX_COMPONENTS_PER_INTERACTION = 2
 MAX_POINTS_PER_COMPONENT = 12
-CardToken = Annotated[str, StringConstraints(pattern=r"^C[1-9][0-9]*$")]
+HotspotToken = Annotated[str, StringConstraints(pattern=r"^H[1-9][0-9]*$")]
 
 
-class CardCatalogueEntry(DomainModel):
-    """Request-local author-facing card information without UUIDs."""
+class RemapHotspotInput(DomainModel):
+    """One existing hotspot identified by a request-local token."""
 
-    token: CardToken
-    name: NonEmptyString
-    description: str = ""
+    token: HotspotToken
+    label: NonEmptyString
 
 
-class HotspotGenerationRequest(DomainModel):
-    """UI-independent request for hotspot proposals."""
+class HotspotRemapRequest(DomainModel):
+    """Complete geometry-only remap request."""
 
     image_path: Path
-    interaction_description: str
-    card_catalogue: tuple[CardCatalogueEntry, ...]
+    hotspots: tuple[RemapHotspotInput, ...] = Field(min_length=1)
     coordinate_extent: int = Field(default=DEFAULT_MODEL_COORDINATE_EXTENT, gt=0)
-    prompt_version: Literal[HOTSPOT_PROMPT_VERSION] = HOTSPOT_PROMPT_VERSION
-    schema_version: Literal[HOTSPOT_SCHEMA_VERSION] = HOTSPOT_SCHEMA_VERSION
+    prompt_version: Literal[HOTSPOT_REMAP_PROMPT_VERSION] = (
+        HOTSPOT_REMAP_PROMPT_VERSION
+    )
+    schema_version: Literal[HOTSPOT_REMAP_SCHEMA_VERSION] = (
+        HOTSPOT_REMAP_SCHEMA_VERSION
+    )
 
     @model_validator(mode="after")
-    def require_unique_card_tokens(self) -> HotspotGenerationRequest:
-        """Keep every request-local destination token unambiguous."""
-        tokens = [card.token for card in self.card_catalogue]
+    def require_unique_tokens(self) -> HotspotRemapRequest:
+        tokens = [hotspot.token for hotspot in self.hotspots]
         if len(tokens) != len(set(tokens)):
-            raise ValueError("card catalogue tokens must be unique")
+            raise ValueError("hotspot remap tokens must be unique")
         return self
 
 
 class ModelPoint(DomainModel):
-    """Integer point emitted in the request coordinate extent."""
-
     x: int
     y: int
 
 
 class ModelPolygon(DomainModel):
-    """One model-emitted polygon component."""
-
     points: tuple[ModelPoint, ...] = Field(
         min_length=3,
         max_length=MAX_POINTS_PER_COMPONENT,
     )
 
 
-class ModelInteractionOutput(DomainModel):
-    """One structured interaction emitted by Ollama."""
-
-    source_interaction_index: int = Field(ge=1, le=MAX_INTERACTIONS)
-    label: NonEmptyString
-    destination_token: CardToken | Literal["UNRESOLVED"]
+class ModelMappedHotspot(DomainModel):
+    token: HotspotToken
     polygons: tuple[ModelPolygon, ...] = Field(
         min_length=1,
         max_length=MAX_COMPONENTS_PER_INTERACTION,
     )
 
 
-class ModelUnlocatedInteractionOutput(DomainModel):
-    """One author-described subject the model cannot locate in the image."""
-
-    source_interaction_index: int = Field(ge=1, le=MAX_INTERACTIONS)
-    label: NonEmptyString
+class ModelUnlocatedHotspot(DomainModel):
+    token: HotspotToken
     reason: NonEmptyString
 
 
-class HotspotModelOutput(DomainModel):
-    """Complete structured response requested from Ollama."""
-
-    interactions: tuple[ModelInteractionOutput, ...] = Field(
-        default_factory=tuple,
-        max_length=MAX_INTERACTIONS,
-    )
-    unlocated_interactions: tuple[ModelUnlocatedInteractionOutput, ...] = Field(
-        default_factory=tuple,
-        max_length=MAX_INTERACTIONS,
-    )
+class HotspotRemapModelOutput(DomainModel):
+    mapped: tuple[ModelMappedHotspot, ...] = Field(default_factory=tuple)
+    unlocated: tuple[ModelUnlocatedHotspot, ...] = Field(default_factory=tuple)
 
 
-def build_hotspot_response_schema(request: HotspotGenerationRequest) -> dict[str, Any]:
-    """Constrain destination output to this request's tokens plus safe abstention."""
-    schema = HotspotModelOutput.model_json_schema()
-    interaction_properties = schema["$defs"]["ModelInteractionOutput"]["properties"]
-    interaction_properties["destination_token"] = {
-        "title": "Destination Token",
-        "type": "string",
-        "enum": [
-            *(card.token for card in request.card_catalogue),
-            UNRESOLVED_DESTINATION_TOKEN,
-        ],
-    }
+class UnlocatedHotspot(DomainModel):
+    token: HotspotToken
+    reason: NonEmptyString
+
+
+class HotspotRemapResult(DomainModel):
+    """Validated geometry keyed to existing request-local hotspot tokens."""
+
+    polygons_by_token: dict[str, tuple[Polygon, ...]]
+    unlocated: tuple[UnlocatedHotspot, ...]
+    warnings: tuple[str, ...]
+    raw_responses: tuple[NonEmptyString, ...]
+    provenance: HotspotRemapProvenance
+    prompt_eval_count: int | None = None
+    eval_count: int | None = None
+    done_reasons: tuple[str, ...] = Field(default_factory=tuple)
+
+
+def build_hotspot_remap_schema(
+    hotspots: tuple[RemapHotspotInput, ...],
+) -> dict[str, Any]:
+    """Constrain every model token to the current request batch."""
+    schema = HotspotRemapModelOutput.model_json_schema()
+    tokens = [hotspot.token for hotspot in hotspots]
+    for definition in ("ModelMappedHotspot", "ModelUnlocatedHotspot"):
+        schema["$defs"][definition]["properties"]["token"] = {
+            "title": "Hotspot Token",
+            "type": "string",
+            "enum": tokens,
+        }
     return schema
 
 
-class ExistingCandidateTarget(DomainModel):
-    """Candidate resolved to a supplied request-local card."""
-
-    type: Literal["existing"] = "existing"
-    card_token: CardToken
-    card_name: NonEmptyString
-
-
-class NewCandidateTarget(DomainModel):
-    """Candidate proposes an explicit new-card action for review."""
-
-    type: Literal["new"] = "new"
-    proposed_name: NonEmptyString
-
-
-class UnresolvedCandidateTarget(DomainModel):
-    """Candidate remains unresolved for author review."""
-
-    type: Literal["unresolved"] = "unresolved"
-    description: str = ""
-
-
-CandidateTarget = Annotated[
-    ExistingCandidateTarget | NewCandidateTarget | UnresolvedCandidateTarget,
-    Field(discriminator="type"),
-]
-
-
-class CandidatePolygon(DomainModel):
-    """Clamped candidate geometry plus validation warnings."""
-
-    points: tuple[Point, ...]
-    warnings: tuple[str, ...] = Field(default_factory=tuple)
-
-
-class HotspotProposal(DomainModel):
-    """One reviewable candidate interaction."""
-
-    source_interaction_index: int = Field(ge=1, le=MAX_INTERACTIONS)
-    label: NonEmptyString
-    target: CandidateTarget
-    polygons: tuple[CandidatePolygon, ...]
-
-
-class HotspotReconciliationWarning(DomainModel):
-    """Actionable warning for an interaction subject absent from the image."""
-
-    source_interaction_index: int = Field(ge=1, le=MAX_INTERACTIONS)
-    label: NonEmptyString
-    reason: NonEmptyString
-
-    @property
-    def message(self) -> str:
-        return (
-            f'Could not locate "{self.label}" in the image: {self.reason}. '
-            "Edit Description and regenerate the background, draw a manual hotspot, "
-            "or adjust/remove the interaction."
-        )
-
-
-class HotspotGenerationResult(DomainModel):
-    """Strict candidate output with diagnostics and raw response access."""
-
-    proposals: tuple[HotspotProposal, ...]
-    warnings: tuple[str, ...]
-    reconciliation_warnings: tuple[HotspotReconciliationWarning, ...] = Field(
-        default_factory=tuple
-    )
-    raw_response: NonEmptyString
-    model_identifier: NonEmptyString
-    prompt_version: NonEmptyString
-    schema_version: NonEmptyString
-    duration_seconds: NonNegativeFiniteFloat
-    total_duration_ns: int | None = None
-    load_duration_ns: int | None = None
-    prompt_eval_count: int | None = None
-    eval_count: int | None = None
-    done_reason: str | None = None
-
-
-def build_hotspot_prompt(request: HotspotGenerationRequest) -> str:
-    """Build the versioned vision prompt without exposing stable UUIDs."""
-    catalogue = [
-        {
-            "token": card.token,
-            "name": card.name,
-            "description": card.description,
-        }
-        for card in request.card_catalogue
-    ]
+def build_hotspot_remap_prompt(
+    request: HotspotRemapRequest,
+    hotspots: tuple[RemapHotspotInput, ...],
+) -> str:
+    """Build a versioned prompt that cannot redefine hotspot semantics."""
     payload = {
-        "interaction_description": request.interaction_description,
-        "card_catalogue": catalogue,
+        "hotspots": [
+            {"token": hotspot.token, "label": hotspot.label}
+            for hotspot in hotspots
+        ],
         "coordinate_extent": request.coordinate_extent,
     }
-    example_destination = (
-        request.card_catalogue[0].token
-        if request.card_catalogue
-        else UNRESOLVED_DESTINATION_TOKEN
-    )
     response_shape = {
-        "interactions": [
+        "mapped": [
             {
-                "source_interaction_index": 1,
-                "label": "short visible subject label",
-                "destination_token": example_destination,
+                "token": hotspots[0].token,
                 "polygons": [
                     {
                         "points": [
@@ -247,46 +149,30 @@ def build_hotspot_prompt(request: HotspotGenerationRequest) -> str:
                 ],
             }
         ],
-        "unlocated_interactions": [
+        "unlocated": [
             {
-                "source_interaction_index": 2,
-                "label": "short missing subject label",
-                "reason": "concrete reason the subject cannot be located",
+                "token": hotspot.token,
+                "reason": "the labeled subject is not visible",
             }
+            for hotspot in hotspots[1:]
         ],
     }
     return f"""\
-Analyze the supplied card image and propose clickable polygon hotspots for the author's interaction
-description.
+Locate each supplied existing hotspot subject in the current card image.
 
 Return JSON matching the supplied schema.
-- Use exactly the response keys and nesting shown below. Every field shown on an interaction is
-  required. The values are illustrative:
+- Return every supplied token exactly once, in either mapped or unlocated.
+- Never invent a token or hotspot.
+- Do not return labels, destinations, actions, ordering, IDs, or prose.
+- Use exactly the response keys and nesting shown here:
 {json.dumps(response_shape, ensure_ascii=False, indent=2)}
 - The geometry key must be "polygons", never "polygon_components".
-- Each polygon's "points" must be an array of objects with exactly one integer "x" and "y" field,
-  never a flat coordinate array.
-- Return an empty array for either top-level collection when it has no entries.
-- Use integer coordinates from 0 through {request.coordinate_extent}.
-- Use one interaction per semantic action and one or more polygon components per interaction.
-- The interaction description is authoritative. Return each described interaction exactly once.
-  Do not add interactions merely because another object is visible.
-- If a described subject cannot be located in the image, do not invent geometry. Omit it from
-  interactions and return it once in unlocated_interactions with its source index, short label,
-  and a concrete reason.
-- Number the semantic actions in the interaction description from 1 in textual order. Return that
-  number as source_interaction_index so every result remains tied to its author-described action.
-- Return only the interactions needed, not the maximum allowed. The safety bounds are at most
-  {MAX_INTERACTIONS} interactions, {MAX_COMPONENTS_PER_INTERACTION} polygon components per
-  interaction, and {MAX_POINTS_PER_COMPONENT} points per component.
-- Keep polygons simple and reasonably editable; do not create holes.
-- Match destination names in the interaction description to the supplied card catalogue. Return the
-  exact opaque token of the intended supplied card as destination_token. Return "UNRESOLVED" only
-  when no supplied destination can be inferred.
-- Destination resolution comes from the author's text and catalogue, not from visible image
-  content. Do not mark a destination unresolved merely because the destination card is not pictured.
-- Never invent or return UUIDs.
-- Do not report confidence scores.
+- Each polygon point must be an object with integer x and y fields.
+- Use coordinates from 0 through {request.coordinate_extent}.
+- Use at most {MAX_COMPONENTS_PER_INTERACTION} polygon components and
+  {MAX_POINTS_PER_COMPONENT} points per component.
+- Keep polygons simple and editable. Do not create holes.
+- If a subject cannot be located, return it in unlocated instead of inventing geometry.
 
 Prompt contract: {request.prompt_version}
 Schema contract: {request.schema_version}
@@ -295,189 +181,173 @@ Request:
 """
 
 
-def _candidate_target(
-    destination_token: CardToken | Literal["UNRESOLVED"],
-    catalogue: dict[str, CardCatalogueEntry],
-    warnings: list[str],
-) -> CandidateTarget:
-    if destination_token == UNRESOLVED_DESTINATION_TOKEN:
-        return UnresolvedCandidateTarget()
-    card = catalogue.get(destination_token)
-    if card is None:
-        warning = f"model selected unknown card token {destination_token!r}"
-        warnings.append(warning)
-        return UnresolvedCandidateTarget(description=warning)
-    return ExistingCandidateTarget(card_token=card.token, card_name=card.name)
-
-
-def _candidate_polygon(
-    output: ModelPolygon,
-    *,
-    extent: int,
-    warnings: list[str],
-) -> CandidatePolygon:
-    polygon_warnings: list[str] = []
-    if any(
-        point.x < 0 or point.x > extent or point.y < 0 or point.y > extent
-        for point in output.points
-    ):
-        polygon_warnings.append("model coordinates were clamped to the canvas")
-    points = tuple(
-        model_point_to_document(point.x, point.y, extent=extent) for point in output.points
-    )
-    polygon_warnings.extend(issue.message for issue in validate_polygon(points))
-    warnings.extend(polygon_warnings)
-    return CandidatePolygon(points=points, warnings=tuple(polygon_warnings))
-
-
-def candidate_target_to_reference(
-    target: CandidateTarget,
-    *,
-    card_ids_by_token: dict[str, UUID],
-) -> CardReference:
-    """Convert a reviewed request-local target into a persisted reference."""
-    if isinstance(target, ExistingCandidateTarget):
-        card_id = card_ids_by_token.get(target.card_token)
-        if card_id is None:
-            raise ValueError(f"no card ID is mapped for candidate token {target.card_token!r}")
-        return ResolvedCardReference(target_card_id=card_id)
-    if isinstance(target, NewCandidateTarget):
-        return UnresolvedCardReference(target_name=target.proposed_name)
-    return UnresolvedCardReference(target_name=target.description or None)
-
-
-def apply_hotspot_proposal(
-    proposal: HotspotProposal,
-    *,
-    card_ids_by_token: dict[str, UUID],
-) -> Interaction:
-    """Cross the Apply boundary, rejecting invalid candidate geometry."""
-    return Interaction(
-        label=proposal.label,
-        action=NavigateAction(
-            target=candidate_target_to_reference(
-                proposal.target,
-                card_ids_by_token=card_ids_by_token,
-            )
-        ),
-        polygons=tuple(Polygon(points=polygon.points) for polygon in proposal.polygons),
-    )
-
-
-class OllamaHotspotGenerator:
-    """Generate and normalize reviewable hotspot candidates."""
-
-    def __init__(self, runtime: OllamaRuntime) -> None:
-        self._runtime = runtime
-
-    def generate(self, request: HotspotGenerationRequest) -> HotspotGenerationResult:
-        """Run one strict multimodal hotspot request."""
-        if not request.image_path.is_file():
-            raise ModelResponseError(f"hotspot input image does not exist: {request.image_path}")
-        call = self._runtime.chat_structured(
-            prompt=build_hotspot_prompt(request),
-            schema=build_hotspot_response_schema(request),
-            image_path=request.image_path,
-        )
-        return normalize_hotspot_response(
-            request=request,
-            call=call,
-            model_identifier=self._runtime.settings.model,
-        )
-
-
-def normalize_hotspot_response(
-    *,
-    request: HotspotGenerationRequest,
+def _normalize_batch(
+    request: HotspotRemapRequest,
+    hotspots: tuple[RemapHotspotInput, ...],
     call: OllamaCallResult,
-    model_identifier: str,
-) -> HotspotGenerationResult:
-    """Strictly parse and normalize one raw response using the production boundary."""
+) -> tuple[dict[str, tuple[Polygon, ...]], list[UnlocatedHotspot], list[str]]:
     try:
-        output = HotspotModelOutput.model_validate_json(
+        output = HotspotRemapModelOutput.model_validate_json(
             structured_json_content(call.content)
         )
     except ValidationError as error:
         raise ModelResponseError(
-            f"Ollama returned an invalid hotspot response for {request.schema_version}: {error}",
+            f"Ollama returned an invalid remap response for "
+            f"{request.schema_version}: {error}",
             raw_response=call.content,
-            response_metadata={
-                "elapsed_seconds": call.elapsed_seconds,
-                "total_duration_ns": call.total_duration_ns,
-                "load_duration_ns": call.load_duration_ns,
-                "prompt_eval_count": call.prompt_eval_count,
-                "eval_count": call.eval_count,
-                "done_reason": call.done_reason,
-            },
         ) from error
+    expected_tokens = {hotspot.token for hotspot in hotspots}
+    returned_tokens = [
+        *(item.token for item in output.mapped),
+        *(item.token for item in output.unlocated),
+    ]
+    if len(returned_tokens) != len(set(returned_tokens)):
+        raise ModelResponseError(
+            "Ollama returned a hotspot token more than once",
+            raw_response=call.content,
+        )
+    unknown = set(returned_tokens) - expected_tokens
+    if unknown:
+        raise ModelResponseError(
+            f"Ollama returned unknown hotspot tokens: {sorted(unknown)}",
+            raw_response=call.content,
+        )
 
+    polygons_by_token: dict[str, tuple[Polygon, ...]] = {}
+    unlocated = [
+        UnlocatedHotspot(token=item.token, reason=item.reason)
+        for item in output.unlocated
+    ]
     warnings: list[str] = []
-    catalogue = {card.token: card for card in request.card_catalogue}
-    proposals = tuple(
-        HotspotProposal(
-            source_interaction_index=interaction.source_interaction_index,
-            label=interaction.label,
-            target=_candidate_target(interaction.destination_token, catalogue, warnings),
-            polygons=tuple(
-                _candidate_polygon(
-                    polygon,
-                    extent=request.coordinate_extent,
-                    warnings=warnings,
+    for mapped in output.mapped:
+        if any(
+            point.x < 0
+            or point.x > request.coordinate_extent
+            or point.y < 0
+            or point.y > request.coordinate_extent
+            for polygon in mapped.polygons
+            for point in polygon.points
+        ):
+            warnings.append(
+                f"{mapped.token} coordinates were clamped to the canvas"
+            )
+        try:
+            polygons_by_token[mapped.token] = tuple(
+                Polygon(
+                    points=tuple(
+                        model_point_to_document(
+                            point.x,
+                            point.y,
+                            extent=request.coordinate_extent,
+                        )
+                        for point in polygon.points
+                    )
                 )
-                for polygon in interaction.polygons
+                for polygon in mapped.polygons
+            )
+        except ValidationError:
+            unlocated.append(
+                UnlocatedHotspot(
+                    token=mapped.token,
+                    reason="the returned polygon geometry was invalid",
+                )
+            )
+            warnings.append(
+                f"{mapped.token} kept its existing geometry because the "
+                "returned polygon was invalid"
+            )
+    for hotspot in hotspots:
+        if (
+            hotspot.token not in polygons_by_token
+            and all(item.token != hotspot.token for item in unlocated)
+        ):
+            unlocated.append(
+                UnlocatedHotspot(
+                    token=hotspot.token,
+                    reason="the model omitted this hotspot",
+                )
+            )
+    return polygons_by_token, unlocated, warnings
+
+
+class OllamaHotspotRemapper:
+    """Remap all supplied hotspots in bounded model calls."""
+
+    def __init__(self, runtime: OllamaRuntime) -> None:
+        self._runtime = runtime
+
+    def remap(self, request: HotspotRemapRequest) -> HotspotRemapResult:
+        if not request.image_path.is_file():
+            raise ModelResponseError(
+                f"hotspot remap image does not exist: {request.image_path}"
+            )
+        polygons_by_token: dict[str, tuple[Polygon, ...]] = {}
+        unlocated: list[UnlocatedHotspot] = []
+        warnings: list[str] = []
+        raw_responses: list[str] = []
+        total_duration = 0.0
+        prompt_eval_count = 0
+        eval_count = 0
+        has_prompt_count = True
+        has_eval_count = True
+        done_reasons: list[str] = []
+        for start in range(0, len(request.hotspots), MAX_INTERACTIONS_PER_CALL):
+            batch = request.hotspots[start : start + MAX_INTERACTIONS_PER_CALL]
+            call = self._runtime.chat_structured(
+                prompt=build_hotspot_remap_prompt(request, batch),
+                schema=build_hotspot_remap_schema(batch),
+                image_path=request.image_path,
+            )
+            mapped, missing, batch_warnings = _normalize_batch(
+                request,
+                batch,
+                call,
+            )
+            polygons_by_token.update(mapped)
+            unlocated.extend(missing)
+            warnings.extend(batch_warnings)
+            raw_responses.append(call.content)
+            total_duration += call.elapsed_seconds
+            if call.prompt_eval_count is None:
+                has_prompt_count = False
+            else:
+                prompt_eval_count += call.prompt_eval_count
+            if call.eval_count is None:
+                has_eval_count = False
+            else:
+                eval_count += call.eval_count
+            if call.done_reason is not None:
+                done_reasons.append(call.done_reason)
+        return HotspotRemapResult(
+            polygons_by_token=polygons_by_token,
+            unlocated=tuple(unlocated),
+            warnings=tuple(warnings),
+            raw_responses=tuple(raw_responses),
+            provenance=HotspotRemapProvenance(
+                model_identifier=self._runtime.settings.model,
+                prompt_version=request.prompt_version,
+                schema_version=request.schema_version,
+                generated_at=datetime.now(UTC),
+                duration_seconds=total_duration,
             ),
+            prompt_eval_count=prompt_eval_count if has_prompt_count else None,
+            eval_count=eval_count if has_eval_count else None,
+            done_reasons=tuple(done_reasons),
         )
-        for interaction in output.interactions
-    )
-    seen_source_interactions: set[int] = set()
-    for proposal in proposals:
-        if proposal.source_interaction_index in seen_source_interactions:
-            warnings.append(
-                "model repeated source interaction "
-                f"{proposal.source_interaction_index}: {proposal.label!r}"
-            )
-        seen_source_interactions.add(proposal.source_interaction_index)
-    reconciliation_warnings: list[HotspotReconciliationWarning] = []
-    seen_unlocated_interactions: set[int] = set()
-    for warning in output.unlocated_interactions:
-        if warning.source_interaction_index in seen_source_interactions:
-            warnings.append(
-                "model both located and marked source interaction "
-                f"{warning.source_interaction_index} as unlocated; "
-                "the contradictory unlocated warning was ignored"
-            )
-            continue
-        if warning.source_interaction_index in seen_unlocated_interactions:
-            warnings.append(
-                "model repeated unlocated source interaction "
-                f"{warning.source_interaction_index}: {warning.label!r}"
-            )
-            continue
-        seen_unlocated_interactions.add(warning.source_interaction_index)
-        reconciliation_warnings.append(
-            HotspotReconciliationWarning(
-                source_interaction_index=warning.source_interaction_index,
-                label=warning.label,
-                reason=warning.reason,
-            )
-        )
-    if len(output.interactions) == MAX_INTERACTIONS:
-        warnings.append(
-            f"model response reached the {MAX_INTERACTIONS}-interaction safety limit; "
-            "output may be repetitive or truncated"
-        )
-    return HotspotGenerationResult(
-        proposals=proposals,
-        warnings=tuple(warnings),
-        reconciliation_warnings=tuple(reconciliation_warnings),
-        raw_response=call.content,
-        model_identifier=model_identifier,
-        prompt_version=request.prompt_version,
-        schema_version=request.schema_version,
-        duration_seconds=call.elapsed_seconds,
-        total_duration_ns=call.total_duration_ns,
-        load_duration_ns=call.load_duration_ns,
-        prompt_eval_count=call.prompt_eval_count,
-        eval_count=call.eval_count,
-        done_reason=call.done_reason,
-    )
+
+
+__all__ = [
+    "HOTSPOT_REMAP_PROMPT_VERSION",
+    "HOTSPOT_REMAP_SCHEMA_VERSION",
+    "HotspotRemapRequest",
+    "HotspotRemapResult",
+    "HotspotToken",
+    "MAX_COMPONENTS_PER_INTERACTION",
+    "MAX_INTERACTIONS_PER_CALL",
+    "MAX_POINTS_PER_COMPONENT",
+    "OllamaHotspotRemapper",
+    "RemapHotspotInput",
+    "UnlocatedHotspot",
+    "build_hotspot_remap_prompt",
+    "build_hotspot_remap_schema",
+]

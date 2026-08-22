@@ -55,9 +55,9 @@ def _write_case(case_dir: Path) -> None:
                 "case_version": "image-case-v2",
                 "case_id": "one",
                 "inputs": {
-                    "scene_description": "Courtyard",
-                    "global_style": "Watercolor",
-                    "card_style": None,
+                    "description": "Courtyard",
+                    "style_name": "Storybook",
+                    "style_prompt": "Watercolor",
                 },
                 "required_visual_elements": ["gate"],
                 "unwanted_artifacts": ["text"],
@@ -81,9 +81,9 @@ def test_image_case_id_is_safe_for_artifact_paths() -> None:
                 "case_version": "image-case-v2",
                 "case_id": "../escape",
                 "inputs": {
-                    "scene_description": "Courtyard",
-                    "global_style": "Watercolor",
-                    "card_style": None,
+                    "description": "Courtyard",
+                    "style_name": "Storybook",
+                    "style_prompt": "Watercolor",
                 },
                 "required_visual_elements": ["gate"],
             }

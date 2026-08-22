@@ -28,6 +28,15 @@ def _unique_style_name(preferred: str, used_names: set[str]) -> str:
     return candidate
 
 
+def _migrate_hotspot_set(value: object) -> object:
+    """Drop obsolete generation provenance while preserving interactions."""
+    if not isinstance(value, dict):
+        return value
+    hotspot_set = deepcopy(value)
+    hotspot_set.pop("generation_provenance", None)
+    return hotspot_set
+
+
 def _migrate_v1_to_v2(document: JsonObject) -> JsonObject:
     """Move card-wide authoring data into complete card revisions."""
     stack_id = UUID(str(document["id"]))
@@ -129,7 +138,9 @@ def _migrate_v1_to_v2(document: JsonObject) -> JsonObject:
                     "description": description,
                     "style_id": selected_style_id,
                     "background": background,
-                    "hotspot_set": old_revision.get("hotspot_set"),
+                    "hotspot_set": _migrate_hotspot_set(
+                        old_revision.get("hotspot_set")
+                    ),
                 }
             )
 
@@ -157,8 +168,30 @@ def _migrate_v1_to_v2(document: JsonObject) -> JsonObject:
     return document
 
 
+def _migrate_v2_to_v3(document: JsonObject) -> JsonObject:
+    """Remove provenance from the retired hotspot-generation workflow."""
+    cards = document.get("cards", [])
+    if not isinstance(cards, list):
+        raise MigrationError("stack cards must be an array")
+    for card in cards:
+        if not isinstance(card, dict):
+            raise MigrationError("stack cards must be objects")
+        revisions = card.get("revisions", [])
+        if not isinstance(revisions, list):
+            raise MigrationError("card revisions must be an array")
+        for revision in revisions:
+            if not isinstance(revision, dict):
+                raise MigrationError("card revisions must be objects")
+            revision["hotspot_set"] = _migrate_hotspot_set(
+                revision.get("hotspot_set")
+            )
+    document["schema_version"] = 3
+    return document
+
+
 DEFAULT_MIGRATIONS: dict[int, Migration] = {
     1: _migrate_v1_to_v2,
+    2: _migrate_v2_to_v3,
 }
 
 

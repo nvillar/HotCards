@@ -8,7 +8,7 @@ from hypergen.storage.migrations import MigrationError, migrate_document
 
 
 def test_current_document_passes_without_mutating_input() -> None:
-    document = {"schema_version": 2, "name": "Castle"}
+    document = {"schema_version": 3, "name": "Castle"}
 
     migrated = migrate_document(document)
 
@@ -40,7 +40,7 @@ def test_migration_dispatch_applies_one_versioned_step() -> None:
     [
         ({}, "missing schema_version"),
         ({"schema_version": True}, "must be an integer"),
-        ({"schema_version": 3}, "newer than supported"),
+        ({"schema_version": 4}, "newer than supported"),
         ({"schema_version": 0}, "no migration"),
     ],
 )
@@ -120,7 +120,7 @@ def test_v1_document_migrates_card_content_into_revisions() -> None:
 
     migrated = migrate_document(document)
 
-    assert migrated["schema_version"] == 2
+    assert migrated["schema_version"] == 3
     assert "global_style" not in migrated
     assert migrated["styles"][0]["name"] == "Default"
     assert migrated["styles"][0]["prompt"] == "Ink wash"
@@ -135,3 +135,30 @@ def test_v1_document_migrates_card_content_into_revisions() -> None:
     assert revision["background"]["type"] == "imported"
     assert revision["background"]["id"] == str(revision_id)
     assert "name" not in revision
+
+
+def test_v2_document_drops_retired_hotspot_generation_provenance() -> None:
+    document = {
+        "schema_version": 2,
+        "cards": [
+            {
+                "revisions": [
+                    {
+                        "hotspot_set": {
+                            "interactions": [],
+                            "generation_provenance": {
+                                "model_identifier": "qwen",
+                            },
+                        }
+                    }
+                ]
+            }
+        ],
+    }
+
+    migrated = migrate_document(document)
+
+    assert migrated["schema_version"] == 3
+    assert migrated["cards"][0]["revisions"][0]["hotspot_set"] == {
+        "interactions": []
+    }

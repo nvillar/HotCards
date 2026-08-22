@@ -19,10 +19,7 @@ from hypergen.evaluation.contracts import SafeCaseId
 from hypergen.evaluation.hotspots import (
     HUMAN_RUBRIC_FIELDS as HOTSPOT_RUBRIC_FIELDS,
 )
-from hypergen.evaluation.hotspots import (
-    ExpectedHotspot,
-    _success_record,
-)
+from hypergen.evaluation.hotspots import HotspotEvaluationCase, _success_record
 from hypergen.evaluation.images import HUMAN_RUBRIC_FIELDS as IMAGE_RUBRIC_FIELDS
 from hypergen.evaluation.manifest import (
     EnvironmentProvider,
@@ -35,14 +32,14 @@ from hypergen.evaluation.manifest import (
 from hypergen.evaluation.reports import render_reports, render_reports_checked
 from hypergen.generation.errors import ModelResponseError
 from hypergen.generation.hotspot_prompts import (
-    HOTSPOT_PROMPT_VERSION,
-    HOTSPOT_SCHEMA_VERSION,
-    CardCatalogueEntry,
-    HotspotGenerationRequest,
-    HotspotModelOutput,
-    OllamaHotspotGenerator,
-    build_hotspot_prompt,
-    build_hotspot_response_schema,
+    HOTSPOT_REMAP_PROMPT_VERSION,
+    HOTSPOT_REMAP_SCHEMA_VERSION,
+    HotspotRemapModelOutput,
+    HotspotRemapRequest,
+    OllamaHotspotRemapper,
+    RemapHotspotInput,
+    build_hotspot_remap_prompt,
+    build_hotspot_remap_schema,
 )
 from hypergen.generation.image_prompts import IMAGE_PROMPT_VERSION, compose_image_prompt
 from hypergen.generation.mflux_generator import (
@@ -67,9 +64,7 @@ class E2EEvaluationCase(DomainModel):
     case_version: Literal["e2e-case-v2"] = E2E_CASE_VERSION
     case_id: SafeCaseId
     inputs: ImageGenerationInputs
-    interaction_description: NonEmptyString
-    card_catalogue: tuple[CardCatalogueEntry, ...]
-    expected_hotspots: tuple[ExpectedHotspot, ...] = Field(min_length=1)
+    hotspots: tuple[RemapHotspotInput, ...] = Field(min_length=1)
     provenance: NonEmptyString
     reuse_terms: NonEmptyString
 
@@ -129,7 +124,7 @@ def _failure_stage(name: str, error: BaseException, elapsed: float) -> dict[str,
     rubric = None
     if name == "image_generation":
         rubric = {field: None for field in IMAGE_RUBRIC_FIELDS}
-    elif name == "hotspot_generation":
+    elif name == "hotspot_remap":
         rubric = {field: None for field in HOTSPOT_RUBRIC_FIELDS}
     return {
         "name": name,
@@ -285,15 +280,14 @@ def _execute_e2e(
             _write_result(settings.output_dir, result)
             lifecycle.complete_stage(f"{case.case_id}:{model}:{stage_name}")
 
-            stage_name = "hotspot_generation"
+            stage_name = "hotspot_remap"
             lifecycle.set_stage(f"{case.case_id}:{model}:{stage_name}")
             started = perf_counter()
             try:
-                hotspots = OllamaHotspotGenerator(runtime).generate(
-                    HotspotGenerationRequest(
+                hotspots = OllamaHotspotRemapper(runtime).remap(
+                    HotspotRemapRequest(
                         image_path=image_path,
-                        interaction_description=case.interaction_description,
-                        card_catalogue=case.card_catalogue,
+                        hotspots=case.hotspots,
                         coordinate_extent=settings.coordinate_extent,
                     )
                 )
@@ -307,20 +301,24 @@ def _execute_e2e(
                 )
                 _write_result(settings.output_dir, result)
                 continue
-            (raw_case_dir / "hotspots.json").write_text(hotspots.raw_response, encoding="utf-8")
-            scored = _success_record(  # type: ignore[arg-type]
-                case,
-                hotspots,
-                extent=settings.coordinate_extent,
+            (raw_case_dir / "hotspots.json").write_text(
+                json.dumps(list(hotspots.raw_responses), indent=2),
+                encoding="utf-8",
             )
-            candidate["hotspot_proposals"] = hotspots.model_dump(
-                mode="json", exclude={"raw_response"}
-            )["proposals"]
+            scored = _success_record(
+                HotspotEvaluationCase(
+                    case_id=case.case_id,
+                    image_path=image_path.name,
+                    hotspots=case.hotspots,
+                ),
+                hotspots,
+            )
+            candidate["hotspot_proposals"] = scored["result"]["proposals"]  # type: ignore[index]
             candidate["stages"].append(  # type: ignore[union-attr]
                 {
                     "name": stage_name,
                     "status": "success",
-                    "elapsed_seconds": hotspots.duration_seconds,
+                    "elapsed_seconds": hotspots.provenance.duration_seconds,
                     "completed_at": datetime.now(UTC).isoformat(),
                     **scored,
                     "human_rubric": candidate["hotspot_human_rubric"],
@@ -369,17 +367,17 @@ def run_e2e_evaluation(
                 ),
             },
             "hotspot_prompt": {
-                "version": HOTSPOT_PROMPT_VERSION,
+                "version": HOTSPOT_REMAP_PROMPT_VERSION,
                 "sha256": contract_digest(
-                    HOTSPOT_PROMPT_VERSION,
-                    inspect.getsource(build_hotspot_prompt),
+                    HOTSPOT_REMAP_PROMPT_VERSION,
+                    inspect.getsource(build_hotspot_remap_prompt),
                 ),
             },
             "hotspot_schema": {
-                "version": HOTSPOT_SCHEMA_VERSION,
+                "version": HOTSPOT_REMAP_SCHEMA_VERSION,
                 "sha256": contract_digest(
-                    HotspotModelOutput.model_json_schema(),
-                    inspect.getsource(build_hotspot_response_schema),
+                    HotspotRemapModelOutput.model_json_schema(),
+                    inspect.getsource(build_hotspot_remap_schema),
                 ),
             },
             "case": {

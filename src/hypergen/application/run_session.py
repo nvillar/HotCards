@@ -79,17 +79,10 @@ class RunSession:
         if card is None:
             self._warning = "The current card is no longer available."
             return self.state
-        revision = next(
-            (
-                revision
-                for revision in card.image_revisions
-                if revision.id == card.active_revision_id
-            ),
-            None,
-        )
+        revision = card.active_revision
         interactions = (
             revision.hotspot_set.interactions
-            if revision is not None and revision.hotspot_set is not None
+            if revision.hotspot_set is not None
             else ()
         )
         interaction = next(

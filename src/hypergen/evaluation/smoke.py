@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 import shutil
 from dataclasses import asdict
 from datetime import UTC, datetime
@@ -28,14 +29,14 @@ from hypergen.evaluation.reports import (
 )
 from hypergen.generation.errors import GenerationError
 from hypergen.generation.hotspot_prompts import (
-    HOTSPOT_PROMPT_VERSION,
-    HOTSPOT_SCHEMA_VERSION,
-    CardCatalogueEntry,
-    HotspotGenerationRequest,
-    HotspotModelOutput,
-    OllamaHotspotGenerator,
-    build_hotspot_prompt,
-    build_hotspot_response_schema,
+    HOTSPOT_REMAP_PROMPT_VERSION,
+    HOTSPOT_REMAP_SCHEMA_VERSION,
+    HotspotRemapModelOutput,
+    HotspotRemapRequest,
+    OllamaHotspotRemapper,
+    RemapHotspotInput,
+    build_hotspot_remap_prompt,
+    build_hotspot_remap_schema,
 )
 from hypergen.generation.image_prompts import IMAGE_PROMPT_VERSION, compose_image_prompt
 from hypergen.generation.mflux_generator import (
@@ -98,12 +99,12 @@ def _collect_hotspot_warnings(result: dict[str, object]) -> list[str]:
     stages = result.get("stages")
     if not isinstance(stages, dict):
         return []
-    hotspot_generation = stages.get("hotspot_generation")
-    if not isinstance(hotspot_generation, dict):
+    hotspot_remap = stages.get("hotspot_remap")
+    if not isinstance(hotspot_remap, dict):
         return []
     warnings: set[str] = set()
     for phase in ("cold", "warm"):
-        record = hotspot_generation.get(phase)
+        record = hotspot_remap.get(phase)
         if isinstance(record, dict):
             warnings.update(record.get("warnings", []))
     return sorted(warnings)
@@ -131,13 +132,13 @@ def run_smoke(
                 ),
             },
             "hotspot_prompt": {
-                "version": HOTSPOT_PROMPT_VERSION,
-                "schema_version": HOTSPOT_SCHEMA_VERSION,
+                "version": HOTSPOT_REMAP_PROMPT_VERSION,
+                "schema_version": HOTSPOT_REMAP_SCHEMA_VERSION,
                 "sha256": contract_digest(
-                    HOTSPOT_PROMPT_VERSION,
-                    inspect.getsource(build_hotspot_prompt),
-                    HotspotModelOutput.model_json_schema(),
-                    inspect.getsource(build_hotspot_response_schema),
+                    HOTSPOT_REMAP_PROMPT_VERSION,
+                    inspect.getsource(build_hotspot_remap_prompt),
+                    HotspotRemapModelOutput.model_json_schema(),
+                    inspect.getsource(build_hotspot_remap_schema),
                 ),
             },
         },
@@ -205,15 +206,15 @@ def run_smoke(
         runtime.unload_model()
         lifecycle.complete_stage(stage)
         inputs = ImageGenerationInputs(
-            scene_description=(
+            description=(
                 "A quiet stone castle courtyard at dusk with an arched wooden gate, "
                 "a red travel chest, and a leafy tree."
             ),
-            global_style="Restrained storybook ink and watercolor illustration.",
-            card_style="Cool twilight shadows with warm lantern light.",
-        )
-        interaction_description = (
-            "The gate leads to the moonlit garden. The travel chest opens the treasure room."
+            style_name="Twilight Storybook",
+            style_prompt=(
+                "Restrained storybook ink and watercolor illustration with "
+                "cool twilight shadows and warm lantern light."
+            ),
         )
         render_prompt = compose_image_prompt(inputs)
         result["render_prompt"] = render_prompt
@@ -257,41 +258,44 @@ def run_smoke(
         _write_result(settings.output_dir, result)
         lifecycle.complete_stage(stage)
 
-        stage = "hotspot_generation_setup"
+        stage = "hotspot_remap_setup"
         lifecycle.set_stage(stage)
-        hotspot_request = HotspotGenerationRequest(
+        hotspot_request = HotspotRemapRequest(
             image_path=fixture_copy,
-            interaction_description=interaction_description,
-            card_catalogue=(
-                CardCatalogueEntry(
-                    token="C1",
-                    name="Moonlit Garden",
-                    description="A walled garden beneath the moon.",
+            hotspots=(
+                RemapHotspotInput(
+                    token="H1",
+                    label="Arched gate",
                 ),
-                CardCatalogueEntry(
-                    token="C2",
-                    name="Treasure Room",
-                    description="A small chamber filled with old maps and a brass coffer.",
+                RemapHotspotInput(
+                    token="H2",
+                    label="Red travel chest",
                 ),
             ),
             coordinate_extent=settings.coordinate_extent,
         )
-        hotspot_generator = OllamaHotspotGenerator(runtime)
+        hotspot_remapper = OllamaHotspotRemapper(runtime)
         lifecycle.complete_stage(stage)
-        stage = "hotspot_generation_cold"
+        stage = "hotspot_remap_cold"
         lifecycle.set_stage(stage)
-        hotspots_cold = hotspot_generator.generate(hotspot_request)
-        (raw_dir / "hotspots-cold.json").write_text(hotspots_cold.raw_response, encoding="utf-8")
-        result["stages"]["hotspot_generation"] = {  # type: ignore[index]
+        hotspots_cold = hotspot_remapper.remap(hotspot_request)
+        (raw_dir / "hotspots-cold.json").write_text(
+            json.dumps(list(hotspots_cold.raw_responses), indent=2),
+            encoding="utf-8",
+        )
+        result["stages"]["hotspot_remap"] = {  # type: ignore[index]
             "cold": hotspots_cold.model_dump(mode="json")
         }
         _write_result(settings.output_dir, result)
         lifecycle.complete_stage(stage)
-        stage = "hotspot_generation_warm"
+        stage = "hotspot_remap_warm"
         lifecycle.set_stage(stage)
-        hotspots_warm = hotspot_generator.generate(hotspot_request)
-        (raw_dir / "hotspots-warm.json").write_text(hotspots_warm.raw_response, encoding="utf-8")
-        result["stages"]["hotspot_generation"]["warm"] = hotspots_warm.model_dump(mode="json")  # type: ignore[index]
+        hotspots_warm = hotspot_remapper.remap(hotspot_request)
+        (raw_dir / "hotspots-warm.json").write_text(
+            json.dumps(list(hotspots_warm.raw_responses), indent=2),
+            encoding="utf-8",
+        )
+        result["stages"]["hotspot_remap"]["warm"] = hotspots_warm.model_dump(mode="json")  # type: ignore[index]
         _write_result(settings.output_dir, result)
         lifecycle.complete_stage(stage)
     except Exception as error:

@@ -43,7 +43,7 @@ from hypergen.domain.models import (
 
 
 class CardCanvas(QGraphicsView):
-    """Display one active image or candidate using stable document coordinates."""
+    """Display one active revision image using stable document coordinates."""
 
     interaction_selected = Signal(object)
     polygon_created = Signal(object, object)
@@ -52,6 +52,7 @@ class CardCanvas(QGraphicsView):
     interaction_deletion_requested = Signal(object)
     editing_error = Signal(str)
     interaction_activated = Signal(object)
+    empty_area_requested = Signal(object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -69,7 +70,7 @@ class CardCanvas(QGraphicsView):
         self._image_item: QGraphicsPixmapItem | None = None
         self._border_item: QGraphicsRectItem | None = None
         self._message_item: QGraphicsTextItem | None = None
-        self._current_image: tuple[Path, bool] | None = None
+        self._current_image: Path | None = None
         self._current_message: str | None = None
         self._hotspot_set: HotspotSet | None = None
         self._selected_interaction_id: UUID | None = None
@@ -99,9 +100,9 @@ class CardCanvas(QGraphicsView):
         self._current_message = None
         self.scene().setSceneRect(QRectF(0, 0, size.width, size.height))
 
-    def show_image(self, path: Path, *, candidate: bool = False) -> None:
+    def show_image(self, path: Path) -> None:
         """Render one decoded image across the logical canvas."""
-        image_key = (path.resolve(), candidate)
+        image_key = path.resolve()
         if image_key == self._current_image and self._image_item is not None:
             return
         pixmap = QPixmap(str(path))
@@ -119,12 +120,9 @@ class CardCanvas(QGraphicsView):
         self._image_item.setZValue(0)
         self._current_image = image_key
         self._current_message = None
-        border_color = QColor("#4da3ff") if candidate else QColor("#8a8f98")
         border = QGraphicsRectItem(self.scene().sceneRect())
-        pen = QPen(border_color, 3 if candidate else 1)
+        pen = QPen(QColor("#8a8f98"), 1)
         pen.setCosmetic(True)
-        if candidate:
-            pen.setStyle(Qt.PenStyle.DashLine)
         border.setPen(pen)
         self.scene().addItem(border)
         border.setZValue(1)
@@ -189,7 +187,12 @@ class CardCanvas(QGraphicsView):
         self._selected_vertex_index = None
         self._render_hotspots()
 
-    def begin_polygon(self, interaction_id: UUID | None = None) -> None:
+    def begin_polygon(
+        self,
+        interaction_id: UUID | None = None,
+        *,
+        initial_point: Point | None = None,
+    ) -> None:
         """Begin a new interaction polygon or another component."""
         if not self._editable or self._image_item is None:
             self.editing_error.emit("Apply a background before drawing hotspots.")
@@ -198,7 +201,11 @@ class CardCanvas(QGraphicsView):
             self.editing_error.emit("The selected hotspot no longer exists.")
             return
         self._drawing_interaction_id = interaction_id
-        self._draft_points = []
+        self._draft_points = (
+            [QPointF(initial_point.x, initial_point.y)]
+            if initial_point is not None
+            else []
+        )
         self._selected_polygon_index = None
         self._selected_vertex_index = None
         self._drag_kind = None
@@ -313,8 +320,14 @@ class CardCanvas(QGraphicsView):
             return
         hit = self._polygon_at(normalized)
         if hit is None:
-            self.interaction_selected.emit(None)
-            self.select_interaction(None)
+            point = Point(x=normalized.x(), y=normalized.y())
+            if self._selected_interaction_id is not None:
+                self.begin_polygon(
+                    self._selected_interaction_id,
+                    initial_point=point,
+                )
+            else:
+                self.empty_area_requested.emit(point)
             event.accept()
             return
         interaction_id, polygon_index = hit
@@ -691,10 +704,7 @@ class CardCanvas(QGraphicsView):
                 self._selected_vertex_index = None
                 self.polygon_changed.emit(interaction_id, polygon_index, changed)
             return
-        if len(interaction.polygons) == 1:
-            self.interaction_deletion_requested.emit(interaction_id)
-        else:
-            self.polygon_deletion_requested.emit(interaction_id, polygon_index)
+        self.polygon_deletion_requested.emit(interaction_id, polygon_index)
 
     def _vertex_at(self, viewport_point: QPoint) -> tuple[UUID, int, int] | None:
         interaction = self._interaction(self._selected_interaction_id)

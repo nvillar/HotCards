@@ -2,9 +2,9 @@
   "case_version": "image-case-v2",
   "case_id": "courtyard",
   "inputs": {
-    "scene_description": "A quiet stone castle courtyard at dusk with an arched wooden gate, a red travel chest, and a leafy tree.",
-    "global_style": "Restrained storybook ink and watercolor illustration.",
-    "card_style": "Restrained storybook ink and watercolor illustration with cool twilight shadows and warm lantern light."
+    "description": "A quiet stone castle courtyard at dusk with an arched wooden gate, a red travel chest, and a leafy tree.",
+    "style_name": "Twilight Storybook",
+    "style_prompt": "Restrained storybook ink and watercolor illustration with cool twilight shadows and warm lantern light."
   },
   "required_visual_elements": [
     "stone castle courtyard at dusk",

@@ -8,10 +8,10 @@ IMAGE_PROMPT_VERSION = "image-prompt-v2"
 
 
 def compose_image_prompt(inputs: ImageGenerationInputs) -> str:
-    """Join Scene and effective Style in a stable, inspectable order."""
+    """Join Description and selected Style in a stable, inspectable order."""
     prompt = "\n\n".join(
         part
-        for part in (inputs.scene_description, inputs.effective_style)
+        for part in (inputs.description, inputs.style_prompt)
         if part.strip()
     )
     if not prompt.strip():

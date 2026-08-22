@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal, Protocol
+from typing import Protocol
 from uuid import UUID, uuid4
 
 from hypergen.domain.models import (
@@ -20,8 +20,6 @@ from hypergen.domain.models import (
     Stack,
     UnresolvedCardReference,
 )
-
-CardTextField = Literal["scene_description"]
 
 
 class CommandError(ValueError):
@@ -245,26 +243,6 @@ class SetRunOverlayModeCommand:
 
 
 @dataclass(frozen=True, slots=True)
-class EditCardTextCommand:
-    """Compatibility command for editing the active revision Description."""
-
-    card_id: UUID
-    field: CardTextField
-    value: str
-
-    def apply(self, document: Stack) -> Stack:
-        if self.field != "scene_description":
-            raise CommandError(f"{self.field!r} is not an editable card text field")
-        card = document.cards[_card_index(document, self.card_id)]
-        assert card.active_revision_id is not None
-        return EditRevisionDescriptionCommand(
-            card_id=self.card_id,
-            revision_id=card.active_revision_id,
-            value=self.value,
-        ).apply(document)
-
-
-@dataclass(frozen=True, slots=True)
 class EditRevisionDescriptionCommand:
     """Commit one revision Description as one editing undo boundary."""
 
@@ -435,28 +413,7 @@ class DuplicateRevisionCommand:
 
 
 @dataclass(frozen=True, slots=True)
-class AddImageRevisionCommand:
-    """Compatibility command that appends one complete revision."""
-
-    card_id: UUID
-    revision: CardRevision
-
-    def apply(self, document: Stack) -> Stack:
-        card_index = _card_index(document, self.card_id)
-        card = document.cards[card_index]
-        if any(revision.id == self.revision.id for revision in card.revisions):
-            raise CommandError(f"revision {self.revision.id} already exists on card {card.id}")
-        card = card.model_copy(
-            update={
-                "revisions": (*card.revisions, self.revision.model_copy(deep=True)),
-                "active_revision_id": self.revision.id,
-            }
-        )
-        return validated_copy(_replace_card(document, card_index, card))
-
-
-@dataclass(frozen=True, slots=True)
-class DeleteImageRevisionCommand:
+class DeleteRevisionCommand:
     """Remove one revision and activate the nearest remaining revision."""
 
     card_id: UUID
@@ -811,23 +768,20 @@ class CreateCardAndResolveCommand:
 
 __all__ = [
     "ActivateRevisionCommand",
-    "AddImageRevisionCommand",
     "AddInteractionCommand",
     "AddPolygonCommand",
     "AddStyleCommand",
-    "CardTextField",
     "ChangeHotspotDestinationCommand",
     "CommandError",
     "CreateCardAndResolveCommand",
     "CreateCardCommand",
     "DeleteCardCommand",
     "DeleteInteractionCommand",
-    "DeleteImageRevisionCommand",
+    "DeleteRevisionCommand",
     "DeletePolygonCommand",
     "DeleteStyleCommand",
     "DocumentCommand",
     "DuplicateRevisionCommand",
-    "EditCardTextCommand",
     "EditGlobalStyleCommand",
     "EditRevisionDescriptionCommand",
     "EditStyleCommand",

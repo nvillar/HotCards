@@ -1,4 +1,4 @@
-"""Transient, identity-bound Description enrichment workflow."""
+"""Direct, identity-bound Description enrichment workflow."""
 
 from __future__ import annotations
 
@@ -11,10 +11,10 @@ from uuid import UUID, uuid4
 
 from PySide6.QtCore import QObject, Signal
 
-from hypergen.application.commands import EditCardTextCommand
+from hypergen.application.commands import EditRevisionDescriptionCommand
 from hypergen.application.document_controller import DocumentController
 from hypergen.application.workers import AdapterWorkers, WorkerOperation
-from hypergen.domain.models import Card, DomainModel, ImageRevision, Stack
+from hypergen.domain.models import Card, CardRevision, Stack
 from hypergen.generation.image_description import (
     ImageDescriptionRequest,
     ImageDescriptionResult,
@@ -58,38 +58,23 @@ def _default_describer_factory(settings: OllamaSettings) -> ImageDescriberProtoc
 class _EnrichmentTarget:
     stack_id: UUID
     card_id: UUID
-    source_scene: str
-    effective_style: str
-    active_revision_id: UUID | None = None
-    revision_id: UUID | None = None
-    revision_image_path: str | None = None
-    resolved_image_path: Path | None = None
-
-
-class SceneEnrichmentDraft(DomainModel):
-    """One reviewable rewrite kept outside the authoritative Stack."""
-
-    stack_id: UUID
-    card_id: UUID
-    source_scene: str
-    effective_style: str
-    active_revision_id: UUID | None = None
-    revision_id: UUID | None = None
-    revision_image_path: str | None = None
-    resolved_image_path: Path | None = None
-    enriched_scene: str
-    model_identifier: str
-    prompt_version: str
+    revision_id: UUID
+    source_description: str
+    style_id: UUID | None
+    style_prompt: str
+    background_id: UUID | None
+    background_path: str | None
+    resolved_image_path: Path | None
 
 
 class SceneEnrichmentWorkflow(QObject):
-    """Coordinate one review-first Description enrichment operation."""
+    """Enrich the active revision Description and apply it immediately."""
 
-    draft_changed = Signal()
     busy_changed = Signal(bool)
     progress_changed = Signal(str)
     failed = Signal(object)
     document_changed = Signal(object)
+    change_applied = Signal(str, object)
 
     def __init__(
         self,
@@ -109,15 +94,10 @@ class SceneEnrichmentWorkflow(QObject):
         self._image_path_resolver = image_path_resolver
         self._enricher_factory = enricher_factory
         self._describer_factory = describer_factory
-        self._draft: SceneEnrichmentDraft | None = None
         self._operation: WorkerOperation | None = None
         self._request_id: UUID | None = None
         self._target: _EnrichmentTarget | None = None
         self._busy = False
-
-    @property
-    def draft(self) -> SceneEnrichmentDraft | None:
-        return self._draft
 
     @property
     def busy(self) -> bool:
@@ -128,28 +108,26 @@ class SceneEnrichmentWorkflow(QObject):
             raise SceneEnrichmentWorkflowError(
                 "Description enrichment is already running"
             )
-        if self._draft is not None:
-            raise SceneEnrichmentWorkflowError(
-                "accept or discard the current enriched Description before starting another"
-            )
         document = self.controller.document
         card = self._card(document, card_id)
-        effective_style = (
-            card.card_style if card.card_style is not None else document.global_style
-        )
-        revision, image_path = self._readable_active_image(card)
-        if not card.scene_description.strip() and image_path is None:
+        revision = card.active_revision
+        style_prompt = self._style_prompt(document, revision)
+        image_path = self._readable_image(revision)
+        if not revision.description.strip() and image_path is None:
             raise SceneEnrichmentWorkflowError(
-                "enter a Description or apply a readable background before enriching it"
+                "enter a Description or add a readable image before enriching it"
             )
         target = _EnrichmentTarget(
             stack_id=document.id,
             card_id=card.id,
-            source_scene=card.scene_description,
-            effective_style=effective_style,
-            active_revision_id=card.active_revision_id,
-            revision_id=revision.id if revision is not None else None,
-            revision_image_path=revision.image_path if revision is not None else None,
+            revision_id=revision.id,
+            source_description=revision.description,
+            style_id=revision.style_id,
+            style_prompt=style_prompt,
+            background_id=(
+                revision.background.id if revision.background is not None else None
+            ),
+            background_path=revision.image_path,
             resolved_image_path=image_path,
         )
         settings = self._settings_provider()
@@ -157,7 +135,7 @@ class SceneEnrichmentWorkflow(QObject):
         self._request_id = request_id
         self._target = target
         if image_path is not None:
-            self._set_busy(True, "Describing background...")
+            self._set_busy(True, "Describing image...")
             operation = self.workers.run_ollama(
                 lambda: self._describer_factory(settings).describe(
                     ImageDescriptionRequest(image_path=image_path)
@@ -166,23 +144,30 @@ class SceneEnrichmentWorkflow(QObject):
             )
             self._operation = operation
             operation.succeeded.connect(
-                partial(
-                    self._description_succeeded,
-                    request_id,
-                    target,
-                    settings,
-                )
+                partial(self._description_succeeded, request_id, target, settings)
             )
             operation.failed.connect(
                 partial(
                     self._operation_failed,
                     request_id,
-                    "Background description failed",
+                    "Image description failed",
                 )
             )
             return operation
         self._set_busy(True, "Enriching Description...")
         return self._start_enrichment(request_id, target, settings)
+
+    def cancel(self) -> None:
+        if self._operation is not None and not self._operation.is_finished:
+            self._operation.cancel()
+        self._operation = None
+        self._request_id = None
+        self._target = None
+        if self._busy:
+            self._set_busy(False, "Description enrichment cancelled")
+
+    def close(self) -> None:
+        self.cancel()
 
     def _start_enrichment(
         self,
@@ -192,8 +177,8 @@ class SceneEnrichmentWorkflow(QObject):
         image_description: str | None = None,
     ) -> WorkerOperation:
         request = SceneEnrichmentRequest(
-            scene=target.source_scene,
-            effective_style=target.effective_style,
+            scene=target.source_description,
+            effective_style=target.style_prompt,
             image_description=image_description,
         )
         operation = self.workers.run_ollama(
@@ -213,64 +198,6 @@ class SceneEnrichmentWorkflow(QObject):
         )
         return operation
 
-    def apply(self, card_id: UUID, enriched_scene: str) -> Stack:
-        draft = self._draft
-        if draft is None or draft.card_id != card_id:
-            raise SceneEnrichmentWorkflowError(
-                "this card has no enriched Description to accept"
-            )
-        if not enriched_scene.strip():
-            raise SceneEnrichmentWorkflowError(
-                "the enriched Description must not be empty"
-            )
-        target = _EnrichmentTarget(
-            stack_id=draft.stack_id,
-            card_id=draft.card_id,
-            source_scene=draft.source_scene,
-            effective_style=draft.effective_style,
-            active_revision_id=draft.active_revision_id,
-            revision_id=draft.revision_id,
-            revision_image_path=draft.revision_image_path,
-            resolved_image_path=draft.resolved_image_path,
-        )
-        if not self._target_is_current(target):
-            self.discard()
-            raise SceneEnrichmentWorkflowError(
-                "the Description, Style, or background changed before the "
-                "enrichment was accepted"
-            )
-        changed = self.controller.execute(
-            EditCardTextCommand(
-                card_id=card_id,
-                field="scene_description",
-                value=enriched_scene,
-            )
-        )
-        self._clear_draft()
-        self.progress_changed.emit("Enriched Description accepted")
-        self.document_changed.emit(changed)
-        return changed
-
-    def discard(self) -> None:
-        if self._draft is None:
-            return
-        self._clear_draft()
-        self.progress_changed.emit("Enriched Description discarded")
-
-    def cancel(self) -> None:
-        if not self._busy and self._draft is None:
-            return
-        if self._operation is not None and not self._operation.is_finished:
-            self._operation.cancel()
-        self._operation = None
-        self._request_id = None
-        self._target = None
-        self._set_busy(False, "Description enrichment cancelled")
-        self.discard()
-
-    def close(self) -> None:
-        self.cancel()
-
     def _description_succeeded(
         self,
         request_id: UUID,
@@ -281,20 +208,14 @@ class SceneEnrichmentWorkflow(QObject):
         if request_id != self._request_id:
             return
         if not self._target_is_current(target):
-            self._finish_with_error(
-                SceneEnrichmentWorkflowError(
-                    "the stack, card, active revision, image, Description, or "
-                    "Style changed before background description completed"
-                ),
-                "Background description failed",
-            )
+            self._finish_with_error(self._stale_error(), "Image description failed")
             return
         if not isinstance(result, ImageDescriptionResult):
             self._finish_with_error(
                 SceneEnrichmentWorkflowError(
-                    "background description returned an unexpected result"
+                    "image description returned an unexpected result"
                 ),
-                "Background description failed",
+                "Image description failed",
             )
             return
         self.progress_changed.emit("Enriching Description...")
@@ -309,13 +230,7 @@ class SceneEnrichmentWorkflow(QObject):
         if request_id != self._request_id:
             return
         if not self._target_is_current(target):
-            self._finish_with_error(
-                SceneEnrichmentWorkflowError(
-                    "the stack, card, active revision, image, Description, or "
-                    "Style changed before enrichment completed"
-                ),
-                "Description enrichment failed",
-            )
+            self._finish_with_error(self._stale_error(), "Description enrichment failed")
             return
         if not isinstance(result, SceneEnrichmentResult):
             self._finish_with_error(
@@ -325,24 +240,22 @@ class SceneEnrichmentWorkflow(QObject):
                 "Description enrichment failed",
             )
             return
+        previous_token = self.controller.current_undo_token
+        changed = self.controller.execute(
+            EditRevisionDescriptionCommand(
+                card_id=target.card_id,
+                revision_id=target.revision_id,
+                value=result.scene,
+            )
+        )
         self._operation = None
         self._request_id = None
         self._target = None
-        self._set_busy(False, "Enriched Description ready for review")
-        self._draft = SceneEnrichmentDraft(
-            stack_id=target.stack_id,
-            card_id=target.card_id,
-            source_scene=target.source_scene,
-            effective_style=target.effective_style,
-            active_revision_id=target.active_revision_id,
-            revision_id=target.revision_id,
-            revision_image_path=target.revision_image_path,
-            resolved_image_path=target.resolved_image_path,
-            enriched_scene=result.scene,
-            model_identifier=result.model_identifier,
-            prompt_version=result.prompt_version,
-        )
-        self.draft_changed.emit()
+        self._set_busy(False, "Description enriched")
+        self.document_changed.emit(changed)
+        token = self.controller.current_undo_token
+        if token is not None and token != previous_token:
+            self.change_applied.emit("Description enriched", token)
 
     def _operation_failed(
         self,
@@ -360,10 +273,6 @@ class SceneEnrichmentWorkflow(QObject):
         self._set_busy(False, progress)
         self.failed.emit(failure)
 
-    def _clear_draft(self) -> None:
-        self._draft = None
-        self.draft_changed.emit()
-
     def _set_busy(self, busy: bool, progress: str) -> None:
         self._busy = busy
         self.busy_changed.emit(busy)
@@ -377,60 +286,42 @@ class SceneEnrichmentWorkflow(QObject):
             (candidate for candidate in document.cards if candidate.id == target.card_id),
             None,
         )
-        if card is None or card.scene_description != target.source_scene:
+        if card is None or card.active_revision_id != target.revision_id:
             return False
-        effective_style = (
-            card.card_style if card.card_style is not None else document.global_style
-        )
-        if effective_style != target.effective_style:
-            return False
-        if card.active_revision_id != target.active_revision_id:
-            return False
-        if target.revision_id is None:
-            return True
-        if card.active_revision_id != target.revision_id:
-            return False
-        revision = next(
-            (
-                candidate
-                for candidate in card.image_revisions
-                if candidate.id == target.revision_id
-            ),
-            None,
-        )
+        revision = card.active_revision
         if (
-            revision is None
-            or revision.image_path != target.revision_image_path
-            or self._image_path_resolver is None
+            revision.description != target.source_description
+            or revision.style_id != target.style_id
+            or self._style_prompt(document, revision) != target.style_prompt
+            or revision.image_path != target.background_path
+            or (
+                revision.background.id
+                if revision.background is not None
+                else None
+            )
+            != target.background_id
         ):
             return False
-        image_path = self._image_path_resolver(revision.image_path)
-        return (
-            image_path == target.resolved_image_path
-            and image_path is not None
-            and image_path.is_file()
-        )
+        if target.resolved_image_path is None:
+            return True
+        image_path = self._readable_image(revision)
+        return image_path == target.resolved_image_path
 
-    def _readable_active_image(
-        self,
-        card: Card,
-    ) -> tuple[ImageRevision | None, Path | None]:
-        if self._image_path_resolver is None:
-            return None, None
-        revision = next(
-            (
-                candidate
-                for candidate in card.image_revisions
-                if candidate.id == card.active_revision_id
-            ),
-            None,
-        )
-        if revision is None:
-            return None, None
+    def _readable_image(self, revision: CardRevision) -> Path | None:
+        if revision.image_path is None or self._image_path_resolver is None:
+            return None
         image_path = self._image_path_resolver(revision.image_path)
         if image_path is None or not image_path.is_file():
-            return None, None
-        return revision, image_path
+            return None
+        return image_path
+
+    @staticmethod
+    def _style_prompt(document: Stack, revision: CardRevision) -> str:
+        style = next(
+            (style for style in document.styles if style.id == revision.style_id),
+            None,
+        )
+        return style.prompt if style is not None else ""
 
     @staticmethod
     def _card(document: Stack, card_id: UUID) -> Card:
@@ -442,15 +333,21 @@ class SceneEnrichmentWorkflow(QObject):
             raise SceneEnrichmentWorkflowError(f"card {card_id} no longer exists")
         return card
 
+    @staticmethod
+    def _stale_error() -> SceneEnrichmentWorkflowError:
+        return SceneEnrichmentWorkflowError(
+            "the stack, card, revision, image, Description, or Style changed "
+            "before enrichment completed"
+        )
+
 
 __all__ = [
-    "OllamaSettingsProvider",
     "ImageDescriberFactory",
     "ImageDescriberProtocol",
     "ImagePathResolver",
+    "OllamaSettingsProvider",
     "SceneEnricherFactory",
     "SceneEnricherProtocol",
-    "SceneEnrichmentDraft",
     "SceneEnrichmentWorkflow",
     "SceneEnrichmentWorkflowError",
 ]
