@@ -209,7 +209,7 @@ def test_unlocated_subject_returns_actionable_reconciliation_warning(
 
     warning = result.reconciliation_warnings[0]
     assert warning.label == "Hidden gate"
-    assert "Edit Scene and regenerate" in warning.message
+    assert "Edit Description and regenerate" in warning.message
     assert "draw a manual hotspot" in warning.message
     assert "adjust/remove the interaction" in warning.message
 

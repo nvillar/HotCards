@@ -184,7 +184,7 @@ class HotspotReconciliationWarning(DomainModel):
     def message(self) -> str:
         return (
             f'Could not locate "{self.label}" in the image: {self.reason}. '
-            "Edit Scene and regenerate the background, draw a manual hotspot, "
+            "Edit Description and regenerate the background, draw a manual hotspot, "
             "or adjust/remove the interaction."
         )
 

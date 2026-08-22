@@ -15,7 +15,9 @@ def compose_image_prompt(inputs: ImageGenerationInputs) -> str:
         if part.strip()
     )
     if not prompt.strip():
-        raise ValueError("enter a Scene or Style before generating a background")
+        raise ValueError(
+            "enter a Description or Style before generating a background"
+        )
     return prompt
 
 

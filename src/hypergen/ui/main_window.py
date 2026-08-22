@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
     QPushButton,
@@ -41,6 +42,7 @@ from hypergen.application.commands import (
     DeletePolygonCommand,
     DocumentCommand,
     EditCardTextCommand,
+    RenameCardCommand,
     ReplacePolygonCommand,
     SetRunOverlayModeCommand,
 )
@@ -288,9 +290,11 @@ class MainWindow(QMainWindow):
         card_canvas = QWidget()
         card_canvas.setObjectName("cardCanvasPanel")
         canvas_layout = QVBoxLayout(card_canvas)
-        self.canvas_card_name = QLabel()
+        self.canvas_card_name = QLineEdit()
         self.canvas_card_name.setObjectName("canvasCardName")
         self.canvas_card_name.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.canvas_card_name.setPlaceholderText("Card name")
+        self.canvas_card_name.setAccessibleName("Card name")
         canvas_layout.addWidget(self.canvas_card_name)
         self.card_canvas = CardCanvas()
         canvas_layout.addWidget(self.card_canvas, 1)
@@ -305,6 +309,9 @@ class MainWindow(QMainWindow):
         canvas_layout.addLayout(self.canvas_fit_controls)
         self.canvas_pages.addWidget(card_canvas)
         self.fit_canvas_button.clicked.connect(self.card_canvas.fit_to_window)
+        self.canvas_card_name.editingFinished.connect(
+            self._commit_canvas_card_name
+        )
 
         self.inspector = Inspector(self.controller)
         self.inspector.document_changed.connect(self.render_document)
@@ -596,11 +603,44 @@ class MainWindow(QMainWindow):
             self.card_sidebar.select_card(self._selected_card_id)
         self.render_document()
 
+    def _commit_canvas_card_name(self) -> bool:
+        if self._rendering or self._selected_card_id is None or self._is_running:
+            return True
+        card = next(
+            (
+                candidate
+                for candidate in self.controller.document.cards
+                if candidate.id == self._selected_card_id
+            ),
+            None,
+        )
+        if card is None:
+            return True
+        name = self.canvas_card_name.text()
+        if name == card.name:
+            return True
+        try:
+            changed = self.controller.execute(
+                RenameCardCommand(card_id=card.id, name=name)
+            )
+        except (CommandError, ValidationError) as error:
+            self.inspector.set_validation_error(str(error))
+            self.canvas_card_name.setText(card.name)
+            return False
+        self.inspector.set_validation_error("")
+        self.render_document(changed)
+        return True
+
+    def _commit_authoring_metadata(self) -> bool:
+        if not self._commit_canvas_card_name():
+            return False
+        return self.inspector.commit_card_metadata()
+
     def new_stack(self) -> None:
         """Create and bind a new stack before exposing its initial card."""
         if self.document_session is None:
             return
-        self.inspector.commit_card_metadata()
+        self._commit_authoring_metadata()
         dialog = NewStackDialog(self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
@@ -630,7 +670,7 @@ class MainWindow(QMainWindow):
         """Open a validated bundle without replacing the current session on failure."""
         if self.document_session is None:
             return
-        self.inspector.commit_card_metadata()
+        self._commit_authoring_metadata()
         selected_path = QFileDialog.getExistingDirectory(
             self,
             "Open HyperGen Stack",
@@ -654,7 +694,7 @@ class MainWindow(QMainWindow):
         """Flush accepted mutations and keep a failed save visible."""
         if self.document_session is None:
             return True
-        self.inspector.commit_card_metadata()
+        self._commit_authoring_metadata()
         saved = self.document_session.flush()
         if not saved:
             self._show_document_error(
@@ -667,7 +707,7 @@ class MainWindow(QMainWindow):
         """Clone the current bound bundle and rebind future autosaves."""
         if self.document_session is None or self.document_session.store is None:
             return
-        self.inspector.commit_card_metadata()
+        self._commit_authoring_metadata()
         selected_path, _filter = QFileDialog.getSaveFileName(
             self,
             "Save HyperGen Stack As",
@@ -868,7 +908,7 @@ class MainWindow(QMainWindow):
         card_id = self._selected_card_id
         if workflow is None or card_id is None:
             return
-        if not self.inspector.commit_card_metadata():
+        if not self._commit_authoring_metadata():
             return
         replacing_draft = workflow.draft_for(card_id) is not None
         if replacing_draft and not self._confirm_draft_replacement():
@@ -881,7 +921,7 @@ class MainWindow(QMainWindow):
 
     def _enrich_scene(self) -> None:
         card_id = self._selected_card_id
-        if card_id is None or not self.inspector.commit_card_metadata():
+        if card_id is None or not self._commit_authoring_metadata():
             return
         try:
             self.scene_enrichment_workflow.start(card_id)
@@ -914,14 +954,14 @@ class MainWindow(QMainWindow):
     def _scene_enrichment_failed(self, failure: object) -> None:
         detail = failure.message if isinstance(failure, WorkerFailure) else str(failure)
         self.inspector.set_scene_enrichment_status(
-            "Scene enrichment failed",
+            "Description enrichment failed",
             detail=detail,
         )
         self._update_generation_actions()
 
     def _describe_image(self) -> None:
         card_id = self._selected_card_id
-        if card_id is None or not self.inspector.commit_card_metadata():
+        if card_id is None or not self._commit_authoring_metadata():
             return
         try:
             self.image_description_workflow.start(card_id)
@@ -943,7 +983,7 @@ class MainWindow(QMainWindow):
 
     def _summarize_hotspots(self) -> None:
         card_id = self._selected_card_id
-        if card_id is None or not self.inspector.commit_card_metadata():
+        if card_id is None or not self._commit_authoring_metadata():
             return
         try:
             summary = compose_hotspot_intent(self.controller.document, card_id)
@@ -962,7 +1002,7 @@ class MainWindow(QMainWindow):
 
     def _generate_hotspots(self) -> None:
         card_id = self._selected_card_id
-        if card_id is None or not self.inspector.commit_card_metadata():
+        if card_id is None or not self._commit_authoring_metadata():
             return
         try:
             self.hotspot_generation_workflow.start(card_id)
@@ -1101,7 +1141,7 @@ class MainWindow(QMainWindow):
         card_id = self._selected_card_id
         if workflow is None or card_id is None:
             return
-        if not self.inspector.commit_card_metadata():
+        if not self._commit_authoring_metadata():
             return
         selected_path, _filter = QFileDialog.getOpenFileName(
             self,
@@ -1363,7 +1403,7 @@ class MainWindow(QMainWindow):
                 )
             )
         elif not has_render_prompt:
-            generate_reason = "Enter a Scene or Style before generating"
+            generate_reason = "Enter a Description or Style before generating"
         elif not mflux_available:
             generate_reason = self._action_diagnostic(AdapterKind.MFLUX)
         elif not ollama_available:
@@ -1406,17 +1446,17 @@ class MainWindow(QMainWindow):
             and not description_busy
             and enrichment_draft is None
         )
-        enrich_reason = "Ready to enrich Scene"
+        enrich_reason = "Ready to enrich Description"
         if not has_card:
             enrich_reason = "Select a card in a saved stack"
         elif not self.inspector.has_scene_input():
-            enrich_reason = "Enter a Scene before enriching"
+            enrich_reason = "Enter a Description before enriching"
         elif enrichment_busy:
-            enrich_reason = "Scene enrichment is running"
+            enrich_reason = "Description enrichment is running"
         elif description_busy:
             enrich_reason = "Image description is running"
         elif enrichment_draft is not None:
-            enrich_reason = "Accept or discard the current enriched Scene"
+            enrich_reason = "Accept or discard the current enriched Description"
         elif not ollama_available:
             enrich_reason = self._action_diagnostic(AdapterKind.OLLAMA)
         self.inspector.set_scene_enrichment_capabilities(
@@ -1463,7 +1503,7 @@ class MainWindow(QMainWindow):
             and not enrichment_busy
             and enrichment_draft is None
         )
-        describe_reason = "Replace Scene from the active image"
+        describe_reason = "Replace Description from the active image"
         if not has_card:
             describe_reason = "Select a card in a saved stack"
         elif not has_readable_active_image:
@@ -1471,7 +1511,9 @@ class MainWindow(QMainWindow):
         elif description_busy:
             describe_reason = "Image description is running"
         elif enrichment_busy or enrichment_draft is not None:
-            describe_reason = "Finish or discard the current Scene enrichment"
+            describe_reason = (
+                "Finish or discard the current Description enrichment"
+            )
         elif not ollama_available:
             describe_reason = self._action_diagnostic(AdapterKind.OLLAMA)
         self.inspector.set_image_description_capabilities(
@@ -1901,7 +1943,7 @@ class MainWindow(QMainWindow):
         if should_run == self._is_running:
             return
         if should_run:
-            self.inspector.commit_card_metadata()
+            self._commit_authoring_metadata()
             self.card_canvas.cancel_drawing()
             self._cancel_ai_activity_for_run()
             self._is_running = True
@@ -1948,6 +1990,7 @@ class MainWindow(QMainWindow):
 
     def _apply_mode_chrome(self) -> None:
         authoring = not self._is_running
+        self.canvas_card_name.setReadOnly(not authoring)
         self.card_sidebar.setVisible(authoring)
         self.inspector.setVisible(authoring)
         self.fit_canvas_button.setVisible(authoring)
@@ -2025,7 +2068,7 @@ class MainWindow(QMainWindow):
         if not self._confirm_generation_cancel("closing the stack"):
             event.ignore()
             return
-        self.inspector.commit_card_metadata()
+        self._commit_authoring_metadata()
         if self.document_session is not None and not self.document_session.flush():
             answer = QMessageBox.warning(
                 self,

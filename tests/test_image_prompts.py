@@ -30,7 +30,7 @@ def test_card_style_fully_replaces_global_style() -> None:
 
 
 def test_empty_scene_and_style_are_rejected() -> None:
-    with pytest.raises(ValueError, match="Scene or Style"):
+    with pytest.raises(ValueError, match="Description or Style"):
         compose_image_prompt(
             ImageGenerationInputs(scene_description="", global_style="")
         )

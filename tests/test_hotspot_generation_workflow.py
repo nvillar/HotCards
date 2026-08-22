@@ -198,7 +198,10 @@ def test_candidate_is_transient_and_request_uses_local_tokens(
         UnresolvedCardReference,
     )
     assert candidate.reconciliation_warnings[0].source_interaction_index == 2
-    assert any("Edit Scene and regenerate" in warning for warning in candidate.warnings)
+    assert any(
+        "Edit Description and regenerate" in warning
+        for warning in candidate.warnings
+    )
 
 
 def test_candidate_edits_apply_atomically_with_provenance_and_undo(

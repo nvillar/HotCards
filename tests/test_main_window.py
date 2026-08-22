@@ -371,7 +371,7 @@ def test_three_panes_render_loaded_stack_in_sidebar_and_inspector(
     assert window.pane_splitter.count() == 3
     assert window.card_sidebar.card_list.count() == 2
     assert window.card_sidebar.card_list.item(0).text() == "★  Foyer"
-    assert window.inspector.card_name_edit.text() == "Foyer"
+    assert window.canvas_card_name.text() == "Foyer"
     assert window.inspector.revision_combo.currentText() == "1. Imported"
     assert window.inspector.hotspot_list.item(0).text() == "Door (1 area)"
     assert window.card_sidebar.findChild(QObject, "addCardButton") is not None
@@ -403,7 +403,10 @@ def test_empty_document_presents_first_card_path(
     assert window.inspector.pages.currentIndex() == 1
     assert window.canvas_pages.currentIndex() == 1
     assert not window.inspector.generate_background_button.isEnabled()
-    assert "Scene or Style" in window.inspector.generate_background_button.toolTip()
+    assert (
+        "Description or Style"
+        in window.inspector.generate_background_button.toolTip()
+    )
     assert window.inspector.import_background_button.isEnabled()
     window.close()
 
@@ -603,8 +606,9 @@ def test_add_rename_and_start_card_mutations_use_controller(
     assert [card.name for card in controller.document.cards] == ["Foyer", "Hall", "Library"]
     assert window.card_sidebar.selected_card_id == created_id
     assert window.inspector.selected_card_id == created_id
-    window.inspector.card_name_edit.setText("Archive")
-    window.inspector.commit_card_metadata()
+    assert window.canvas_card_name.accessibleName() == "Card name"
+    window.canvas_card_name.setText("Archive")
+    window.canvas_card_name.editingFinished.emit()
     assert controller.document.cards[-1].name == "Archive"
     window.card_sidebar.start_button.click()
     assert controller.document.start_card_id == created_id
@@ -631,16 +635,16 @@ def test_drag_reorder_is_one_undoable_controller_command(
     window.close()
 
 
-def test_invalid_card_name_is_rejected_and_inspector_is_restored(
+def test_invalid_canvas_card_name_is_rejected_and_restored(
     application: QApplication,
 ) -> None:
     window, controller, _workers, _settings = make_window()
 
-    window.inspector.card_name_edit.clear()
-    window.inspector.commit_card_metadata()
+    window.canvas_card_name.clear()
+    window.canvas_card_name.editingFinished.emit()
 
     assert controller.document.cards[0].name == "Foyer"
-    assert window.inspector.card_name_edit.text() == "Foyer"
+    assert window.canvas_card_name.text() == "Foyer"
     assert not window.inspector.validation_error.isHidden()
     window.close()
 
@@ -653,7 +657,7 @@ def test_inspector_combines_card_and_background_authoring(
     tabs = window.inspector.inspector_tabs
     assert tabs.count() == 2
     assert [tabs.tabText(index) for index in range(2)] == [
-        "Card",
+        "Background",
         "Hotspots (1)",
     ]
     assert tabs.widget(0).isAncestorOf(window.inspector.scene_edit)
@@ -688,7 +692,7 @@ def test_scene_enrichment_requires_scene_and_available_ollama(
     window.inspector.scene_edit.clear()
     application.processEvents()
     assert not window.inspector.enrich_scene_button.isEnabled()
-    assert "Enter a Scene" in window.inspector.enrich_scene_button.toolTip()
+    assert "Enter a Description" in window.inspector.enrich_scene_button.toolTip()
     window.close()
 
 
@@ -715,8 +719,8 @@ def test_scene_enrichment_accept_discard_and_undo(
     window.inspector.enriched_scene_edit.setPlainText(
         "An edited richly detailed quiet entrance"
     )
-    window.inspector.card_name_edit.setText("Renamed Foyer")
-    window.inspector.card_name_edit.editingFinished.emit()
+    window.canvas_card_name.setText("Renamed Foyer")
+    window.canvas_card_name.editingFinished.emit()
     assert (
         window.inspector.enriched_scene_edit.toPlainText()
         == "An edited richly detailed quiet entrance"
@@ -912,7 +916,7 @@ def test_generation_aborts_when_pending_metadata_is_invalid(
     window._availability[AdapterKind.MFLUX] = True
     window._availability[AdapterKind.OLLAMA] = True
     window.inspector.scene_edit.setPlainText("New scene")
-    window.inspector.card_name_edit.clear()
+    window.canvas_card_name.clear()
     application.processEvents()
 
     assert window.inspector.generate_background_button.isEnabled()
@@ -946,7 +950,7 @@ def test_background_draft_is_contextual_and_previews_on_canvas(
     workflow.set_draft(draft)
 
     assert not window.inspector.draft_widget.isHidden()
-    assert window.inspector.inspector_tabs.tabText(0) == "Card • Review"
+    assert window.inspector.inspector_tabs.tabText(0) == "Background • Review"
     assert window.inspector.generate_background_button.text() == "Generate Background"
     assert window.inspector.draft_widget.frameShape() == QFrame.Shape.StyledPanel
     assert window.inspector.draft_widget.accessibleName() == "Review required"
@@ -1193,7 +1197,7 @@ def test_generated_hotspot_candidate_reuses_editor_and_applies_atomically(
     assert window.card_canvas._hotspot_set == candidate.hotspot_set
     assert controller.document.cards[0].image_revisions[0].hotspot_set == original
     warning = window.inspector.hotspot_candidate_warnings.text()
-    assert "Edit Scene and regenerate" in warning
+    assert "Edit Description and regenerate" in warning
     assert "draw a manual hotspot" in warning
     assert "adjust/remove the interaction" in warning
     window.inspector.dismiss_candidate_warnings_button.click()
@@ -1678,6 +1682,7 @@ def test_toolbar_switches_between_authoring_and_run_controls(
     assert window.restart_action.isVisible()
     assert window.card_sidebar.isHidden()
     assert window.inspector.isHidden()
+    assert window.canvas_card_name.isReadOnly()
     assert not window.overlay_selector.isHidden()
     assert window.check_services_button.isHidden()
     assert "unavailable" in window.run_status_label.text()
@@ -1686,6 +1691,7 @@ def test_toolbar_switches_between_authoring_and_run_controls(
     window.mode_selector.setCurrentText("Author")
     assert not window.card_sidebar.isHidden()
     assert not window.inspector.isHidden()
+    assert not window.canvas_card_name.isReadOnly()
     assert window.overlay_selector.isHidden()
     assert len(workers.ollama_checks) == 1
     assert len(workers.mflux_checks) == 1

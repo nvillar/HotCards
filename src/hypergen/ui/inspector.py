@@ -11,7 +11,6 @@ from PySide6.QtGui import QFocusEvent
 from PySide6.QtWidgets import (
     QButtonGroup,
     QComboBox,
-    QFormLayout,
     QFrame,
     QHBoxLayout,
     QInputDialog,
@@ -41,7 +40,6 @@ from hypergen.application.commands import (
     DocumentCommand,
     EditCardTextCommand,
     EditGlobalStyleCommand,
-    RenameCardCommand,
     RenameInteractionCommand,
     ReorderHotspotCommand,
 )
@@ -207,9 +205,6 @@ class Inspector(QWidget):
         self.setObjectName("inspector")
         self.setMinimumWidth(300)
 
-        heading = QLabel("Inspector")
-        heading.setObjectName("inspectorHeading")
-
         self.inspector_tabs = QTabWidget()
         self.inspector_tabs.setObjectName("inspectorTabs")
 
@@ -221,13 +216,8 @@ class Inspector(QWidget):
         card_page.setObjectName("cardInspectorContent")
         card_layout = QVBoxLayout(card_page)
         self.card_layout = card_layout
-        self.card_name_edit = QLineEdit()
-        self.card_name_edit.setObjectName("cardNameEdit")
-        name_form = QFormLayout()
-        name_form.addRow("Name", self.card_name_edit)
-        card_layout.addLayout(name_form)
         scene_heading = QHBoxLayout()
-        self.scene_heading = _section_heading("Scene")
+        self.scene_heading = _section_heading("Description")
         scene_heading.addWidget(self.scene_heading)
         scene_heading.addStretch(1)
         card_layout.addLayout(scene_heading)
@@ -250,7 +240,7 @@ class Inspector(QWidget):
         self.scene_enrichment_widget.setObjectName("sceneEnrichmentReview")
         enrichment_layout = QVBoxLayout(self.scene_enrichment_widget)
         enrichment_layout.setContentsMargins(0, 4, 0, 4)
-        enrichment_layout.addWidget(_section_heading("Enriched Scene"))
+        enrichment_layout.addWidget(_section_heading("Enriched Description"))
         self.enriched_scene_edit = QPlainTextEdit()
         self.enriched_scene_edit.setObjectName("enrichedSceneEdit")
         self.enriched_scene_edit.setMaximumHeight(150)
@@ -384,7 +374,7 @@ class Inspector(QWidget):
         card_layout.addWidget(self.import_background_button)
         card_layout.addStretch(1)
         card_scroll.setWidget(card_page)
-        self.inspector_tabs.addTab(card_scroll, "Card")
+        self.inspector_tabs.addTab(card_scroll, "Background")
 
         interactivity_page = QWidget()
         interactivity_page.setObjectName("interactivityInspectorTab")
@@ -571,7 +561,6 @@ class Inspector(QWidget):
 
         form_page = QWidget()
         form_layout = QVBoxLayout(form_page)
-        form_layout.addWidget(heading)
         form_layout.addWidget(self.inspector_tabs, 1)
         self.pages.addWidget(form_page)
 
@@ -579,7 +568,6 @@ class Inspector(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.pages)
 
-        self.card_name_edit.editingFinished.connect(self.commit_card_metadata)
         self.scene_edit.editing_finished.connect(self.commit_card_metadata)
         self.interactions_edit.editing_finished.connect(self.commit_card_metadata)
         self.style_edit.editing_finished.connect(self._commit_style_text)
@@ -657,7 +645,7 @@ class Inspector(QWidget):
             self.render_inputs_changed.emit()
 
     def has_render_prompt_input(self) -> bool:
-        """Return whether the visible Scene or effective Style can render."""
+        """Return whether the visible Description or effective Style can render."""
         return bool(
             self.selected_card_id is not None
             and (
@@ -667,7 +655,7 @@ class Inspector(QWidget):
         )
 
     def has_scene_input(self) -> bool:
-        """Return whether the visible Scene can be enriched."""
+        """Return whether the visible Description can be enriched."""
         return bool(
             self.selected_card_id is not None
             and self.scene_edit.toPlainText().strip()
@@ -684,7 +672,6 @@ class Inspector(QWidget):
             self.selected_card_id = card.id if card is not None else None
             if card is None:
                 self.pages.setCurrentIndex(0)
-                self.card_name_edit.clear()
                 self.scene_edit.clear()
                 self.interactions_edit.clear()
                 self.style_edit.clear()
@@ -697,7 +684,6 @@ class Inspector(QWidget):
                 self._update_tab_labels(0)
                 return
             self.pages.setCurrentIndex(1)
-            self.card_name_edit.setText(card.name)
             self.scene_edit.setPlainText(card.scene_description)
             self.interactions_edit.setPlainText(card.interaction_description)
             use_override = card.card_style is not None
@@ -725,10 +711,6 @@ class Inspector(QWidget):
         card = next(card for card in self.controller.document.cards if card.id == card_id)
         changed = self.controller.document
         try:
-            name = self.card_name_edit.text()
-            if name != card.name:
-                changed = self.controller.execute(RenameCardCommand(card_id=card_id, name=name))
-                card = next(card for card in changed.cards if card.id == card_id)
             field_values = (
                 ("scene_description", self.scene_edit.toPlainText()),
                 ("interaction_description", self.interactions_edit.toPlainText()),
@@ -830,6 +812,10 @@ class Inspector(QWidget):
 
     def set_background_status(self, message: str, *, detail: str = "") -> None:
         self.background_status_message.set_message(message, detail=detail)
+
+    def set_validation_error(self, message: str) -> None:
+        self.validation_error.setText(message)
+        self.validation_error.setVisible(bool(message))
 
     def set_scene_enrichment_capabilities(
         self,
@@ -1140,7 +1126,7 @@ class Inspector(QWidget):
     def _update_card_tab_label(self) -> None:
         self.inspector_tabs.setTabText(
             0,
-            "Card • Review" if self._has_background_draft else "Card",
+            "Background • Review" if self._has_background_draft else "Background",
         )
 
     def _revision_selected(self, index: int) -> None:

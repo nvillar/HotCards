@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtWidgets import QApplication, QFrame
+from PySide6.QtWidgets import QApplication, QFrame, QLabel
 
 from hypergen.application.document_controller import DocumentController
 from hypergen.domain.models import (
@@ -70,6 +70,9 @@ def test_card_tab_hides_revision_summary_and_collapses_details_and_style(
     inspector.render(controller.document, card.id)
 
     assert inspector.inspector_tabs.count() == 2
+    assert inspector.findChild(QLabel, "inspectorHeading") is None
+    assert not hasattr(inspector, "card_name_edit")
+    assert inspector.scene_heading.text() == "Description"
     assert inspector.revision_combo.currentText() == "1. Solar Expanse"
     assert not hasattr(inspector, "background_value")
     assert not hasattr(inspector, "revision_metadata")
@@ -236,7 +239,7 @@ def test_card_tab_uses_revision_edit_generation_hierarchy(
     inspector.close()
 
 
-def test_scene_actions_follow_text_without_redundant_start_control(
+def test_description_actions_follow_text_without_redundant_name_control(
     application: QApplication,
 ) -> None:
     card = Card(name="Card", scene_description="A scene")
