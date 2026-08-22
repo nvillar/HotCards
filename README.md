@@ -35,12 +35,17 @@ Description; otherwise it performs text-only enrichment.
 The Hotspots inspector is the sole source of interaction semantics. A new
 hotspot is persisted and selected immediately, even before it has an area;
 clicking empty canvas begins a polygon for the selected hotspot and creates one
-first when needed. Remap asks the local vision model only to relocate existing
-hotspots on the active image. It cannot add, delete, rename, reorder, or
-retarget them, and unmatched hotspots retain their previous geometry. Run mode
-supports deterministic hotspot navigation, Back/Restart history, and
-configurable overlays. Local AI services are checked automatically when Author
-mode is entered; Run mode starts no AI work.
+first when needed. Canvas editing uses hierarchical hotspot, area, and vertex
+selection: drag an area or vertex to move it, use the edge `+` or double-click
+an edge to add a vertex, press Delete to remove the selected vertex or area,
+and press Escape to step back through the selection. Context menus expose the
+same geometry actions, and successful edits offer a dismissible Undo. Remap
+asks the local vision model only to relocate existing hotspots on the active
+image. It cannot add, delete, rename, reorder, or retarget them, and unmatched
+hotspots retain their previous geometry. Run mode supports deterministic
+hotspot navigation, Back/Restart history, and configurable overlays. Local AI
+services are checked automatically when Author mode is entered; Run mode starts
+no AI work.
 
 ## Setup and run
 

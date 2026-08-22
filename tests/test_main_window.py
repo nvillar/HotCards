@@ -28,9 +28,14 @@ from hypergen.domain.models import (
     Card,
     CardRevision,
     GenerationStyle,
+    HotspotSet,
     ImportedBackground,
+    Interaction,
+    NavigateAction,
     Point,
+    Polygon,
     Stack,
+    UnresolvedCardReference,
 )
 from hypergen.ui.main_window import MainWindow
 from hypergen.ui.new_stack_dialog import NewStackDialog
@@ -415,6 +420,45 @@ def test_notification_undo_expires_after_another_command(
     assert window.inspector.undo_message.isHidden()
     window._undo_notification()
     assert controller.document.cards[0].name == "Second"
+
+
+def test_hotspot_geometry_change_shows_targeted_undo(
+    application: QApplication,
+) -> None:
+    interaction = Interaction(
+        label="Door",
+        action=NavigateAction(target=UnresolvedCardReference()),
+        polygons=(
+            Polygon(
+                points=(
+                    Point(x=0.1, y=0.1),
+                    Point(x=0.4, y=0.1),
+                    Point(x=0.2, y=0.4),
+                )
+            ),
+        ),
+    )
+    revision = CardRevision(
+        hotspot_set=HotspotSet(interactions=(interaction,))
+    )
+    card = Card(name="Card", revisions=(revision,))
+    window, controller, _workers, _background = _window(
+        Stack(name="Demo", cards=(card,))
+    )
+
+    window._delete_hotspot_polygon(interaction.id, 0)
+
+    changed = controller.document.cards[0].active_revision.hotspot_set
+    assert changed is not None
+    assert changed.interactions[0].polygons == ()
+    assert window.inspector.undo_message.label.text() == "Hotspot area deleted"
+    assert not window.inspector.undo_message.isHidden()
+
+    window._undo_notification()
+
+    restored = controller.document.cards[0].active_revision.hotspot_set
+    assert restored is not None
+    assert restored.interactions[0].polygons == interaction.polygons
 
 
 def test_empty_canvas_request_creates_and_selects_blank_hotspot(

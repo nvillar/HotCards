@@ -63,6 +63,10 @@ for live Ollama and MFLUX runs.
   background preserves its hotspots so the author can Remap them.
 - Hotspots may have no polygons. Area-less hotspots retain their label and
   destination in storage and are ignored by Run-mode hit testing.
+- Keep Author canvas selection hierarchical: a selected vertex belongs to a
+  selected polygon, which belongs to the selected hotspot. Inspector
+  synchronization and same-revision edits must not discard a valid more
+  specific selection.
 - Remap may return only polygons or an unlocated result for opaque,
   request-local tokens representing existing hotspots. It must preserve IDs,
   labels, destinations, actions, and order; invalid or missing geometry retains

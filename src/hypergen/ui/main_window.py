@@ -1417,6 +1417,7 @@ class MainWindow(QMainWindow):
             revision.hotspot_set,
             self.inspector.selected_interaction_id,
             editable=True,
+            context_id=revision.id,
         )
 
     def _resolve_revision_image_path(self, image_path: str) -> Path | None:
@@ -1437,6 +1438,20 @@ class MainWindow(QMainWindow):
             return
         card_id, revision_id, hotspot_set = context
         if isinstance(interaction_id, UUID):
+            interaction = next(
+                (
+                    interaction
+                    for interaction in hotspot_set.interactions
+                    if interaction.id == interaction_id
+                ),
+                None,
+            )
+            if interaction is None:
+                self.inspector.set_hotspot_error(
+                    "The hotspot being edited no longer exists."
+                )
+                self.render_document()
+                return
             command = AddPolygonCommand(
                 card_id=card_id,
                 revision_id=revision_id,
@@ -1444,6 +1459,7 @@ class MainWindow(QMainWindow):
                 polygon=polygon,
             )
             selected_id = interaction_id
+            selected_polygon_index = len(interaction.polygons)
         else:
             existing_labels = {
                 interaction.label.casefold()
@@ -1463,7 +1479,13 @@ class MainWindow(QMainWindow):
                 interaction=interaction,
             )
             selected_id = interaction.id
-        self._execute_hotspot_canvas_command(command, selected_id)
+            selected_polygon_index = 0
+        self._execute_hotspot_canvas_command(
+            command,
+            selected_id,
+            selected_polygon_index=selected_polygon_index,
+            undo_message="Hotspot area added",
+        )
 
     def _begin_implicit_hotspot_area(self, point: object) -> None:
         from hypergen.domain.models import Point
@@ -1524,6 +1546,7 @@ class MainWindow(QMainWindow):
                 polygon=polygon,
             ),
             interaction_id,
+            undo_message="Hotspot geometry updated",
         )
 
     def _delete_hotspot_polygon(
@@ -1543,6 +1566,7 @@ class MainWindow(QMainWindow):
                 polygon_index=polygon_index,
             ),
             interaction_id,
+            undo_message="Hotspot area deleted",
         )
 
     def _delete_hotspot_interaction(self, interaction_id: object) -> None:
@@ -1557,13 +1581,18 @@ class MainWindow(QMainWindow):
                 interaction_id=interaction_id,
             ),
             None,
+            undo_message="Hotspot deleted",
         )
 
     def _execute_hotspot_canvas_command(
         self,
         command: DocumentCommand,
         selected_interaction_id: UUID | None,
+        *,
+        selected_polygon_index: int | None = None,
+        undo_message: str | None = None,
     ) -> None:
+        previous_undo_token = self.controller.current_undo_token
         try:
             changed = self.controller.execute(command)
         except (CommandError, ValidationError) as error:
@@ -1574,6 +1603,21 @@ class MainWindow(QMainWindow):
         self.render_document(changed)
         self.inspector.select_interaction(selected_interaction_id)
         self.card_canvas.select_interaction(selected_interaction_id)
+        if (
+            selected_interaction_id is not None
+            and selected_polygon_index is not None
+        ):
+            self.card_canvas.select_polygon(
+                selected_interaction_id,
+                selected_polygon_index,
+            )
+        undo_token = self.controller.current_undo_token
+        if (
+            undo_message is not None
+            and undo_token is not None
+            and undo_token != previous_undo_token
+        ):
+            self._show_undo_notification(undo_message, undo_token)
 
     def _active_hotspot_context(
         self,
