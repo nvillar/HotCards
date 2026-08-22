@@ -77,6 +77,20 @@ def test_revision_naming_accepts_valid_plain_title_from_mlx_model(
     assert result.name == "Castle Moat Bridge Scene"
 
 
+def test_revision_naming_accepts_standalone_json_fence(tmp_path: Path) -> None:
+    image_path = tmp_path / "generated.png"
+    image_path.write_bytes(b"image")
+    client = FakeOllamaClient('```json\n{"name":"Moonlit Moat"}\n```')
+    runtime = OllamaRuntime(
+        OllamaSettings(model="qwen3.5:9b-mlx"),
+        client=client,  # type: ignore[arg-type]
+    )
+
+    result = OllamaRevisionNamer(runtime).name(request(image_path))
+
+    assert result.name == "Moonlit Moat"
+
+
 @pytest.mark.parametrize("name", ["Generated", "x" * 49])
 def test_revision_naming_rejects_invalid_name(
     tmp_path: Path,

@@ -28,8 +28,9 @@ from hypergen.domain.models import (
 )
 from hypergen.generation.errors import ModelResponseError
 from hypergen.generation.ollama_client import OllamaCallResult, OllamaRuntime
+from hypergen.generation.structured_output import structured_json_content
 
-HOTSPOT_PROMPT_VERSION = "hotspot-prompt-v2"
+HOTSPOT_PROMPT_VERSION = "hotspot-prompt-v3"
 HOTSPOT_SCHEMA_VERSION = "hotspot-schema-v2"
 UNRESOLVED_DESTINATION_TOKEN = "UNRESOLVED"
 MAX_INTERACTIONS = 4
@@ -224,11 +225,48 @@ def build_hotspot_prompt(request: HotspotGenerationRequest) -> str:
         "card_catalogue": catalogue,
         "coordinate_extent": request.coordinate_extent,
     }
+    example_destination = (
+        request.card_catalogue[0].token
+        if request.card_catalogue
+        else UNRESOLVED_DESTINATION_TOKEN
+    )
+    response_shape = {
+        "interactions": [
+            {
+                "source_interaction_index": 1,
+                "label": "short visible subject label",
+                "destination_token": example_destination,
+                "polygons": [
+                    {
+                        "points": [
+                            {"x": 100, "y": 100},
+                            {"x": 200, "y": 100},
+                            {"x": 150, "y": 200},
+                        ]
+                    }
+                ],
+            }
+        ],
+        "unlocated_interactions": [
+            {
+                "source_interaction_index": 2,
+                "label": "short missing subject label",
+                "reason": "concrete reason the subject cannot be located",
+            }
+        ],
+    }
     return f"""\
 Analyze the supplied card image and propose clickable polygon hotspots for the author's interaction
 description.
 
 Return JSON matching the supplied schema.
+- Use exactly the response keys and nesting shown below. Every field shown on an interaction is
+  required. The values are illustrative:
+{json.dumps(response_shape, ensure_ascii=False, indent=2)}
+- The geometry key must be "polygons", never "polygon_components".
+- Each polygon's "points" must be an array of objects with exactly one integer "x" and "y" field,
+  never a flat coordinate array.
+- Return an empty array for either top-level collection when it has no entries.
 - Use integer coordinates from 0 through {request.coordinate_extent}.
 - Use one interaction per semantic action and one or more polygon components per interaction.
 - The interaction description is authoritative. Return each described interaction exactly once.
@@ -356,7 +394,9 @@ def normalize_hotspot_response(
 ) -> HotspotGenerationResult:
     """Strictly parse and normalize one raw response using the production boundary."""
     try:
-        output = HotspotModelOutput.model_validate_json(call.content)
+        output = HotspotModelOutput.model_validate_json(
+            structured_json_content(call.content)
+        )
     except ValidationError as error:
         raise ModelResponseError(
             f"Ollama returned an invalid hotspot response for {request.schema_version}: {error}",

@@ -140,6 +140,37 @@ def test_hotspot_adapter_clamps_coordinates_and_preserves_warnings(tmp_path: Pat
     assert destination["enum"] == ["C1", "UNRESOLVED"]
 
 
+def test_hotspot_adapter_accepts_standalone_json_fence(tmp_path: Path) -> None:
+    image_path = tmp_path / "fixture.png"
+    image_path.write_bytes(b"fixture")
+    fenced = f"```json\n{hotspot_response()}\n```"
+    runtime = OllamaRuntime(
+        OllamaSettings(),
+        client=FakeOllamaClient([fenced]),
+    )
+
+    result = OllamaHotspotGenerator(runtime).generate(request(image_path))
+
+    assert result.proposals[0].label == "Gate"
+    assert result.raw_response == fenced
+
+
+def test_hotspot_adapter_rejects_json_fence_with_surrounding_prose(
+    tmp_path: Path,
+) -> None:
+    image_path = tmp_path / "fixture.png"
+    image_path.write_bytes(b"fixture")
+    runtime = OllamaRuntime(
+        OllamaSettings(),
+        client=FakeOllamaClient(
+            [f"Here is the result:\n```json\n{hotspot_response()}\n```"]
+        ),
+    )
+
+    with pytest.raises(ModelResponseError, match="invalid hotspot response"):
+        OllamaHotspotGenerator(runtime).generate(request(image_path))
+
+
 def test_unknown_request_token_becomes_unresolved_warning(tmp_path: Path) -> None:
     image_path = tmp_path / "fixture.png"
     image_path.write_bytes(b"fixture")

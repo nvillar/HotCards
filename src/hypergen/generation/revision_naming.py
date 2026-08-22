@@ -17,6 +17,7 @@ from hypergen.domain.models import (
 )
 from hypergen.generation.errors import ModelResponseError
 from hypergen.generation.ollama_client import OllamaRuntime
+from hypergen.generation.structured_output import structured_json_content
 
 REVISION_NAMING_PROMPT_VERSION = "revision-naming-v1"
 
@@ -123,7 +124,7 @@ class OllamaRevisionNamer:
             image_path=request.image_path,
         )
         try:
-            content = call.content.strip()
+            content = structured_json_content(call.content)
             output = (
                 RevisionNamingModelOutput.model_validate_json(content)
                 if content.startswith("{")

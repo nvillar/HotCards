@@ -114,7 +114,7 @@ def generated_result() -> HotspotGenerationResult:
         ),
         raw_response='{"interactions":[]}',
         model_identifier="qwen3.5:9b",
-        prompt_version="hotspot-prompt-v2",
+        prompt_version="hotspot-prompt-v3",
         schema_version="hotspot-schema-v2",
         duration_seconds=2.0,
     )

@@ -1,6 +1,6 @@
 {
   "contract_version": "hotspot-production-v2",
-  "prompt_version": "hotspot-prompt-v2",
+  "prompt_version": "hotspot-prompt-v3",
   "schema_version": "hotspot-schema-v2",
   "selected_model": "qwen3.5:9b",
   "selected_limits": {

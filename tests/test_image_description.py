@@ -64,3 +64,20 @@ def test_ollama_image_describer_uses_image_and_parses_scene(
     assert result.raw_response == content
     message = client.calls[0]["messages"][0]  # type: ignore[index]
     assert message["images"] == [image_path]  # type: ignore[index]
+
+
+def test_ollama_image_describer_accepts_standalone_json_fence(
+    tmp_path: Path,
+) -> None:
+    image_path = tmp_path / "image.png"
+    image_path.write_bytes(b"image")
+    client = FakeOllamaClient(
+        '```json\n{"scene":"A moonlit stone castle framed by pines"}\n```'
+    )
+    runtime = OllamaRuntime(OllamaSettings(), client=client)  # type: ignore[arg-type]
+
+    result = OllamaImageDescriber(runtime).describe(
+        ImageDescriptionRequest(image_path=image_path)
+    )
+
+    assert result.scene == "A moonlit stone castle framed by pines"

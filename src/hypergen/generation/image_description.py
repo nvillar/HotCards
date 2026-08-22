@@ -13,6 +13,7 @@ from hypergen.domain.models import (
 )
 from hypergen.generation.errors import ModelResponseError
 from hypergen.generation.ollama_client import OllamaRuntime
+from hypergen.generation.structured_output import structured_json_content
 
 IMAGE_DESCRIPTION_PROMPT_VERSION = "image-description-v1"
 
@@ -81,7 +82,9 @@ class OllamaImageDescriber:
             image_path=request.image_path,
         )
         try:
-            output = ImageDescriptionModelOutput.model_validate_json(call.content)
+            output = ImageDescriptionModelOutput.model_validate_json(
+                structured_json_content(call.content)
+            )
         except ValidationError as error:
             raise ModelResponseError(
                 "Ollama returned an invalid image description response for "

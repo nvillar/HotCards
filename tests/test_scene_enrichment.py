@@ -89,3 +89,16 @@ def test_ollama_scene_enricher_parses_structured_output() -> None:
     assert result.model_identifier == "qwen3.5:9b-mlx"
     assert result.total_duration_ns == 2_000_000
     assert client.messages[0]["role"] == "user"
+
+
+def test_ollama_scene_enricher_accepts_standalone_json_fence() -> None:
+    client = FakeOllamaClient(
+        '```json\n{"scene":"An ancient moonlit wood veiled in mist"}\n```'
+    )
+    runtime = OllamaRuntime(OllamaSettings(), client=client)  # type: ignore[arg-type]
+
+    result = OllamaSceneEnricher(runtime).enrich(
+        SceneEnrichmentRequest(scene="A mysterious wood")
+    )
+
+    assert result.scene == "An ancient moonlit wood veiled in mist"
