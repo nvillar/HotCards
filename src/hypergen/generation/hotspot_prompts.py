@@ -44,6 +44,7 @@ class HotspotRemapRequest(DomainModel):
     image_path: Path
     hotspots: tuple[RemapHotspotInput, ...] = Field(min_length=1)
     coordinate_extent: int = Field(default=DEFAULT_MODEL_COORDINATE_EXTENT, gt=0)
+    coordinate_grid_divisions: int | None = Field(default=None, ge=2, le=20)
     prompt_version: Literal[HOTSPOT_REMAP_PROMPT_VERSION] = (
         HOTSPOT_REMAP_PROMPT_VERSION
     )
@@ -157,6 +158,17 @@ def build_hotspot_remap_prompt(
             for hotspot in hotspots[1:]
         ],
     }
+    grid_guidance = "\n\n"
+    if request.coordinate_grid_divisions is not None:
+        grid_guidance = f"""
+- The image has a temporary {request.coordinate_grid_divisions} by \
+{request.coordinate_grid_divisions} measurement grid.
+- Cyan vertical lines mark x coordinates and magenta horizontal lines mark y coordinates.
+- Grid labels use the same 0 through {request.coordinate_extent} coordinate system as the response.
+- Ignore grid lines and labels as scene content; use them only to estimate vertex coordinates.
+- Fit polygons tightly to the visible subject with minimal surrounding padding.
+
+"""
     return f"""\
 Locate each supplied existing hotspot subject in the current card image.
 
@@ -172,9 +184,8 @@ Return JSON matching the supplied schema.
 - Use at most {MAX_COMPONENTS_PER_INTERACTION} polygon components and
   {MAX_POINTS_PER_COMPONENT} points per component.
 - Keep polygons simple and editable. Do not create holes.
-- If a subject cannot be located, return it in unlocated instead of inventing geometry.
-
-Prompt contract: {request.prompt_version}
+- If a subject cannot be located, return it in unlocated instead of inventing geometry.\
+{grid_guidance}Prompt contract: {request.prompt_version}
 Schema contract: {request.schema_version}
 Request:
 {json.dumps(payload, ensure_ascii=False, indent=2)}

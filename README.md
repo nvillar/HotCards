@@ -69,6 +69,14 @@ reports include contact sheets or annotated predictions. Report rendering is
 offline and never calls a model. The tracked default decision and evidence
 tradeoffs are in [`evals/DECISION.md`](evals/DECISION.md).
 
+Coordinate-grounding experiments can compare labeled grids and Ollama models
+against the authored polygons in any local stack revision:
+
+```sh
+uv run hypergen-eval remap-grid \
+  --stack "/path/to/Stack.hypergen" --card "Map" --revision 5
+```
+
 ## Architecture at a glance
 
 - `domain/` — in-memory stack model, geometry, validation.

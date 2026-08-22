@@ -114,6 +114,29 @@ def test_single_hotspot_prompt_example_returns_token_once(
     assert '"unlocated": []' in prompt
 
 
+def test_grid_prompt_explains_normalized_overlay(tmp_path: Path) -> None:
+    request = _request(tmp_path).model_copy(
+        update={"coordinate_grid_divisions": 10}
+    )
+
+    prompt = build_hotspot_remap_prompt(request, request.hotspots)
+
+    assert "temporary 10 by 10 measurement grid" in prompt
+    assert "Cyan vertical lines mark x coordinates" in prompt
+    assert "minimal surrounding padding" in prompt
+
+
+def test_no_grid_request_preserves_production_prompt_spacing(
+    tmp_path: Path,
+) -> None:
+    request = _request(tmp_path)
+
+    prompt = build_hotspot_remap_prompt(request, request.hotspots)
+
+    assert "inventing geometry.\n\nPrompt contract:" in prompt
+    assert "measurement grid" not in prompt
+
+
 def test_schema_constrains_output_to_current_batch_tokens(tmp_path: Path) -> None:
     request = _request(tmp_path)
     schema = build_hotspot_remap_schema(request.hotspots)

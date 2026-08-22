@@ -23,6 +23,13 @@ from hypergen.evaluation.images import (
     default_image_output_dir,
     run_image_evaluation,
 )
+from hypergen.evaluation.remap_grid import (
+    DEFAULT_GRID_DIVISIONS,
+    DEFAULT_GRID_MODELS,
+    RemapGridExperimentSettings,
+    default_remap_grid_output_dir,
+    run_remap_grid_experiment,
+)
 from hypergen.evaluation.reports import ReportRenderingError
 from hypergen.evaluation.smoke import (
     SmokeSettings,
@@ -114,6 +121,32 @@ def build_parser() -> argparse.ArgumentParser:
     e2e.add_argument("--ollama-timeout", type=_positive_float, default=120.0)
     e2e.add_argument("--ollama-num-predict", type=_positive_int, default=1024)
     e2e.add_argument("--ollama-context-length", type=_positive_int, default=8192)
+    remap_grid = subparsers.add_parser(
+        "remap-grid",
+        help="compare coordinate grids and Ollama models against authored hotspots",
+    )
+    remap_grid.add_argument("--output-dir", type=Path)
+    remap_grid.add_argument("--stack", type=Path, required=True)
+    remap_grid.add_argument("--card", required=True)
+    remap_grid.add_argument("--revision", type=_positive_int, required=True)
+    remap_grid.add_argument(
+        "--ollama-model",
+        action="append",
+        dest="ollama_models",
+        default=None,
+    )
+    remap_grid.add_argument(
+        "--grid",
+        action="append",
+        dest="grid_divisions",
+        type=int,
+        default=None,
+    )
+    remap_grid.add_argument("--trials", type=_positive_int, default=3)
+    remap_grid.add_argument("--ollama-endpoint", default="http://localhost:11434")
+    remap_grid.add_argument("--ollama-timeout", type=_positive_float, default=180.0)
+    remap_grid.add_argument("--ollama-num-predict", type=_positive_int, default=2048)
+    remap_grid.add_argument("--ollama-context-length", type=_positive_int, default=8192)
     return parser
 
 
@@ -169,6 +202,24 @@ def run_cli(arguments: Sequence[str] | None = None) -> int:
                     ollama_endpoint=args.ollama_endpoint,
                     seed=args.seed,
                     quantization=args.quantization,
+                    ollama_timeout_seconds=args.ollama_timeout,
+                    ollama_num_predict=args.ollama_num_predict,
+                    ollama_context_length=args.ollama_context_length,
+                )
+            )
+        elif args.command == "remap-grid":
+            result_path = run_remap_grid_experiment(
+                RemapGridExperimentSettings(
+                    output_dir=args.output_dir or default_remap_grid_output_dir(),
+                    stack_bundle=args.stack,
+                    card_name=args.card,
+                    revision_number=args.revision,
+                    models=tuple(args.ollama_models or DEFAULT_GRID_MODELS),
+                    grid_divisions=tuple(
+                        args.grid_divisions or DEFAULT_GRID_DIVISIONS
+                    ),
+                    trials=args.trials,
+                    ollama_endpoint=args.ollama_endpoint,
                     ollama_timeout_seconds=args.ollama_timeout,
                     ollama_num_predict=args.ollama_num_predict,
                     ollama_context_length=args.ollama_context_length,
