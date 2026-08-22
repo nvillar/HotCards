@@ -57,10 +57,6 @@ from hypergen.application.hotspot_generation_workflow import (
     HotspotGenerationWorkflow,
     HotspotGenerationWorkflowError,
 )
-from hypergen.application.image_description_workflow import (
-    ImageDescriptionWorkflow,
-    ImageDescriptionWorkflowError,
-)
 from hypergen.application.run_session import RunSession, RunSessionState
 from hypergen.application.scene_enrichment_workflow import (
     SceneEnrichmentWorkflow,
@@ -121,7 +117,6 @@ class MainWindow(QMainWindow):
         background_workflow: BackgroundWorkflow | None = None,
         scene_enrichment_workflow: SceneEnrichmentWorkflow | None = None,
         hotspot_generation_workflow: HotspotGenerationWorkflow | None = None,
-        image_description_workflow: ImageDescriptionWorkflow | None = None,
         project_directory: Path | None = None,
         start_diagnostics: bool = True,
         owns_workers: bool = False,
@@ -134,7 +129,6 @@ class MainWindow(QMainWindow):
         self.background_workflow = background_workflow
         self.scene_enrichment_workflow = scene_enrichment_workflow
         self.hotspot_generation_workflow = hotspot_generation_workflow
-        self.image_description_workflow = image_description_workflow
         self.project_directory = project_directory or default_project_directory()
         self._availability_checks = dict(availability_checks or {})
         self._availability_checks_factory = availability_checks_factory
@@ -178,15 +172,6 @@ class MainWindow(QMainWindow):
                 self._resolve_revision_image_path,
                 parent=self,
             )
-        if self.image_description_workflow is None:
-            self.image_description_workflow = ImageDescriptionWorkflow(
-                controller,
-                workers,
-                self._ollama_settings,
-                self._resolve_revision_image_path,
-                parent=self,
-            )
-
         self.setWindowTitle(f"HyperGen — {controller.document.name}")
         self.setObjectName("mainWindow")
         self.resize(1180, 760)
@@ -326,7 +311,6 @@ class MainWindow(QMainWindow):
         self.inspector.discard_scene_enrichment_requested.connect(
             self._discard_scene_enrichment
         )
-        self.inspector.describe_image_requested.connect(self._describe_image)
         self.inspector.summarize_hotspots_requested.connect(
             self._summarize_hotspots
         )
@@ -430,19 +414,6 @@ class MainWindow(QMainWindow):
         self.hotspot_generation_workflow.document_changed.connect(
             self.render_document
         )
-        self.image_description_workflow.busy_changed.connect(
-            lambda _busy: self._update_generation_actions()
-        )
-        self.image_description_workflow.progress_changed.connect(
-            self._image_description_progress_changed
-        )
-        self.image_description_workflow.failed.connect(
-            self._image_description_failed
-        )
-        self.image_description_workflow.document_changed.connect(
-            self.render_document
-        )
-
         self.pane_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.pane_splitter.setObjectName("threePaneSplitter")
         self.pane_splitter.addWidget(self.card_sidebar)
@@ -598,7 +569,6 @@ class MainWindow(QMainWindow):
         if selected_card_id != self._selected_card_id:
             self.scene_enrichment_workflow.cancel()
             self.hotspot_generation_workflow.cancel()
-            self.image_description_workflow.cancel()
         self._selected_card_id = selected_card_id
         if self.card_sidebar.selected_card_id != self._selected_card_id:
             self.card_sidebar.select_card(self._selected_card_id)
@@ -728,10 +698,12 @@ class MainWindow(QMainWindow):
             self._show_document_error("Could Not Save Stack As", str(error))
 
     def undo(self) -> None:
+        self.scene_enrichment_workflow.cancel()
         if self.controller.undo():
             self.render_document()
 
     def redo(self) -> None:
+        self.scene_enrichment_workflow.cancel()
         if self.controller.redo():
             self.render_document()
 
@@ -775,7 +747,6 @@ class MainWindow(QMainWindow):
                 return
             self.scene_enrichment_workflow.cancel()
             self.hotspot_generation_workflow.cancel()
-            self.image_description_workflow.cancel()
             self.card_sidebar.delete_card(card.id)
             if draft is not None:
                 self.background_workflow.discard_draft(card.id)
@@ -955,29 +926,8 @@ class MainWindow(QMainWindow):
     def _scene_enrichment_failed(self, failure: object) -> None:
         detail = failure.message if isinstance(failure, WorkerFailure) else str(failure)
         self.inspector.set_scene_enrichment_status(
-            "Description enrichment failed",
-            detail=detail,
-        )
-        self._update_generation_actions()
-
-    def _describe_image(self) -> None:
-        card_id = self._selected_card_id
-        if card_id is None or not self._commit_authoring_metadata():
-            return
-        try:
-            self.image_description_workflow.start(card_id)
-        except ImageDescriptionWorkflowError as error:
-            self.inspector.set_scene_enrichment_status(str(error), detail=str(error))
-        self._update_generation_actions()
-
-    def _image_description_progress_changed(self, message: str) -> None:
-        self.inspector.set_scene_enrichment_status(message)
-        self._update_generation_actions()
-
-    def _image_description_failed(self, failure: object) -> None:
-        detail = failure.message if isinstance(failure, WorkerFailure) else str(failure)
-        self.inspector.set_scene_enrichment_status(
-            "Image description failed",
+            self.inspector.scene_enrichment_status.text()
+            or "Description enrichment failed",
             detail=detail,
         )
         self._update_generation_actions()
@@ -1176,7 +1126,7 @@ class MainWindow(QMainWindow):
     def _accept_background_draft(self) -> None:
         if self.background_workflow is None or self._selected_card_id is None:
             return
-        self.image_description_workflow.cancel()
+        self.scene_enrichment_workflow.cancel()
         try:
             self.background_workflow.apply_draft(self._selected_card_id)
         except (
@@ -1198,7 +1148,7 @@ class MainWindow(QMainWindow):
             or not isinstance(revision_id, UUID)
         ):
             return
-        self.image_description_workflow.cancel()
+        self.scene_enrichment_workflow.cancel()
         try:
             self.background_workflow.activate_revision(
                 self._selected_card_id,
@@ -1228,7 +1178,7 @@ class MainWindow(QMainWindow):
         dialog.exec()
         if dialog.clickedButton() is not delete_button:
             return
-        self.image_description_workflow.cancel()
+        self.scene_enrichment_workflow.cancel()
         try:
             self.background_workflow.delete_revision(
                 self._selected_card_id,
@@ -1436,34 +1386,6 @@ class MainWindow(QMainWindow):
             import_reason=import_reason,
             busy=workflow_busy,
         )
-        enrichment_busy = self.scene_enrichment_workflow.busy
-        enrichment_draft = self.scene_enrichment_workflow.draft
-        description_busy = self.image_description_workflow.busy
-        can_enrich = (
-            has_card
-            and self.inspector.has_scene_input()
-            and ollama_available
-            and not enrichment_busy
-            and not description_busy
-            and enrichment_draft is None
-        )
-        enrich_reason = "Ready to enrich Description"
-        if not has_card:
-            enrich_reason = "Select a card in a saved stack"
-        elif not self.inspector.has_scene_input():
-            enrich_reason = "Enter a Description before enriching"
-        elif enrichment_busy:
-            enrich_reason = "Description enrichment is running"
-        elif description_busy:
-            enrich_reason = "Image description is running"
-        elif enrichment_draft is not None:
-            enrich_reason = "Accept or discard the current enriched Description"
-        elif not ollama_available:
-            enrich_reason = self._action_diagnostic(AdapterKind.OLLAMA)
-        self.inspector.set_scene_enrichment_capabilities(
-            can_enrich=can_enrich,
-            reason=enrich_reason,
-        )
         selected_card = next(
             (
                 card
@@ -1496,30 +1418,35 @@ class MainWindow(QMainWindow):
         has_readable_active_image = (
             active_image_path is not None and active_image_path.is_file()
         )
-        can_describe_image = (
+        enrichment_busy = self.scene_enrichment_workflow.busy
+        enrichment_draft = self.scene_enrichment_workflow.draft
+        has_enrichment_input = (
+            self.inspector.has_description_input()
+            or has_readable_active_image
+        )
+        can_enrich = (
             has_card
-            and has_readable_active_image
+            and has_enrichment_input
             and ollama_available
-            and not description_busy
             and not enrichment_busy
             and enrichment_draft is None
         )
-        describe_reason = "Replace Description from the active image"
+        enrich_reason = "Ready to enrich Description"
         if not has_card:
-            describe_reason = "Select a card in a saved stack"
-        elif not has_readable_active_image:
-            describe_reason = "Apply an available background before describing it"
-        elif description_busy:
-            describe_reason = "Image description is running"
-        elif enrichment_busy or enrichment_draft is not None:
-            describe_reason = (
-                "Finish or discard the current Description enrichment"
+            enrich_reason = "Select a card in a saved stack"
+        elif not has_enrichment_input:
+            enrich_reason = (
+                "Enter a Description or apply an available background before enriching"
             )
+        elif enrichment_busy:
+            enrich_reason = "Description enrichment is running"
+        elif enrichment_draft is not None:
+            enrich_reason = "Accept or discard the current enriched Description"
         elif not ollama_available:
-            describe_reason = self._action_diagnostic(AdapterKind.OLLAMA)
-        self.inspector.set_image_description_capabilities(
-            can_describe=can_describe_image,
-            reason=describe_reason,
+            enrich_reason = self._action_diagnostic(AdapterKind.OLLAMA)
+        self.inspector.set_scene_enrichment_capabilities(
+            can_enrich=can_enrich,
+            reason=enrich_reason,
         )
         hotspot_busy = self.hotspot_generation_workflow.busy
         hotspot_candidate = self.hotspot_generation_workflow.candidate
@@ -2044,7 +1971,6 @@ class MainWindow(QMainWindow):
         self._cancel_diagnostics()
         self.scene_enrichment_workflow.cancel()
         self.hotspot_generation_workflow.cancel()
-        self.image_description_workflow.cancel()
         if self.background_workflow is not None and self.background_workflow.busy:
             self.background_workflow.cancel()
 
@@ -2090,7 +2016,6 @@ class MainWindow(QMainWindow):
             self.background_workflow.close()
         self.scene_enrichment_workflow.close()
         self.hotspot_generation_workflow.close()
-        self.image_description_workflow.close()
         if self._owns_workers:
             self.workers.shutdown(wait_milliseconds=100)
         super().closeEvent(event)

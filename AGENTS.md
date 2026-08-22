@@ -46,12 +46,14 @@ for live Ollama and MFLUX runs.
 - Keep image actions, model actions, and storage out of widgets.
 - Reuse production prompt builders, schemas, adapters, and geometry validation
   in the evaluation harness. Do not fork generation behavior.
-- Compose background prompts deterministically from Scene plus effective Style
+- Compose background prompts deterministically from Description plus effective Style
   (`Card.card_style` replaces `Stack.global_style` when present). Interaction
   intent feeds hotspot generation only and must not alter the image prompt.
-- Keep reverse authoring explicit: Enrich is text-to-text, while Describe Image
-  reads only the active revision image and replaces Scene through one undoable
-  command. Neither assist reads interaction intent.
+- Keep Description enrichment review-first. With a readable active accepted
+  revision, Enrich describes its visible details and then merges them with
+  authored Description and effective Style; without one, it is text-only.
+  Neither path reads interaction intent, and only acceptance replaces
+  Description through one undoable command.
 - Store each hotspot set under exactly one image revision. Never silently reuse
   hotspots against another image revision.
 - Keep generated hotspot candidates session-only while they are reviewed. The

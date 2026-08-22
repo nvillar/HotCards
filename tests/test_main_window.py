@@ -144,7 +144,6 @@ class FakeWorkers(QObject):
     ) -> FakeOperation:
         assert stage in {
             "describing background",
-            "describing image",
             "enriching Description",
             "generating hotspots",
             "naming background revision",
@@ -172,6 +171,7 @@ class FakeBackgroundWorkflow(QObject):
         self.busy = False
         self.closed = False
         self.generate_calls: list[object] = []
+        self.activated_revision_ids: list[object] = []
 
     def close(self) -> None:
         self.closed = True
@@ -219,6 +219,9 @@ class FakeBackgroundWorkflow(QObject):
 
     def generate(self, card_id: object, *, replace_draft: bool = False) -> None:
         self.generate_calls.append((card_id, replace_draft))
+
+    def activate_revision(self, _card_id: object, revision_id: object) -> None:
+        self.activated_revision_ids.append(revision_id)
 
 
 @pytest.fixture(scope="module")
@@ -682,7 +685,7 @@ def test_inspector_combines_card_and_background_authoring(
     window.close()
 
 
-def test_scene_enrichment_requires_scene_and_available_ollama(
+def test_scene_enrichment_requires_description_or_image_and_available_ollama(
     application: QApplication,
 ) -> None:
     window, _controller, _workers, _settings = make_window()
@@ -753,6 +756,10 @@ def test_scene_enrichment_uses_active_accepted_image(
     window._availability[AdapterKind.OLLAMA] = True
     window._update_generation_actions()
 
+    window.inspector.scene_edit.clear()
+    application.processEvents()
+    assert window.inspector.enrich_scene_button.isEnabled()
+    window.inspector.scene_edit.setPlainText("A quiet entrance")
     window.inspector.enrich_scene_button.click()
     assert workers.ollama_run_stages == ["describing background"]
     workers.ollama_run_operations[-1].succeeded.emit(
@@ -783,6 +790,56 @@ def test_scene_enrichment_uses_active_accepted_image(
     assert window.inspector.enriched_scene_edit.toPlainText().startswith(
         "A quiet navy entrance"
     )
+    window.close()
+
+
+def test_scene_enrichment_failure_identifies_image_stage(
+    application: QApplication,
+    tmp_path: Path,
+) -> None:
+    window, _controller, workers, _workflow = make_hotspot_window(tmp_path)
+    window._availability[AdapterKind.OLLAMA] = True
+    window._update_generation_actions()
+
+    window.inspector.enrich_scene_button.click()
+    workers.ollama_run_operations[-1].failed.emit(
+        WorkerFailure(
+            adapter=AdapterKind.OLLAMA,
+            stage="describing background",
+            kind=WorkerFailureKind.MODEL_RESPONSE,
+            message="invalid image description",
+        )
+    )
+
+    assert (
+        window.inspector.scene_enrichment_status.text()
+        == "Background description failed"
+    )
+    assert (
+        window.inspector.scene_enrichment_status.toolTip()
+        == "invalid image description"
+    )
+    window.close()
+
+
+def test_scene_enrichment_is_cancelled_before_revision_activation(
+    application: QApplication,
+    tmp_path: Path,
+) -> None:
+    window, controller, workers, _workflow = make_hotspot_window(tmp_path)
+    workflow = window.background_workflow
+    assert isinstance(workflow, FakeBackgroundWorkflow)
+    window._availability[AdapterKind.OLLAMA] = True
+    window._update_generation_actions()
+
+    window.inspector.enrich_scene_button.click()
+    operation = workers.ollama_run_operations[-1]
+    revision_id = controller.document.cards[0].active_revision_id
+    assert revision_id is not None
+    window._activate_revision(revision_id)
+
+    assert operation.cancelled
+    assert workflow.activated_revision_ids == [revision_id]
     window.close()
 
 
@@ -823,57 +880,6 @@ def test_scene_enrichment_is_cancelled_when_card_is_deleted(
 
     assert operation.cancelled
     assert all(card.id != card_id for card in controller.document.cards)
-    window.close()
-
-
-def test_describe_image_replaces_scene_and_is_undoable(
-    application: QApplication,
-    tmp_path: Path,
-) -> None:
-    window, controller, workers, _workflow = make_hotspot_window(tmp_path)
-    original_scene = controller.document.cards[0].scene_description
-    window._availability[AdapterKind.OLLAMA] = True
-    window._update_generation_actions()
-
-    assert window.inspector.describe_image_button.isEnabled()
-    window.inspector.describe_image_button.click()
-    assert not window.inspector.describe_image_button.isEnabled()
-    result = ImageDescriptionResult(
-        scene="A moonlit castle framed by dark pines and silver mist",
-        raw_response='{"scene":"A moonlit castle"}',
-        model_identifier="qwen3.5:9b",
-        prompt_version="image-description-v1",
-        duration_seconds=1.0,
-    )
-    workers.ollama_run_operations[-1].succeeded.emit(result)
-
-    assert (
-        controller.document.cards[0].scene_description
-        == "A moonlit castle framed by dark pines and silver mist"
-    )
-    assert controller.undo()
-    assert controller.document.cards[0].scene_description == original_scene
-    window.close()
-
-
-def test_describe_image_cancels_on_card_switch_and_run(
-    application: QApplication,
-    tmp_path: Path,
-) -> None:
-    window, controller, workers, _workflow = make_hotspot_window(tmp_path)
-    window._availability[AdapterKind.OLLAMA] = True
-    window._update_generation_actions()
-
-    window.inspector.describe_image_button.click()
-    first = workers.ollama_run_operations[-1]
-    window.select_card(controller.document.cards[1].id)
-    assert first.cancelled
-
-    window.select_card(controller.document.cards[0].id)
-    window.inspector.describe_image_button.click()
-    second = workers.ollama_run_operations[-1]
-    window.mode_selector.setCurrentText("Run")
-    assert second.cancelled
     window.close()
 
 

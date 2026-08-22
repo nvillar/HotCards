@@ -254,10 +254,8 @@ def test_description_actions_follow_text_without_redundant_name_control(
     )
 
     assert layout.indexOf(inspector.scene_edit) < scene_actions_index
-    assert [
-        inspector.enrich_scene_button.text(),
-        inspector.describe_image_button.text(),
-    ] == ["Enrich", "Describe Image"]
+    assert inspector.enrich_scene_button.text() == "Enrich"
+    assert not hasattr(inspector, "describe_image_button")
     assert not hasattr(inspector, "start_card_check")
     inspector.close()
 

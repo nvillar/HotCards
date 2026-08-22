@@ -183,7 +183,6 @@ class Inspector(QWidget):
     candidate_create_destination_requested = Signal(object, str)
     candidate_reorder_requested = Signal(object, int)
     candidate_delete_requested = Signal(object)
-    describe_image_requested = Signal()
     summarize_hotspots_requested = Signal()
 
     def __init__(
@@ -230,11 +229,7 @@ class Inspector(QWidget):
         self.enrich_scene_button = QPushButton("Enrich")
         self.enrich_scene_button.setObjectName("enrichSceneButton")
         self.enrich_scene_button.setEnabled(False)
-        self.describe_image_button = QPushButton("Describe Image")
-        self.describe_image_button.setObjectName("describeImageButton")
-        self.describe_image_button.setEnabled(False)
         self.scene_actions.addWidget(self.enrich_scene_button)
-        self.scene_actions.addWidget(self.describe_image_button)
         card_layout.addLayout(self.scene_actions)
         self.scene_enrichment_widget = QWidget()
         self.scene_enrichment_widget.setObjectName("sceneEnrichmentReview")
@@ -628,7 +623,6 @@ class Inspector(QWidget):
             self._dismiss_candidate_warnings
         )
         self.enrich_scene_button.clicked.connect(self.enrich_scene_requested)
-        self.describe_image_button.clicked.connect(self.describe_image_requested)
         self.summarize_hotspots_button.clicked.connect(
             self.summarize_hotspots_requested
         )
@@ -654,7 +648,7 @@ class Inspector(QWidget):
             )
         )
 
-    def has_scene_input(self) -> bool:
+    def has_description_input(self) -> bool:
         """Return whether the visible Description can be enriched."""
         return bool(
             self.selected_card_id is not None
@@ -825,15 +819,6 @@ class Inspector(QWidget):
     ) -> None:
         self.enrich_scene_button.setEnabled(can_enrich)
         self.enrich_scene_button.setToolTip(reason)
-
-    def set_image_description_capabilities(
-        self,
-        *,
-        can_describe: bool,
-        reason: str,
-    ) -> None:
-        self.describe_image_button.setEnabled(can_describe)
-        self.describe_image_button.setToolTip(reason)
 
     def set_hotspot_summary_capabilities(
         self,

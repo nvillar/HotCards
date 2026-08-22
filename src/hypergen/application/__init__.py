@@ -37,10 +37,6 @@ from hypergen.application.hotspot_generation_workflow import (
     HotspotGenerationWorkflow,
     HotspotGenerationWorkflowError,
 )
-from hypergen.application.image_description_workflow import (
-    ImageDescriptionWorkflow,
-    ImageDescriptionWorkflowError,
-)
 from hypergen.application.scene_enrichment_workflow import (
     SceneEnrichmentDraft,
     SceneEnrichmentWorkflow,
@@ -82,8 +78,6 @@ __all__ = [
     "HotspotGenerationDraft",
     "HotspotGenerationWorkflow",
     "HotspotGenerationWorkflowError",
-    "ImageDescriptionWorkflow",
-    "ImageDescriptionWorkflowError",
     "OperationStatus",
     "RenameCardCommand",
     "ReorderCardCommand",

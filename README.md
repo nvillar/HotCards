@@ -17,17 +17,19 @@ Stacks are stored as self-contained `.hypergen` directory bundles and
 autosaved atomically after creation or opening. At startup, HyperGen lists
 projects in `~/Documents/HyperGen` and offers direct Open and Create actions.
 
-The current Author workflow uses Card and Hotspots inspector tabs. The
-Card tab keeps Scene, background revisions, and a collapsible Style editor
-together. Background prompts are composed directly from the author-visible
-Scene plus either the stack's global Style or a card-specific replacement;
-interaction intent does not alter the image. An optional Enrich action can
-rewrite Scene text through Ollama for explicit review, editing, acceptance, or
-discard; accepted text remains an ordinary undoable Scene edit. Describe Image
-can instead replace Scene with a generation-ready visual description of the
-active revision. Authors can review generated or imported card-local background
-drafts, with generated revisions receiving short model-generated names. They
-can switch cards without losing drafts, manage revision history, and edit manual
+The current Author workflow uses Background and Hotspots inspector tabs, with
+the selected card's name editable above the canvas. Background keeps
+Description, accepted image revisions, and a collapsible Style editor together.
+Background prompts are composed directly from the author-visible Description
+plus either the stack's global Style or a card-specific replacement; interaction
+intent does not alter the image. Enrich produces one editable Description
+proposal for explicit acceptance or discard. When an accepted background is
+active, Enrich first describes its visible details and merges them with the
+authored Description and effective Style; otherwise it performs text-only
+enrichment. Accepted text remains one ordinary undoable Description edit.
+Authors can review generated or imported card-local background drafts, with
+generated revisions receiving short model-generated names. They can switch
+cards without losing drafts, manage revision history, and edit manual
 multi-area polygon hotspots with explicit card destinations. Authors can
 also generate transient hotspot candidates from the active image and interaction
 intent, correct them with the same geometry and destination controls, review
@@ -69,7 +71,7 @@ tradeoffs are in [`evals/DECISION.md`](evals/DECISION.md).
 - `domain/` — in-memory stack model, geometry, validation.
 - `storage/` — human-readable `*.hypergen` bundle storage.
 - `generation/` — deterministic MFLUX prompt composition, image generation,
-  Scene enrichment, and Ollama hotspot adapters.
+  Description enrichment, and Ollama hotspot adapters.
 - `application/` — document controller, typed commands, session undo, workers.
 - `ui/` — PySide6 Author and Run interface.
 - `evaluation/` — `hypergen-eval` harness reusing production adapters.
