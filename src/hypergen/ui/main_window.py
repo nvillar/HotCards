@@ -167,6 +167,7 @@ class MainWindow(QMainWindow):
                 controller,
                 workers,
                 self._ollama_settings,
+                self._resolve_revision_image_path,
                 parent=self,
             )
         if self.hotspot_generation_workflow is None:

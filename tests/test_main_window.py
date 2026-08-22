@@ -108,6 +108,7 @@ class FakeWorkers(QObject):
         self.ollama_operations: list[FakeOperation] = []
         self.mflux_operations: list[FakeOperation] = []
         self.ollama_run_calls: list[object] = []
+        self.ollama_run_stages: list[str] = []
         self.ollama_run_operations: list[FakeOperation] = []
         self.shutdown_calls = 0
 
@@ -142,12 +143,14 @@ class FakeWorkers(QObject):
         stage: str,
     ) -> FakeOperation:
         assert stage in {
+            "describing background",
             "describing image",
-            "enriching Scene",
+            "enriching Description",
             "generating hotspots",
             "naming background revision",
         }
         self.ollama_run_calls.append(operation)
+        self.ollama_run_stages.append(stage)
         handle = FakeOperation()
         self.ollama_run_operations.append(handle)
         return handle
@@ -709,7 +712,7 @@ def test_scene_enrichment_accept_discard_and_undo(
         scene="A richly detailed quiet entrance",
         raw_response='{"scene":"A richly detailed quiet entrance"}',
         model_identifier="qwen3.5:9b",
-        prompt_version="scene-enrichment-v1",
+        prompt_version="scene-enrichment-v2",
         duration_seconds=1.0,
     )
     workers.ollama_run_operations[-1].succeeded.emit(result)
@@ -739,6 +742,47 @@ def test_scene_enrichment_accept_discard_and_undo(
     window.inspector.discard_scene_enrichment_button.click()
     assert controller.document.cards[0].scene_description == "A quiet entrance"
     assert window.inspector.scene_enrichment_widget.isHidden()
+    window.close()
+
+
+def test_scene_enrichment_uses_active_accepted_image(
+    application: QApplication,
+    tmp_path: Path,
+) -> None:
+    window, controller, workers, _workflow = make_hotspot_window(tmp_path)
+    window._availability[AdapterKind.OLLAMA] = True
+    window._update_generation_actions()
+
+    window.inspector.enrich_scene_button.click()
+    assert workers.ollama_run_stages == ["describing background"]
+    workers.ollama_run_operations[-1].succeeded.emit(
+        ImageDescriptionResult(
+            scene="A navy entrance with a centered doorway",
+            raw_response='{"scene":"A navy entrance with a centered doorway"}',
+            model_identifier="qwen3.5:9b-mlx",
+            prompt_version="image-description-v1",
+            duration_seconds=1.0,
+        )
+    )
+    assert workers.ollama_run_stages == [
+        "describing background",
+        "enriching Description",
+    ]
+    workers.ollama_run_operations[-1].succeeded.emit(
+        SceneEnrichmentResult(
+            scene="A quiet navy entrance with a centered doorway",
+            raw_response='{"scene":"A quiet navy entrance with a centered doorway"}',
+            model_identifier="qwen3.5:9b-mlx",
+            prompt_version="scene-enrichment-v2",
+            duration_seconds=1.0,
+        )
+    )
+
+    assert controller.document.cards[0].scene_description == "A quiet entrance"
+    assert not window.inspector.scene_enrichment_widget.isHidden()
+    assert window.inspector.enriched_scene_edit.toPlainText().startswith(
+        "A quiet navy entrance"
+    )
     window.close()
 
 

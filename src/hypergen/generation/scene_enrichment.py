@@ -1,10 +1,10 @@
-"""Opt-in Ollama contract for rewriting an author-visible Scene."""
+"""Opt-in Ollama contract for enriching an author-visible Description."""
 
 from __future__ import annotations
 
 import json
 
-from pydantic import ValidationError
+from pydantic import ValidationError, model_validator
 
 from hypergen.domain.models import (
     DomainModel,
@@ -14,15 +14,25 @@ from hypergen.domain.models import (
 from hypergen.generation.errors import ModelResponseError
 from hypergen.generation.ollama_client import OllamaRuntime
 
-SCENE_ENRICHMENT_PROMPT_VERSION = "scene-enrichment-v1"
+SCENE_ENRICHMENT_PROMPT_VERSION = "scene-enrichment-v2"
 
 
 class SceneEnrichmentRequest(DomainModel):
-    """Author-controlled Scene plus read-only effective Style context."""
+    """Author Description plus optional visible image and Style context."""
 
-    scene: NonEmptyString
+    scene: str = ""
     effective_style: str = ""
+    image_description: str | None = None
     prompt_version: NonEmptyString = SCENE_ENRICHMENT_PROMPT_VERSION
+
+    @model_validator(mode="after")
+    def require_description_or_image(self) -> SceneEnrichmentRequest:
+        """Require at least one source of visual authoring context."""
+        if not self.scene.strip() and not (
+            self.image_description is not None and self.image_description.strip()
+        ):
+            raise ValueError("Description or image description must not be empty")
+        return self
 
 
 class SceneEnrichmentModelOutput(DomainModel):
@@ -32,7 +42,7 @@ class SceneEnrichmentModelOutput(DomainModel):
 
 
 class SceneEnrichmentResult(DomainModel):
-    """Reviewable Scene rewrite with debugging metadata."""
+    """Reviewable Description rewrite with debugging metadata."""
 
     scene: NonEmptyString
     raw_response: NonEmptyString
@@ -50,32 +60,38 @@ def build_scene_enrichment_prompt(request: SceneEnrichmentRequest) -> str:
     """Build a bounded rewrite prompt without interaction intent."""
     source = json.dumps(
         {
-            "scene": request.scene,
+            "authored_description": request.scene,
             "effective_style": request.effective_style,
+            "visible_image_description": request.image_description,
         },
         ensure_ascii=False,
         indent=2,
     )
     return f"""\
-Rewrite the author's Scene into a richer text-to-image description for one illustrated card.
+Write a richer text-to-image Description for one illustrated card.
 
 Return JSON matching the supplied schema.
-- Preserve the author's subject, setting, mood, and factual intent.
-- Add concrete visual composition, lighting, materials, atmosphere, and spatial details only when
-  they support the original Scene.
+- Preserve the authored Description's subject, setting, mood, and factual intent when it is
+  present. It is authoritative if it conflicts with the visible image description.
+- Treat visible_image_description only as evidence of visible details in the active accepted
+  background. Incorporate compatible composition, viewpoint, spatial relationships, lighting,
+  color, materials, atmosphere, and rendering characteristics.
+- If the authored Description is empty, construct the result from visible_image_description.
 - Treat effective_style as read-only visual context. Do not repeat it mechanically.
 - Do not add interactions, navigation instructions, hotspots, captions, labels, signs, or
-  interface elements unless the Scene explicitly requests them.
-- Return only the rewritten Scene in the scene field.
+  interface elements unless the authored Description explicitly requests them.
+- Do not add hidden story facts, destinations, resolution or dimensions, step counts, model
+  parameters, or other technical generation settings.
+- Return only the rewritten Description in the scene field.
 
 Prompt contract: {request.prompt_version}
-Author-controlled input:
+Input:
 {source}
 """
 
 
 class OllamaSceneEnricher:
-    """Rewrite a Scene through the shared structured Ollama runtime."""
+    """Enrich a Description through the shared structured Ollama runtime."""
 
     def __init__(self, runtime: OllamaRuntime) -> None:
         self._runtime = runtime
@@ -89,7 +105,7 @@ class OllamaSceneEnricher:
             output = SceneEnrichmentModelOutput.model_validate_json(call.content)
         except ValidationError as error:
             raise ModelResponseError(
-                "Ollama returned an invalid Scene enrichment response for "
+                "Ollama returned an invalid Description enrichment response for "
                 f"{request.prompt_version}: {error}",
                 raw_response=call.content,
                 response_metadata={

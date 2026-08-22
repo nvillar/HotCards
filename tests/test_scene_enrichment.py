@@ -1,4 +1,4 @@
-"""Tests for the opt-in Scene enrichment contract."""
+"""Tests for the opt-in Description enrichment contract."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ class FakeOllamaClient:
         )
 
 
-def test_scene_enrichment_prompt_uses_scene_and_style_without_interactions() -> None:
+def test_scene_enrichment_prompt_uses_description_and_style_without_interactions() -> None:
     prompt = build_scene_enrichment_prompt(
         SceneEnrichmentRequest(
             scene="A mysterious wood",
@@ -38,7 +38,34 @@ def test_scene_enrichment_prompt_uses_scene_and_style_without_interactions() -> 
     assert "A mysterious wood" in prompt
     assert "Ink and watercolor" in prompt
     assert "Do not add interactions" in prompt
+    assert "resolution or dimensions" in prompt
     assert "interaction_description" not in prompt
+
+
+def test_scene_enrichment_prompt_merges_visible_image_details() -> None:
+    prompt = build_scene_enrichment_prompt(
+        SceneEnrichmentRequest(
+            scene="A mysterious wood",
+            effective_style="Ink and watercolor",
+            image_description=(
+                "Silver birches seen from below beneath a violet moon"
+            ),
+        )
+    )
+
+    assert '"authored_description": "A mysterious wood"' in prompt
+    assert "Silver birches seen from below" in prompt
+    assert "authoritative if it conflicts" in prompt
+    assert "hidden story facts" in prompt
+
+
+def test_scene_enrichment_accepts_image_context_without_authored_description() -> None:
+    request = SceneEnrichmentRequest(
+        image_description="A moonlit stone bridge over dark water"
+    )
+
+    assert request.scene == ""
+    assert request.image_description
 
 
 def test_ollama_scene_enricher_parses_structured_output() -> None:
