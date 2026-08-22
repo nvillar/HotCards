@@ -217,11 +217,34 @@ def test_card_header_and_toolbar_match_revision_hierarchy(
         "1",
         "2",
     ]
+    assert window.revision_combo.currentText() == "1"
     assert window.add_revision_button.text() == "+"
     assert window.delete_revision_button.text() == "−"
     assert window.overlay_label.text() == "Hotspots"
     assert window.styles_button.text() == "Styles"
     assert window.inspector.inspector_tabs.tabText(0) == "Background"
+
+
+def test_card_header_displays_serialized_active_revision(
+    application: QApplication,
+) -> None:
+    stack = _stack()
+    card = stack.cards[0]
+    stack = stack.model_copy(
+        update={
+            "cards": (
+                card.model_copy(
+                    update={"active_revision_id": card.revisions[1].id}
+                ),
+            )
+        }
+    )
+    serialized_stack = Stack.model_validate_json(stack.model_dump_json())
+
+    window, _controller, _workers, _background = _window(serialized_stack)
+
+    assert window.revision_combo.currentIndex() == 1
+    assert window.revision_combo.currentText() == "2"
 
 
 def test_card_name_edit_uses_controller_and_restores_invalid_value(

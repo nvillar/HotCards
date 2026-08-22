@@ -517,6 +517,11 @@ class MainWindow(QMainWindow):
                     and previous_card_id == selected_card.id
                     else selected_card.name
                 )
+                active_revision_index = next(
+                    index
+                    for index, revision in enumerate(selected_card.revisions)
+                    if revision.id == selected_card.active_revision_id
+                )
                 with QSignalBlocker(self.revision_combo):
                     self.revision_combo.clear()
                     for index, revision in enumerate(
@@ -524,11 +529,7 @@ class MainWindow(QMainWindow):
                         start=1,
                     ):
                         self.revision_combo.addItem(str(index), revision.id)
-                    self.revision_combo.setCurrentIndex(
-                        self.revision_combo.findData(
-                            selected_card.active_revision_id
-                        )
-                    )
+                    self.revision_combo.setCurrentIndex(active_revision_index)
                 self.add_revision_button.setEnabled(not self._is_running)
                 self.delete_revision_button.setEnabled(
                     not self._is_running and len(selected_card.revisions) > 1
