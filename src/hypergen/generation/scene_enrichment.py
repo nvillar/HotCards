@@ -58,7 +58,7 @@ class SceneEnrichmentResult(DomainModel):
 
 
 def build_scene_enrichment_prompt(request: SceneEnrichmentRequest) -> str:
-    """Build a bounded rewrite prompt without interaction intent."""
+    """Build a bounded rewrite prompt from revision-local visual context."""
     source = json.dumps(
         {
             "authored_description": request.scene,

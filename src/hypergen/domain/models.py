@@ -71,7 +71,7 @@ class RunOverlayMode(StrEnum):
 
 
 class ImageOrigin(StrEnum):
-    """How an accepted image revision entered a stack."""
+    """How a revision background entered a stack."""
 
     GENERATED = "generated"
     IMPORTED = "imported"

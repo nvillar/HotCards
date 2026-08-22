@@ -4,8 +4,8 @@ HyperGen is an experimental, local-first authoring tool for illustrated,
 spatially interactive stacks of cards, inspired by classic HyperCard.
 
 Authors describe each card in natural language, generate a background image
-locally, generate and edit clickable polygon hotspots, and run the stack as an
-interactive experience. All generation runs on-device.
+locally, place clickable polygon hotspots, and run the stack as an interactive
+experience. All generation runs on-device.
 
 **Status:** early developer proof of concept. Not packaged for end users.
 
@@ -17,27 +17,30 @@ Stacks are stored as self-contained `.hypergen` directory bundles and
 autosaved atomically after creation or opening. At startup, HyperGen lists
 projects in `~/Documents/HyperGen` and offers direct Open and Create actions.
 
-The current Author workflow uses Background and Hotspots inspector tabs, with
-the selected card's name editable above the canvas. Background keeps
-Description, accepted image revisions, and a collapsible Style editor together.
-Background prompts are composed directly from the author-visible Description
-plus either the stack's global Style or a card-specific replacement; interaction
-intent does not alter the image. Enrich produces one editable Description
-proposal for explicit acceptance or discard. When an accepted background is
-active, Enrich first describes its visible details and merges them with the
-authored Description and effective Style; otherwise it performs text-only
-enrichment. Accepted text remains one ordinary undoable Description edit.
-Authors can review generated or imported card-local background drafts, with
-generated revisions receiving short model-generated names. They can switch
-cards without losing drafts, manage revision history, and edit manual
-multi-area polygon hotspots with explicit card destinations. Authors can
-also generate transient hotspot candidates from the active image and interaction
-intent, correct them with the same geometry and destination controls, review
-absent-subject warnings, then apply or discard the complete set. Summarize
-Hotspots can reconstruct Intent offline from the active revision's applied
-labels and destinations. Run mode supports deterministic hotspot navigation,
-Back/Restart history, and configurable overlays. Local AI services are checked
-automatically when Author mode is entered; Run mode starts no AI work.
+Each card owns one or more numbered revisions. A revision contains its
+Description, selected stack Style, optional blank/generated/imported background,
+and hotspot set. The compact header above the canvas edits the card name and
+selects, duplicates, or deletes revisions; the toolbar manages Mode, hotspot
+visibility, and the stack-wide Style library.
+
+The Background inspector contains Description, Enrich, Generate Image, Style,
+Import Image, and Clear Image controls. Background prompts are composed
+deterministically from the revision Description and selected Style. Generate,
+Import, Clear, and Enrich apply directly to the active revision; replacement
+actions confirm before discarding an existing image, and successful changes
+offer a dismissible, history-safe Undo action. With a readable image, Enrich
+first describes visible details and incorporates them into the revised
+Description; otherwise it performs text-only enrichment.
+
+The Hotspots inspector is the sole source of interaction semantics. A new
+hotspot is persisted and selected immediately, even before it has an area;
+clicking empty canvas begins a polygon for the selected hotspot and creates one
+first when needed. Remap asks the local vision model only to relocate existing
+hotspots on the active image. It cannot add, delete, rename, reorder, or
+retarget them, and unmatched hotspots retain their previous geometry. Run mode
+supports deterministic hotspot navigation, Back/Restart history, and
+configurable overlays. Local AI services are checked automatically when Author
+mode is entered; Run mode starts no AI work.
 
 ## Setup and run
 
@@ -71,7 +74,7 @@ tradeoffs are in [`evals/DECISION.md`](evals/DECISION.md).
 - `domain/` — in-memory stack model, geometry, validation.
 - `storage/` — human-readable `*.hypergen` bundle storage.
 - `generation/` — deterministic MFLUX prompt composition, image generation,
-  Description enrichment, and Ollama hotspot adapters.
+  Description enrichment, and Ollama hotspot Remap adapters.
 - `application/` — document controller, typed commands, session undo, workers.
 - `ui/` — PySide6 Author and Run interface.
 - `evaluation/` — `hypergen-eval` harness reusing production adapters.

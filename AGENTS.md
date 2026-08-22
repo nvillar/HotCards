@@ -46,38 +46,41 @@ for live Ollama and MFLUX runs.
 - Keep image actions, model actions, and storage out of widgets.
 - Reuse production prompt builders, schemas, adapters, and geometry validation
   in the evaluation harness. Do not fork generation behavior.
-- Compose background prompts deterministically from Description plus effective Style
-  (`Card.card_style` replaces `Stack.global_style` when present). Interaction
-  intent feeds hotspot generation only and must not alter the image prompt.
-- Keep Description enrichment review-first. With a readable active accepted
-  revision, Enrich describes its visible details and then merges them with
-  authored Description and effective Style; without one, it is text-only.
-  Neither path reads interaction intent, and only acceptance replaces
-  Description through one undoable command.
-- Store each hotspot set under exactly one image revision. Never silently reuse
-  hotspots against another image revision.
-- Keep generated hotspot candidates session-only while they are reviewed. The
-  previously applied set remains authoritative until one complete candidate is
-  applied through a single undoable replacement.
-- Compose Summarize Hotspots output deterministically and offline from only the
-  active revision's applied hotspot labels and destinations. Never summarize a
-  transient candidate as authoritative Intent.
-- Keep pending background drafts session-only, with at most one per card. They
-  must not enter stack JSON, autosave, or Undo/Redo before acceptance.
+- Keep each card's complete authoring state in one of its numbered revisions:
+  Description, selected stack Style, optional background, and hotspot set.
+  Visible revision numbers are positional; stable UUIDs remain internal.
+- Keep at least one revision per card. Duplicate a complete revision, including
+  its hotspot semantics and immutable background reference.
+- Compose background prompts deterministically from the active revision's
+  Description plus selected stack Style. Hotspots must not alter image prompts.
+- Apply Generate, Import, Clear, Enrich, and Remap directly through document
+  commands. Use pre-action confirmation when replacing or clearing an image,
+  then expose a dismissible Undo bound to the exact current history token.
+- With a readable active background, Enrich describes its visible details and
+  merges them with the authored Description and selected Style; without one, it
+  is text-only. Apply only the final Description through one undoable command.
+- Store each hotspot set under exactly one complete card revision. Replacing a
+  background preserves its hotspots so the author can Remap them.
+- Hotspots may have no polygons. Area-less hotspots retain their label and
+  destination in storage and are ignored by Run-mode hit testing.
+- Remap may return only polygons or an unlocated result for opaque,
+  request-local tokens representing existing hotspots. It must preserve IDs,
+  labels, destinations, actions, and order; invalid or missing geometry retains
+  the existing polygons. Apply all batches through one undoable replacement.
+- Do not allow background replacement and Remap to overlap. Suppress stale
+  model results after relevant revision, image, Description, Style, project, or
+  mode changes.
 - Check local AI services on entry to Author mode, with concurrent checks
   deduplicated. Entering Run mode must not start AI work and must suppress
   pending AI results.
-- Represent an image revision's applied hotspot set as `HotspotSet | None`.
+- Represent a revision's applied hotspot set as `HotspotSet | None`.
   `None` means no set has been applied; an empty `HotspotSet` means an applied
   set currently contains no interactions.
-- Applied hotspot presence is acceptance. Do not add workflow flags such as
-  `unreviewed`, `accepted`, `manually_edited`, or `stale`.
 - Use discriminated resolved/unresolved types for persisted references, not a
   nullable UUID plus status boolean. Store resolved runtime targets by UUID
-  after Apply. If a destination card is deleted, convert inbound references to
+  after selection. If a destination card is deleted, convert inbound references to
   unresolved while retaining the former target name; do not delete inbound
-  hotspots. Candidate-only `existing`/`new`/`unresolved` variants and
-  request-local tokens must not enter stack JSON.
+  hotspots. Request-local Remap tokens must not enter stack JSON.
 - Expose and execute only the `navigate` action initially. Keep the stored action
   representation typed and forward-compatible, and reject unknown action types.
 - Do not add a database, web server, browser UI, plugin system,

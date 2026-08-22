@@ -387,10 +387,10 @@ class MainWindow(QMainWindow):
             lambda _busy: self._update_generation_actions()
         )
         self.hotspot_remap_workflow.progress_changed.connect(
-            self._hotspot_generation_progress_changed
+            self._hotspot_remap_progress_changed
         )
         self.hotspot_remap_workflow.failed.connect(
-            self._hotspot_generation_failed
+            self._hotspot_remap_failed
         )
         self.hotspot_remap_workflow.document_changed.connect(
             self.render_document
@@ -957,11 +957,11 @@ class MainWindow(QMainWindow):
             self.inspector.set_hotspot_status(str(error), detail=str(error))
         self._update_generation_actions()
 
-    def _hotspot_generation_progress_changed(self, message: str) -> None:
+    def _hotspot_remap_progress_changed(self, message: str) -> None:
         self.inspector.set_hotspot_status(message)
         self._update_generation_actions()
 
-    def _hotspot_generation_failed(self, failure: object) -> None:
+    def _hotspot_remap_failed(self, failure: object) -> None:
         detail = failure.message if isinstance(failure, WorkerFailure) else str(failure)
         self.inspector.set_hotspot_status(
             "Hotspot remap failed",

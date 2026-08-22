@@ -85,7 +85,7 @@ def build_parser() -> argparse.ArgumentParser:
     images.add_argument("--quantization", type=int)
     hotspots = subparsers.add_parser(
         "hotspots",
-        help="compare structured hotspot generation across Ollama models",
+        help="compare geometry-only hotspot remapping across Ollama models",
     )
     hotspots.add_argument("--output-dir", type=Path)
     hotspots.add_argument("--case-dir", type=Path, default=Path("evals/cases/hotspots"))
