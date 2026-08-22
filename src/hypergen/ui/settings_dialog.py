@@ -20,6 +20,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from hypergen.generation.ollama_client import DEFAULT_OLLAMA_MODEL
+
 OLLAMA_ENDPOINT_KEY = "services/ollama_endpoint"
 OLLAMA_MODEL_KEY = "services/ollama_model"
 MFLUX_MODEL_KEY = "generation/mflux_model"
@@ -44,7 +46,7 @@ class MachineSettings:
     """Non-portable generation configuration stored outside stack documents."""
 
     ollama_endpoint: str = "http://localhost:11434"
-    ollama_model: str = "qwen3.5:9b"
+    ollama_model: str = DEFAULT_OLLAMA_MODEL
     mflux_model: str = "flux2-klein-4b"
     step_count: int = 4
     quantization: int | None = None

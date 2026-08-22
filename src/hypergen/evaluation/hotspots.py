@@ -48,6 +48,7 @@ from hypergen.generation.hotspot_prompts import (
     normalize_hotspot_response,
 )
 from hypergen.generation.ollama_client import (
+    DEFAULT_OLLAMA_MODEL,
     OllamaCallResult,
     OllamaRuntime,
     OllamaSettings,
@@ -55,7 +56,7 @@ from hypergen.generation.ollama_client import (
 
 HOTSPOT_CASE_VERSION = "hotspot-case-v1"
 HOTSPOT_RESULT_VERSION = "hotspot-result-v1"
-DEFAULT_OLLAMA_MODELS = ("qwen3.5:4b", "qwen3.5:9b", "qwen3.6:35b")
+DEFAULT_OLLAMA_MODELS = ("qwen3.5:4b", DEFAULT_OLLAMA_MODEL, "qwen3.6:35b")
 HUMAN_RUBRIC_FIELDS = (
     "missing_hotspots",
     "invented_hotspots",
@@ -97,7 +98,7 @@ class HotspotEvaluationSettings(DomainModel):
     ollama_num_predict: PositiveInt = 1024
     ollama_context_length: PositiveInt = 8192
     include_ablations: bool = True
-    ablation_model: NonEmptyString = "qwen3.5:9b"
+    ablation_model: NonEmptyString = DEFAULT_OLLAMA_MODEL
 
 
 OllamaRuntimeFactory = Callable[[OllamaSettings], OllamaRuntime]

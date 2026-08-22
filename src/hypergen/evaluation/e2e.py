@@ -49,11 +49,15 @@ from hypergen.generation.mflux_generator import (
     MfluxGenerationRequest,
     MfluxGenerator,
 )
-from hypergen.generation.ollama_client import OllamaRuntime, OllamaSettings
+from hypergen.generation.ollama_client import (
+    DEFAULT_OLLAMA_MODEL,
+    OllamaRuntime,
+    OllamaSettings,
+)
 
 E2E_CASE_VERSION = "e2e-case-v2"
 E2E_RESULT_VERSION = "e2e-result-v2"
-E2E_OLLAMA_MODELS = ("qwen3.5:4b", "qwen3.5:9b", "qwen3.6:35b")
+E2E_OLLAMA_MODELS = ("qwen3.5:4b", DEFAULT_OLLAMA_MODEL, "qwen3.6:35b")
 E2E_MFLUX_MODEL = "flux2-klein-4b"
 
 

@@ -91,6 +91,7 @@ from hypergen.ui.card_sidebar import CardSidebar
 from hypergen.ui.crop_dialog import CropDialog
 from hypergen.ui.inspector import Inspector
 from hypergen.ui.new_stack_dialog import NewStackDialog
+from hypergen.ui.project_paths import bundle_path, default_project_directory
 from hypergen.ui.settings_dialog import (
     SettingsDialog,
     SettingsStore,
@@ -119,6 +120,7 @@ class MainWindow(QMainWindow):
         scene_enrichment_workflow: SceneEnrichmentWorkflow | None = None,
         hotspot_generation_workflow: HotspotGenerationWorkflow | None = None,
         image_description_workflow: ImageDescriptionWorkflow | None = None,
+        project_directory: Path | None = None,
         start_diagnostics: bool = True,
         owns_workers: bool = False,
     ) -> None:
@@ -131,6 +133,7 @@ class MainWindow(QMainWindow):
         self.scene_enrichment_workflow = scene_enrichment_workflow
         self.hotspot_generation_workflow = hotspot_generation_workflow
         self.image_description_workflow = image_description_workflow
+        self.project_directory = project_directory or default_project_directory()
         self._availability_checks = dict(availability_checks or {})
         self._availability_checks_factory = availability_checks_factory
         self._settings_dialog_factory = settings_dialog_factory
@@ -154,6 +157,7 @@ class MainWindow(QMainWindow):
                 self.document_session,
                 workers,
                 self._background_generation_settings,
+                self._ollama_settings,
                 parent=self,
             )
         if self.scene_enrichment_workflow is None:
@@ -601,11 +605,11 @@ class MainWindow(QMainWindow):
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         stack = dialog.stack()
-        suggested_name = f"{stack.name}.hypergen"
+        suggested_path = self.project_directory / f"{stack.name}.hypergen"
         selected_path, _filter = QFileDialog.getSaveFileName(
             self,
             "Create HyperGen Stack",
-            suggested_name,
+            str(suggested_path),
             "HyperGen Stack (*.hypergen)",
         )
         if not selected_path:
@@ -630,6 +634,7 @@ class MainWindow(QMainWindow):
         selected_path = QFileDialog.getExistingDirectory(
             self,
             "Open HyperGen Stack",
+            str(self.project_directory),
         )
         if not selected_path:
             return
@@ -666,7 +671,10 @@ class MainWindow(QMainWindow):
         selected_path, _filter = QFileDialog.getSaveFileName(
             self,
             "Save HyperGen Stack As",
-            f"{self.controller.document.name}.hypergen",
+            str(
+                self.project_directory
+                / f"{self.controller.document.name}.hypergen"
+            ),
             "HyperGen Stack (*.hypergen)",
         )
         if not selected_path:
@@ -823,8 +831,7 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _bundle_path(selected_path: str) -> Path:
-        path = Path(selected_path)
-        return path if path.suffix == ".hypergen" else path.with_suffix(".hypergen")
+        return bundle_path(selected_path)
 
     def _show_document_error(self, title: str, message: str) -> None:
         QMessageBox.critical(self, title, message)
@@ -1131,7 +1138,12 @@ class MainWindow(QMainWindow):
         self.image_description_workflow.cancel()
         try:
             self.background_workflow.apply_draft(self._selected_card_id)
-        except (BackgroundWorkflowError, StackStoreError, CommandError) as error:
+        except (
+            BackgroundWorkflowError,
+            StackStoreError,
+            CommandError,
+            ValidationError,
+        ) as error:
             self.inspector.set_background_status(str(error), detail=str(error))
 
     def _discard_background_draft(self) -> None:
@@ -1250,8 +1262,13 @@ class MainWindow(QMainWindow):
 
     def _background_failed(self, failure: object) -> None:
         if isinstance(failure, WorkerFailure):
+            message = (
+                "Revision naming failed"
+                if failure.stage == "naming background revision"
+                else "Background generation failed"
+            )
             self.inspector.set_background_status(
-                "Background generation failed",
+                message,
                 detail=failure.message,
             )
         else:
@@ -1320,6 +1337,7 @@ class MainWindow(QMainWindow):
         )
         has_render_prompt = self.inspector.has_render_prompt_input()
         mflux_available = self._availability[AdapterKind.MFLUX] is True
+        ollama_available = self._availability[AdapterKind.OLLAMA] is True
         workflow_busy = (
             self.background_workflow.busy
             if self.background_workflow is not None
@@ -1348,6 +1366,8 @@ class MainWindow(QMainWindow):
             generate_reason = "Enter a Scene or Style before generating"
         elif not mflux_available:
             generate_reason = self._action_diagnostic(AdapterKind.MFLUX)
+        elif not ollama_available:
+            generate_reason = self._action_diagnostic(AdapterKind.OLLAMA)
         elif selected_has_draft:
             generate_reason = "Ready to generate a replacement draft"
         import_reason = (
@@ -1368,6 +1388,7 @@ class MainWindow(QMainWindow):
                 has_card
                 and has_render_prompt
                 and mflux_available
+                and ollama_available
             ),
             generate_reason=generate_reason,
             can_import=has_card and not selected_has_draft,
@@ -1377,7 +1398,6 @@ class MainWindow(QMainWindow):
         enrichment_busy = self.scene_enrichment_workflow.busy
         enrichment_draft = self.scene_enrichment_workflow.draft
         description_busy = self.image_description_workflow.busy
-        ollama_available = self._availability[AdapterKind.OLLAMA] is True
         can_enrich = (
             has_card
             and self.inspector.has_scene_input()

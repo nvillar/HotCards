@@ -555,7 +555,7 @@ class Inspector(QWidget):
         self.add_hotspot_button = QPushButton("Draw Hotspot")
         self.add_hotspot_button.setObjectName("addHotspotButton")
         hotspots_layout.addWidget(self.add_hotspot_button)
-        self.inspector_tabs.addTab(interactivity_page, "Interactivity")
+        self.inspector_tabs.addTab(interactivity_page, "Hotspots")
 
         self.pages = QStackedWidget()
         empty_page = QWidget()
@@ -1026,12 +1026,13 @@ class Inspector(QWidget):
             return
         self.background_status_message.dismiss()
         origin = "Generated" if draft.origin.value == "generated" else "Imported"
+        draft_name = draft.name or origin
         detail = (
             draft.generation_metadata.render_prompt
             if draft.generation_metadata is not None
             else draft.source_filename or ""
         )
-        self.draft_value.setText(f"{origin} background is ready to review.")
+        self.draft_value.setText(f"{draft_name} background is ready to review.")
         self.draft_value.setToolTip(detail)
 
     def _render_revisions(self, document: Stack, card: Card) -> None:
@@ -1040,7 +1041,10 @@ class Inspector(QWidget):
             self.revision_combo.clear()
             for index, revision in enumerate(card.image_revisions, start=1):
                 origin = "Generated" if revision.origin.value == "generated" else "Imported"
-                self.revision_combo.addItem(f"{index}. {origin}", revision.id)
+                self.revision_combo.addItem(
+                    f"{index}. {revision.name or origin}",
+                    revision.id,
+                )
             active_index = self._combo_index_for_data(
                 self.revision_combo,
                 card.active_revision_id,
@@ -1130,7 +1134,7 @@ class Inspector(QWidget):
         review_suffix = " • Review" if self._hotspot_candidate is not None else ""
         self.inspector_tabs.setTabText(
             1,
-            f"Interactivity ({hotspot_count}){review_suffix}",
+            f"Hotspots ({hotspot_count}){review_suffix}",
         )
 
     def _update_card_tab_label(self) -> None:

@@ -45,6 +45,7 @@ def generated_revision(image_path: str) -> ImageRevision:
         duration_seconds=1.0,
     )
     return ImageRevision(
+        name="Solar Expanse",
         image_path=image_path,
         origin=ImageOrigin.GENERATED,
         generation_metadata=metadata,
@@ -69,6 +70,7 @@ def test_card_tab_hides_revision_summary_and_collapses_details_and_style(
     inspector.render(controller.document, card.id)
 
     assert inspector.inspector_tabs.count() == 2
+    assert inspector.revision_combo.currentText() == "1. Solar Expanse"
     assert not hasattr(inspector, "background_value")
     assert not hasattr(inspector, "revision_metadata")
     assert inspector.revision_details.isHidden()
@@ -106,7 +108,7 @@ def test_section_headings_are_bold(
     inspector.close()
 
 
-def test_interactivity_tab_uses_compact_controls_and_on_demand_help(
+def test_hotspots_tab_uses_compact_controls_and_on_demand_help(
     application: QApplication,
 ) -> None:
     card = Card(name="Card", interaction_description="Tap the fox")
@@ -114,7 +116,7 @@ def test_interactivity_tab_uses_compact_controls_and_on_demand_help(
     inspector = Inspector(controller)
     inspector.render(controller.document, card.id)
 
-    assert inspector.inspector_tabs.tabText(1) == "Interactivity (0)"
+    assert inspector.inspector_tabs.tabText(1) == "Hotspots (0)"
     assert inspector.interactions_edit.toPlainText() == "Tap the fox"
     assert inspector.summarize_hotspots_button.text() == "Summarize Hotspots"
     for button, accessible_name in (

@@ -11,7 +11,11 @@ from hypergen.evaluation.cli import run_cli
 from hypergen.evaluation.smoke import SmokeSettings, SmokeStageError, run_smoke
 from hypergen.generation.errors import ModelUnavailableError
 from hypergen.generation.mflux_generator import MfluxGenerator
-from hypergen.generation.ollama_client import OllamaRuntime, OllamaSettings
+from hypergen.generation.ollama_client import (
+    DEFAULT_OLLAMA_MODEL,
+    OllamaRuntime,
+    OllamaSettings,
+)
 
 
 class FakeGeneratedImage:
@@ -37,7 +41,7 @@ class FakeOllamaClient:
         self.model_available = model_available
 
     def list(self) -> SimpleNamespace:
-        models = (SimpleNamespace(model="qwen3.5:9b"),) if self.model_available else ()
+        models = (SimpleNamespace(model=DEFAULT_OLLAMA_MODEL),) if self.model_available else ()
         return SimpleNamespace(models=models)
 
     def show(self, model: str) -> SimpleNamespace:

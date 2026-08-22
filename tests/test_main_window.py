@@ -145,6 +145,7 @@ class FakeWorkers(QObject):
             "describing image",
             "enriching Scene",
             "generating hotspots",
+            "naming background revision",
         }
         self.ollama_run_calls.append(operation)
         handle = FakeOperation()
@@ -653,7 +654,7 @@ def test_inspector_combines_card_and_background_authoring(
     assert tabs.count() == 2
     assert [tabs.tabText(index) for index in range(2)] == [
         "Card",
-        "Interactivity (1)",
+        "Hotspots (1)",
     ]
     assert tabs.widget(0).isAncestorOf(window.inspector.scene_edit)
     assert tabs.widget(0).isAncestorOf(window.inspector.style_edit)
@@ -868,6 +869,10 @@ def test_global_style_enables_generation_when_scene_is_only_whitespace(
     window._availability[AdapterKind.MFLUX] = True
     window._update_generation_actions()
 
+    assert not window.inspector.generate_background_button.isEnabled()
+    assert "ollama" in window.inspector.generate_background_button.toolTip().lower()
+    window._availability[AdapterKind.OLLAMA] = True
+    window._update_generation_actions()
     assert window.inspector.generate_background_button.isEnabled()
     window.close()
 
@@ -880,6 +885,7 @@ def test_pending_style_text_enables_generation_before_focus_changes(
         Stack(name="Demo", cards=(card,))
     )
     window._availability[AdapterKind.MFLUX] = True
+    window._availability[AdapterKind.OLLAMA] = True
     window._update_generation_actions()
     assert not window.inspector.generate_background_button.isEnabled()
 
@@ -904,6 +910,7 @@ def test_generation_aborts_when_pending_metadata_is_invalid(
     workflow = window.background_workflow
     assert isinstance(workflow, FakeBackgroundWorkflow)
     window._availability[AdapterKind.MFLUX] = True
+    window._availability[AdapterKind.OLLAMA] = True
     window.inspector.scene_edit.setPlainText("New scene")
     window.inspector.card_name_edit.clear()
     application.processEvents()
@@ -977,6 +984,7 @@ def test_other_card_draft_does_not_block_generation_or_import(
         )
     )
     window._availability[AdapterKind.MFLUX] = True
+    window._availability[AdapterKind.OLLAMA] = True
     window.select_card(second.id)
     window.inspector.scene_edit.setPlainText("A long gallery")
     application.processEvents()
@@ -1012,6 +1020,7 @@ def test_generate_replacement_requires_confirmation_and_keeps_draft(
     )
     workflow.set_draft(draft)
     window._availability[AdapterKind.MFLUX] = True
+    window._availability[AdapterKind.OLLAMA] = True
     window._update_generation_actions()
     monkeypatch.setattr(window, "_confirm_draft_replacement", lambda: False)
 

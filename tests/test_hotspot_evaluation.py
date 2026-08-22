@@ -138,7 +138,7 @@ def test_hotspot_suite_isolates_unavailable_candidate(tmp_path: Path) -> None:
             settings,
             client=FakeOllamaClient(
                 settings.model,
-                available=settings.model != "qwen3.5:9b",
+                available=settings.model != "qwen3.5:9b-mlx",
             ),
         )
 
@@ -157,14 +157,14 @@ def test_hotspot_suite_isolates_unavailable_candidate(tmp_path: Path) -> None:
     assert result["status"] == "completed_with_failures"
     assert {row["model"] for row in result["models"]} == {
         "qwen3.5:4b",
-        "qwen3.5:9b",
+        "qwen3.5:9b-mlx",
         "qwen3.6:35b",
     }
-    failed = next(row for row in result["models"] if row["model"] == "qwen3.5:9b")
+    failed = next(row for row in result["models"] if row["model"] == "qwen3.5:9b-mlx")
     assert failed["cold"]["failure"]["classification"] == "transport_or_service"
     manifest = json.loads((tmp_path / "run" / "manifest.json").read_text())
     assert manifest["status"] == "completed_with_failures"
-    assert not any("qwen3.5:9b" in stage for stage in manifest["completed_stages"])
+    assert not any("qwen3.5:9b-mlx" in stage for stage in manifest["completed_stages"])
     assert (tmp_path / "run" / "manifest.json").is_file()
     assert (tmp_path / "run" / "report.html").is_file()
     assert (tmp_path / "run" / "contact-sheet.png").is_file()

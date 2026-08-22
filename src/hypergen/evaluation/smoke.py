@@ -42,7 +42,11 @@ from hypergen.generation.mflux_generator import (
     MfluxGenerationRequest,
     MfluxGenerator,
 )
-from hypergen.generation.ollama_client import OllamaRuntime, OllamaSettings
+from hypergen.generation.ollama_client import (
+    DEFAULT_OLLAMA_MODEL,
+    OllamaRuntime,
+    OllamaSettings,
+)
 
 
 class SmokeStageError(GenerationError):
@@ -60,7 +64,7 @@ class SmokeSettings(DomainModel):
     output_dir: Path
     fixture_image: Path
     ollama_endpoint: NonEmptyString = "http://localhost:11434"
-    ollama_model: NonEmptyString = "qwen3.5:9b"
+    ollama_model: NonEmptyString = DEFAULT_OLLAMA_MODEL
     mflux_model: NonEmptyString = "flux2-klein-4b"
     seed: int = 42
     width: PositiveInt = 1024

@@ -17,7 +17,11 @@ from hypergen.generation.hotspot_prompts import (
     build_hotspot_prompt,
     build_hotspot_response_schema,
 )
-from hypergen.generation.ollama_client import OllamaRuntime, OllamaSettings
+from hypergen.generation.ollama_client import (
+    DEFAULT_OLLAMA_MODEL,
+    OllamaRuntime,
+    OllamaSettings,
+)
 
 
 class FakeOllamaClient:
@@ -25,7 +29,7 @@ class FakeOllamaClient:
         self,
         responses: list[str],
         *,
-        models: tuple[str, ...] = ("qwen3.5:9b",),
+        models: tuple[str, ...] = (DEFAULT_OLLAMA_MODEL,),
         capabilities: tuple[str, ...] = ("vision", "thinking"),
     ) -> None:
         self.responses = responses

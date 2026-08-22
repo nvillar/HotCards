@@ -59,7 +59,7 @@ class FakeOllamaClient:
 
     def chat(self, **kwargs: object) -> SimpleNamespace:
         self.call_count += 1
-        if self.model == "qwen3.5:9b":
+        if self.model == "qwen3.5:9b-mlx":
             content = '{"interactions":'
         else:
             far_edge = 1_500 if self.model == "qwen3.6:35b" else 500
@@ -149,10 +149,14 @@ def test_e2e_uses_exact_models_fixed_mflux_and_preserves_partial_stages(
         for row in result["candidates"]
         for stage in row["stages"]
     )
-    failed = next(row for row in result["candidates"] if row["ollama_model"] == "qwen3.5:9b")
+    failed = next(
+        row for row in result["candidates"] if row["ollama_model"] == "qwen3.5:9b-mlx"
+    )
     assert failed["artifact_path"]
     assert failed["stages"][-1]["failure"]["classification"] == "structured_output_validation"
-    assert (tmp_path / "run" / "raw" / "one" / "qwen3.5-9b" / "partial-hotspots.json").is_file()
+    assert (
+        tmp_path / "run" / "raw" / "one" / "qwen3.5-9b-mlx" / "partial-hotspots.json"
+    ).is_file()
     assert (tmp_path / "run" / "manifest.json").is_file()
     assert (tmp_path / "run" / "summary.csv").is_file()
     assert (tmp_path / "run" / "report.html").is_file()
@@ -164,7 +168,8 @@ def test_e2e_uses_exact_models_fixed_mflux_and_preserves_partial_stages(
         "one:qwen3.6:35b:hotspot_generation: model coordinates were clamped to the canvas"
     ]
     assert not any(
-        "qwen3.5:9b:hotspot_generation" in stage for stage in manifest["completed_stages"]
+        "qwen3.5:9b-mlx:hotspot_generation" in stage
+        for stage in manifest["completed_stages"]
     )
 
 
@@ -201,7 +206,7 @@ def test_e2e_report_failure_finalizes_manifest_without_erasing_stage_data(
         stage["status"] == "success"
         for candidate in result["candidates"]
         for stage in candidate["stages"]
-        if candidate["ollama_model"] != "qwen3.5:9b"
+        if candidate["ollama_model"] != "qwen3.5:9b-mlx"
     )
     assert manifest["status"] == "completed_with_report_failure"
     assert manifest["failure"]["classification"] == "report_rendering"

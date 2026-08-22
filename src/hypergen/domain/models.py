@@ -21,8 +21,17 @@ from pydantic import (
 )
 
 CURRENT_SCHEMA_VERSION = 1
+MAX_REVISION_NAME_LENGTH = 48
 
 NonEmptyString = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+RevisionName = Annotated[
+    str,
+    StringConstraints(
+        strip_whitespace=True,
+        min_length=1,
+        max_length=MAX_REVISION_NAME_LENGTH,
+    ),
+]
 NormalizedCoordinate = Annotated[float, Field(ge=0.0, le=1.0)]
 NonNegativeFiniteFloat = Annotated[FiniteFloat, Field(ge=0.0)]
 
@@ -219,6 +228,7 @@ class ImageRevision(DomainModel):
     """An immutable accepted image artifact and its associated hotspot set."""
 
     id: UUID = Field(default_factory=uuid4)
+    name: RevisionName | None = None
     image_path: NonEmptyString
     origin: ImageOrigin
     source_filename: str | None = None
@@ -257,6 +267,13 @@ class Card(DomainModel):
         revision_ids = [revision.id for revision in self.image_revisions]
         if len(revision_ids) != len(set(revision_ids)):
             raise ValueError("image revision IDs must be unique within a card")
+        revision_names = [
+            revision.name.casefold()
+            for revision in self.image_revisions
+            if revision.name is not None
+        ]
+        if len(revision_names) != len(set(revision_names)):
+            raise ValueError("image revision names must be unique within a card")
         if self.active_revision_id is not None and self.active_revision_id not in set(revision_ids):
             raise ValueError("active_revision_id must identify an image revision on this card")
         return self

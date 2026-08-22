@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
+from typing import Protocol
 from uuid import UUID, uuid4
 
 from PIL import Image, ImageOps, UnidentifiedImageError
@@ -29,6 +30,7 @@ from hypergen.domain.models import (
     ImageGenerationMetadata,
     ImageOrigin,
     ImageRevision,
+    RevisionName,
     Stack,
 )
 from hypergen.generation.image_prompts import compose_image_prompt
@@ -36,6 +38,13 @@ from hypergen.generation.mflux_generator import (
     MfluxGenerationRequest,
     MfluxGenerationResult,
     MfluxGenerator,
+)
+from hypergen.generation.ollama_client import OllamaRuntime, OllamaSettings
+from hypergen.generation.revision_naming import (
+    OllamaRevisionNamer,
+    RevisionNamingRequest,
+    RevisionNamingResult,
+    unique_revision_name,
 )
 
 
@@ -62,6 +71,20 @@ class _GenerationTarget:
 
 
 GenerationSettingsProvider = Callable[[], BackgroundGenerationSettings]
+OllamaSettingsProvider = Callable[[], OllamaSettings]
+
+
+class RevisionNamerProtocol(Protocol):
+    def name(self, request: RevisionNamingRequest) -> RevisionNamingResult: ...
+
+
+RevisionNamerFactory = Callable[[OllamaSettings], RevisionNamerProtocol]
+
+
+def _default_revision_namer_factory(
+    settings: OllamaSettings,
+) -> RevisionNamerProtocol:
+    return OllamaRevisionNamer(OllamaRuntime(settings))
 
 
 class BackgroundDraft(DomainModel):
@@ -70,6 +93,8 @@ class BackgroundDraft(DomainModel):
     stack_id: UUID
     card_id: UUID
     revision_id: UUID
+    name: RevisionName | None = None
+    proposed_name: RevisionName | None = None
     image_path: Path
     origin: ImageOrigin
     source_filename: str | None = None
@@ -153,8 +178,10 @@ class BackgroundWorkflow(QObject):
         session: DocumentSession,
         workers: AdapterWorkers,
         settings_provider: GenerationSettingsProvider,
+        ollama_settings_provider: OllamaSettingsProvider,
         *,
         mflux_generator: MfluxGenerator | None = None,
+        revision_namer_factory: RevisionNamerFactory = _default_revision_namer_factory,
         temporary_directory: Path | None = None,
         parent: QObject | None = None,
     ) -> None:
@@ -163,7 +190,9 @@ class BackgroundWorkflow(QObject):
         self.session = session
         self.workers = workers
         self._settings_provider = settings_provider
+        self._ollama_settings_provider = ollama_settings_provider
         self._mflux_generator = mflux_generator or MfluxGenerator()
+        self._revision_namer_factory = revision_namer_factory
         self._owned_temporary_directory = (
             tempfile.TemporaryDirectory(prefix="hypergen-background-")
             if temporary_directory is None
@@ -180,6 +209,7 @@ class BackgroundWorkflow(QObject):
         self._operation: WorkerOperation | None = None
         self._request_id: UUID | None = None
         self._request_target: _GenerationTarget | None = None
+        self._pending_image_path: Path | None = None
         self._busy = False
 
     @property
@@ -208,6 +238,7 @@ class BackgroundWorkflow(QObject):
         document = self.controller.document
         card = self._card(document, card_id)
         settings = self._settings_provider()
+        ollama_settings = self._ollama_settings_provider()
         inputs = ImageGenerationInputs(
             scene_description=card.scene_description,
             global_style=document.global_style,
@@ -256,6 +287,7 @@ class BackgroundWorkflow(QObject):
                 request_id,
                 target,
                 revision_id,
+                ollama_settings,
             )
         )
         operation.failed.connect(partial(self._operation_failed, request_id))
@@ -306,7 +338,18 @@ class BackgroundWorkflow(QObject):
         document = self.controller.document
         if document.id != draft.stack_id:
             raise BackgroundWorkflowError("the background draft belongs to another stack")
-        self._card(document, draft.card_id)
+        card = self._card(document, draft.card_id)
+        revision_name = (
+            unique_revision_name(
+                draft.proposed_name or draft.name,
+                (
+                    self._revision_display_name(revision)
+                    for revision in card.image_revisions
+                ),
+            )
+            if draft.name is not None
+            else None
+        )
         image_path = store.import_image(
             draft.image_path,
             card_id=draft.card_id,
@@ -314,6 +357,7 @@ class BackgroundWorkflow(QObject):
         )
         revision = ImageRevision(
             id=draft.revision_id,
+            name=revision_name,
             image_path=image_path,
             origin=draft.origin,
             source_filename=draft.source_filename,
@@ -379,6 +423,7 @@ class BackgroundWorkflow(QObject):
         self._request_id = None
         self._request_target = None
         self._operation = None
+        self._discard_pending_image()
         self._set_busy(False, "Generation cancelled")
 
     def close(self) -> None:
@@ -392,6 +437,7 @@ class BackgroundWorkflow(QObject):
         request_id: UUID,
         target: _GenerationTarget,
         revision_id: UUID,
+        ollama_settings: OllamaSettings,
         result: object,
     ) -> None:
         if request_id != self._request_id:
@@ -412,18 +458,74 @@ class BackgroundWorkflow(QObject):
                 BackgroundWorkflowError("image generation returned an unexpected result")
             )
             return
+        self._pending_image_path = result.output_path
+        card = self._card(self.controller.document, target.card_id)
+        existing_names = tuple(
+            self._revision_display_name(revision) for revision in card.image_revisions
+        )
+        request = RevisionNamingRequest(
+            image_path=result.output_path,
+            render_prompt=result.metadata.render_prompt,
+            existing_names=existing_names,
+        )
+        self.progress_changed.emit("Naming background revision...")
+        operation = self.workers.run_ollama(
+            lambda: self._revision_namer_factory(ollama_settings).name(request),
+            stage="naming background revision",
+        )
+        self._operation = operation
+        operation.succeeded.connect(
+            partial(
+                self._revision_named,
+                request_id,
+                target,
+                revision_id,
+                result,
+            )
+        )
+        operation.failed.connect(partial(self._operation_failed, request_id))
+
+    def _revision_named(
+        self,
+        request_id: UUID,
+        target: _GenerationTarget,
+        revision_id: UUID,
+        generation_result: MfluxGenerationResult,
+        result: object,
+    ) -> None:
+        if request_id != self._request_id:
+            return
+        if not self._target_is_current(target):
+            self._finish_with_error(
+                BackgroundWorkflowError(
+                    "the stack or card changed before revision naming completed"
+                )
+            )
+            return
+        if not isinstance(result, RevisionNamingResult):
+            self._finish_with_error(
+                BackgroundWorkflowError("revision naming returned an unexpected result")
+            )
+            return
+        card = self._card(self.controller.document, target.card_id)
+        existing_names = (
+            self._revision_display_name(revision) for revision in card.image_revisions
+        )
         draft = BackgroundDraft(
             stack_id=target.stack_id,
             card_id=target.card_id,
             revision_id=revision_id,
-            image_path=result.output_path,
+            name=unique_revision_name(result.name, existing_names),
+            proposed_name=result.name,
+            image_path=generation_result.output_path,
             origin=ImageOrigin.GENERATED,
-            generation_metadata=result.metadata,
-            created_at=result.metadata.generated_at,
+            generation_metadata=generation_result.metadata,
+            created_at=generation_result.metadata.generated_at,
         )
         self._operation = None
         self._request_id = None
         self._request_target = None
+        self._pending_image_path = None
         self._set_busy(False, "Background draft ready")
         self._set_draft(draft)
 
@@ -436,8 +538,14 @@ class BackgroundWorkflow(QObject):
         self._operation = None
         self._request_id = None
         self._request_target = None
+        self._discard_pending_image()
         self._set_busy(False, "Background generation failed")
         self.failed.emit(failure)
+
+    def _discard_pending_image(self) -> None:
+        if self._pending_image_path is not None:
+            self._pending_image_path.unlink(missing_ok=True)
+            self._pending_image_path = None
 
     def _set_draft(self, draft: BackgroundDraft) -> None:
         previous = self._drafts.get(draft.card_id)
@@ -489,6 +597,12 @@ class BackgroundWorkflow(QObject):
         )
 
     @staticmethod
+    def _revision_display_name(revision: ImageRevision) -> str:
+        if revision.name is not None:
+            return revision.name
+        return "Generated" if revision.origin is ImageOrigin.GENERATED else "Imported"
+
+    @staticmethod
     def _card(document: Stack, card_id: UUID) -> Card:
         card = next((candidate for candidate in document.cards if candidate.id == card_id), None)
         if card is None:
@@ -502,5 +616,8 @@ __all__ = [
     "BackgroundWorkflow",
     "BackgroundWorkflowError",
     "GenerationSettingsProvider",
+    "OllamaSettingsProvider",
+    "RevisionNamerFactory",
+    "RevisionNamerProtocol",
     "prepare_import_image",
 ]

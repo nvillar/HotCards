@@ -22,6 +22,12 @@ from hypergen.application.document_controller import DocumentController
 from hypergen.application.document_session import DocumentSession
 from hypergen.domain.models import Card, ImageGenerationInputs, Stack
 from hypergen.generation.mflux_generator import MfluxGenerator
+from hypergen.generation.ollama_client import OllamaSettings
+from hypergen.generation.revision_naming import (
+    REVISION_NAMING_PROMPT_VERSION,
+    RevisionNamingRequest,
+    RevisionNamingResult,
+)
 from hypergen.storage.stack_store import StackStore
 
 
@@ -46,9 +52,15 @@ class FakeWorkers:
     def __init__(self) -> None:
         self.mflux_calls: list[object] = []
         self.mflux_operations: list[FakeOperation] = []
+        self.ollama_calls: list[object] = []
+        self.ollama_operations: list[FakeOperation] = []
 
     def run_ollama(self, operation: object, *, stage: str) -> FakeOperation:
-        raise AssertionError(f"background generation must not call Ollama: {stage}")
+        assert stage == "naming background revision"
+        self.ollama_calls.append(operation)
+        handle = FakeOperation()
+        self.ollama_operations.append(handle)
+        return handle
 
     def run_mflux(self, operation: object, *, stage: str) -> FakeOperation:
         assert stage == "generating background image"
@@ -76,6 +88,22 @@ class FakeMfluxModel:
         )
 
 
+class FakeRevisionNamer:
+    def __init__(self, proposed_name: str = "Moonlit Garden") -> None:
+        self.proposed_name = proposed_name
+        self.requests: list[RevisionNamingRequest] = []
+
+    def name(self, request: RevisionNamingRequest) -> RevisionNamingResult:
+        self.requests.append(request)
+        return RevisionNamingResult(
+            name=self.proposed_name,
+            raw_response=f'{{"name":"{self.proposed_name}"}}',
+            model_identifier="test-model",
+            prompt_version=REVISION_NAMING_PROMPT_VERSION,
+            duration_seconds=0.1,
+        )
+
+
 def settings() -> BackgroundGenerationSettings:
     return BackgroundGenerationSettings(
         mflux_model="flux2-klein-4b",
@@ -84,6 +112,10 @@ def settings() -> BackgroundGenerationSettings:
         random_seed=False,
         fixed_seed=42,
     )
+
+
+def ollama_settings() -> OllamaSettings:
+    return OllamaSettings(model="test-model")
 
 
 def bound_workflow(
@@ -113,12 +145,15 @@ def bound_workflow(
     session.create(controller.document, tmp_path / "Stack.hypergen")
     workers = FakeWorkers()
     generator = MfluxGenerator(model_factory=lambda *_args: FakeMfluxModel())
+    namer = FakeRevisionNamer()
     workflow = BackgroundWorkflow(
         controller,
         session,
         workers,  # type: ignore[arg-type]
         settings,
+        ollama_settings,
         mflux_generator=generator,
+        revision_namer_factory=lambda _settings: namer,
         temporary_directory=tmp_path / "candidates",
     )
     return workflow, controller, session, workers, card
@@ -130,9 +165,13 @@ def test_generate_then_apply_creates_durable_revision(tmp_path: Path) -> None:
     workflow.generate(card.id)
     generated = workers.mflux_calls[0]()  # type: ignore[operator]
     workers.mflux_operations[0].succeeded.emit(generated)
+    assert workflow.draft_for(card.id) is None
+    named = workers.ollama_calls[0]()  # type: ignore[operator]
+    workers.ollama_operations[0].succeeded.emit(named)
 
     draft = workflow.draft_for(card.id)
     assert draft is not None
+    assert draft.name == "Moonlit Garden"
     assert draft.image_path.is_file()
     assert generated.metadata.inputs == ImageGenerationInputs(
         scene_description="A garden",
@@ -144,6 +183,7 @@ def test_generate_then_apply_creates_durable_revision(tmp_path: Path) -> None:
     assert workflow.draft_for(card.id) is None
     revision = controller.document.cards[0].image_revisions[0]
     assert revision.id == draft.revision_id
+    assert revision.name == "Moonlit Garden"
     assert revision.generation_metadata is not None
     assert revision.generation_metadata.render_prompt == "A garden\n\nPencil"
     assert revision.generation_metadata.seed == 42
@@ -238,6 +278,69 @@ def test_generation_failure_preserves_document(tmp_path: Path) -> None:
     assert controller.document == before
 
 
+def test_revision_naming_failure_discards_generated_image(tmp_path: Path) -> None:
+    workflow, controller, _session, workers, card = bound_workflow(tmp_path)
+    failures: list[object] = []
+    workflow.failed.connect(failures.append)
+    before = controller.document
+
+    workflow.generate(card.id)
+    generated = workers.mflux_calls[0]()  # type: ignore[operator]
+    workers.mflux_operations[0].succeeded.emit(generated)
+    error = BackgroundWorkflowError("naming failed")
+    workers.ollama_operations[0].failed.emit(error)
+
+    assert failures == [error]
+    assert not workflow.busy
+    assert workflow.draft_for(card.id) is None
+    assert not generated.output_path.exists()
+    assert controller.document == before
+
+
+def test_generated_revision_names_append_unique_index(tmp_path: Path) -> None:
+    workflow, controller, _session, workers, card = bound_workflow(tmp_path)
+
+    workflow.generate(card.id)
+    first_generated = workers.mflux_calls[0]()  # type: ignore[operator]
+    workers.mflux_operations[0].succeeded.emit(first_generated)
+    first_named = workers.ollama_calls[0]()  # type: ignore[operator]
+    workers.ollama_operations[0].succeeded.emit(first_named)
+    workflow.apply_draft(card.id)
+
+    workflow.generate(card.id)
+    second_generated = workers.mflux_calls[1]()  # type: ignore[operator]
+    workers.mflux_operations[1].succeeded.emit(second_generated)
+    second_named = workers.ollama_calls[1]()  # type: ignore[operator]
+    workers.ollama_operations[1].succeeded.emit(second_named)
+
+    draft = workflow.draft_for(card.id)
+    assert draft is not None
+    assert draft.name == "Moonlit Garden 2"
+    workflow.apply_draft(card.id)
+    assert [
+        revision.name
+        for revision in controller.document.cards[0].image_revisions
+    ] == ["Moonlit Garden", "Moonlit Garden 2"]
+
+    second_revision_id = controller.document.cards[0].image_revisions[1].id
+    workflow.delete_revision(card.id, second_revision_id)
+    workflow.generate(card.id)
+    third_generated = workers.mflux_calls[2]()  # type: ignore[operator]
+    workers.mflux_operations[2].succeeded.emit(third_generated)
+    third_named = workers.ollama_calls[2]()  # type: ignore[operator]
+    workers.ollama_operations[2].succeeded.emit(third_named)
+    third_draft = workflow.draft_for(card.id)
+    assert third_draft is not None
+    assert third_draft.name == "Moonlit Garden 2"
+
+    assert controller.undo()
+    workflow.apply_draft(card.id)
+    assert [
+        revision.name
+        for revision in controller.document.cards[0].image_revisions
+    ] == ["Moonlit Garden", "Moonlit Garden 2", "Moonlit Garden 3"]
+
+
 def test_generation_result_is_discarded_after_document_identity_changes(
     tmp_path: Path,
 ) -> None:
@@ -268,6 +371,7 @@ def test_new_candidate_requires_bound_stack_and_resolved_prior_candidate(
         session,
         FakeWorkers(),  # type: ignore[arg-type]
         settings,
+        ollama_settings,
         temporary_directory=tmp_path / "candidates",
     )
 
@@ -299,6 +403,8 @@ def test_drafts_are_card_local_and_replacement_is_atomic(tmp_path: Path) -> None
     workflow.generate(first_card.id, replace_draft=True)
     generated = workers.mflux_calls[1]()  # type: ignore[operator]
     workers.mflux_operations[1].succeeded.emit(generated)
+    named = workers.ollama_calls[0]()  # type: ignore[operator]
+    workers.ollama_operations[0].succeeded.emit(named)
     replacement = workflow.draft_for(first_card.id)
     assert replacement is not None and replacement != first_draft
     assert not first_draft.image_path.exists()

@@ -3,7 +3,12 @@
 **Decision date:** 2026-07-21
 **Status:** provisional defaults; human quality review remains required
 
-## Ollama default: `qwen3.5:9b` (provisional)
+## Ollama default: `qwen3.5:9b-mlx` (provisional)
+
+The active runtime uses the locally optimized MLX variant. The selection
+evidence below was gathered with the base `qwen3.5:9b` tag and remains the
+quality rationale for choosing the 9B parameter class; the MLX variant still
+requires final walkthrough validation.
 
 The final indexed hotspot comparison used the production 4/2/12
 interaction/component/point limits, 1024 output tokens, 8192 context tokens,

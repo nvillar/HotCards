@@ -14,9 +14,10 @@ interactive experience. All generation runs on-device.
 authoring shell remains usable when either service is unavailable.
 
 Stacks are stored as self-contained `.hypergen` directory bundles and
-autosaved atomically after creation or opening.
+autosaved atomically after creation or opening. At startup, HyperGen lists
+projects in `~/Documents/HyperGen` and offers direct Open and Create actions.
 
-The current Author workflow uses Card and Interactivity inspector tabs. The
+The current Author workflow uses Card and Hotspots inspector tabs. The
 Card tab keeps Scene, background revisions, and a collapsible Style editor
 together. Background prompts are composed directly from the author-visible
 Scene plus either the stack's global Style or a card-specific replacement;
@@ -25,8 +26,9 @@ rewrite Scene text through Ollama for explicit review, editing, acceptance, or
 discard; accepted text remains an ordinary undoable Scene edit. Describe Image
 can instead replace Scene with a generation-ready visual description of the
 active revision. Authors can review generated or imported card-local background
-drafts, switch cards without losing them, manage revision history, and edit
-manual multi-area polygon hotspots with explicit card destinations. Authors can
+drafts, with generated revisions receiving short model-generated names. They
+can switch cards without losing drafts, manage revision history, and edit manual
+multi-area polygon hotspots with explicit card destinations. Authors can
 also generate transient hotspot candidates from the active image and interaction
 intent, correct them with the same geometry and destination controls, review
 absent-subject warnings, then apply or discard the complete set. Summarize
@@ -38,8 +40,8 @@ automatically when Author mode is entered; Run mode starts no AI work.
 ## Setup and run
 
 Prerequisites: Python 3.12 and [uv](https://docs.astral.sh/uv/). To enable
-generation, also run Ollama with the configured model and cache the selected
-MFLUX model locally.
+generation, also run Ollama with the configured model (default:
+`qwen3.5:9b-mlx`) and cache the selected MFLUX model locally.
 
 ```sh
 uv sync

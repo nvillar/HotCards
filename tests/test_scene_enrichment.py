@@ -59,6 +59,6 @@ def test_ollama_scene_enricher_parses_structured_output() -> None:
 
     assert result.scene.startswith("An ancient moonlit wood")
     assert result.raw_response == content
-    assert result.model_identifier == "qwen3.5:9b"
+    assert result.model_identifier == "qwen3.5:9b-mlx"
     assert result.total_duration_ns == 2_000_000
     assert client.messages[0]["role"] == "user"

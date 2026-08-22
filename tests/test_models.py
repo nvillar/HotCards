@@ -139,6 +139,24 @@ def test_hotspot_set_distinguishes_never_applied_from_applied_empty() -> None:
     assert applied_empty.hotspot_set.interactions == ()
 
 
+def test_card_rejects_duplicate_revision_names_case_insensitively() -> None:
+    first = ImageRevision(
+        name="Moonlit Moat",
+        image_path="assets/cards/card/first.png",
+        origin=ImageOrigin.IMPORTED,
+        created_at=datetime.now(UTC),
+    )
+    second = ImageRevision(
+        name="moonlit moat",
+        image_path="assets/cards/card/second.png",
+        origin=ImageOrigin.IMPORTED,
+        created_at=datetime.now(UTC),
+    )
+
+    with pytest.raises(ValidationError, match="revision names must be unique"):
+        Card(name="Courtyard", image_revisions=(first, second))
+
+
 def test_hotspots_are_nested_in_their_image_revision() -> None:
     interaction = Interaction(
         label="Gate",

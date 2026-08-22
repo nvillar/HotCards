@@ -17,6 +17,8 @@ from hypergen.generation.errors import (
     ServiceUnavailableError,
 )
 
+DEFAULT_OLLAMA_MODEL = "qwen3.5:9b-mlx"
+
 
 class OllamaClientProtocol(Protocol):
     """Subset of the official client used by HyperGen."""
@@ -52,7 +54,7 @@ class OllamaSettings:
     """Machine-local Ollama connection and inference settings."""
 
     endpoint: str = "http://localhost:11434"
-    model: str = "qwen3.5:9b"
+    model: str = DEFAULT_OLLAMA_MODEL
     think: bool | str | None = False
     temperature: float = 0.0
     keep_alive: str | float | None = "10m"

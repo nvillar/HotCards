@@ -4,19 +4,22 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Callable, Mapping
+from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import QSettings
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
 
 from hypergen.application.document_controller import DocumentController
-from hypergen.application.document_session import DocumentSession
+from hypergen.application.document_session import DocumentSession, DocumentSessionError
 from hypergen.application.workers import AdapterKind, AdapterWorkers
 from hypergen.domain.models import Stack
 from hypergen.generation.errors import ModelUnavailableError
 from hypergen.generation.ollama_client import OllamaRuntime, OllamaSettings
 from hypergen.ui.main_window import AvailabilityChecksFactory, MainWindow
+from hypergen.ui.project_paths import default_project_directory
 from hypergen.ui.settings_dialog import SettingsStore, load_machine_settings
+from hypergen.ui.welcome_dialog import WelcomeDialog, WelcomeSelection
 
 
 def build_availability_checks(
@@ -79,6 +82,7 @@ def build_main_window(
     availability_checks: Mapping[AdapterKind, Callable[[], Any]] | None = None,
     availability_checks_factory: AvailabilityChecksFactory | None = None,
     document_session: DocumentSession | None = None,
+    project_directory: Path | None = None,
     start_diagnostics: bool = False,
 ) -> MainWindow:
     """Construct an injectable shell without creating live model clients."""
@@ -99,6 +103,7 @@ def build_main_window(
         availability_checks=availability_checks,
         availability_checks_factory=availability_checks_factory,
         document_session=active_session,
+        project_directory=project_directory,
         start_diagnostics=start_diagnostics,
         owns_workers=workers is None,
     )
@@ -110,10 +115,46 @@ def main() -> int:
     application.setOrganizationName("HyperGen")
     application.setApplicationName("HyperGen")
     settings = QSettings()
+    project_directory = default_project_directory()
+    controller = DocumentController(Stack(name="Welcome"))
+    session = DocumentSession(controller)
+    while session.store is None:
+        welcome = WelcomeDialog(project_directory)
+        if welcome.exec() != QDialog.DialogCode.Accepted:
+            return 0
+        selection = welcome.selection
+        if selection is None:
+            continue
+        try:
+            _apply_welcome_selection(session, selection)
+        except DocumentSessionError as error:
+            QMessageBox.critical(
+                None,
+                (
+                    "Could Not Open Project"
+                    if selection.stack is None
+                    else "Could Not Create Project"
+                ),
+                str(error),
+            )
     window = build_main_window(
+        controller=controller,
         settings=settings,
         availability_checks_factory=lambda: build_availability_checks(settings),
+        document_session=session,
+        project_directory=project_directory,
         start_diagnostics=True,
     )
     window.show()
     return application.exec()
+
+
+def _apply_welcome_selection(
+    session: DocumentSession,
+    selection: WelcomeSelection,
+) -> None:
+    """Bind the startup selection before constructing the authoring shell."""
+    if selection.stack is None:
+        session.open(selection.bundle_path)
+    else:
+        session.create(selection.stack, selection.bundle_path)

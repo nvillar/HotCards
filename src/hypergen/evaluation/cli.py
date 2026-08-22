@@ -31,6 +31,7 @@ from hypergen.evaluation.smoke import (
     run_smoke,
 )
 from hypergen.generation.errors import GenerationError
+from hypergen.generation.ollama_client import DEFAULT_OLLAMA_MODEL
 
 
 def _positive_int(value: str) -> int:
@@ -61,7 +62,7 @@ def build_parser() -> argparse.ArgumentParser:
     smoke.add_argument("--output-dir", type=Path)
     smoke.add_argument("--fixture-image", type=Path, default=default_smoke_fixture())
     smoke.add_argument("--ollama-endpoint", default="http://localhost:11434")
-    smoke.add_argument("--ollama-model", default="qwen3.5:9b")
+    smoke.add_argument("--ollama-model", default=DEFAULT_OLLAMA_MODEL)
     smoke.add_argument("--mflux-model", default="flux2-klein-4b")
     smoke.add_argument("--seed", type=int, default=42)
     smoke.add_argument("--quantization", type=int)
@@ -100,7 +101,7 @@ def build_parser() -> argparse.ArgumentParser:
     hotspots.add_argument("--ollama-num-predict", type=_positive_int, default=1024)
     hotspots.add_argument("--ollama-context-length", type=_positive_int, default=8192)
     hotspots.add_argument("--no-ablations", action="store_true")
-    hotspots.add_argument("--ablation-model", default="qwen3.5:9b")
+    hotspots.add_argument("--ablation-model", default=DEFAULT_OLLAMA_MODEL)
     e2e = subparsers.add_parser(
         "e2e",
         help="compare exact Ollama candidates through one fixed MFLUX model",
