@@ -11,12 +11,13 @@ from pydantic import Field, StringConstraints, ValidationError, model_validator
 
 from hypergen.domain.geometry import (
     DEFAULT_MODEL_COORDINATE_EXTENT,
-    model_point_to_document,
+    model_coordinate_to_normalized,
 )
 from hypergen.domain.models import (
     DomainModel,
     HotspotRemapProvenance,
     NonEmptyString,
+    Point,
     Polygon,
 )
 from hypergen.generation.errors import ModelResponseError
@@ -44,6 +45,10 @@ class HotspotRemapRequest(DomainModel):
     image_path: Path
     hotspots: tuple[RemapHotspotInput, ...] = Field(min_length=1)
     coordinate_extent: int = Field(default=DEFAULT_MODEL_COORDINATE_EXTENT, gt=0)
+    coordinate_width: int | None = Field(default=None, gt=0)
+    coordinate_height: int | None = Field(default=None, gt=0)
+    explicit_coordinate_guidance: bool = False
+    batch_size: Literal[1, 2, 4] = MAX_INTERACTIONS_PER_CALL
     coordinate_grid_divisions: int | None = Field(default=None, ge=2, le=20)
     prompt_version: Literal[HOTSPOT_REMAP_PROMPT_VERSION] = (
         HOTSPOT_REMAP_PROMPT_VERSION
@@ -57,7 +62,19 @@ class HotspotRemapRequest(DomainModel):
         tokens = [hotspot.token for hotspot in self.hotspots]
         if len(tokens) != len(set(tokens)):
             raise ValueError("hotspot remap tokens must be unique")
+        if (self.coordinate_width is None) != (self.coordinate_height is None):
+            raise ValueError(
+                "coordinate_width and coordinate_height must be supplied together"
+            )
         return self
+
+    @property
+    def x_extent(self) -> int:
+        return self.coordinate_width or self.coordinate_extent
+
+    @property
+    def y_extent(self) -> int:
+        return self.coordinate_height or self.coordinate_extent
 
 
 class ModelPoint(DomainModel):
@@ -128,13 +145,19 @@ def build_hotspot_remap_prompt(
     hotspots: tuple[RemapHotspotInput, ...],
 ) -> str:
     """Build a versioned prompt that cannot redefine hotspot semantics."""
-    payload = {
+    payload: dict[str, Any] = {
         "hotspots": [
             {"token": hotspot.token, "label": hotspot.label}
             for hotspot in hotspots
         ],
-        "coordinate_extent": request.coordinate_extent,
     }
+    if request.coordinate_width is None:
+        payload["coordinate_extent"] = request.coordinate_extent
+    else:
+        payload["coordinate_bounds"] = {
+            "x": [0, request.x_extent],
+            "y": [0, request.y_extent],
+        }
     response_shape = {
         "mapped": [
             {
@@ -142,9 +165,18 @@ def build_hotspot_remap_prompt(
                 "polygons": [
                     {
                         "points": [
-                            {"x": 100, "y": 100},
-                            {"x": 200, "y": 100},
-                            {"x": 150, "y": 200},
+                            {
+                                "x": round(request.x_extent * 0.1),
+                                "y": round(request.y_extent * 0.1),
+                            },
+                            {
+                                "x": round(request.x_extent * 0.2),
+                                "y": round(request.y_extent * 0.1),
+                            },
+                            {
+                                "x": round(request.x_extent * 0.15),
+                                "y": round(request.y_extent * 0.2),
+                            },
                         ]
                     }
                 ],
@@ -164,10 +196,28 @@ def build_hotspot_remap_prompt(
 - The image has a temporary {request.coordinate_grid_divisions} by \
 {request.coordinate_grid_divisions} measurement grid.
 - Cyan vertical lines mark x coordinates and magenta horizontal lines mark y coordinates.
-- Grid labels use the same 0 through {request.coordinate_extent} coordinate system as the response.
+- Grid labels use the same x=0..{request.x_extent}, y=0..{request.y_extent} \
+coordinate system as the response.
 - Ignore grid lines and labels as scene content; use them only to estimate vertex coordinates.
 - Fit polygons tightly to the visible subject with minimal surrounding padding.
 
+"""
+    coordinate_instruction = (
+        f"- Use coordinates from 0 through {request.coordinate_extent}."
+        if request.coordinate_width is None
+        else (
+            f"- Use x coordinates from 0 through {request.x_extent} and "
+            f"y coordinates from 0 through {request.y_extent}."
+        )
+    )
+    explicit_guidance = ""
+    if request.explicit_coordinate_guidance:
+        explicit_guidance = f"""
+- The coordinate origin (0, 0) is the image's top-left corner.
+- X increases from left to right; y increases from top to bottom.
+- The bottom-right image edge is ({request.x_extent}, {request.y_extent}).
+- Fit each polygon tightly to the whole visible labeled subject with minimal padding.
+- Exclude adjacent scenery, shadows, and unrelated objects.
 """
     return f"""\
 Locate each supplied existing hotspot subject in the current card image.
@@ -180,12 +230,12 @@ Return JSON matching the supplied schema.
 {json.dumps(response_shape, ensure_ascii=False, indent=2)}
 - The geometry key must be "polygons", never "polygon_components".
 - Each polygon point must be an object with integer x and y fields.
-- Use coordinates from 0 through {request.coordinate_extent}.
+{coordinate_instruction}
 - Use at most {MAX_COMPONENTS_PER_INTERACTION} polygon components and
   {MAX_POINTS_PER_COMPONENT} points per component.
 - Keep polygons simple and editable. Do not create holes.
 - If a subject cannot be located, return it in unlocated instead of inventing geometry.\
-{grid_guidance}Prompt contract: {request.prompt_version}
+{explicit_guidance}{grid_guidance}Prompt contract: {request.prompt_version}
 Schema contract: {request.schema_version}
 Request:
 {json.dumps(payload, ensure_ascii=False, indent=2)}
@@ -233,9 +283,9 @@ def _normalize_batch(
     for mapped in output.mapped:
         if any(
             point.x < 0
-            or point.x > request.coordinate_extent
+            or point.x > request.x_extent
             or point.y < 0
-            or point.y > request.coordinate_extent
+            or point.y > request.y_extent
             for polygon in mapped.polygons
             for point in polygon.points
         ):
@@ -246,10 +296,15 @@ def _normalize_batch(
             polygons_by_token[mapped.token] = tuple(
                 Polygon(
                     points=tuple(
-                        model_point_to_document(
-                            point.x,
-                            point.y,
-                            extent=request.coordinate_extent,
+                        Point(
+                            x=model_coordinate_to_normalized(
+                                point.x,
+                                extent=request.x_extent,
+                            ),
+                            y=model_coordinate_to_normalized(
+                                point.y,
+                                extent=request.y_extent,
+                            ),
                         )
                         for point in polygon.points
                     )
@@ -302,8 +357,8 @@ class OllamaHotspotRemapper:
         has_prompt_count = True
         has_eval_count = True
         done_reasons: list[str] = []
-        for start in range(0, len(request.hotspots), MAX_INTERACTIONS_PER_CALL):
-            batch = request.hotspots[start : start + MAX_INTERACTIONS_PER_CALL]
+        for start in range(0, len(request.hotspots), request.batch_size):
+            batch = request.hotspots[start : start + request.batch_size]
             call = self._runtime.chat_structured(
                 prompt=build_hotspot_remap_prompt(request, batch),
                 schema=build_hotspot_remap_schema(batch),

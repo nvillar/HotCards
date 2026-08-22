@@ -39,7 +39,13 @@ def test_grid_overlay_preserves_dimensions_and_changes_pixels(
     output = tmp_path / "grid.png"
     Image.new("RGB", (100, 80), "white").save(source)
 
-    render_coordinate_grid(source, output, divisions=10)
+    render_coordinate_grid(
+        source,
+        output,
+        divisions=10,
+        x_extent=100,
+        y_extent=80,
+    )
 
     with Image.open(source) as original, Image.open(output) as gridded:
         assert gridded.size == original.size
@@ -62,6 +68,9 @@ def test_summary_scores_failed_trials_as_zero() -> None:
             {
                 "model": "model",
                 "grid_divisions": 10,
+                "coordinate_mode": "normalized",
+                "coordinate_guidance": "minimal",
+                "batch_size": 4,
                 "status": "success",
                 "mean_polygon_iou": 0.8,
                 "mean_bbox_iou": 0.6,
@@ -70,6 +79,9 @@ def test_summary_scores_failed_trials_as_zero() -> None:
             {
                 "model": "model",
                 "grid_divisions": 10,
+                "coordinate_mode": "normalized",
+                "coordinate_guidance": "minimal",
+                "batch_size": 4,
                 "status": "failed",
             },
         ]

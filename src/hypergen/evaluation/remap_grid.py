@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from statistics import mean, pstdev
+from typing import Literal
 
 from PIL import Image, ImageChops, ImageDraw
 from pydantic import Field
@@ -44,6 +45,18 @@ class RemapGridExperimentSettings(DomainModel):
         default=DEFAULT_GRID_DIVISIONS,
         min_length=1,
     )
+    coordinate_modes: tuple[Literal["normalized", "native"], ...] = Field(
+        default=("normalized",),
+        min_length=1,
+    )
+    coordinate_guidance: tuple[Literal["minimal", "explicit"], ...] = Field(
+        default=("minimal",),
+        min_length=1,
+    )
+    batch_sizes: tuple[Literal[1, 2, 4], ...] = Field(
+        default=(4,),
+        min_length=1,
+    )
     trials: int = Field(default=3, gt=0)
     ollama_endpoint: str = "http://localhost:11434"
     ollama_timeout_seconds: float = Field(default=180.0, gt=0)
@@ -74,9 +87,10 @@ def render_coordinate_grid(
     output_path: Path,
     *,
     divisions: int,
-    extent: int = 1000,
+    x_extent: int = 1000,
+    y_extent: int = 1000,
 ) -> Path:
-    """Overlay a labeled normalized coordinate grid without resizing the image."""
+    """Overlay a labeled coordinate grid without resizing the image."""
     if divisions < 2 or divisions > 20:
         raise ValueError("grid divisions must be between 2 and 20")
     with Image.open(source_path) as source:
@@ -92,17 +106,18 @@ def render_coordinate_grid(
         draw.line((x, 0, x, image.height), fill=(0, 220, 255, alpha), width=line_width)
         draw.line((0, y, image.width, y), fill=(255, 0, 180, alpha), width=line_width)
         if major:
-            coordinate = round(extent * index / divisions)
+            x_coordinate = round(x_extent * index / divisions)
+            y_coordinate = round(y_extent * index / divisions)
             draw.text(
                 (x + 2, 2),
-                f"x={coordinate}",
+                f"x={x_coordinate}",
                 fill=(0, 0, 0, 255),
                 stroke_width=2,
                 stroke_fill=(255, 255, 255, 230),
             )
             draw.text(
                 (2, y + 2),
-                f"y={coordinate}",
+                f"y={y_coordinate}",
                 fill=(0, 0, 0, 255),
                 stroke_width=2,
                 stroke_fill=(255, 255, 255, 230),
@@ -247,14 +262,26 @@ def _score_result(
 def _summaries(rows: list[dict[str, object]]) -> list[dict[str, object]]:
     summaries: list[dict[str, object]] = []
     combinations = sorted(
-        {(str(row["model"]), int(row["grid_divisions"])) for row in rows}
+        {
+            (
+                str(row["model"]),
+                int(row["grid_divisions"]),
+                str(row["coordinate_mode"]),
+                str(row["coordinate_guidance"]),
+                int(row["batch_size"]),
+            )
+            for row in rows
+        }
     )
-    for model, divisions in combinations:
+    for model, divisions, coordinate_mode, coordinate_guidance, batch_size in combinations:
         trials = [
             row
             for row in rows
             if row["model"] == model
             and row["grid_divisions"] == divisions
+            and row["coordinate_mode"] == coordinate_mode
+            and row["coordinate_guidance"] == coordinate_guidance
+            and row["batch_size"] == batch_size
         ]
         successes = [row for row in trials if row["status"] == "success"]
         polygon_values = [
@@ -276,6 +303,9 @@ def _summaries(rows: list[dict[str, object]]) -> list[dict[str, object]]:
             {
                 "model": model,
                 "grid_divisions": divisions,
+                "coordinate_mode": coordinate_mode,
+                "coordinate_guidance": coordinate_guidance,
+                "batch_size": batch_size,
                 "successful_trials": len(successes),
                 "trial_count": len(trials),
                 "success_rate": len(successes) / len(trials),
@@ -409,14 +439,24 @@ def run_remap_grid_experiment(
             for item in references
         ],
     }
-    grid_paths: dict[int, Path] = {0: source_copy}
-    for divisions in settings.grid_divisions:
-        if divisions:
-            grid_paths[divisions] = render_coordinate_grid(
-                source_copy,
-                settings.output_dir / "grids" / f"grid-{divisions}.png",
-                divisions=divisions,
-            )
+    grid_paths: dict[tuple[int, str], Path] = {
+        (0, mode): source_copy for mode in settings.coordinate_modes
+    }
+    for coordinate_mode in settings.coordinate_modes:
+        x_extent, y_extent = (
+            image_size if coordinate_mode == "native" else (1000, 1000)
+        )
+        for divisions in settings.grid_divisions:
+            if divisions:
+                grid_paths[(divisions, coordinate_mode)] = render_coordinate_grid(
+                    source_copy,
+                    settings.output_dir
+                    / "grids"
+                    / f"grid-{divisions}-{coordinate_mode}.png",
+                    divisions=divisions,
+                    x_extent=x_extent,
+                    y_extent=y_extent,
+                )
 
     rows: list[dict[str, object]] = []
     contact_entries: list[tuple[Path, str]] = []
@@ -438,6 +478,9 @@ def run_remap_grid_experiment(
                 {
                     "model": model,
                     "grid_divisions": divisions,
+                    "coordinate_mode": coordinate_mode,
+                    "coordinate_guidance": coordinate_guidance,
+                    "batch_size": batch_size,
                     "trial": trial,
                     "status": "failed",
                     "error_type": type(error).__name__,
@@ -445,6 +488,9 @@ def run_remap_grid_experiment(
                     "stage": "model_setup",
                 }
                 for divisions in settings.grid_divisions
+                for coordinate_mode in settings.coordinate_modes
+                for coordinate_guidance in settings.coordinate_guidance
+                for batch_size in settings.batch_sizes
                 for trial in range(1, settings.trials + 1)
             )
             _write_outputs(
@@ -456,83 +502,129 @@ def run_remap_grid_experiment(
             continue
         remapper = OllamaHotspotRemapper(runtime)
         for divisions in settings.grid_divisions:
-            for trial in range(1, settings.trials + 1):
-                request = HotspotRemapRequest(
-                    image_path=grid_paths[divisions],
-                    hotspots=tuple(
-                        RemapHotspotInput(
-                            token=reference.token,
-                            label=reference.label,
-                        )
-                        for reference in references
-                    ),
-                    coordinate_grid_divisions=divisions or None,
-                )
-                row: dict[str, object] = {
-                    "model": model,
-                    "grid_divisions": divisions,
-                    "trial": trial,
-                }
-                try:
-                    result = remapper.remap(request)
-                except GenerationError as error:
-                    if (
-                        isinstance(error, ModelResponseError)
-                        and error.raw_response is not None
-                    ):
-                        raw_dir = (
-                            settings.output_dir
-                            / "raw"
-                            / model_artifact_id
-                        )
-                        raw_dir.mkdir(parents=True, exist_ok=True)
-                        (
-                            raw_dir
-                            / f"grid-{divisions}-trial-{trial}-failed.txt"
-                        ).write_text(error.raw_response, encoding="utf-8")
-                    row.update(
-                        {
-                            "status": "failed",
-                            "error_type": type(error).__name__,
-                            "message": str(error),
-                        }
-                    )
-                else:
-                    raw_dir = settings.output_dir / "raw" / model_artifact_id
-                    raw_dir.mkdir(parents=True, exist_ok=True)
-                    (raw_dir / f"grid-{divisions}-trial-{trial}.json").write_text(
-                        json.dumps(list(result.raw_responses), indent=2),
-                        encoding="utf-8",
-                    )
-                    row.update(
-                        {
-                            "status": "success",
-                            **_score_result(references, result, image_size),
-                        }
-                    )
-                    overlay_path = _annotate_comparison(
-                        source_copy,
-                        settings.output_dir
-                        / "overlays"
-                        / model_artifact_id
-                        / f"grid-{divisions}-trial-{trial}.png",
-                        references,
-                        result.polygons_by_token,
-                    )
-                    contact_entries.append(
-                        (
-                            overlay_path,
-                            f"{model} grid={divisions} trial={trial} "
-                            f"IoU={row['mean_polygon_iou']:.3f}",
-                        )
-                    )
-                rows.append(row)
-                _write_outputs(
-                    settings,
-                    source_metadata,
-                    rows,
-                    contact_entries,
-                )
+            for coordinate_mode in settings.coordinate_modes:
+                for coordinate_guidance in settings.coordinate_guidance:
+                    for batch_size in settings.batch_sizes:
+                        for trial in range(1, settings.trials + 1):
+                            coordinate_width = (
+                                image_size[0]
+                                if coordinate_mode == "native"
+                                else None
+                            )
+                            coordinate_height = (
+                                image_size[1]
+                                if coordinate_mode == "native"
+                                else None
+                            )
+                            condition = (
+                                f"grid-{divisions}-coords-{coordinate_mode}-"
+                                f"guide-{coordinate_guidance}-batch-{batch_size}"
+                            )
+                            request = HotspotRemapRequest(
+                                image_path=grid_paths[
+                                    (divisions, coordinate_mode)
+                                ],
+                                hotspots=tuple(
+                                    RemapHotspotInput(
+                                        token=reference.token,
+                                        label=reference.label,
+                                    )
+                                    for reference in references
+                                ),
+                                coordinate_width=coordinate_width,
+                                coordinate_height=coordinate_height,
+                                explicit_coordinate_guidance=(
+                                    coordinate_guidance == "explicit"
+                                ),
+                                batch_size=batch_size,
+                                coordinate_grid_divisions=divisions or None,
+                            )
+                            row: dict[str, object] = {
+                                "model": model,
+                                "grid_divisions": divisions,
+                                "coordinate_mode": coordinate_mode,
+                                "coordinate_guidance": coordinate_guidance,
+                                "batch_size": batch_size,
+                                "trial": trial,
+                            }
+                            try:
+                                result = remapper.remap(request)
+                            except GenerationError as error:
+                                if (
+                                    isinstance(error, ModelResponseError)
+                                    and error.raw_response is not None
+                                ):
+                                    raw_dir = (
+                                        settings.output_dir
+                                        / "raw"
+                                        / model_artifact_id
+                                    )
+                                    raw_dir.mkdir(parents=True, exist_ok=True)
+                                    (
+                                        raw_dir
+                                        / f"{condition}-trial-{trial}-failed.txt"
+                                    ).write_text(
+                                        error.raw_response,
+                                        encoding="utf-8",
+                                    )
+                                row.update(
+                                    {
+                                        "status": "failed",
+                                        "error_type": type(error).__name__,
+                                        "message": str(error),
+                                    }
+                                )
+                            else:
+                                raw_dir = (
+                                    settings.output_dir
+                                    / "raw"
+                                    / model_artifact_id
+                                )
+                                raw_dir.mkdir(parents=True, exist_ok=True)
+                                (
+                                    raw_dir / f"{condition}-trial-{trial}.json"
+                                ).write_text(
+                                    json.dumps(
+                                        list(result.raw_responses),
+                                        indent=2,
+                                    ),
+                                    encoding="utf-8",
+                                )
+                                row.update(
+                                    {
+                                        "status": "success",
+                                        **_score_result(
+                                            references,
+                                            result,
+                                            image_size,
+                                        ),
+                                    }
+                                )
+                                overlay_path = _annotate_comparison(
+                                    source_copy,
+                                    settings.output_dir
+                                    / "overlays"
+                                    / model_artifact_id
+                                    / f"{condition}-trial-{trial}.png",
+                                    references,
+                                    result.polygons_by_token,
+                                )
+                                contact_entries.append(
+                                    (
+                                        overlay_path,
+                                        f"{model} {coordinate_mode} "
+                                        f"{coordinate_guidance} batch={batch_size} "
+                                        f"grid={divisions} trial={trial} "
+                                        f"IoU={row['mean_polygon_iou']:.3f}",
+                                    )
+                                )
+                            rows.append(row)
+                            _write_outputs(
+                                settings,
+                                source_metadata,
+                                rows,
+                                contact_entries,
+                            )
 
     return _write_outputs(
         settings,

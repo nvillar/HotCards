@@ -142,6 +142,28 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
     )
+    remap_grid.add_argument(
+        "--coordinate-mode",
+        action="append",
+        choices=("normalized", "native"),
+        dest="coordinate_modes",
+        default=None,
+    )
+    remap_grid.add_argument(
+        "--coordinate-guidance",
+        action="append",
+        choices=("minimal", "explicit"),
+        dest="coordinate_guidance",
+        default=None,
+    )
+    remap_grid.add_argument(
+        "--batch-size",
+        action="append",
+        choices=(1, 2, 4),
+        type=int,
+        dest="batch_sizes",
+        default=None,
+    )
     remap_grid.add_argument("--trials", type=_positive_int, default=3)
     remap_grid.add_argument("--ollama-endpoint", default="http://localhost:11434")
     remap_grid.add_argument("--ollama-timeout", type=_positive_float, default=180.0)
@@ -218,6 +240,13 @@ def run_cli(arguments: Sequence[str] | None = None) -> int:
                     grid_divisions=tuple(
                         args.grid_divisions or DEFAULT_GRID_DIVISIONS
                     ),
+                    coordinate_modes=tuple(
+                        args.coordinate_modes or ("normalized",)
+                    ),
+                    coordinate_guidance=tuple(
+                        args.coordinate_guidance or ("minimal",)
+                    ),
+                    batch_sizes=tuple(args.batch_sizes or (4,)),
                     trials=args.trials,
                     ollama_endpoint=args.ollama_endpoint,
                     ollama_timeout_seconds=args.ollama_timeout,

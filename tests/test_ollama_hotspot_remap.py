@@ -126,6 +126,117 @@ def test_grid_prompt_explains_normalized_overlay(tmp_path: Path) -> None:
     assert "minimal surrounding padding" in prompt
 
 
+def test_native_coordinate_prompt_uses_image_dimensions(
+    tmp_path: Path,
+) -> None:
+    request = _request(tmp_path).model_copy(
+        update={
+            "coordinate_width": 1024,
+            "coordinate_height": 768,
+            "explicit_coordinate_guidance": True,
+        }
+    )
+
+    prompt = build_hotspot_remap_prompt(request, request.hotspots)
+
+    assert '"x": [\n      0,\n      1024' in prompt
+    assert '"y": [\n      0,\n      768' in prompt
+    assert "origin (0, 0) is the image's top-left corner" in prompt
+    assert "bottom-right image edge is (1024, 768)" in prompt
+
+
+def test_native_coordinate_prompt_example_stays_within_small_image(
+    tmp_path: Path,
+) -> None:
+    request = _request(tmp_path).model_copy(
+        update={"coordinate_width": 64, "coordinate_height": 48}
+    )
+
+    prompt = build_hotspot_remap_prompt(request, request.hotspots)
+
+    assert '"x": 13' in prompt
+    assert '"y": 10' in prompt
+    assert '"x": 200' not in prompt
+
+
+def test_native_coordinates_normalize_each_axis_independently(
+    tmp_path: Path,
+) -> None:
+    request = _request(tmp_path, count=1).model_copy(
+        update={"coordinate_width": 1024, "coordinate_height": 768}
+    )
+    client = FakeClient(
+        [
+            _response(
+                points=[
+                    {"x": 256, "y": 192},
+                    {"x": 768, "y": 192},
+                    {"x": 512, "y": 576},
+                ]
+            )
+        ]
+    )
+
+    result = OllamaHotspotRemapper(_runtime(client)).remap(request)
+
+    assert result.polygons_by_token["H1"][0].points[0].x == 0.25
+    assert result.polygons_by_token["H1"][0].points[0].y == 0.25
+    assert result.polygons_by_token["H1"][0].points[2].y == 0.75
+
+
+def test_configurable_batch_size_splits_requests(tmp_path: Path) -> None:
+    request = _request(tmp_path, count=4).model_copy(update={"batch_size": 2})
+    client = FakeClient(
+        [
+            json.dumps(
+                {
+                    "mapped": [
+                        {
+                            "token": token,
+                            "polygons": [
+                                {
+                                    "points": [
+                                        {"x": 100, "y": 100},
+                                        {"x": 500, "y": 100},
+                                        {"x": 300, "y": 500},
+                                    ]
+                                }
+                            ],
+                        }
+                        for token in ("H1", "H2")
+                    ],
+                    "unlocated": [],
+                }
+            ),
+            json.dumps(
+                {
+                    "mapped": [
+                        {
+                            "token": token,
+                            "polygons": [
+                                {
+                                    "points": [
+                                        {"x": 100, "y": 100},
+                                        {"x": 500, "y": 100},
+                                        {"x": 300, "y": 500},
+                                    ]
+                                }
+                            ],
+                        }
+                        for token in ("H3", "H4")
+                    ],
+                    "unlocated": [],
+                }
+            ),
+        ]
+    )
+
+    result = OllamaHotspotRemapper(_runtime(client)).remap(request)
+
+    assert len(client.calls) == 2
+    assert set(result.polygons_by_token) == {"H1", "H2", "H3", "H4"}
+
+
 def test_no_grid_request_preserves_production_prompt_spacing(
     tmp_path: Path,
 ) -> None:
