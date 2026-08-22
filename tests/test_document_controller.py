@@ -1,14 +1,12 @@
 """Focused tests for authoritative document history and autosave signaling."""
 
-from datetime import UTC, datetime
-
 from hypergen.application.commands import (
     AddInteractionCommand,
     ChangeHotspotDestinationCommand,
     CreateCardAndResolveCommand,
     CreateCardCommand,
     DeleteCardCommand,
-    EditCardTextCommand,
+    EditRevisionDescriptionCommand,
     RenameCardCommand,
     RenameInteractionCommand,
     ReplaceHotspotSetCommand,
@@ -16,9 +14,8 @@ from hypergen.application.commands import (
 from hypergen.application.document_controller import DocumentController
 from hypergen.domain.models import (
     Card,
+    CardRevision,
     HotspotSet,
-    ImageOrigin,
-    ImageRevision,
     Interaction,
     NavigateAction,
     Point,
@@ -45,24 +42,22 @@ def interaction(target_name: str = "Retained destination") -> Interaction:
     )
 
 
-def document_with_hotspot() -> tuple[Stack, Card, ImageRevision, Interaction]:
+def document_with_hotspot() -> tuple[Stack, Card, CardRevision, Interaction]:
     hotspot = interaction()
-    revision = ImageRevision(
-        image_path="assets/cards/source/image.png",
-        origin=ImageOrigin.IMPORTED,
+    revision = CardRevision(
+        description="Original description",
         hotspot_set=HotspotSet(interactions=(hotspot,)),
-        created_at=datetime.now(UTC),
     )
     source = Card(
         name="Source",
-        image_revisions=(revision,),
+        revisions=(revision,),
         active_revision_id=revision.id,
     )
     return Stack(name="Stack", cards=(source,), start_card_id=source.id), source, revision, hotspot
 
 
 def hotspot_target(controller: DocumentController) -> object:
-    hotspot_set = controller.document.cards[0].image_revisions[0].hotspot_set
+    hotspot_set = controller.document.cards[0].revisions[0].hotspot_set
     assert hotspot_set is not None
     return hotspot_set.interactions[0].action.target
 
@@ -91,24 +86,27 @@ def test_text_edits_have_sensible_per_commit_undo_boundaries() -> None:
     controller = DocumentController(Stack(name="Stack", cards=(card,)))
 
     controller.execute(
-        EditCardTextCommand(
+        EditRevisionDescriptionCommand(
             card_id=card.id,
-            field="scene_description",
+            revision_id=card.active_revision.id,
             value="First committed edit",
         )
     )
     controller.execute(
-        EditCardTextCommand(
+        EditRevisionDescriptionCommand(
             card_id=card.id,
-            field="scene_description",
+            revision_id=card.active_revision.id,
             value="Second committed edit",
         )
     )
 
     assert controller.undo()
-    assert controller.document.cards[0].scene_description == "First committed edit"
+    assert (
+        controller.document.cards[0].active_revision.description
+        == "First committed edit"
+    )
     assert controller.undo()
-    assert controller.document.cards[0].scene_description == ""
+    assert controller.document.cards[0].active_revision.description == ""
 
 
 def test_complete_hotspot_replacement_is_one_atomic_undo_step() -> None:
@@ -123,15 +121,15 @@ def test_complete_hotspot_replacement_is_one_atomic_undo_step() -> None:
             hotspot_set=replacement,
         )
     )
-    changed = controller.document.cards[0].image_revisions[0].hotspot_set
+    changed = controller.document.cards[0].revisions[0].hotspot_set
     assert changed == replacement
 
     assert controller.undo()
-    restored = controller.document.cards[0].image_revisions[0].hotspot_set
+    restored = controller.document.cards[0].revisions[0].hotspot_set
     assert restored is not None
     assert restored.interactions == (original,)
     assert controller.redo()
-    assert controller.document.cards[0].image_revisions[0].hotspot_set == replacement
+    assert controller.document.cards[0].revisions[0].hotspot_set == replacement
 
 
 def test_destination_resolution_is_one_undoable_command() -> None:
@@ -176,15 +174,15 @@ def test_manual_interaction_edits_have_individual_undo_boundaries() -> None:
         )
     )
 
-    hotspot_set = controller.document.cards[0].image_revisions[0].hotspot_set
+    hotspot_set = controller.document.cards[0].revisions[0].hotspot_set
     assert hotspot_set is not None
     assert hotspot_set.interactions[-1].label == "Renamed"
     assert controller.undo()
-    hotspot_set = controller.document.cards[0].image_revisions[0].hotspot_set
+    hotspot_set = controller.document.cards[0].revisions[0].hotspot_set
     assert hotspot_set is not None
     assert hotspot_set.interactions[-1].label == "Door"
     assert controller.undo()
-    hotspot_set = controller.document.cards[0].image_revisions[0].hotspot_set
+    hotspot_set = controller.document.cards[0].revisions[0].hotspot_set
     assert hotspot_set is not None
     assert len(hotspot_set.interactions) == 1
 
@@ -200,7 +198,7 @@ def test_deleting_start_destination_is_valid_and_undo_restores_inbound_link() ->
     resolved_revision = revision.model_copy(
         update={"hotspot_set": HotspotSet(interactions=(resolved_hotspot,))}
     )
-    resolved_source = source.model_copy(update={"image_revisions": (resolved_revision,)})
+    resolved_source = source.model_copy(update={"revisions": (resolved_revision,)})
     controller = DocumentController(
         Stack(
             name="Stack",
