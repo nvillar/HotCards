@@ -67,3 +67,35 @@ def test_notification_actions_and_dismissal_report_stable_ids(
     bar.dismiss_button.click()
     assert dismissed == ["undo"]
     assert bar.isHidden()
+
+
+def test_explicit_priority_keeps_time_sensitive_action_visible(
+    application: QApplication,
+) -> None:
+    bar = NotificationBar()
+    bar.show_notification(
+        "service",
+        Notification(
+            "Ollama unavailable",
+            kind=NotificationKind.WARNING,
+        ),
+    )
+    bar.show_notification(
+        "undo",
+        Notification(
+            "Card deleted",
+            kind=NotificationKind.SUCCESS,
+            primary_action=NotificationAction("undo", "Undo"),
+            priority=3,
+        ),
+    )
+
+    assert bar.current_key == "undo"
+    bar.show_notification(
+        "error",
+        Notification(
+            "Stack could not be saved",
+            kind=NotificationKind.ERROR,
+        ),
+    )
+    assert bar.current_key == "error"

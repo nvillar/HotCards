@@ -26,11 +26,11 @@ visibility, and the stack-wide Style library.
 The Background inspector contains Description, Enrich, Generate Image, Style,
 Import Image, and Clear Image controls. Background prompts are composed
 deterministically from the revision Description and selected Style. Generate,
-Import, Clear, and Enrich apply directly to the active revision; replacement
-actions confirm before discarding an existing image, and successful changes
-offer a dismissible, history-safe Undo action. With a readable image, Enrich
-first describes visible details and incorporates them into the revised
-Description; otherwise it performs text-only enrichment.
+Import, Clear, and Enrich apply directly to the active revision. Existing
+images remain in place until replacement succeeds, and successful changes
+offer a dismissible, history-safe Undo action in the notification bar. With a
+readable image, Enrich first describes visible details and incorporates them
+into the revised Description; otherwise it performs text-only enrichment.
 
 The Hotspots inspector is the sole source of interaction semantics. A new
 hotspot is persisted and selected immediately, even before it has an area;
@@ -46,6 +46,11 @@ hotspots retain their previous geometry. Run mode supports deterministic
 hotspot navigation, Back/Restart history, and configurable overlays. Local AI
 services are checked automatically when Author mode is entered; Run mode starts
 no AI work.
+
+Transient outcomes, failures, Run warnings, and Undo actions appear in one
+notification bar below the toolbar. Reversible deletions and replacements apply
+directly and offer Undo; field validation remains beside the responsible input,
+while the status bar is reserved for passive document and AI-service state.
 
 ## Setup and run
 

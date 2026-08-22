@@ -140,6 +140,49 @@ def test_welcome_new_project_defaults_save_location(
     assert dialog.result() == QDialog.DialogCode.Accepted
 
 
+def test_existing_project_destination_is_reported_inside_welcome_dialog(
+    application: QApplication,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    projects = tmp_path / "HyperGen"
+    existing = projects / "Garden.hypergen"
+    existing.mkdir(parents=True)
+    stack = Stack(name="Garden", cards=(Card(name="Card 1"),))
+
+    class AcceptedNewStackDialog:
+        def __init__(self, _parent: object) -> None:
+            pass
+
+        def exec(self) -> QDialog.DialogCode:
+            return QDialog.DialogCode.Accepted
+
+        def stack(self) -> Stack:
+            return stack
+
+    monkeypatch.setattr(
+        welcome_dialog_module,
+        "NewStackDialog",
+        AcceptedNewStackDialog,
+    )
+    monkeypatch.setattr(
+        welcome_dialog_module.QFileDialog,
+        "getSaveFileName",
+        lambda *_args, **_kwargs: (
+            str(existing),
+            "HyperGen Stack (*.hypergen)",
+        ),
+    )
+    dialog = WelcomeDialog(projects)
+
+    dialog.new_button.click()
+
+    assert dialog.selection is None
+    assert not dialog.error_label.isHidden()
+    assert "already exists" in dialog.error_label.text()
+    assert str(existing) in dialog.error_label.text()
+
+
 def test_startup_selection_creates_and_reopens_project(tmp_path: Path) -> None:
     bundle = tmp_path / "Garden.hypergen"
     stack = Stack(name="Garden", cards=(Card(name="Card 1"),))

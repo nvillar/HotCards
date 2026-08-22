@@ -154,6 +154,11 @@ class Inspector(QWidget):
         self.scene_edit.setAccessibleName("Description")
         self.scene_edit.setMaximumHeight(180)
         layout.addWidget(self.scene_edit)
+        self.description_error = QLabel()
+        self.description_error.setObjectName("descriptionValidationError")
+        self.description_error.setWordWrap(True)
+        self.description_error.setVisible(False)
+        layout.addWidget(self.description_error)
 
         self.enrich_scene_button = QPushButton("Enrich")
         self.enrich_scene_button.setObjectName("enrichSceneButton")
@@ -169,6 +174,11 @@ class Inspector(QWidget):
         self.style_combo.setAccessibleName("Generate style")
         self.style_combo.setToolTip("Style used when generating this revision's image")
         layout.addWidget(self.style_combo)
+        self.style_error = QLabel()
+        self.style_error.setObjectName("styleValidationError")
+        self.style_error.setWordWrap(True)
+        self.style_error.setVisible(False)
+        layout.addWidget(self.style_error)
 
         self.import_background_button = QPushButton("Import Image...")
         self.import_background_button.setObjectName("importBackgroundButton")
@@ -177,11 +187,6 @@ class Inspector(QWidget):
         self.clear_background_button.setObjectName("clearBackgroundButton")
         layout.addWidget(self.clear_background_button)
 
-        self.validation_error = QLabel()
-        self.validation_error.setObjectName("inspectorValidationError")
-        self.validation_error.setWordWrap(True)
-        self.validation_error.setVisible(False)
-        layout.addWidget(self.validation_error)
         layout.addStretch(1)
         scroll.setWidget(page)
         self.inspector_tabs.addTab(scroll, "Background")
@@ -311,6 +316,9 @@ class Inspector(QWidget):
             if card is None:
                 self._rendered_revision_id = None
                 self.pages.setCurrentIndex(0)
+                self._set_error(self.description_error, "")
+                self._set_error(self.style_error, "")
+                self.set_hotspot_error("")
                 self.scene_edit.clear()
                 self.style_combo.clear()
                 self.hotspot_list.clear()
@@ -322,6 +330,10 @@ class Inspector(QWidget):
                 previous_card_id == card.id
                 and previous_revision_id == revision.id
             )
+            if not same_revision:
+                self._set_error(self.description_error, "")
+                self._set_error(self.style_error, "")
+                self.set_hotspot_error("")
             self._rendered_revision_id = revision.id
             self.scene_edit.setPlainText(
                 description_draft
@@ -364,7 +376,8 @@ class Inspector(QWidget):
                 card_id=card.id,
                 revision_id=card.active_revision.id,
                 value=value,
-            )
+            ),
+            error_label=self.description_error,
         )
 
     def commit_card_metadata(self) -> bool:
@@ -459,9 +472,12 @@ class Inspector(QWidget):
         self.hotspot_error.setText(message)
         self.hotspot_error.setVisible(bool(message))
 
-    def set_validation_error(self, message: str) -> None:
-        self.validation_error.setText(message)
-        self.validation_error.setVisible(bool(message))
+    def reset_context(self) -> None:
+        self.selected_card_id = None
+        self._rendered_revision_id = None
+        self._set_error(self.description_error, "")
+        self._set_error(self.style_error, "")
+        self.set_hotspot_error("")
 
     def _render_hotspots(
         self,
@@ -554,7 +570,8 @@ class Inspector(QWidget):
                 card_id=card.id,
                 revision_id=card.active_revision.id,
                 style_id=style_id if isinstance(style_id, UUID) else None,
-            )
+            ),
+            error_label=self.style_error,
         )
 
     def _hotspot_selection_changed(
@@ -707,16 +724,20 @@ class Inspector(QWidget):
         self,
         command: DocumentCommand,
         *,
+        error_label: QLabel | None = None,
         undo_message: str | None = None,
     ) -> bool:
+        target_error = (
+            error_label if error_label is not None else self.hotspot_error
+        )
         previous_token = self.controller.current_undo_token
         try:
             changed = self.controller.execute(command)
         except (CommandError, ValidationError) as error:
-            self.set_hotspot_error(str(error))
+            self._set_error(target_error, str(error))
             self.render(self.controller.document, self.selected_card_id)
             return False
-        self.set_hotspot_error("")
+        self._set_error(target_error, "")
         self.render(changed, self.selected_card_id)
         self.document_changed.emit(changed)
         token = self.controller.current_undo_token
@@ -727,6 +748,11 @@ class Inspector(QWidget):
         ):
             self.change_applied.emit(undo_message, token)
         return True
+
+    @staticmethod
+    def _set_error(label: QLabel, message: str) -> None:
+        label.setText(message)
+        label.setVisible(bool(message))
 
     def _selected_card(self) -> Card | None:
         return next(

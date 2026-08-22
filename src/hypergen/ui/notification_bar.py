@@ -37,6 +37,7 @@ class Notification:
     primary_action: NotificationAction | None = None
     secondary_action: NotificationAction | None = None
     dismissible: bool = True
+    priority: int | None = None
 
 
 class NotificationBar(QFrame):
@@ -49,7 +50,7 @@ class NotificationBar(QFrame):
         NotificationKind.INFO: 0,
         NotificationKind.SUCCESS: 1,
         NotificationKind.WARNING: 2,
-        NotificationKind.ERROR: 3,
+        NotificationKind.ERROR: 4,
     }
     _ICONS = {
         NotificationKind.INFO: QStyle.StandardPixmap.SP_MessageBoxInformation,
@@ -169,7 +170,11 @@ class NotificationBar(QFrame):
         key, (_sequence, notification) = max(
             self._entries.items(),
             key=lambda entry: (
-                self._PRIORITY[entry[1][1].kind],
+                (
+                    entry[1][1].priority
+                    if entry[1][1].priority is not None
+                    else self._PRIORITY[entry[1][1].kind]
+                ),
                 entry[1][0],
             ),
         )

@@ -140,6 +140,7 @@ class MainWindow(QMainWindow):
         self._selected_card_id = (
             controller.document.cards[0].id if controller.document.cards else None
         )
+        self._rendered_card_id: UUID | None = None
         self._availability: dict[AdapterKind, bool | None] = {
             AdapterKind.OLLAMA: None,
             AdapterKind.MFLUX: None,
@@ -147,7 +148,9 @@ class MainWindow(QMainWindow):
         self._diagnostic_messages: dict[AdapterKind, str] = {}
         self._diagnostic_operations: list[WorkerOperation] = []
         self._diagnostic_generation = 0
+        self._service_notification_dismissed = False
         self._undo_notification_token: UndoToken | None = None
+        self._card_name_commit_failed = False
         self._rendering = False
         self._is_running = False
         self._run_session = RunSession()
@@ -309,6 +312,11 @@ class MainWindow(QMainWindow):
         self.delete_revision_button.setToolTip("Delete the active revision")
         self.card_header.addWidget(self.delete_revision_button)
         canvas_layout.addLayout(self.card_header)
+        self.canvas_card_name_error = QLabel()
+        self.canvas_card_name_error.setObjectName("canvasCardNameError")
+        self.canvas_card_name_error.setWordWrap(True)
+        self.canvas_card_name_error.setVisible(False)
+        canvas_layout.addWidget(self.canvas_card_name_error)
         self.card_canvas = CardCanvas()
         canvas_layout.addWidget(self.card_canvas, 1)
         self.canvas_fit_controls = QHBoxLayout()
@@ -324,6 +332,9 @@ class MainWindow(QMainWindow):
         self.fit_canvas_button.clicked.connect(self.card_canvas.fit_to_window)
         self.canvas_card_name.editingFinished.connect(
             self._commit_canvas_card_name
+        )
+        self.canvas_card_name.textEdited.connect(
+            self._card_name_edited
         )
         self.revision_combo.currentIndexChanged.connect(
             self._revision_selection_changed
@@ -433,15 +444,6 @@ class MainWindow(QMainWindow):
         self.service_status_label = QLabel("Checking local AI services…")
         self.service_status_label.setObjectName("serviceStatusLabel")
         self.statusBar().addPermanentWidget(self.service_status_label, 1)
-        self.check_services_button = QPushButton("Check AI Services")
-        self.check_services_button.setObjectName("checkServicesButton")
-        self.check_services_button.clicked.connect(self.run_availability_checks)
-        self.statusBar().addPermanentWidget(self.check_services_button)
-        self.review_settings_button = QPushButton("Review Settings…")
-        self.review_settings_button.setObjectName("reviewSettingsButton")
-        self.review_settings_button.setVisible(False)
-        self.review_settings_button.clicked.connect(self.open_advanced_settings)
-        self.statusBar().addPermanentWidget(self.review_settings_button)
         self.create_first_card_button.clicked.connect(self._primary_empty_action)
 
         self.document_status_label = QLabel()
@@ -492,7 +494,7 @@ class MainWindow(QMainWindow):
     def render_document(self, _document: Stack | None = None) -> None:
         """Refresh all panes from the controller's authoritative snapshot."""
         snapshot = self.controller.document
-        previous_card_id = self._selected_card_id
+        previous_card_id = self._rendered_card_id
         preserve_card_name = self.canvas_card_name.hasFocus()
         card_name_draft = self.canvas_card_name.text()
         if (
@@ -519,13 +521,20 @@ class MainWindow(QMainWindow):
                 None,
             )
             if selected_card is None:
+                self._rendered_card_id = None
+                self._card_name_commit_failed = False
                 self.canvas_pages.setCurrentIndex(0)
                 self.canvas_card_name.clear()
+                self._set_canvas_card_name_error("")
                 with QSignalBlocker(self.revision_combo):
                     self.revision_combo.clear()
                 self.add_revision_button.setEnabled(False)
                 self.delete_revision_button.setEnabled(False)
             else:
+                if previous_card_id != selected_card.id:
+                    self._card_name_commit_failed = False
+                    self._set_canvas_card_name_error("")
+                self._rendered_card_id = selected_card.id
                 self.canvas_pages.setCurrentIndex(1)
                 self.canvas_card_name.setText(
                     card_name_draft
@@ -575,6 +584,9 @@ class MainWindow(QMainWindow):
     def _commit_canvas_card_name(self) -> bool:
         if self._rendering or self._selected_card_id is None or self._is_running:
             return True
+        if self._card_name_commit_failed:
+            self._card_name_commit_failed = False
+            return False
         card = next(
             (
                 candidate
@@ -593,12 +605,22 @@ class MainWindow(QMainWindow):
                 RenameCardCommand(card_id=card.id, name=name)
             )
         except (CommandError, ValidationError) as error:
-            self.inspector.set_validation_error(str(error))
+            self._card_name_commit_failed = True
+            self._set_canvas_card_name_error(str(error))
             self.canvas_card_name.setText(card.name)
             return False
-        self.inspector.set_validation_error("")
+        self._card_name_commit_failed = False
+        self._set_canvas_card_name_error("")
         self.render_document(changed)
         return True
+
+    def _card_name_edited(self) -> None:
+        self._card_name_commit_failed = False
+        self._set_canvas_card_name_error("")
+
+    def _set_canvas_card_name_error(self, message: str) -> None:
+        self.canvas_card_name_error.setText(message)
+        self.canvas_card_name_error.setVisible(bool(message))
 
     def _commit_authoring_metadata(self) -> bool:
         if not self._commit_canvas_card_name():
@@ -661,6 +683,7 @@ class MainWindow(QMainWindow):
                 message=message,
                 kind=NotificationKind.SUCCESS,
                 primary_action=NotificationAction("undo", "Undo"),
+                priority=3,
             ),
         )
 
@@ -676,10 +699,16 @@ class MainWindow(QMainWindow):
     def _notification_action_requested(self, action_id: str) -> None:
         if action_id == "undo" and not self._is_running:
             self._undo_notification()
+        elif action_id == "open-settings" and not self._is_running:
+            self.open_advanced_settings()
+        elif action_id == "check-services" and not self._is_running:
+            self.run_availability_checks()
 
     def _notification_dismissed(self, key: str) -> None:
         if key == "undo":
             self._undo_notification_token = None
+        elif key == "ai-services":
+            self._service_notification_dismissed = True
 
     def _show_error(
         self,
@@ -882,6 +911,10 @@ class MainWindow(QMainWindow):
         self.scene_enrichment_workflow.cancel()
         self.hotspot_remap_workflow.cancel()
         self._undo_notification_token = None
+        self._rendered_card_id = None
+        self._card_name_commit_failed = False
+        self._set_canvas_card_name_error("")
+        self.inspector.reset_context()
         self.notification_bar.clear_all()
         if self._is_running:
             state = self._run_session.start(self.controller.document)
@@ -973,6 +1006,8 @@ class MainWindow(QMainWindow):
         """Submit injected service checks without blocking the UI thread."""
         if self._is_running or self._diagnostic_operations:
             return
+        self._service_notification_dismissed = False
+        self.notification_bar.clear_notification("ai-services")
         checks = (
             dict(self._availability_checks_factory())
             if self._availability_checks_factory is not None
@@ -1456,17 +1491,33 @@ class MainWindow(QMainWindow):
                 for adapter in AdapterKind
             )
         )
-        self.review_settings_button.setVisible(
-            bool(unavailable) and not self._is_running
-        )
-        self.check_services_button.setText(
-            "Check Again" if unavailable else "Check AI Services"
-        )
-        self.check_services_button.setVisible(
-            not self._is_running
-            and not diagnostics_running
-            and bool(pending or unavailable)
-        )
+        if (
+            unavailable
+            and not pending
+            and not self._is_running
+            and not self._service_notification_dismissed
+        ):
+            self.notification_bar.show_notification(
+                "ai-services",
+                Notification(
+                    message=summary,
+                    kind=NotificationKind.WARNING,
+                    detail=self.service_status_label.toolTip(),
+                    primary_action=NotificationAction(
+                        "open-settings",
+                        "Settings",
+                    ),
+                    secondary_action=NotificationAction(
+                        "check-services",
+                        "Check Again",
+                    ),
+                ),
+            )
+        elif not unavailable:
+            self._service_notification_dismissed = False
+            self.notification_bar.clear_notification("ai-services")
+        elif self._is_running:
+            self.notification_bar.clear_notification("ai-services")
 
     def _render_card_canvas(self, card: object) -> None:
         if not isinstance(card, Card):
@@ -1780,7 +1831,10 @@ class MainWindow(QMainWindow):
         if should_run == self._is_running:
             return
         if should_run:
-            self._commit_authoring_metadata()
+            if not self._commit_authoring_metadata():
+                with QSignalBlocker(self.mode_selector):
+                    self.mode_selector.setCurrentText("Author")
+                return
             self.card_canvas.cancel_drawing()
             self._cancel_ai_activity_for_run()
             self._undo_notification_token = None
@@ -1852,22 +1906,6 @@ class MainWindow(QMainWindow):
         for action in self.player_navigation_actions:
             action.setVisible(self._is_running)
         self.service_status_label.setVisible(authoring)
-        pending = any(
-            available is None
-            for available in self._availability.values()
-        )
-        unavailable = any(
-            available is False
-            for available in self._availability.values()
-        )
-        self.check_services_button.setVisible(
-            authoring
-            and not self._diagnostic_operations
-            and (pending or unavailable)
-        )
-        self.review_settings_button.setVisible(
-            authoring and unavailable
-        )
 
     def _update_run_actions(self) -> None:
         state = self._run_session.state
@@ -1905,18 +1943,33 @@ class MainWindow(QMainWindow):
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self._restart_availability_checks()
 
+    def _ask_retry_failed_close_save(self, message: str) -> bool:
+        dialog = QMessageBox(
+            QMessageBox.Icon.Critical,
+            "Stack Not Saved",
+            message,
+            parent=self,
+        )
+        retry_button = dialog.addButton(
+            "Retry Saving",
+            QMessageBox.ButtonRole.AcceptRole,
+        )
+        keep_working_button = dialog.addButton(
+            "Keep Working",
+            QMessageBox.ButtonRole.RejectRole,
+        )
+        dialog.setDefaultButton(retry_button)
+        dialog.setEscapeButton(keep_working_button)
+        dialog.exec()
+        return dialog.clickedButton() is retry_button
+
     def closeEvent(self, event: QCloseEvent) -> None:
         self._commit_authoring_metadata()
         if self.document_session is not None and not self.document_session.flush():
-            answer = QMessageBox.warning(
-                self,
-                "Stack Not Saved",
+            if self._ask_retry_failed_close_save(
                 (self.document_session.state.error or "The stack could not be saved.")
                 + "\n\nRetry saving before closing?",
-                QMessageBox.StandardButton.Retry | QMessageBox.StandardButton.Cancel,
-                QMessageBox.StandardButton.Retry,
-            )
-            if answer == QMessageBox.StandardButton.Retry:
+            ):
                 if not self.document_session.flush():
                     event.ignore()
                     return

@@ -14,7 +14,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
-    QMessageBox,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -75,6 +74,11 @@ class WelcomeDialog(QDialog):
         )
         location_label.setStyleSheet("color: palette(mid);")
 
+        self.error_label = QLabel()
+        self.error_label.setObjectName("welcomeErrorLabel")
+        self.error_label.setWordWrap(True)
+        self.error_label.setVisible(False)
+
         self.new_button = QPushButton("Create New Project")
         self.new_button.setObjectName("welcomeNewProjectButton")
         self.new_button.clicked.connect(self._create_project)
@@ -99,6 +103,7 @@ class WelcomeDialog(QDialog):
         layout.addWidget(self.project_list, 1)
         layout.addWidget(self.empty_label)
         layout.addWidget(location_label)
+        layout.addWidget(self.error_label)
         layout.addSpacing(8)
         layout.addLayout(buttons)
 
@@ -106,6 +111,7 @@ class WelcomeDialog(QDialog):
 
     def refresh_projects(self) -> None:
         """Refresh direct child bundles without opening untrusted stack data."""
+        self._set_error("")
         self.project_list.clear()
         self.new_button.setEnabled(True)
         try:
@@ -161,6 +167,7 @@ class WelcomeDialog(QDialog):
         self.accept()
 
     def _create_project(self) -> None:
+        self._set_error("")
         dialog = NewStackDialog(self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
@@ -176,14 +183,16 @@ class WelcomeDialog(QDialog):
             return
         path = bundle_path(selected_path)
         if path.exists():
-            QMessageBox.warning(
-                self,
-                "Project Already Exists",
-                f"A project already exists at:\n{path}",
+            self._set_error(
+                f"A project already exists at:\n{path}"
             )
             return
         self.selection = WelcomeSelection(bundle_path=path, stack=stack)
         self.accept()
+
+    def _set_error(self, message: str) -> None:
+        self.error_label.setText(message)
+        self.error_label.setVisible(bool(message))
 
 
 __all__ = ["WelcomeDialog", "WelcomeSelection"]

@@ -54,8 +54,13 @@ for live Ollama and MFLUX runs.
 - Compose background prompts deterministically from the active revision's
   Description plus selected stack Style. Hotspots must not alter image prompts.
 - Apply Generate, Import, Clear, Enrich, and Remap directly through document
-  commands. Use pre-action confirmation when replacing or clearing an image,
-  then expose a dismissible Undo bound to the exact current history token.
+  commands. Keep an existing image visible until replacement succeeds, then
+  expose a dismissible Undo bound to the exact current history token.
+- Apply reversible deletions and replacements without confirmation. Report
+  outcomes, failures, Run warnings, and Undo actions in the global notification
+  bar; keep field validation beside its input and the status bar passive. Use a
+  blocking decision dialog only when proceeding could lose persisted work and
+  Undo cannot recover it.
 - With a readable active background, Enrich describes its visible details and
   merges them with the authored Description and selected Style; without one, it
   is text-only. Apply only the final Description through one undoable command.

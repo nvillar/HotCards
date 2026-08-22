@@ -24,7 +24,7 @@ from hypergen.application.commands import (
 )
 from hypergen.application.document_controller import DocumentController
 from hypergen.application.document_session import DocumentSession, DocumentSessionState
-from hypergen.application.workers import AdapterKind
+from hypergen.application.workers import AdapterKind, AvailabilityDiagnostic
 from hypergen.domain.models import (
     Card,
     CardRevision,
@@ -281,7 +281,45 @@ def test_card_name_edit_uses_controller_and_restores_invalid_value(
     window._commit_canvas_card_name()
     assert controller.document.cards[0].name == "Foyer"
     assert window.canvas_card_name.text() == "Foyer"
+    assert not window.canvas_card_name_error.isHidden()
+    assert not hasattr(window.inspector, "validation_error")
     assert card_id == controller.document.cards[0].id
+
+def test_card_name_validation_error_does_not_follow_card_selection(
+    application: QApplication,
+) -> None:
+    first = Card(name="First")
+    second = Card(name="Second")
+    window, _controller, _workers, _background = _window(
+        Stack(name="Demo", cards=(first, second))
+    )
+    window.canvas_card_name.setText("   ")
+    window._commit_canvas_card_name()
+    assert not window.canvas_card_name_error.isHidden()
+
+    window.select_card(second.id)
+
+    assert window.canvas_card_name.text() == "Second"
+    assert window.canvas_card_name_error.isHidden()
+
+
+def test_focus_triggered_name_failure_aborts_run_transition(
+    application: QApplication,
+) -> None:
+    window, _controller, _workers, _background = _window()
+    window.show()
+    window.canvas_card_name.setFocus()
+    window.canvas_card_name.setText("   ")
+    application.processEvents()
+
+    window.mode_selector.setFocus()
+    application.processEvents()
+    assert not window.canvas_card_name_error.isHidden()
+    window.mode_selector.setCurrentText("Run")
+
+    assert window.mode_selector.currentText() == "Author"
+    assert not window._is_running
+    window.close()
 
 
 def test_render_preserves_focused_card_name_draft(
@@ -433,6 +471,60 @@ def test_author_and_run_modes_apply_consistent_read_only_chrome(
     assert window.styles_button.isEnabled()
 
 
+def test_status_bar_is_passive_and_ai_recovery_uses_notification_bar(
+    application: QApplication,
+) -> None:
+    window, controller, _workers, _background = _window()
+    window.apply_availability_diagnostic(
+        AvailabilityDiagnostic(
+            adapter=AdapterKind.OLLAMA,
+            available=False,
+            message="Ollama is unavailable",
+        )
+    )
+    window.apply_availability_diagnostic(
+        AvailabilityDiagnostic(
+            adapter=AdapterKind.MFLUX,
+            available=True,
+            message="MFLUX is available",
+        )
+    )
+
+    assert not hasattr(window, "check_services_button")
+    assert not hasattr(window, "review_settings_button")
+    assert window.service_status_label.text() == "Ollama unavailable"
+    assert window.notification_bar.current_key == "ai-services"
+    assert window.notification_bar.primary_button.text() == "Settings"
+    assert window.notification_bar.secondary_button.text() == "Check Again"
+
+    window.notification_bar.dismiss_current()
+    window.apply_availability_diagnostic(
+        AvailabilityDiagnostic(
+            adapter=AdapterKind.OLLAMA,
+            available=True,
+            message="Ollama is available",
+        )
+    )
+    window.apply_availability_diagnostic(
+        AvailabilityDiagnostic(
+            adapter=AdapterKind.OLLAMA,
+            available=False,
+            message="Ollama is unavailable again",
+        )
+    )
+    assert window.notification_bar.current_key == "ai-services"
+
+    card = controller.document.cards[0]
+    changed = controller.execute(
+        RenameCardCommand(card_id=card.id, name="Renamed")
+    )
+    window.render_document(changed)
+    token = controller.current_undo_token
+    assert token is not None
+    window._show_undo_notification("Renamed", token)
+    assert window.notification_bar.current_key == "undo"
+
+
 def test_generate_replacement_starts_without_a_second_confirmation(
     application: QApplication,
 ) -> None:
@@ -539,10 +631,14 @@ def test_document_replacement_clears_document_specific_notifications(
         "enrichment-error",
         "Description enrichment failed",
     )
+    window._set_canvas_card_name_error("Invalid card name")
+    window.inspector.set_hotspot_error("Invalid hotspot")
 
     window._document_replaced(object())
     assert window.notification_bar.isHidden()
     assert background.cancel_calls == 1
+    assert window.canvas_card_name_error.isHidden()
+    assert window.inspector.hotspot_error.isHidden()
 
 
 def test_clean_session_state_clears_previous_document_error(
