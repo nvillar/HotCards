@@ -55,7 +55,9 @@ for live Ollama and MFLUX runs.
   one source card may fill multiple roles. Group roles by active source
   background, feed each unique image to MFLUX once in first-role order, combine
   its role instructions, and do not inject source Descriptions into the image
-  prompt.
+  prompt. Phrase FLUX reference instructions positively by stating which
+  attributes come from each image and which come from the scene or other
+  assigned references.
 - Compose background prompts deterministically from the active revision's
   Description plus fixed instructions for assigned reference roles. Hotspots
   must not alter image prompts.
@@ -76,7 +78,11 @@ for live Ollama and MFLUX runs.
   both versions. Require distinctive source-language overlap for every assigned
   role, including style-specific cues for Visual style, reject recognized
   conflicting authored styles that remain, and reject newly invented quoted
-  visible text.
+  visible text. Shape the result for FLUX.2 as one concise natural-language
+  paragraph ordered by subject, action, style, context, then secondary details.
+  Use positive desired-image language, associate colors and materials with
+  specific objects, and add photographic camera details only for explicitly
+  photographic styles.
 - Store each hotspot set under exactly one complete card revision. Replacing a
   background preserves its hotspots so the author can review and adjust them
   manually.
