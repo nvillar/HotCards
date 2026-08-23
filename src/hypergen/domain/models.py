@@ -21,7 +21,7 @@ from pydantic import (
     model_validator,
 )
 
-CURRENT_SCHEMA_VERSION = 4
+CURRENT_SCHEMA_VERSION = 5
 
 NonEmptyString = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 NormalizedCoordinate = Annotated[float, Field(ge=0.0, le=1.0)]
@@ -124,9 +124,11 @@ CardReference = Annotated[
 class ReferenceRole(StrEnum):
     """One deterministic image-reference role."""
 
-    IDENTITY = "identity"
-    VISUAL_STYLE = "visual_style"
+    SUBJECT = "subject"
+    STYLE = "style"
     SETTING = "setting"
+    IDENTITY = SUBJECT
+    VISUAL_STYLE = STYLE
 
 
 class NavigateAction(DomainModel):
@@ -157,8 +159,8 @@ class ImageGenerationInputs(DomainModel):
     """Author-controlled inputs captured for a generated image."""
 
     description: str
-    identity_reference: ImageReferenceSnapshot | None = None
-    visual_style_reference: ImageReferenceSnapshot | None = None
+    subject_reference: ImageReferenceSnapshot | None = None
+    style_reference: ImageReferenceSnapshot | None = None
     setting_reference: ImageReferenceSnapshot | None = None
 
     def references_by_role(
@@ -255,16 +257,57 @@ class GeneratedBackground(DomainModel):
 Background = GeneratedBackground
 
 
+class EnrichmentReferenceSnapshot(DomainModel):
+    """Exact reference image used to produce an Enriched Description."""
+
+    role: ReferenceRole
+    card_id: UUID
+    revision_id: UUID
+    background_id: UUID
+
+
+class EnrichedDescription(DomainModel):
+    """One derived Description and the inputs that established its freshness."""
+
+    text: NonEmptyString
+    source_description: str
+    references: tuple[EnrichmentReferenceSnapshot, ...] = ()
+    model_identifier: NonEmptyString | None = None
+    prompt_version: NonEmptyString | None = None
+
+    def is_current(
+        self,
+        *,
+        source_description: str,
+        references: tuple[EnrichmentReferenceSnapshot, ...],
+    ) -> bool:
+        """Return whether the derived text still matches its upstream inputs."""
+        return (
+            self.source_description == source_description
+            and self.references == references
+        )
+
+
 class CardRevision(DomainModel):
     """One complete revision of a card's authored content."""
 
     id: UUID = Field(default_factory=uuid4)
     description: str = ""
+    enriched_description: EnrichedDescription | None = None
     background: Background | None = None
     hotspot_set: HotspotSet | None = None
-    identity: CardReference | None = None
-    visual_style: CardReference | None = None
+    subject: CardReference | None = None
+    style: CardReference | None = None
     setting: CardReference | None = None
+
+    @property
+    def effective_description(self) -> str:
+        """Return the text used for image generation."""
+        return (
+            self.enriched_description.text
+            if self.enriched_description is not None
+            else self.description
+        )
 
     @field_validator("hotspot_set")
     @classmethod
@@ -366,8 +409,8 @@ class Stack(DomainModel):
         for card in self.cards:
             for revision in card.revisions:
                 for reference in (
-                    revision.identity,
-                    revision.visual_style,
+                    revision.subject,
+                    revision.style,
                     revision.setting,
                 ):
                     if not isinstance(reference, ResolvedCardReference):

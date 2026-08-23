@@ -150,12 +150,13 @@ def test_enrichment_applies_immediately_with_one_undo_boundary() -> None:
     workers.operations[0].succeeded.emit(work())
 
     assert enricher.requests[0].scene == "A courtyard"
-    assert controller.document.cards[0].active_revision.description == (
-        "A richer courtyard"
-    )
+    revision = controller.document.cards[0].active_revision
+    assert revision.description == "A courtyard"
+    assert revision.enriched_description is not None
+    assert revision.enriched_description.text == "A richer courtyard"
     assert isinstance(applied[0], UndoToken)
     assert controller.undo_if_current(applied[0])  # type: ignore[arg-type]
-    assert controller.document.cards[0].active_revision.description == "A courtyard"
+    assert controller.document.cards[0].active_revision.enriched_description is None
 
 
 def test_empty_description_is_rejected_even_with_an_image() -> None:
@@ -236,7 +237,7 @@ def test_enrichment_uses_grouped_generation_time_reference_descriptions() -> Non
         revisions=(
             CardRevision(
                 description="A guard approaches the same castle",
-                identity=reference,
+                subject=reference,
                 setting=reference,
             ),
         ),
@@ -250,14 +251,14 @@ def test_enrichment_uses_grouped_generation_time_reference_descriptions() -> Non
 
     context = enricher.requests[0].references[0]
     assert context.roles == (
-        ReferenceRole.IDENTITY,
+        ReferenceRole.SUBJECT,
         ReferenceRole.SETTING,
     )
     assert context.source_description.startswith("A black basalt castle")
     assert "Edited after generation" not in context.source_description
-    assert controller.document.cards[0].active_revision.description == (
-        "A richer courtyard"
-    )
+    enriched = controller.document.cards[0].active_revision.enriched_description
+    assert enriched is not None
+    assert enriched.text == "A richer courtyard"
 
 
 def test_reference_changes_make_enrichment_result_stale() -> None:
@@ -274,7 +275,7 @@ def test_reference_changes_make_enrichment_result_stale() -> None:
         revisions=(
             CardRevision(
                 description="The outer gate",
-                identity=ResolvedCardReference(target_card_id=source.id),
+                subject=ResolvedCardReference(target_card_id=source.id),
             ),
         ),
     )
@@ -287,7 +288,7 @@ def test_reference_changes_make_enrichment_result_stale() -> None:
         SetRevisionReferenceCommand(
             card_id=target.id,
             revision_id=target.active_revision.id,
-            role=ReferenceRole.IDENTITY,
+            role=ReferenceRole.SUBJECT,
             reference=None,
         )
     )
@@ -330,6 +331,6 @@ def test_editing_current_source_text_does_not_stale_reference_provenance() -> No
     )
     workers.operations[0].succeeded.emit(_result("Enriched gate"))
 
-    assert controller.document.cards[0].active_revision.description == (
-        "Enriched gate"
-    )
+    enriched = controller.document.cards[0].active_revision.enriched_description
+    assert enriched is not None
+    assert enriched.text == "Enriched gate"

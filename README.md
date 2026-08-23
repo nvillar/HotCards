@@ -19,37 +19,42 @@ projects in `~/Documents/HyperGen` and offers direct Open and Create actions.
 Bundles must use the current schema version; legacy stack schemas are
 intentionally unsupported and are not migrated on load.
 
-Each card owns one or more numbered revisions. A revision contains its
-Description, optional generated background, fixed Identity, Visual style, and
-Setting card references, and hotspot set. The compact header above the canvas
-edits the card name and selects, duplicates, or deletes revisions; the toolbar
-manages Mode and hotspot visibility.
+Each card owns one or more numbered revisions. A revision contains its authored
+Description, optional Enriched Description, optional generated background,
+fixed Subject, Style, and Setting card references, and hotspot set. The compact
+header above the canvas edits the card name and selects, duplicates, or deletes
+revisions; the toolbar manages Mode and hotspot visibility.
 
-The Background inspector contains Description, Enrich Description, Identity,
-Visual style, and Setting card selectors, Generate Image, and Clear Image
-controls. Each reference role can select one other card; the same card cannot
-reference itself. Generate groups roles that use the same active source
-background, sends each unique image once in Identity, Visual style, Setting
-order, and combines its role instructions. Source Descriptions are not injected
-into the MFLUX prompt. Background prompts are composed deterministically from
-the target revision Description and fixed role instructions. Generated images
-are the only supported background source. Generate, Clear, and Enrich
-Description apply directly to the active revision and expose a history-safe
-Undo action.
+The Background inspector follows the authoring sequence Description,
+references, Enriched Description, then Image. `Using:` lines identify the
+inputs to Enrich Description and Generate Image. Each reference role can select
+one other card; the same card cannot reference itself. Generate groups roles
+that use the same active source background, sends each unique image once in
+Subject, Style, Setting order, and combines its role instructions. Source
+Descriptions are not injected into the MFLUX prompt. Background prompts are
+composed deterministically from the Enriched Description when present, falling
+back to Description, plus fixed role instructions. Generated images are the
+only supported background source. Generate, Clear, and Enrich Description
+apply directly to the active revision and expose a history-safe Undo action.
 Existing images remain in place until replacement succeeds, and successful
 changes offer a dismissible, history-safe Undo action in the notification bar.
-Enrichment never reads an image and requires authored Description text. It uses
-the generation-time Descriptions of referenced backgrounds as role-scoped text
-provenance so the enriched target stays compatible with their Identity, Visual
-style, and Setting contributions. Assigned references replace conflicting
-authored details within their roles; for example, an assigned photorealistic
-Visual style replaces an authored sketch style rather than blending with it.
+Enrichment never reads an image and requires authored Description text. It
+always starts from that authored text and stores the result separately. It uses
+the exact effective Descriptions recorded when referenced backgrounds were
+generated as role-scoped text provenance so the enriched target stays
+compatible with their Subject, Style, and Setting contributions. Assigned
+references replace conflicting authored details within their roles; for
+example, an assigned photorealistic Style replaces an authored sketch style
+rather than blending with it. An enrichment is Current while its authored
+Description and usable reference-image provenance still match its inputs;
+otherwise it remains active but is marked Out of date. Generate always prefers
+the Enriched Description, including an out-of-date one, until it is cleared.
 Enriched text follows FLUX.2 prompt guidance: one concise natural-language
 paragraph ordered by subject, action, style, context, then secondary details,
 using positive descriptions and object-specific colors and materials.
 A rewrite that omits its assigned reference traits, retains a recognized
 conflicting authored style, or invents quoted visible text is rejected without
-changing the Description.
+changing either Description field.
 
 The Hotspots inspector is the sole source of interaction semantics. A new
 hotspot is persisted and selected immediately, even before it has an area;

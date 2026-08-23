@@ -10,12 +10,14 @@ from uuid import UUID, uuid4
 
 from PySide6.QtCore import QObject, Signal
 
-from hypergen.application.commands import EditRevisionDescriptionCommand
+from hypergen.application.commands import SetRevisionEnrichedDescriptionCommand
 from hypergen.application.document_controller import DocumentController
 from hypergen.application.workers import AdapterWorkers, WorkerOperation
 from hypergen.domain.models import (
     Card,
     CardReference,
+    EnrichedDescription,
+    EnrichmentReferenceSnapshot,
     ReferenceRole,
     ResolvedCardReference,
     Stack,
@@ -65,7 +67,7 @@ class _EnrichmentReferenceTarget:
 
 
 class SceneEnrichmentWorkflow(QObject):
-    """Enrich and immediately apply one Description through an undoable command."""
+    """Derive and apply one Enriched Description through an undoable command."""
 
     busy_changed = Signal(bool)
     progress_changed = Signal(str)
@@ -192,10 +194,16 @@ class SceneEnrichmentWorkflow(QObject):
             return
         previous_token = self.controller.current_undo_token
         changed = self.controller.execute(
-            EditRevisionDescriptionCommand(
+            SetRevisionEnrichedDescriptionCommand(
                 card_id=target.card_id,
                 revision_id=target.revision_id,
-                value=result.scene,
+                value=EnrichedDescription(
+                    text=result.scene,
+                    source_description=target.source_description,
+                    references=_reference_snapshots(target.references),
+                    model_identifier=result.model_identifier,
+                    prompt_version=result.prompt_version,
+                ),
             )
         )
         self._operation = None
@@ -342,4 +350,35 @@ __all__ = [
     "SceneEnricherProtocol",
     "SceneEnrichmentWorkflow",
     "SceneEnrichmentWorkflowError",
+    "enrichment_reference_snapshots",
 ]
+
+
+def _reference_snapshots(
+    targets: tuple[_EnrichmentReferenceTarget, ...],
+) -> tuple[EnrichmentReferenceSnapshot, ...]:
+    return tuple(
+        EnrichmentReferenceSnapshot(
+            role=target.role,
+            card_id=target.assignment.target_card_id,
+            revision_id=target.source_revision_id,
+            background_id=target.source_background_id,
+        )
+        for target in targets
+        if (
+            isinstance(target.assignment, ResolvedCardReference)
+            and target.source_revision_id is not None
+            and target.source_background_id is not None
+            and target.source_generation_description
+        )
+    )
+
+
+def enrichment_reference_snapshots(
+    document: Stack,
+    card: Card,
+) -> tuple[EnrichmentReferenceSnapshot, ...]:
+    """Return the usable reference-image inputs for enrichment freshness."""
+    return _reference_snapshots(
+        SceneEnrichmentWorkflow._reference_targets(document, card)
+    )

@@ -68,7 +68,7 @@ def test_scene_enrichment_prompt_expands_authored_visual_details() -> None:
     assert "Preserve exact" in prompt
     assert "authored color names and hex codes" in prompt
     assert "authored" in prompt
-    assert "or assigned Visual style is explicitly photographic" in prompt
+    assert "or assigned Style is explicitly photographic" in prompt
     assert "Preserve authored visible text exactly" in prompt
     assert "without inventing story facts, interactions" in prompt
     assert "dimensions, model settings" in prompt
@@ -94,7 +94,7 @@ def test_scene_enrichment_prompt_scopes_grouped_reference_provenance() -> None:
     )
 
     assert '"roles": [' in prompt
-    assert '"identity"' in prompt
+    assert '"subject"' in prompt
     assert '"setting"' in prompt
     assert "black basalt castle" in prompt
     assert "source Descriptions" in prompt
@@ -105,7 +105,7 @@ def test_scene_enrichment_prompt_scopes_grouped_reference_provenance() -> None:
     assert "authored Description is the scene skeleton" in prompt
     assert "References never override authored actions, poses, or object states" in prompt
     assert "Discard conflicting" in prompt
-    assert "replace conflicting authored identity and appearance" in prompt
+    assert "replace conflicting authored subject identity and appearance" in prompt
     assert "replace conflicting authored style" in prompt
     assert "replace a conflicting authored location or environment" in prompt
     assert "distinctive source phrase verbatim" in prompt
