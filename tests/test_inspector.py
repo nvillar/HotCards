@@ -14,6 +14,7 @@ from hypergen.application.document_controller import DocumentController
 from hypergen.domain.models import (
     Card,
     CardRevision,
+    EnrichedDescription,
     HotspotSet,
     Interaction,
     NavigateAction,
@@ -111,26 +112,26 @@ def test_reference_selectors_assign_distinct_cards_with_undo(
     )
 
     assert inspector._combo_index_for_data(
-        inspector.identity_reference_combo,
+        inspector.subject_reference_combo,
         source.id,
     ) == -1
     identity_index = inspector._combo_index_for_data(
-        inspector.identity_reference_combo,
+        inspector.subject_reference_combo,
         portrait.id,
     )
-    inspector.identity_reference_combo.setCurrentIndex(identity_index)
+    inspector.subject_reference_combo.setCurrentIndex(identity_index)
 
-    assert controller.document.cards[0].active_revision.identity == (
+    assert controller.document.cards[0].active_revision.subject == (
         ResolvedCardReference(target_card_id=portrait.id)
     )
     assert inspector._combo_index_for_data(
-        inspector.visual_style_reference_combo,
+        inspector.style_reference_combo,
         portrait.id,
     ) >= 0
-    assert applied[-1][0] == "Identity reference changed"
+    assert applied[-1][0] == "Subject reference changed"
     assert controller.undo_if_current(applied[-1][1])  # type: ignore[arg-type]
     inspector.render(controller.document, source.id)
-    assert controller.document.cards[0].active_revision.identity is None
+    assert controller.document.cards[0].active_revision.subject is None
 
 
 def test_deleted_reference_is_shown_as_unresolved(
@@ -138,7 +139,7 @@ def test_deleted_reference_is_shown_as_unresolved(
 ) -> None:
     destination = Card(name="Former portrait")
     revision = CardRevision(
-        identity=ResolvedCardReference(target_card_id=destination.id)
+        subject=ResolvedCardReference(target_card_id=destination.id)
     )
     source = Card(name="Source", revisions=(revision,))
     controller = DocumentController(
@@ -150,10 +151,10 @@ def test_deleted_reference_is_shown_as_unresolved(
     changed = controller.execute(DeleteCardCommand(card_id=destination.id))
     inspector.render(changed, source.id)
 
-    assert inspector.identity_reference_combo.currentText() == (
+    assert inspector.subject_reference_combo.currentText() == (
         "Missing: Former portrait"
     )
-    assert controller.document.cards[0].active_revision.identity == (
+    assert controller.document.cards[0].active_revision.subject == (
         UnresolvedCardReference(target_name="Former portrait")
     )
 
@@ -181,6 +182,77 @@ def test_render_preserves_focused_description_draft(
 
     assert not hasattr(inspector, "hotspot_label_edit")
     inspector.close()
+
+
+def test_enriched_description_status_and_generation_source(
+    application: QApplication,
+) -> None:
+    revision = CardRevision(
+        description="A courtyard",
+        enriched_description=EnrichedDescription(
+            text="A richly detailed courtyard",
+            source_description="A courtyard",
+        ),
+    )
+    card = Card(name="Card", revisions=(revision,))
+    controller = DocumentController(Stack(name="Demo", cards=(card,)))
+    inspector = Inspector(controller)
+    inspector.render(controller.document, card.id)
+
+    assert inspector.enriched_scene_edit.toPlainText() == (
+        "A richly detailed courtyard"
+    )
+    assert inspector.enrichment_status_label.text() == "Current"
+    assert inspector.enrich_using_label.text() == "Using: Description"
+    assert inspector.generate_using_label.text() == (
+        "Using: Enriched Description"
+    )
+    assert inspector.enrich_scene_button.text() == "Re-enrich Description"
+
+    inspector.scene_edit.setPlainText("A changed courtyard")
+    assert inspector.commit_revision_metadata()
+
+    current = controller.document.cards[0].active_revision
+    assert current.enriched_description is not None
+    assert current.effective_description == "A richly detailed courtyard"
+    assert inspector.enrichment_status_label.text() == "Out of date"
+    assert inspector.generate_using_label.text() == (
+        "Using: Enriched Description (Out of date)"
+    )
+
+    inspector.enriched_scene_edit.setPlainText("A manually revised courtyard")
+    assert inspector.commit_revision_metadata()
+    assert inspector.enrichment_status_label.text() == "Out of date"
+
+    inspector.clear_enriched_description_button.click()
+    assert controller.document.cards[0].active_revision.enriched_description is None
+    assert inspector.generate_using_label.text() == "Using: Description"
+
+
+def test_using_labels_name_assigned_reference_roles(
+    application: QApplication,
+) -> None:
+    subject = Card(name="Subject")
+    style = Card(name="Style")
+    source = Card(
+        name="Source",
+        revisions=(
+            CardRevision(
+                description="A courtyard",
+                subject=ResolvedCardReference(target_card_id=subject.id),
+                style=ResolvedCardReference(target_card_id=style.id),
+            ),
+        ),
+    )
+    controller = DocumentController(
+        Stack(name="Demo", cards=(source, subject, style))
+    )
+    inspector = Inspector(controller)
+    inspector.render(controller.document, source.id)
+
+    expected = "Using: Description + References (Subject, Style)"
+    assert inspector.enrich_using_label.text() == expected
+    assert inspector.generate_using_label.text() == expected
 
 
 def test_add_hotspot_persists_and_selects_area_less_entry(

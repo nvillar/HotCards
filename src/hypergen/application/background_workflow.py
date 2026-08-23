@@ -144,7 +144,7 @@ class BackgroundWorkflow(QObject):
             for reference in references
         }
         inputs = ImageGenerationInputs(
-            description=revision.description,
+            description=revision.effective_description,
             **snapshots,
         )
         try:
@@ -386,7 +386,7 @@ class BackgroundWorkflow(QObject):
             stack_id=document.id,
             card_id=card.id,
             revision_id=revision.id,
-            description=revision.description,
+            description=revision.effective_description,
             background_id=(
                 revision.background.id if revision.background is not None else None
             ),
@@ -409,7 +409,7 @@ class BackgroundWorkflow(QObject):
             return False
         revision = card.active_revision
         if not (
-            revision.description == target.description
+            revision.effective_description == target.description
             and (
                 revision.background.id
                 if revision.background is not None

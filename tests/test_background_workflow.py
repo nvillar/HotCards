@@ -21,6 +21,7 @@ from hypergen.application.commands import (
     CreateCardCommand,
     DuplicateRevisionCommand,
     EditRevisionDescriptionCommand,
+    SetRevisionEnrichedDescriptionCommand,
     SetRevisionReferenceCommand,
 )
 from hypergen.application.document_controller import DocumentController, UndoToken
@@ -28,6 +29,7 @@ from hypergen.application.document_session import DocumentSession
 from hypergen.domain.models import (
     Card,
     CardRevision,
+    EnrichedDescription,
     HotspotSet,
     Interaction,
     NavigateAction,
@@ -174,7 +176,7 @@ def test_generate_applies_to_active_revision_and_preserves_other_content(
     metadata = revision.generation_metadata
     assert metadata is not None
     assert metadata.inputs.description == "A garden"
-    assert metadata.inputs.identity_reference is None
+    assert metadata.inputs.subject_reference is None
     assert session.flush()
     assert StackStore(session.state.bundle_path).load() == controller.document
     assert applied[0][0] == "Image generated"
@@ -182,6 +184,31 @@ def test_generate_applies_to_active_revision_and_preserves_other_content(
 
     assert controller.undo_if_current(applied[0][1])  # type: ignore[arg-type]
     assert controller.document.cards[0].active_revision.background is None
+
+
+def test_generate_prefers_enriched_description(tmp_path: Path) -> None:
+    workflow, controller, _session, workers, card = _bound_workflow(tmp_path)
+    controller.execute(
+        SetRevisionEnrichedDescriptionCommand(
+            card_id=card.id,
+            revision_id=card.active_revision.id,
+            value=EnrichedDescription(
+                text="A richly detailed garden",
+                source_description="A garden",
+            ),
+        )
+    )
+
+    workflow.generate(card.id)
+    _complete_generation(workers)
+
+    revision = controller.document.cards[0].active_revision
+    assert revision.description == "A garden"
+    assert revision.enriched_description is not None
+    assert revision.generation_metadata is not None
+    assert revision.generation_metadata.inputs.description == (
+        "A richly detailed garden"
+    )
 
 
 def test_generation_failure_and_stale_result_preserve_current_revision(
@@ -236,7 +263,7 @@ def test_references_capture_exact_source_and_suppress_stale_results(
         SetRevisionReferenceCommand(
             card_id=target.id,
             revision_id=target.active_revision.id,
-            role=ReferenceRole.IDENTITY,
+            role=ReferenceRole.SUBJECT,
             reference=ResolvedCardReference(target_card_id=source.id),
         )
     )
@@ -254,16 +281,16 @@ def test_references_capture_exact_source_and_suppress_stale_results(
     target_revision = controller.document.cards[0].active_revision
     metadata = target_revision.generation_metadata
     assert metadata is not None
-    assert metadata.inputs.identity_reference is not None
-    assert metadata.inputs.identity_reference.card_id == source.id
-    assert metadata.inputs.identity_reference.revision_id == source_revision.id
-    assert metadata.inputs.identity_reference.background_id == (
+    assert metadata.inputs.subject_reference is not None
+    assert metadata.inputs.subject_reference.card_id == source.id
+    assert metadata.inputs.subject_reference.revision_id == source_revision.id
+    assert metadata.inputs.subject_reference.background_id == (
         source_revision.background.id
     )
     assert metadata.inputs.setting_reference == (
-        metadata.inputs.identity_reference
+        metadata.inputs.subject_reference
     )
-    assert "REFERENCE IMAGE 1\nIDENTITY + SETTING" in metadata.render_prompt
+    assert "REFERENCE IMAGE 1\nSUBJECT + SETTING" in metadata.render_prompt
     assert metadata.effective_settings["reference_count"] == 1
 
     failures: list[object] = []

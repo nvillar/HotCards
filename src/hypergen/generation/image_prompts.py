@@ -13,13 +13,13 @@ _SCENE_AUTHORITY = (
 )
 
 _REFERENCE_INSTRUCTIONS = {
-    ReferenceRole.IDENTITY: (
-        "IDENTITY",
+    ReferenceRole.SUBJECT: (
+        "SUBJECT",
         "Derive the recognizable appearance and identity of the subject, "
         "object, person, or place from this image.",
     ),
-    ReferenceRole.VISUAL_STYLE: (
-        "VISUAL STYLE",
+    ReferenceRole.STYLE: (
+        "STYLE",
         "Derive medium, linework, texture, palette, lighting, and rendering "
         "treatment from this image.",
     ),

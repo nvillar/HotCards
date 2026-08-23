@@ -105,7 +105,7 @@ def test_bundle_round_trip_preserves_document_and_relative_asset(tmp_path: Path)
     assert image_path is not None
     assert image_path.startswith("assets/cards/")
     assert not Path(image_path).is_absolute()
-    assert json.loads(store.stack_path.read_text())["schema_version"] == 4
+    assert json.loads(store.stack_path.read_text())["schema_version"] == 5
 
 
 def test_failed_replace_preserves_active_stack_and_removes_temporary_file(
@@ -257,7 +257,8 @@ def test_load_rejects_missing_legacy_and_future_versions(tmp_path: Path) -> None
     for payload, message in [
         ({"name": "Missing"}, "schema_version"),
         ({"schema_version": 3, "name": "Legacy"}, "schema_version"),
-        ({"schema_version": 5, "name": "Future"}, "schema_version"),
+        ({"schema_version": 4, "name": "Legacy"}, "schema_version"),
+        ({"schema_version": 6, "name": "Future"}, "schema_version"),
     ]:
         store.stack_path.write_text(json.dumps(payload))
         with pytest.raises(StackStoreError, match=message):

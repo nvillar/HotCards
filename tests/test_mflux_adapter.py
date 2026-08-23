@@ -95,7 +95,7 @@ def test_reference_generation_uses_edit_model_and_kv_cache(
         update={
             "inputs": ImageGenerationInputs(
                 description="A referenced portrait",
-                identity_reference=snapshot,
+                subject_reference=snapshot,
             ),
             "render_prompt": "REFERENCE IMAGE 1\nIDENTITY\nPreserve identity",
             "model_identifier": "flux2-klein-9b-kv",
@@ -117,7 +117,7 @@ def test_reference_generation_uses_edit_model_and_kv_cache(
     assert edit_calls == [("flux2-klein-9b-kv", None)]
     assert edit_model.calls[0]["image_paths"] == [tmp_path / "identity.png"]
     assert edit_model.calls[0]["use_kv_cache"] is True
-    assert result.metadata.inputs.identity_reference == snapshot
+    assert result.metadata.inputs.subject_reference == snapshot
     assert result.metadata.effective_settings["reference_count"] == 1
     assert result.metadata.effective_settings["use_kv_cache"] is True
 
@@ -145,7 +145,7 @@ def test_multi_role_snapshot_requires_one_unique_image_path(
     generation_request = MfluxGenerationRequest(
         inputs=ImageGenerationInputs(
             description="Same castle",
-            identity_reference=snapshot,
+            subject_reference=snapshot,
             setting_reference=snapshot,
         ),
         render_prompt="Same castle",
@@ -195,7 +195,7 @@ def test_switching_generation_modes_evicts_the_previous_model(
         MfluxGenerationRequest(
             inputs=ImageGenerationInputs(
                 description="Referenced scene",
-                identity_reference=snapshot,
+                subject_reference=snapshot,
             ),
             render_prompt="Referenced scene",
             output_path=tmp_path / "edit.png",

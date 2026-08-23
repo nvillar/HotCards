@@ -46,11 +46,12 @@ for live Ollama and MFLUX runs.
 - Reuse production prompt builders, schemas, adapters, and geometry validation
   in the evaluation harness. Do not fork generation behavior.
 - Keep each card's complete authoring state in one of its numbered revisions:
-  Description, optional background, fixed card-reference roles, and hotspot set.
-  Visible revision numbers are positional; stable UUIDs remain internal.
+  authored Description, optional Enriched Description with input provenance,
+  optional background, fixed card-reference roles, and hotspot set. Visible
+  revision numbers are positional; stable UUIDs remain internal.
 - Keep at least one revision per card. Duplicate a complete revision, including
   its hotspot semantics and immutable background reference.
-- Keep exactly three optional card-reference roles: Identity, Visual style, and
+- Keep exactly three optional card-reference roles: Subject, Style, and
   Setting. Each accepts at most one other card and rejects self-references, but
   one source card may fill multiple roles. Group roles by active source
   background, feed each unique image to MFLUX once in first-role order, combine
@@ -59,8 +60,9 @@ for live Ollama and MFLUX runs.
   attributes come from each image and which come from the scene or other
   assigned references.
 - Compose background prompts deterministically from the active revision's
-  Description plus fixed instructions for assigned reference roles. Hotspots
-  must not alter image prompts.
+  Enriched Description when present, falling back to Description, plus fixed
+  instructions for assigned reference roles. Hotspots must not alter image
+  prompts.
 - Support generated backgrounds only; do not add image import. Apply Generate
   and Clear directly through document commands. Keep an existing image visible
   until replacement succeeds, then expose a dismissible Undo bound to the exact
@@ -71,18 +73,22 @@ for live Ollama and MFLUX runs.
   blocking decision dialog only when proceeding could lose persisted work and
   Undo cannot recover it.
 - Enrich Description is text-only and requires authored Description text. It
-  must not send current or referenced images to Ollama. Give it role-scoped
-  generation-time Description provenance for referenced backgrounds, then
-  apply its result directly through one undoable command. Assigned references
-  replace conflicting authored details within their role rather than blending
-  both versions. Require distinctive source-language overlap for every assigned
-  role, including style-specific cues for Visual style, reject recognized
-  conflicting authored styles that remain, and reject newly invented quoted
-  visible text. Shape the result for FLUX.2 as one concise natural-language
-  paragraph ordered by subject, action, style, context, then secondary details.
-  Use positive desired-image language, associate colors and materials with
-  specific objects, and add photographic camera details only for explicitly
-  photographic styles.
+  must not send current or referenced images to Ollama. Always derive it from
+  the authored Description, never from an existing enrichment. Give it
+  role-scoped generation-time effective-Description provenance for referenced
+  backgrounds, then store the result separately through one undoable command.
+  Track source Description and exact usable reference-image provenance so an
+  enrichment can be marked Current or Out of date without being cleared; image
+  generation still prefers an out-of-date enrichment until the author clears
+  it. Assigned references replace conflicting authored details within their
+  role rather than blending both versions. Require distinctive source-language
+  overlap for every assigned role, including style-specific cues for Style,
+  reject recognized conflicting authored styles that remain, and reject newly
+  invented quoted visible text. Shape the result for FLUX.2 as one concise
+  natural-language paragraph ordered by subject, action, style, context, then
+  secondary details. Use positive desired-image language, associate colors and
+  materials with specific objects, and add photographic camera details only
+  for explicitly photographic styles.
 - Store each hotspot set under exactly one complete card revision. Replacing a
   background preserves its hotspots so the author can review and adjust them
   manually.

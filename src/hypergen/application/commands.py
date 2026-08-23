@@ -11,6 +11,7 @@ from hypergen.domain.models import (
     Card,
     CardReference,
     CardRevision,
+    EnrichedDescription,
     HotspotSet,
     Interaction,
     NavigateAction,
@@ -268,6 +269,25 @@ class EditRevisionDescriptionCommand:
         revision_index = _revision_index(card, self.revision_id)
         revision = card.revisions[revision_index].model_copy(
             update={"description": self.value}
+        )
+        card = _replace_revision(card, revision_index, revision)
+        return validated_copy(_replace_card(document, card_index, card))
+
+
+@dataclass(frozen=True, slots=True)
+class SetRevisionEnrichedDescriptionCommand:
+    """Set or clear one revision's derived Description."""
+
+    card_id: UUID
+    revision_id: UUID
+    value: EnrichedDescription | None
+
+    def apply(self, document: Stack) -> Stack:
+        card_index = _card_index(document, self.card_id)
+        card = document.cards[card_index]
+        revision_index = _revision_index(card, self.revision_id)
+        revision = card.revisions[revision_index].model_copy(
+            update={"enriched_description": self.value}
         )
         card = _replace_revision(card, revision_index, revision)
         return validated_copy(_replace_card(document, card_index, card))
@@ -674,6 +694,7 @@ __all__ = [
     "DocumentCommand",
     "DuplicateRevisionCommand",
     "EditRevisionDescriptionCommand",
+    "SetRevisionEnrichedDescriptionCommand",
     "RenameCardCommand",
     "ReorderCardCommand",
     "ReorderHotspotCommand",

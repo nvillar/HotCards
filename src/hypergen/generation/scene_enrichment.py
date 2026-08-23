@@ -104,10 +104,10 @@ AUTHORITY
   never mention sources, references, roles, constraints, or the rewrite process.
 
 REFERENCE ROLE SCOPES
-- Identity: replace conflicting authored identity and appearance with the source's defining
+- Subject: replace conflicting authored subject identity and appearance with the source's defining
   age, species, facial features, hair, body, clothing, and other recognizable traits. State
   those traits together consistently while retaining the authored action and pose.
-- Visual style: replace conflicting authored style with the source's medium, era, rendering
+- Style: replace conflicting authored style with the source's medium, era, rendering
   technology, geometry, texture, shading, palette, and lighting. State the critical style
   immediately after subject and action. Retain no conflicting authored style.
 - Setting: replace a conflicting authored location or environment with the source's defining
@@ -121,10 +121,10 @@ FLUX.2 DETAIL GUIDANCE
   spatial relationships, atmosphere, framing, and composition when they improve the image.
 - Associate each color, material, and spatial detail with its specific object. Preserve exact
   authored color names and hex codes on their intended objects when those details remain under
-  authored authority; assigned Identity, Visual style, or Setting details take precedence
+  authored authority; assigned Subject, Style, or Setting details take precedence
   within their scopes.
 - Add camera bodies, lenses, film stocks, aperture, or depth of field only when the authored
-  or assigned Visual style is explicitly photographic.
+  or assigned Style is explicitly photographic.
 - Preserve authored visible text exactly in quotation marks and on its intended object.
   Describe placement and typography only when authored. When no quoted text is authored,
   introduce no visible words, lettering, signs, captions, or labels.
@@ -373,10 +373,10 @@ def _validate_reference_fidelity(
         for role in reference.roles
     ]
     for role, source in expected_sources:
-        if role is ReferenceRole.VISUAL_STYLE:
+        if role is ReferenceRole.STYLE:
             if not _has_distinctive_style_phrase(source, output.scene):
                 raise ValueError(
-                    "visual_style reference is not visibly preserved; "
+                    "style reference is not visibly preserved; "
                     "the rewritten Description omitted its distinctive style"
                 )
             retained_conflicts = _retained_conflicting_style_markers(
@@ -387,7 +387,7 @@ def _validate_reference_fidelity(
             if retained_conflicts:
                 values = ", ".join(sorted(retained_conflicts))
                 raise ValueError(
-                    f"visual_style reference did not override conflicting authored style: {values}"
+                    f"style reference did not override conflicting authored style: {values}"
                 )
         elif not _has_distinctive_shared_phrase(source, output.scene):
             raise ValueError(

@@ -11,6 +11,8 @@ from hypergen.domain.models import (
     CanvasSize,
     Card,
     CardRevision,
+    EnrichedDescription,
+    EnrichmentReferenceSnapshot,
     GeneratedBackground,
     HotspotSet,
     ImageGenerationInputs,
@@ -20,6 +22,7 @@ from hypergen.domain.models import (
     NavigateAction,
     Point,
     Polygon,
+    ReferenceRole,
     ResolvedCardReference,
     RunOverlayMode,
     Stack,
@@ -46,16 +49,47 @@ def image_metadata() -> ImageGenerationMetadata:
 def test_stack_defaults_match_document_contract() -> None:
     stack = Stack(name="Castle")
 
-    assert stack.schema_version == 4
+    assert stack.schema_version == 5
     assert (stack.canvas.width, stack.canvas.height) == (1024, 768)
     assert stack.run_overlay_mode is RunOverlayMode.HIDDEN
     assert stack.cards == ()
 
 
+def test_revision_uses_enriched_description_when_available() -> None:
+    reference = EnrichmentReferenceSnapshot(
+        role=ReferenceRole.STYLE,
+        card_id=uuid4(),
+        revision_id=uuid4(),
+        background_id=uuid4(),
+    )
+    enrichment = EnrichedDescription(
+        text="A richer courtyard",
+        source_description="A courtyard",
+        references=(reference,),
+    )
+    revision = CardRevision(
+        description="A courtyard",
+        enriched_description=enrichment,
+    )
+
+    assert revision.effective_description == "A richer courtyard"
+    assert enrichment.is_current(
+        source_description="A courtyard",
+        references=(reference,),
+    )
+    assert not enrichment.is_current(
+        source_description="A changed courtyard",
+        references=(reference,),
+    )
+    assert CardRevision(description="A courtyard").effective_description == (
+        "A courtyard"
+    )
+
+
 def test_stack_serializes_fixed_reference_slots_without_legacy_style_keys() -> None:
     destination = Card(name="Portrait")
     revision = CardRevision(
-        identity=ResolvedCardReference(target_card_id=destination.id)
+        subject=ResolvedCardReference(target_card_id=destination.id)
     )
     source = Card(name="Source", revisions=(revision,))
     stack = Stack(name="Castle", cards=(source, destination))
@@ -63,8 +97,8 @@ def test_stack_serializes_fixed_reference_slots_without_legacy_style_keys() -> N
     values = stack.model_dump(mode="json")
 
     serialized_revision = values["cards"][0]["revisions"][0]
-    assert serialized_revision["identity"]["target_card_id"] == str(destination.id)
-    assert serialized_revision["visual_style"] is None
+    assert serialized_revision["subject"]["target_card_id"] == str(destination.id)
+    assert serialized_revision["style"] is None
     assert serialized_revision["setting"] is None
     assert "style_id" not in serialized_revision
     assert "styles" not in values
@@ -146,7 +180,7 @@ def test_stack_rejects_self_references_and_accepts_multi_role_sources() -> None:
                         "revisions": (
                             source.active_revision.model_copy(
                                 update={
-                                    "identity": ResolvedCardReference(
+                                    "subject": ResolvedCardReference(
                                         target_card_id=source.id
                                     )
                                 }
@@ -158,7 +192,7 @@ def test_stack_rejects_self_references_and_accepts_multi_role_sources() -> None:
         )
     reference = Card(name="Reference")
     revision = CardRevision(
-        identity=ResolvedCardReference(target_card_id=reference.id),
+        subject=ResolvedCardReference(target_card_id=reference.id),
         setting=ResolvedCardReference(target_card_id=reference.id),
     )
     stack = Stack(
@@ -166,7 +200,7 @@ def test_stack_rejects_self_references_and_accepts_multi_role_sources() -> None:
         cards=(Card(name="Source", revisions=(revision,)), reference),
     )
 
-    assert stack.cards[0].active_revision.identity == (
+    assert stack.cards[0].active_revision.subject == (
         stack.cards[0].active_revision.setting
     )
 
@@ -214,11 +248,11 @@ def test_generation_inputs_capture_exact_reference_source_state() -> None:
     )
     inputs = ImageGenerationInputs(
         description="Portrait at dusk",
-        identity_reference=snapshot,
+        subject_reference=snapshot,
     )
 
-    assert inputs.identity_reference == snapshot
-    assert inputs.visual_style_reference is None
+    assert inputs.subject_reference == snapshot
+    assert inputs.style_reference is None
 
 
 def test_hotspots_are_nested_in_their_image_revision() -> None:
