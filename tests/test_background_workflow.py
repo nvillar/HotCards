@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from uuid import uuid4
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -16,7 +17,12 @@ from hypergen.application.background_workflow import (
     BackgroundWorkflow,
     BackgroundWorkflowError,
 )
-from hypergen.application.commands import EditRevisionDescriptionCommand
+from hypergen.application.commands import (
+    CreateCardCommand,
+    DuplicateRevisionCommand,
+    EditRevisionDescriptionCommand,
+    SetRevisionReferenceCommand,
+)
 from hypergen.application.document_controller import DocumentController, UndoToken
 from hypergen.application.document_session import DocumentSession
 from hypergen.domain.models import (
@@ -25,6 +31,8 @@ from hypergen.domain.models import (
     HotspotSet,
     Interaction,
     NavigateAction,
+    ReferenceRole,
+    ResolvedCardReference,
     Stack,
     UnresolvedCardReference,
 )
@@ -130,7 +138,8 @@ def _bound_workflow(
         workers,  # type: ignore[arg-type]
         _settings,
         mflux_generator=MfluxGenerator(
-            model_factory=lambda *_args: FakeMfluxModel()
+            model_factory=lambda *_args: FakeMfluxModel(),
+            edit_model_factory=lambda *_args: FakeMfluxModel(),
         ),
         temporary_directory=tmp_path / "temporary",
     )
@@ -201,6 +210,81 @@ def test_generation_failure_and_stale_result_preserve_current_revision(
     assert controller.document.cards[0].active_revision.background is None
     assert "changed before generation completed" in str(failures[-1])
     assert not list((tmp_path / "temporary").glob("generated-*.png"))
+
+
+def test_references_capture_exact_source_and_suppress_stale_results(
+    tmp_path: Path,
+) -> None:
+    workflow, controller, _session, workers, target = _bound_workflow(tmp_path)
+    source_id = uuid4()
+    controller.execute(CreateCardCommand(name="Portrait", card_id=source_id))
+    source = next(card for card in controller.document.cards if card.id == source_id)
+    controller.execute(
+        EditRevisionDescriptionCommand(
+            card_id=source.id,
+            revision_id=source.active_revision.id,
+            value="A distinctive knight portrait",
+        )
+    )
+    workflow.generate(source.id)
+    _complete_generation(workers)
+    source = next(card for card in controller.document.cards if card.id == source_id)
+    source_revision = source.active_revision
+    assert source_revision.background is not None
+
+    controller.execute(
+        SetRevisionReferenceCommand(
+            card_id=target.id,
+            revision_id=target.active_revision.id,
+            role=ReferenceRole.IDENTITY,
+            reference=ResolvedCardReference(target_card_id=source.id),
+        )
+    )
+    workflow.generate(target.id)
+    _complete_generation(workers)
+
+    target_revision = controller.document.cards[0].active_revision
+    metadata = target_revision.generation_metadata
+    assert metadata is not None
+    assert metadata.inputs.identity_reference is not None
+    assert metadata.inputs.identity_reference.card_id == source.id
+    assert metadata.inputs.identity_reference.revision_id == source_revision.id
+    assert metadata.inputs.identity_reference.background_id == (
+        source_revision.background.id
+    )
+    assert "REFERENCE IMAGE 1\nIDENTITY" in metadata.render_prompt
+
+    failures: list[object] = []
+    workflow.failed.connect(failures.append)
+    current_background = target_revision.background
+    workflow.generate(target.id)
+    controller.execute(
+        DuplicateRevisionCommand(
+            card_id=source.id,
+            source_revision_id=source_revision.id,
+        )
+    )
+    _complete_generation(workers)
+
+    assert controller.document.cards[0].active_revision.background == current_background
+    assert "changed before generation completed" in str(failures[-1])
+
+
+def test_reference_card_requires_an_active_image(tmp_path: Path) -> None:
+    workflow, controller, _session, _workers, target = _bound_workflow(tmp_path)
+    source_id = uuid4()
+    controller.execute(CreateCardCommand(name="Blank source", card_id=source_id))
+    controller.execute(
+        SetRevisionReferenceCommand(
+            card_id=target.id,
+            revision_id=target.active_revision.id,
+            role=ReferenceRole.SETTING,
+            reference=ResolvedCardReference(target_card_id=source_id),
+        )
+    )
+
+    with pytest.raises(BackgroundWorkflowError, match="has no image"):
+        workflow.generate(target.id)
 
 def test_revision_duplicate_activate_delete_round_trip(tmp_path: Path) -> None:
     workflow, controller, _session, _workers, card = _bound_workflow(tmp_path)

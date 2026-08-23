@@ -1,11 +1,12 @@
 """Tests for the in-process MFLUX adapter behind fakes."""
 
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from PIL import Image
 
-from hypergen.domain.models import ImageGenerationInputs
+from hypergen.domain.models import ImageGenerationInputs, ImageReferenceSnapshot
 from hypergen.generation.errors import ImageGenerationError, ModelLoadError
 from hypergen.generation.mflux_generator import (
     MfluxGenerationRequest,
@@ -76,6 +77,110 @@ def test_mflux_adapter_loads_once_and_records_effective_metadata(tmp_path: Path)
     assert first.load_duration_seconds >= 0
     assert first.generation_duration_seconds >= 0
     assert first.serialization_duration_seconds >= 0
+
+
+def test_reference_generation_uses_edit_model_and_kv_cache(
+    tmp_path: Path,
+) -> None:
+    source_model = FakeMfluxModel()
+    edit_model = FakeMfluxModel()
+    source_calls: list[tuple[str, int | None]] = []
+    edit_calls: list[tuple[str, int | None]] = []
+    snapshot = ImageReferenceSnapshot(
+        card_id=uuid4(),
+        revision_id=uuid4(),
+        background_id=uuid4(),
+    )
+    generation_request = request(tmp_path / "referenced.png").model_copy(
+        update={
+            "inputs": ImageGenerationInputs(
+                description="A referenced portrait",
+                identity_reference=snapshot,
+            ),
+            "render_prompt": "REFERENCE IMAGE 1\nIDENTITY\nPreserve identity",
+            "model_identifier": "flux2-klein-9b-kv",
+            "reference_image_paths": (tmp_path / "identity.png",),
+        }
+    )
+    generator = MfluxGenerator(
+        model_factory=lambda model, quantization: (
+            source_calls.append((model, quantization)) or source_model
+        ),
+        edit_model_factory=lambda model, quantization: (
+            edit_calls.append((model, quantization)) or edit_model
+        ),
+    )
+
+    result = generator.generate(generation_request)
+
+    assert source_calls == []
+    assert edit_calls == [("flux2-klein-9b-kv", None)]
+    assert edit_model.calls[0]["image_paths"] == [tmp_path / "identity.png"]
+    assert edit_model.calls[0]["use_kv_cache"] is True
+    assert result.metadata.inputs.identity_reference == snapshot
+    assert result.metadata.effective_settings["reference_count"] == 1
+    assert result.metadata.effective_settings["use_kv_cache"] is True
+
+
+def test_reference_paths_must_match_snapshot_count(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="must match"):
+        MfluxGenerationRequest(
+            inputs=ImageGenerationInputs(description="Missing snapshot"),
+            render_prompt="Missing snapshot",
+            output_path=tmp_path / "invalid.png",
+            reference_image_paths=(tmp_path / "reference.png",),
+            seed=1,
+        )
+
+
+def test_switching_generation_modes_evicts_the_previous_model(
+    tmp_path: Path,
+) -> None:
+    source_calls = 0
+    edit_calls = 0
+
+    def source_factory(
+        _model_identifier: str,
+        _quantization: int | None,
+    ) -> FakeMfluxModel:
+        nonlocal source_calls
+        source_calls += 1
+        return FakeMfluxModel()
+
+    def edit_factory(
+        _model_identifier: str,
+        _quantization: int | None,
+    ) -> FakeMfluxModel:
+        nonlocal edit_calls
+        edit_calls += 1
+        return FakeMfluxModel()
+
+    snapshot = ImageReferenceSnapshot(
+        card_id=uuid4(),
+        revision_id=uuid4(),
+        background_id=uuid4(),
+    )
+    generator = MfluxGenerator(
+        model_factory=source_factory,
+        edit_model_factory=edit_factory,
+    )
+    generator.generate(request(tmp_path / "source-1.png"))
+    generator.generate(
+        MfluxGenerationRequest(
+            inputs=ImageGenerationInputs(
+                description="Referenced scene",
+                identity_reference=snapshot,
+            ),
+            render_prompt="Referenced scene",
+            output_path=tmp_path / "edit.png",
+            reference_image_paths=(tmp_path / "reference.png",),
+            seed=1,
+        )
+    )
+    generator.generate(request(tmp_path / "source-2.png"))
+
+    assert source_calls == 2
+    assert edit_calls == 1
 
 
 def test_mflux_adapter_refuses_overwrite(tmp_path: Path) -> None:

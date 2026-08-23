@@ -1,8 +1,10 @@
 """Tests for deterministic author-controlled image prompts."""
 
+from uuid import uuid4
+
 import pytest
 
-from hypergen.domain.models import ImageGenerationInputs
+from hypergen.domain.models import ImageGenerationInputs, ImageReferenceSnapshot
 from hypergen.generation.image_prompts import compose_image_prompt
 
 
@@ -22,3 +24,31 @@ def test_empty_or_whitespace_description_is_rejected() -> None:
             compose_image_prompt(
                 ImageGenerationInputs(description=description)
             )
+
+
+def test_reference_roles_are_ordered_and_missing_slots_are_renumbered() -> None:
+    identity = ImageReferenceSnapshot(
+        card_id=uuid4(),
+        revision_id=uuid4(),
+        background_id=uuid4(),
+    )
+    setting = ImageReferenceSnapshot(
+        card_id=uuid4(),
+        revision_id=uuid4(),
+        background_id=uuid4(),
+    )
+
+    prompt = compose_image_prompt(
+        ImageGenerationInputs(
+            description="A knight crossing a market square",
+            identity_reference=identity,
+            setting_reference=setting,
+        )
+    )
+
+    assert prompt.index("REFERENCE IMAGE 1\nIDENTITY") < prompt.index(
+        "REFERENCE IMAGE 2\nSETTING"
+    )
+    assert "REFERENCE IMAGE 3" not in prompt
+    assert "VISUAL STYLE" not in prompt
+    assert prompt.endswith("SCENE\nA knight crossing a market square")

@@ -27,7 +27,11 @@ from hypergen.domain.models import (
     Card,
     GeneratedBackground,
     ImageGenerationInputs,
+    ImageReferenceSnapshot,
+    ReferenceRole,
+    ResolvedCardReference,
     Stack,
+    UnresolvedCardReference,
 )
 from hypergen.generation.image_prompts import compose_image_prompt
 from hypergen.generation.mflux_generator import (
@@ -61,6 +65,16 @@ class _GenerationTarget:
     description: str
     background_id: UUID | None
     bundle_path: Path
+    references: tuple[_GenerationReferenceTarget, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _GenerationReferenceTarget:
+    role: ReferenceRole
+    card_id: UUID
+    revision_id: UUID
+    background_id: UUID
+    image_path: str
 
 
 GenerationSettingsProvider = Callable[[], BackgroundGenerationSettings]
@@ -120,15 +134,31 @@ class BackgroundWorkflow(QObject):
         document = self.controller.document
         card = self._card(document, card_id)
         revision = card.active_revision
-        inputs = ImageGenerationInputs(description=revision.description)
+        references = self._resolve_references(document, card)
+        snapshots = {
+            f"{reference.role.value}_reference": ImageReferenceSnapshot(
+                card_id=reference.card_id,
+                revision_id=reference.revision_id,
+                background_id=reference.background_id,
+            )
+            for reference in references
+        }
+        inputs = ImageGenerationInputs(
+            description=revision.description,
+            **snapshots,
+        )
         try:
             render_prompt = compose_image_prompt(inputs)
         except ValueError as error:
             raise BackgroundWorkflowError(str(error)) from error
         settings = self._settings_provider()
+        reference_image_paths = tuple(
+            self._reference_asset_path(reference)
+            for reference in references
+        )
         request_id = uuid4()
         asset_id = uuid4()
-        target = self._target(document, card)
+        target = self._target(document, card, references)
         self._request_id = request_id
         self._request_target = target
         output_path = self._temporary_directory / f"generated-{asset_id}.png"
@@ -146,6 +176,7 @@ class BackgroundWorkflow(QObject):
             height=document.canvas.height,
             step_count=settings.step_count,
             quantization=settings.quantization,
+            reference_image_paths=reference_image_paths,
         )
         self._set_busy(True, "Generating image...")
         operation = self.workers.run_mflux(
@@ -341,7 +372,12 @@ class BackgroundWorkflow(QObject):
             raise BackgroundWorkflowError("save the stack before changing an image")
         return store
 
-    def _target(self, document: Stack, card: Card) -> _GenerationTarget:
+    def _target(
+        self,
+        document: Stack,
+        card: Card,
+        references: tuple[_GenerationReferenceTarget, ...],
+    ) -> _GenerationTarget:
         bundle_path = self.session.state.bundle_path
         if bundle_path is None:
             raise BackgroundWorkflowError("save the stack before changing an image")
@@ -355,6 +391,7 @@ class BackgroundWorkflow(QObject):
                 revision.background.id if revision.background is not None else None
             ),
             bundle_path=bundle_path.resolve(),
+            references=references,
         )
 
     def _target_is_current(self, target: _GenerationTarget) -> bool:
@@ -371,7 +408,7 @@ class BackgroundWorkflow(QObject):
         if card is None or card.active_revision_id != target.revision_id:
             return False
         revision = card.active_revision
-        return (
+        if not (
             revision.description == target.description
             and (
                 revision.background.id
@@ -379,7 +416,90 @@ class BackgroundWorkflow(QObject):
                 else None
             )
             == target.background_id
+        ):
+            return False
+        for reference in target.references:
+            assignment = getattr(revision, reference.role.value)
+            if not (
+                isinstance(assignment, ResolvedCardReference)
+                and assignment.target_card_id == reference.card_id
+            ):
+                return False
+            source = next(
+                (
+                    candidate
+                    for candidate in document.cards
+                    if candidate.id == reference.card_id
+                ),
+                None,
+            )
+            if (
+                source is None
+                or source.active_revision_id != reference.revision_id
+                or source.active_revision.background is None
+                or source.active_revision.background.id != reference.background_id
+            ):
+                return False
+        return len(target.references) == sum(
+            getattr(revision, role.value) is not None
+            for role in ReferenceRole
         )
+
+    def _resolve_references(
+        self,
+        document: Stack,
+        card: Card,
+    ) -> tuple[_GenerationReferenceTarget, ...]:
+        references: list[_GenerationReferenceTarget] = []
+        for role in ReferenceRole:
+            assignment = getattr(card.active_revision, role.value)
+            if assignment is None:
+                continue
+            label = role.value.replace("_", " ").title()
+            if isinstance(assignment, UnresolvedCardReference):
+                name = assignment.target_name or "unknown card"
+                raise BackgroundWorkflowError(
+                    f"{label} reference {name!r} is unresolved"
+                )
+            source = next(
+                (
+                    candidate
+                    for candidate in document.cards
+                    if candidate.id == assignment.target_card_id
+                ),
+                None,
+            )
+            if source is None:
+                raise BackgroundWorkflowError(
+                    f"{label} reference card no longer exists"
+                )
+            source_revision = source.active_revision
+            if source_revision.background is None:
+                raise BackgroundWorkflowError(
+                    f"{label} reference card {source.name!r} has no image"
+                )
+            references.append(
+                _GenerationReferenceTarget(
+                    role=role,
+                    card_id=source.id,
+                    revision_id=source_revision.id,
+                    background_id=source_revision.background.id,
+                    image_path=source_revision.background.image_path,
+                )
+            )
+        return tuple(references)
+
+    def _reference_asset_path(
+        self,
+        reference: _GenerationReferenceTarget,
+    ) -> Path:
+        path = self._require_store().asset_path(reference.image_path)
+        if not path.is_file():
+            raise BackgroundWorkflowError(
+                f"{reference.role.value.replace('_', ' ').title()} "
+                "reference image is unavailable"
+            )
+        return path
 
     @staticmethod
     def _card(document: Stack, card_id: UUID) -> Card:

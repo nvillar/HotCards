@@ -28,9 +28,11 @@ manages Mode and hotspot visibility.
 The Background inspector contains Description, Enrich Description, Identity,
 Visual style, and Setting card selectors, Generate Image, and Clear Image
 controls. Each reference role can select one other card; the same card cannot
-fill multiple roles. Background prompts are composed
-deterministically from the revision Description. Generated images are the only
-supported background source. Generate and Clear apply
+fill multiple roles. Generate uses each referenced card's active background in
+Identity, Visual style, Setting order; missing roles are omitted and source
+Descriptions are not injected. Background prompts are composed deterministically
+from the target revision Description and fixed role instructions. Generated
+images are the only supported background source. Generate and Clear apply
 directly to the active revision; Enrich Description produces an editable,
 session-only text proposal that must be applied or discarded explicitly.
 Existing images remain in place until replacement succeeds, and successful
@@ -63,7 +65,9 @@ model selectors.
 Prerequisites: Python 3.12 and [uv](https://docs.astral.sh/uv/). To enable
 generation, also run Ollama with an installed text model (default:
 `qwen3.5:9b-mlx`) and cache the selected MFLUX model locally. FLUX.2 Klein 4B
-uses Apache 2.0; FLUX.2 Klein 9B KV uses the FLUX Non-Commercial License.
+uses Apache 2.0; FLUX.2 Klein 9B KV uses the FLUX Non-Commercial License. The
+9B KV choice requires both the regular 9B weights for text-only generation and
+the 9B KV weights for reference generation.
 
 ```sh
 uv sync
