@@ -28,13 +28,14 @@ def build_availability_checks(
     """Build lazy checks whose adapter objects are constructed only on worker threads."""
     values = load_machine_settings(settings)
 
-    def check_ollama() -> None:
-        OllamaRuntime(
+    def check_ollama() -> tuple[str, ...]:
+        runtime = OllamaRuntime(
             OllamaSettings(
                 endpoint=values.ollama_endpoint,
                 model=values.ollama_model,
             )
-        ).require_model()
+        )
+        return runtime.installed_models()
 
     def check_mflux() -> None:
         from huggingface_hub import snapshot_download
@@ -45,28 +46,32 @@ def build_availability_checks(
         )
 
         configurations = {
-            "flux2-klein-4b": ModelConfig.flux2_klein_4b,
-            "flux2-klein-9b": ModelConfig.flux2_klein_9b,
+            "flux2-klein-4b": (ModelConfig.flux2_klein_4b,),
+            "flux2-klein-9b-kv": (
+                ModelConfig.flux2_klein_9b,
+                ModelConfig.flux2_klein_9b_kv,
+            ),
         }
-        configuration_factory = configurations.get(values.mflux_model)
-        if configuration_factory is None:
+        configuration_factories = configurations.get(values.mflux_model)
+        if configuration_factories is None:
             raise ModelUnavailableError(
                 f"MFLUX model tag {values.mflux_model!r} is unsupported. "
-                "Choose flux2-klein-4b or flux2-klein-9b."
+                "Choose flux2-klein-4b or flux2-klein-9b-kv."
             )
-        repository = configuration_factory().model_name
-        try:
-            snapshot_download(
-                repo_id=repository,
-                allow_patterns=Flux2KleinWeightDefinition.get_download_patterns(),
-                local_files_only=True,
-            )
-        except LocalEntryNotFoundError as error:
-            raise ModelUnavailableError(
-                f"MFLUX model {values.mflux_model!r} is not available in the local "
-                "Hugging Face cache. Download or authenticate with Hugging Face "
-                "outside HyperGen, then retry."
-            ) from error
+        for configuration_factory in configuration_factories:
+            repository = configuration_factory().model_name
+            try:
+                snapshot_download(
+                    repo_id=repository,
+                    allow_patterns=Flux2KleinWeightDefinition.get_download_patterns(),
+                    local_files_only=True,
+                )
+            except LocalEntryNotFoundError as error:
+                raise ModelUnavailableError(
+                    f"MFLUX repository {repository!r} is not available in the local "
+                    "Hugging Face cache. Download or authenticate with Hugging Face "
+                    "outside HyperGen, then retry."
+                ) from error
 
     return {
         AdapterKind.OLLAMA: check_ollama,

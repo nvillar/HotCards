@@ -30,6 +30,24 @@ class FakeOllamaClient:
         )
 
 
+def test_ollama_runtime_lists_installed_models_in_stable_order() -> None:
+    client = SimpleNamespace(
+        list=lambda: SimpleNamespace(
+            models=(
+                SimpleNamespace(model="qwen3.5:9b-mlx"),
+                SimpleNamespace(model="llama3.2:latest"),
+                SimpleNamespace(model="qwen3.5:9b-mlx"),
+            )
+        )
+    )
+    runtime = OllamaRuntime(OllamaSettings(), client=client)  # type: ignore[arg-type]
+
+    assert runtime.installed_models() == (
+        "llama3.2:latest",
+        "qwen3.5:9b-mlx",
+    )
+
+
 def test_scene_enrichment_prompt_expands_authored_visual_details() -> None:
     prompt = build_scene_enrichment_prompt(
         SceneEnrichmentRequest(scene='A mysterious wood with a sign saying "Enter"')

@@ -29,6 +29,10 @@ STEP_COUNT_KEY = "generation/step_count"
 QUANTIZATION_KEY = "generation/quantization"
 RANDOM_SEED_KEY = "generation/random_seed"
 FIXED_SEED_KEY = "generation/fixed_seed"
+MFLUX_MODEL_OPTIONS = (
+    ("FLUX.2 Klein 4B", "flux2-klein-4b"),
+    ("FLUX.2 Klein 9B KV (Non-Commercial)", "flux2-klein-9b-kv"),
+)
 
 
 class SettingsStore(Protocol):
@@ -79,10 +83,21 @@ def load_machine_settings(settings: SettingsStore) -> MachineSettings:
     defaults = MachineSettings()
     quantization_value = settings.value(QUANTIZATION_KEY, "")
     quantization = _int_value(quantization_value, 0) if str(quantization_value).strip() else None
+    ollama_model = str(
+        settings.value(OLLAMA_MODEL_KEY, defaults.ollama_model)
+    ).strip() or defaults.ollama_model
+    mflux_model = str(
+        settings.value(MFLUX_MODEL_KEY, defaults.mflux_model)
+    ).strip()
+    if mflux_model == "flux2-klein-9b":
+        mflux_model = "flux2-klein-9b-kv"
+    supported_mflux_models = {value for _label, value in MFLUX_MODEL_OPTIONS}
+    if mflux_model not in supported_mflux_models:
+        mflux_model = defaults.mflux_model
     return MachineSettings(
         ollama_endpoint=str(settings.value(OLLAMA_ENDPOINT_KEY, defaults.ollama_endpoint)).strip(),
-        ollama_model=str(settings.value(OLLAMA_MODEL_KEY, defaults.ollama_model)).strip(),
-        mflux_model=str(settings.value(MFLUX_MODEL_KEY, defaults.mflux_model)).strip(),
+        ollama_model=ollama_model,
+        mflux_model=mflux_model,
         step_count=max(
             1,
             _int_value(
@@ -118,10 +133,6 @@ class SettingsDialog(QDialog):
 
         self.ollama_endpoint_edit = QLineEdit()
         self.ollama_endpoint_edit.setObjectName("ollamaEndpointEdit")
-        self.ollama_model_edit = QLineEdit()
-        self.ollama_model_edit.setObjectName("ollamaModelEdit")
-        self.mflux_model_edit = QLineEdit()
-        self.mflux_model_edit.setObjectName("mfluxModelEdit")
 
         self.step_count_spin = QSpinBox()
         self.step_count_spin.setObjectName("stepCountSpin")
@@ -143,8 +154,6 @@ class SettingsDialog(QDialog):
 
         form = QFormLayout()
         form.addRow("Ollama endpoint", self.ollama_endpoint_edit)
-        form.addRow("Ollama model tag", self.ollama_model_edit)
-        form.addRow("MFLUX model tag", self.mflux_model_edit)
         form.addRow("Inference steps", self.step_count_spin)
         form.addRow("Quantization", self.quantization_combo)
         form.addRow("Seed behavior", self.random_seed_check)
@@ -178,8 +187,6 @@ class SettingsDialog(QDialog):
         """Load persisted values into the controls."""
         values = load_machine_settings(self.settings)
         self.ollama_endpoint_edit.setText(values.ollama_endpoint)
-        self.ollama_model_edit.setText(values.ollama_model)
-        self.mflux_model_edit.setText(values.mflux_model)
         self.step_count_spin.setValue(values.step_count)
         quantization_index = self.quantization_combo.findData(values.quantization)
         self.quantization_combo.setCurrentIndex(max(0, quantization_index))
@@ -190,10 +197,11 @@ class SettingsDialog(QDialog):
 
     def machine_settings(self) -> MachineSettings:
         """Return the values currently displayed by the dialog."""
+        current = load_machine_settings(self.settings)
         return MachineSettings(
             ollama_endpoint=_validated_ollama_endpoint(self.ollama_endpoint_edit.text().strip()),
-            ollama_model=self.ollama_model_edit.text().strip(),
-            mflux_model=self.mflux_model_edit.text().strip(),
+            ollama_model=current.ollama_model,
+            mflux_model=current.mflux_model,
             step_count=self.step_count_spin.value(),
             quantization=self.quantization_combo.currentData(),
             random_seed=self.random_seed_check.isChecked(),
@@ -204,8 +212,6 @@ class SettingsDialog(QDialog):
         """Persist non-sensitive values to the injected QSettings-compatible store."""
         values = self.machine_settings()
         self.settings.setValue(OLLAMA_ENDPOINT_KEY, values.ollama_endpoint)
-        self.settings.setValue(OLLAMA_MODEL_KEY, values.ollama_model)
-        self.settings.setValue(MFLUX_MODEL_KEY, values.mflux_model)
         self.settings.setValue(STEP_COUNT_KEY, values.step_count)
         self.settings.setValue(
             QUANTIZATION_KEY,
@@ -248,6 +254,7 @@ def _validated_ollama_endpoint(value: str) -> str:
 __all__ = [
     "FIXED_SEED_KEY",
     "MFLUX_MODEL_KEY",
+    "MFLUX_MODEL_OPTIONS",
     "MachineSettings",
     "OLLAMA_ENDPOINT_KEY",
     "OLLAMA_MODEL_KEY",

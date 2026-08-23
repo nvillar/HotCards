@@ -504,7 +504,8 @@ def test_status_bar_is_passive_and_ai_recovery_uses_notification_bar(
 
     assert not hasattr(window, "check_services_button")
     assert not hasattr(window, "review_settings_button")
-    assert window.service_status_label.text() == "Ollama unavailable"
+    assert not hasattr(window, "service_status_label")
+    assert "Ollama is unavailable" in window.llm_model_combo.toolTip()
     assert window.notification_bar.current_key == "ai-services"
     assert window.notification_bar.primary_button.text() == "Settings"
     assert window.notification_bar.secondary_button.text() == "Check Again"
@@ -533,6 +534,46 @@ def test_status_bar_is_passive_and_ai_recovery_uses_notification_bar(
     assert token is not None
     window._show_undo_notification("Renamed", token)
     assert window.notification_bar.current_key == "undo"
+
+
+def test_bottom_model_selectors_persist_and_follow_operation_state(
+    application: QApplication,
+) -> None:
+    window, _controller, _workers, background = _window()
+    settings = window.settings
+    assert isinstance(settings, FakeSettings)
+
+    window._availability_check_succeeded(
+        AdapterKind.OLLAMA,
+        window._diagnostic_generation,
+        ("llama3.2:latest", "qwen3.5:9b-mlx"),
+    )
+    assert [
+        window.llm_model_combo.itemData(index)
+        for index in range(window.llm_model_combo.count())
+    ] == ["llama3.2:latest", "qwen3.5:9b-mlx"]
+    window.llm_model_combo.setCurrentIndex(
+        window.llm_model_combo.findData("llama3.2:latest")
+    )
+    assert settings.values["services/ollama_model"] == "llama3.2:latest"
+
+    window.image_model_combo.setCurrentIndex(
+        window.image_model_combo.findData("flux2-klein-9b-kv")
+    )
+    assert settings.values["generation/mflux_model"] == "flux2-klein-9b-kv"
+    assert "non-commercial" in window.image_model_combo.toolTip().lower()
+
+    background.busy = True
+    window.scene_enrichment_workflow._busy = True
+    window._update_generation_actions()
+    assert not window.llm_model_combo.isEnabled()
+    assert not window.image_model_combo.isEnabled()
+
+    background.busy = False
+    window.scene_enrichment_workflow._busy = False
+    window.mode_selector.setCurrentText("Run")
+    assert not window.llm_model_combo.isEnabled()
+    assert not window.image_model_combo.isEnabled()
 
 
 def test_generate_replacement_starts_without_a_second_confirmation(

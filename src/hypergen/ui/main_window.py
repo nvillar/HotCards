@@ -88,6 +88,9 @@ from hypergen.ui.notification_bar import (
 )
 from hypergen.ui.project_paths import bundle_path, default_project_directory
 from hypergen.ui.settings_dialog import (
+    MFLUX_MODEL_KEY,
+    MFLUX_MODEL_OPTIONS,
+    OLLAMA_MODEL_KEY,
     SettingsDialog,
     SettingsStore,
     load_machine_settings,
@@ -378,14 +381,36 @@ class MainWindow(QMainWindow):
         central_layout.addWidget(self.pane_splitter, 1)
         self.setCentralWidget(central_widget)
 
-        self.service_status_label = QLabel("Checking local AI services…")
-        self.service_status_label.setObjectName("serviceStatusLabel")
-        self.statusBar().addPermanentWidget(self.service_status_label, 1)
-        self.create_first_card_button.clicked.connect(self._primary_empty_action)
-
         self.document_status_label = QLabel()
         self.document_status_label.setObjectName("documentStatusLabel")
         self.statusBar().addWidget(self.document_status_label, 1)
+        values = load_machine_settings(self.settings)
+        self.llm_model_label = QLabel("LLM")
+        self.llm_model_combo = QComboBox()
+        self.llm_model_combo.setObjectName("llmModelCombo")
+        self.llm_model_combo.setAccessibleName("LLM model")
+        self.llm_model_combo.addItem(values.ollama_model, values.ollama_model)
+        self.image_model_label = QLabel("Image")
+        self.image_model_combo = QComboBox()
+        self.image_model_combo.setObjectName("imageModelCombo")
+        self.image_model_combo.setAccessibleName("Image model")
+        for label, model in MFLUX_MODEL_OPTIONS:
+            self.image_model_combo.addItem(label, model)
+        self.image_model_combo.setCurrentIndex(
+            max(0, self.image_model_combo.findData(values.mflux_model))
+        )
+        self.statusBar().addPermanentWidget(self.llm_model_label)
+        self.statusBar().addPermanentWidget(self.llm_model_combo)
+        self.statusBar().addPermanentWidget(self.image_model_label)
+        self.statusBar().addPermanentWidget(self.image_model_combo)
+        self.llm_model_combo.currentIndexChanged.connect(
+            self._llm_model_changed
+        )
+        self.image_model_combo.currentIndexChanged.connect(
+            self._image_model_changed
+        )
+        self._service_status_detail = "Local AI availability checks pending"
+        self.create_first_card_button.clicked.connect(self._primary_empty_action)
 
     def _build_menu(self) -> None:
         file_menu = self.menuBar().addMenu("File")
@@ -1093,10 +1118,28 @@ class MainWindow(QMainWindow):
         self,
         adapter: AdapterKind,
         generation: int,
-        _result: object,
+        result: object,
     ) -> None:
         if generation != self._diagnostic_generation:
             return
+        if adapter is AdapterKind.OLLAMA and isinstance(result, (list, tuple)):
+            models = tuple(
+                model for model in result if isinstance(model, str) and model
+            )
+            self._set_installed_ollama_models(models)
+            selected = load_machine_settings(self.settings).ollama_model
+            if selected not in models:
+                self.apply_availability_diagnostic(
+                    AvailabilityDiagnostic(
+                        adapter=adapter,
+                        available=False,
+                        message=(
+                            f"Ollama model {selected!r} is not installed. "
+                            f"Run `ollama pull {selected}` or select an installed model."
+                        ),
+                    )
+                )
+                return
         self.apply_availability_diagnostic(
             AvailabilityDiagnostic(
                 adapter=adapter,
@@ -1204,6 +1247,9 @@ class MainWindow(QMainWindow):
             reason=enrich_reason,
             busy=enrichment_busy,
         )
+        authoring = not self._is_running
+        self.llm_model_combo.setEnabled(authoring and not enrichment_busy)
+        self.image_model_combo.setEnabled(authoring and not workflow_busy)
         pending = [
             adapter for adapter, available in self._availability.items() if available is None
         ]
@@ -1224,15 +1270,21 @@ class MainWindow(QMainWindow):
             summary = f"{names} unavailable"
         else:
             summary = "Local AI services ready"
-        self.service_status_label.setText(summary)
-        self.service_status_label.setToolTip(
-            "\n".join(
-                self._diagnostic_messages.get(
-                    adapter,
-                    f"{adapter.value} availability check pending",
-                )
-                for adapter in AdapterKind
+        self._service_status_detail = "\n".join(
+            self._diagnostic_messages.get(
+                adapter,
+                f"{adapter.value} availability check pending",
             )
+            for adapter in AdapterKind
+        )
+        self.llm_model_combo.setToolTip(self._service_status_detail)
+        image_license = (
+            "\nFLUX.2 Klein 9B KV is licensed for non-commercial use."
+            if self.image_model_combo.currentData() == "flux2-klein-9b-kv"
+            else ""
+        )
+        self.image_model_combo.setToolTip(
+            self._service_status_detail + image_license
         )
         if (
             unavailable
@@ -1245,7 +1297,7 @@ class MainWindow(QMainWindow):
                 Notification(
                     message=summary,
                     kind=NotificationKind.WARNING,
-                    detail=self.service_status_label.toolTip(),
+                    detail=self._service_status_detail,
                     primary_action=NotificationAction(
                         "open-settings",
                         "Settings",
@@ -1261,6 +1313,43 @@ class MainWindow(QMainWindow):
             self.notification_bar.clear_notification("ai-services")
         elif self._is_running:
             self.notification_bar.clear_notification("ai-services")
+
+    def _set_installed_ollama_models(self, models: tuple[str, ...]) -> None:
+        selected = load_machine_settings(self.settings).ollama_model
+        with QSignalBlocker(self.llm_model_combo):
+            self.llm_model_combo.clear()
+            for model in models:
+                self.llm_model_combo.addItem(model, model)
+            if selected not in models:
+                self.llm_model_combo.addItem(
+                    f"{selected} (not installed)",
+                    selected,
+                )
+            self.llm_model_combo.setCurrentIndex(
+                self.llm_model_combo.findData(selected)
+            )
+
+    def _llm_model_changed(self, index: int) -> None:
+        model = self.llm_model_combo.itemData(index)
+        if not isinstance(model, str) or not model:
+            return
+        if model == load_machine_settings(self.settings).ollama_model:
+            return
+        self.scene_enrichment_workflow.cancel()
+        self.settings.setValue(OLLAMA_MODEL_KEY, model)
+        self.settings.sync()
+        self._restart_availability_checks()
+
+    def _image_model_changed(self, index: int) -> None:
+        model = self.image_model_combo.itemData(index)
+        if not isinstance(model, str) or not model:
+            return
+        if model == load_machine_settings(self.settings).mflux_model:
+            return
+        self._cancel_background_generation()
+        self.settings.setValue(MFLUX_MODEL_KEY, model)
+        self.settings.sync()
+        self._restart_availability_checks()
 
     def _render_card_canvas(self, card: object) -> None:
         if not isinstance(card, Card):
@@ -1622,7 +1711,6 @@ class MainWindow(QMainWindow):
         self.overlay_selector.setVisible(True)
         for action in self.player_navigation_actions:
             action.setVisible(self._is_running)
-        self.service_status_label.setVisible(authoring)
 
     def _update_run_actions(self) -> None:
         state = self._run_session.state
