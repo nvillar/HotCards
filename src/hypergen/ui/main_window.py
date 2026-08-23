@@ -51,10 +51,6 @@ from hypergen.application.document_session import (
     DocumentSessionError,
     DocumentSessionState,
 )
-from hypergen.application.hotspot_remap_workflow import (
-    HotspotRemapWorkflow,
-    HotspotRemapWorkflowError,
-)
 from hypergen.application.run_session import RunSession, RunSessionState
 from hypergen.application.scene_enrichment_workflow import (
     SceneEnrichmentWorkflow,
@@ -119,7 +115,6 @@ class MainWindow(QMainWindow):
         document_session: DocumentSession | None = None,
         background_workflow: BackgroundWorkflow | None = None,
         scene_enrichment_workflow: SceneEnrichmentWorkflow | None = None,
-        hotspot_remap_workflow: HotspotRemapWorkflow | None = None,
         project_directory: Path | None = None,
         start_diagnostics: bool = True,
         owns_workers: bool = False,
@@ -131,7 +126,6 @@ class MainWindow(QMainWindow):
         self.document_session = document_session
         self.background_workflow = background_workflow
         self.scene_enrichment_workflow = scene_enrichment_workflow
-        self.hotspot_remap_workflow = hotspot_remap_workflow
         self.project_directory = project_directory or default_project_directory()
         self._availability_checks = dict(availability_checks or {})
         self._availability_checks_factory = availability_checks_factory
@@ -164,14 +158,6 @@ class MainWindow(QMainWindow):
             )
         if self.scene_enrichment_workflow is None:
             self.scene_enrichment_workflow = SceneEnrichmentWorkflow(
-                controller,
-                workers,
-                self._ollama_settings,
-                self._resolve_revision_image_path,
-                parent=self,
-            )
-        if self.hotspot_remap_workflow is None:
-            self.hotspot_remap_workflow = HotspotRemapWorkflow(
                 controller,
                 workers,
                 self._ollama_settings,
@@ -330,92 +316,46 @@ class MainWindow(QMainWindow):
         canvas_layout.addLayout(self.canvas_fit_controls)
         self.canvas_pages.addWidget(card_canvas)
         self.fit_canvas_button.clicked.connect(self.card_canvas.fit_to_window)
-        self.canvas_card_name.editingFinished.connect(
-            self._commit_canvas_card_name
-        )
-        self.canvas_card_name.textEdited.connect(
-            self._card_name_edited
-        )
-        self.revision_combo.currentIndexChanged.connect(
-            self._revision_selection_changed
-        )
+        self.canvas_card_name.editingFinished.connect(self._commit_canvas_card_name)
+        self.canvas_card_name.textEdited.connect(self._card_name_edited)
+        self.revision_combo.currentIndexChanged.connect(self._revision_selection_changed)
         self.add_revision_button.clicked.connect(self._duplicate_revision)
         self.delete_revision_button.clicked.connect(self._delete_active_revision)
 
         self.inspector = Inspector(self.controller)
         self.inspector.document_changed.connect(self.render_document)
-        self.inspector.render_inputs_changed.connect(
-            self._update_generation_actions
-        )
+        self.inspector.render_inputs_changed.connect(self._update_generation_actions)
         self.inspector.enrich_scene_requested.connect(self._enrich_scene)
-        self.inspector.remap_hotspots_requested.connect(self._remap_hotspots)
         self.inspector.generate_background_requested.connect(self._generate_background)
         self.inspector.import_background_requested.connect(self._import_background)
         self.inspector.clear_background_requested.connect(self._clear_background)
         self.inspector.change_applied.connect(self._show_undo_notification)
-        self.inspector.hotspot_selected.connect(
-            self.card_canvas.select_interaction
-        )
-        self.card_canvas.interaction_selected.connect(
-            self.inspector.select_interaction
-        )
-        self.card_canvas.empty_area_requested.connect(
-            self._begin_implicit_hotspot_area
-        )
+        self.inspector.hotspot_selected.connect(self.card_canvas.select_interaction)
+        self.card_canvas.interaction_selected.connect(self.inspector.select_interaction)
+        self.card_canvas.empty_area_requested.connect(self._begin_implicit_hotspot_area)
         self.card_canvas.polygon_created.connect(self._create_hotspot_polygon)
         self.card_canvas.polygon_changed.connect(self._replace_hotspot_polygon)
-        self.card_canvas.polygon_deletion_requested.connect(
-            self._delete_hotspot_polygon
-        )
-        self.card_canvas.interaction_deletion_requested.connect(
-            self._delete_hotspot_interaction
-        )
+        self.card_canvas.polygon_deletion_requested.connect(self._delete_hotspot_polygon)
+        self.card_canvas.interaction_deletion_requested.connect(self._delete_hotspot_interaction)
         self.card_canvas.editing_error.connect(self.inspector.set_hotspot_error)
-        self.card_canvas.interaction_activated.connect(
-            self._run_interaction_activated
-        )
+        self.card_canvas.interaction_activated.connect(self._run_interaction_activated)
         if self.background_workflow is not None:
             self.background_workflow.busy_changed.connect(
                 lambda _busy: self._update_generation_actions()
             )
-            self.background_workflow.progress_changed.connect(
-                self._background_progress_changed
-            )
+            self.background_workflow.progress_changed.connect(self._background_progress_changed)
             self.background_workflow.failed.connect(self._background_failed)
             self.background_workflow.document_changed.connect(self.render_document)
-            self.background_workflow.change_applied.connect(
-                self._show_undo_notification
-            )
+            self.background_workflow.change_applied.connect(self._show_undo_notification)
         self.scene_enrichment_workflow.busy_changed.connect(
             lambda _busy: self._update_generation_actions()
         )
         self.scene_enrichment_workflow.progress_changed.connect(
             self._scene_enrichment_progress_changed
         )
-        self.scene_enrichment_workflow.failed.connect(
-            self._scene_enrichment_failed
-        )
-        self.scene_enrichment_workflow.document_changed.connect(
-            self.render_document
-        )
-        self.scene_enrichment_workflow.change_applied.connect(
-            self._show_undo_notification
-        )
-        self.hotspot_remap_workflow.busy_changed.connect(
-            lambda _busy: self._update_generation_actions()
-        )
-        self.hotspot_remap_workflow.progress_changed.connect(
-            self._hotspot_remap_progress_changed
-        )
-        self.hotspot_remap_workflow.failed.connect(
-            self._hotspot_remap_failed
-        )
-        self.hotspot_remap_workflow.document_changed.connect(
-            self.render_document
-        )
-        self.hotspot_remap_workflow.change_applied.connect(
-            self._show_undo_notification
-        )
+        self.scene_enrichment_workflow.failed.connect(self._scene_enrichment_failed)
+        self.scene_enrichment_workflow.document_changed.connect(self.render_document)
+        self.scene_enrichment_workflow.change_applied.connect(self._show_undo_notification)
         self.pane_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.pane_splitter.setObjectName("threePaneSplitter")
         self.pane_splitter.addWidget(self.card_sidebar)
@@ -427,12 +367,8 @@ class MainWindow(QMainWindow):
         self.pane_splitter.setSizes([220, 700, 280])
 
         self.notification_bar = NotificationBar()
-        self.notification_bar.action_requested.connect(
-            self._notification_action_requested
-        )
-        self.notification_bar.notification_dismissed.connect(
-            self._notification_dismissed
-        )
+        self.notification_bar.action_requested.connect(self._notification_action_requested)
+        self.notification_bar.notification_dismissed.connect(self._notification_dismissed)
         central_widget = QWidget()
         central_layout = QVBoxLayout(central_widget)
         central_layout.setContentsMargins(0, 0, 0, 0)
@@ -538,8 +474,7 @@ class MainWindow(QMainWindow):
                 self.canvas_pages.setCurrentIndex(1)
                 self.canvas_card_name.setText(
                     card_name_draft
-                    if preserve_card_name
-                    and previous_card_id == selected_card.id
+                    if preserve_card_name and previous_card_id == selected_card.id
                     else selected_card.name
                 )
                 active_revision_index = next(
@@ -575,7 +510,6 @@ class MainWindow(QMainWindow):
         selected_card_id = card_id if isinstance(card_id, UUID) else None
         if selected_card_id != self._selected_card_id:
             self.scene_enrichment_workflow.cancel()
-            self.hotspot_remap_workflow.cancel()
         self._selected_card_id = selected_card_id
         if self.card_sidebar.selected_card_id != self._selected_card_id:
             self.card_sidebar.select_card(self._selected_card_id)
@@ -601,9 +535,7 @@ class MainWindow(QMainWindow):
         if name == card.name:
             return True
         try:
-            changed = self.controller.execute(
-                RenameCardCommand(card_id=card.id, name=name)
-            )
+            changed = self.controller.execute(RenameCardCommand(card_id=card.id, name=name))
         except (CommandError, ValidationError) as error:
             self._card_name_commit_failed = True
             self._set_canvas_card_name_error(str(error))
@@ -650,7 +582,6 @@ class MainWindow(QMainWindow):
             return
         self.notification_bar.clear_notification("background-error")
         self.scene_enrichment_workflow.cancel()
-        self.hotspot_remap_workflow.cancel()
         try:
             workflow.duplicate_revision(card_id, revision_id)
         except (BackgroundWorkflowError, CommandError, ValidationError) as error:
@@ -813,10 +744,7 @@ class MainWindow(QMainWindow):
         selected_path, _filter = QFileDialog.getSaveFileName(
             self,
             "Save HyperGen Stack As",
-            str(
-                self.project_directory
-                / f"{self.controller.document.name}.hypergen"
-            ),
+            str(self.project_directory / f"{self.controller.document.name}.hypergen"),
             "HyperGen Stack (*.hypergen)",
         )
         if not selected_path:
@@ -833,7 +761,6 @@ class MainWindow(QMainWindow):
 
     def undo(self) -> None:
         self.scene_enrichment_workflow.cancel()
-        self.hotspot_remap_workflow.cancel()
         self._undo_notification_token = None
         self.notification_bar.clear_notification("undo")
         if self.controller.undo():
@@ -841,7 +768,6 @@ class MainWindow(QMainWindow):
 
     def redo(self) -> None:
         self.scene_enrichment_workflow.cancel()
-        self.hotspot_remap_workflow.cancel()
         self._undo_notification_token = None
         self.notification_bar.clear_notification("undo")
         if self.controller.redo():
@@ -875,21 +801,17 @@ class MainWindow(QMainWindow):
             if isinstance(interaction.action.target, ResolvedCardReference)
             and interaction.action.target.target_card_id == card.id
         )
-        if (
-            self.background_workflow is not None
-            and self.background_workflow.is_generating_for(card.id)
+        if self.background_workflow is not None and self.background_workflow.is_generating_for(
+            card.id
         ):
             self._cancel_background_generation()
         previous_token = self.controller.current_undo_token
         self.scene_enrichment_workflow.cancel()
-        self.hotspot_remap_workflow.cancel()
         self.card_sidebar.delete_card(card.id)
         consequences: list[str] = []
         if inbound_link_count:
             noun = "link is" if inbound_link_count == 1 else "links are"
-            consequences.append(
-                f"{inbound_link_count} inbound {noun} now unresolved"
-            )
+            consequences.append(f"{inbound_link_count} inbound {noun} now unresolved")
         if was_start_card:
             consequences.append("the start card was cleared")
         message = "Card deleted"
@@ -900,16 +822,12 @@ class MainWindow(QMainWindow):
             self._show_undo_notification(message, token)
 
     def _cancel_background_generation(self) -> None:
-        if (
-            self.background_workflow is not None
-            and self.background_workflow.busy
-        ):
+        if self.background_workflow is not None and self.background_workflow.busy:
             self.background_workflow.cancel()
 
     def _document_replaced(self, _document: object) -> None:
         self._cancel_background_generation()
         self.scene_enrichment_workflow.cancel()
-        self.hotspot_remap_workflow.cancel()
         self._undo_notification_token = None
         self._rendered_card_id = None
         self._card_name_commit_failed = False
@@ -929,9 +847,7 @@ class MainWindow(QMainWindow):
         if state.error is None:
             self.notification_bar.clear_notification("document-error")
         bound = state.bundle_path is not None
-        self.card_sidebar.set_document_editable(
-            self.document_session is None or bound
-        )
+        self.card_sidebar.set_document_editable(self.document_session is None or bound)
         if self.document_session is not None and not bound:
             self.create_first_card_button.setText("Create New Stack")
             self.document_status_label.setText("Create or open a stack")
@@ -952,9 +868,7 @@ class MainWindow(QMainWindow):
         else:
             self.create_first_card_button.setText("Create Your First Card")
             label = (
-                state.bundle_path.name
-                if state.bundle_path is not None
-                else "In-memory document"
+                state.bundle_path.name if state.bundle_path is not None else "In-memory document"
             )
             self.document_status_label.setText(label)
             self.document_status_label.setToolTip(
@@ -979,12 +893,8 @@ class MainWindow(QMainWindow):
             and self.document_session is not None
             and self.document_session.store is not None
         )
-        self.undo_action.setEnabled(
-            bound and not self._is_running and self.controller.can_undo
-        )
-        self.redo_action.setEnabled(
-            bound and not self._is_running and self.controller.can_redo
-        )
+        self.undo_action.setEnabled(bound and not self._is_running and self.controller.can_undo)
+        self.redo_action.setEnabled(bound and not self._is_running and self.controller.can_redo)
         self.advanced_settings_action.setEnabled(not self._is_running)
         self.mode_selector.setEnabled(bound)
         self.overlay_selector.setEnabled(bound and self._is_running)
@@ -1039,12 +949,6 @@ class MainWindow(QMainWindow):
         self.notification_bar.clear_notification("background-error")
         self.notification_bar.clear_notification("background-warning")
         self.notification_bar.clear_notification("background-cancelled")
-        if self.hotspot_remap_workflow.busy:
-            self._show_warning(
-                "background-warning",
-                "Wait for hotspot remapping to finish"
-            )
-            return
         if not self._commit_authoring_metadata():
             return
         try:
@@ -1085,41 +989,6 @@ class MainWindow(QMainWindow):
         )
         self._update_generation_actions()
 
-    def _remap_hotspots(self) -> None:
-        card_id = self._selected_card_id
-        if card_id is None or not self._commit_authoring_metadata():
-            return
-        self.notification_bar.clear_notification("hotspot-error")
-        self.notification_bar.clear_notification("hotspot-warning")
-        if self.background_workflow is not None and self.background_workflow.busy:
-            self._show_warning(
-                "hotspot-warning",
-                "Wait for background generation to finish"
-            )
-            return
-        try:
-            self.hotspot_remap_workflow.start(card_id)
-        except HotspotRemapWorkflowError as error:
-            self._show_error(
-                "hotspot-error",
-                "Could not remap hotspots",
-                detail=str(error),
-            )
-        self._update_generation_actions()
-
-    def _hotspot_remap_progress_changed(self, _message: str) -> None:
-        self.notification_bar.clear_notification("hotspot-error")
-        self._update_generation_actions()
-
-    def _hotspot_remap_failed(self, failure: object) -> None:
-        detail = failure.message if isinstance(failure, WorkerFailure) else str(failure)
-        self._show_error(
-            "hotspot-error",
-            "Hotspot remap failed",
-            detail=detail,
-        )
-        self._update_generation_actions()
-
     def _import_background(self) -> None:
         workflow = self.background_workflow
         card_id = self._selected_card_id
@@ -1127,12 +996,6 @@ class MainWindow(QMainWindow):
             return
         self.notification_bar.clear_notification("background-error")
         self.notification_bar.clear_notification("background-warning")
-        if self.hotspot_remap_workflow.busy:
-            self._show_warning(
-                "background-warning",
-                "Wait for hotspot remapping to finish"
-            )
-            return
         if not self._commit_authoring_metadata():
             return
         selected_path, _filter = QFileDialog.getOpenFileName(
@@ -1175,7 +1038,6 @@ class MainWindow(QMainWindow):
             return
         self.notification_bar.clear_notification("background-error")
         self.scene_enrichment_workflow.cancel()
-        self.hotspot_remap_workflow.cancel()
         try:
             workflow.clear_background(card_id)
         except (
@@ -1198,7 +1060,6 @@ class MainWindow(QMainWindow):
             return
         self.notification_bar.clear_notification("background-error")
         self.scene_enrichment_workflow.cancel()
-        self.hotspot_remap_workflow.cancel()
         try:
             self.background_workflow.activate_revision(
                 self._selected_card_id,
@@ -1218,12 +1079,9 @@ class MainWindow(QMainWindow):
             or not isinstance(revision_id, UUID)
         ):
             return
-        was_generating = self.background_workflow.is_generating_for(
-            self._selected_card_id
-        )
+        was_generating = self.background_workflow.is_generating_for(self._selected_card_id)
         self.notification_bar.clear_notification("background-error")
         self.scene_enrichment_workflow.cancel()
-        self.hotspot_remap_workflow.cancel()
         try:
             self.background_workflow.delete_revision(
                 self._selected_card_id,
@@ -1327,26 +1185,14 @@ class MainWindow(QMainWindow):
         mflux_available = self._availability[AdapterKind.MFLUX] is True
         ollama_available = self._availability[AdapterKind.OLLAMA] is True
         workflow_busy = (
-            self.background_workflow.busy
-            if self.background_workflow is not None
-            else False
+            self.background_workflow.busy if self.background_workflow is not None else False
         )
-        hotspot_busy = self.hotspot_remap_workflow.busy
         selected_card = next(
-            (
-                card
-                for card in self.controller.document.cards
-                if card.id == self._selected_card_id
-            ),
+            (card for card in self.controller.document.cards if card.id == self._selected_card_id),
             None,
         )
-        active_revision = (
-            selected_card.active_revision if selected_card is not None else None
-        )
-        has_image = (
-            active_revision is not None
-            and active_revision.background is not None
-        )
+        active_revision = selected_card.active_revision if selected_card is not None else None
+        has_image = active_revision is not None and active_revision.background is not None
         generate_reason = "Ready to generate"
         if not has_card:
             generate_reason = "Select a card in a saved stack"
@@ -1361,38 +1207,27 @@ class MainWindow(QMainWindow):
                     "MFLUX runs one job at a time"
                 )
             )
-        elif hotspot_busy:
-            generate_reason = "Hotspot remapping is running"
         elif not has_render_prompt:
             generate_reason = "Enter a Description or Style before generating"
         elif not mflux_available:
             generate_reason = self._action_diagnostic(AdapterKind.MFLUX)
         import_reason = (
             "Ready to import"
-            if has_card and not workflow_busy and not hotspot_busy
+            if has_card and not workflow_busy
             else (
-                "Wait for background generation or hotspot remapping to finish"
+                "Wait for background generation to finish"
                 if workflow_busy
-                or hotspot_busy
                 else "Select a card in a saved stack"
             )
         )
         self.inspector.set_background_capabilities(
-            can_generate=(
-                has_card
-                and has_render_prompt
-                and mflux_available
-            ),
+            can_generate=(has_card and has_render_prompt and mflux_available),
             generate_reason=generate_reason,
             can_import=has_card,
             import_reason=import_reason,
             can_clear=has_card and has_image,
-            clear_reason=(
-                "Clear the current image"
-                if has_image
-                else "This revision has no image"
-            ),
-            busy=workflow_busy or hotspot_busy,
+            clear_reason=("Clear the current image" if has_image else "This revision has no image"),
+            busy=workflow_busy,
             generating=workflow_busy,
         )
         active_image_path = (
@@ -1400,27 +1235,15 @@ class MainWindow(QMainWindow):
             if active_revision is not None and active_revision.image_path is not None
             else None
         )
-        has_readable_active_image = (
-            active_image_path is not None and active_image_path.is_file()
-        )
+        has_readable_active_image = active_image_path is not None and active_image_path.is_file()
         enrichment_busy = self.scene_enrichment_workflow.busy
-        has_enrichment_input = (
-            self.inspector.has_description_input()
-            or has_readable_active_image
-        )
-        can_enrich = (
-            has_card
-            and has_enrichment_input
-            and ollama_available
-            and not enrichment_busy
-        )
+        has_enrichment_input = self.inspector.has_description_input() or has_readable_active_image
+        can_enrich = has_card and has_enrichment_input and ollama_available and not enrichment_busy
         enrich_reason = "Ready to enrich Description"
         if not has_card:
             enrich_reason = "Select a card in a saved stack"
         elif not has_enrichment_input:
-            enrich_reason = (
-                "Enter a Description or apply an available background before enriching"
-            )
+            enrich_reason = "Enter a Description or apply an available background before enriching"
         elif enrichment_busy:
             enrich_reason = "Description enrichment is running"
         elif not ollama_available:
@@ -1429,37 +1252,6 @@ class MainWindow(QMainWindow):
             can_enrich=can_enrich,
             reason=enrich_reason,
             busy=enrichment_busy,
-        )
-        has_applied_hotspots = (
-            active_revision is not None
-            and active_revision.hotspot_set is not None
-            and bool(active_revision.hotspot_set.interactions)
-        )
-        can_remap_hotspots = (
-            has_card
-            and has_readable_active_image
-            and has_applied_hotspots
-            and ollama_available
-            and not hotspot_busy
-            and not workflow_busy
-        )
-        hotspot_reason = "Ready to remap hotspots"
-        if not has_card:
-            hotspot_reason = "Select a card in a saved stack"
-        elif not has_readable_active_image:
-            hotspot_reason = "Add an available image before remapping hotspots"
-        elif not has_applied_hotspots:
-            hotspot_reason = "Add at least one hotspot before remapping"
-        elif hotspot_busy:
-            hotspot_reason = "Hotspot remapping is running"
-        elif workflow_busy:
-            hotspot_reason = "Background generation is running"
-        elif not ollama_available:
-            hotspot_reason = self._action_diagnostic(AdapterKind.OLLAMA)
-        self.inspector.set_hotspot_remap_capabilities(
-            can_remap=can_remap_hotspots,
-            reason=hotspot_reason,
-            busy=hotspot_busy,
         )
         pending = [
             adapter for adapter, available in self._availability.items() if available is None
@@ -1527,21 +1319,15 @@ class MainWindow(QMainWindow):
         if revision.background is None:
             self.card_canvas.show_message("No image")
             if self._is_running:
-                self._set_run_warning(
-                    f'"{card.name}" has no image in this revision.'
-                )
+                self._set_run_warning(f'"{card.name}" has no image in this revision.')
             return
         if self.document_session is None or self.document_session.store is None:
             self.card_canvas.show_message("Background bundle is unavailable")
             if self._is_running:
-                self._set_run_warning(
-                    f'The background for "{card.name}" is unavailable.'
-                )
+                self._set_run_warning(f'The background for "{card.name}" is unavailable.')
             return
         try:
-            asset_path = self.document_session.store.asset_path(
-                revision.background.image_path
-            )
+            asset_path = self.document_session.store.asset_path(revision.background.image_path)
         except StackStoreError as error:
             self.card_canvas.show_message(str(error))
             if self._is_running:
@@ -1553,13 +1339,8 @@ class MainWindow(QMainWindow):
                 revision.hotspot_set,
                 self.controller.document.run_overlay_mode,
             )
-            if (
-                revision.hotspot_set is None
-                or not revision.hotspot_set.interactions
-            ):
-                self._set_run_warning(
-                    f'"{card.name}" has no hotspots to navigate.'
-                )
+            if revision.hotspot_set is None or not revision.hotspot_set.interactions:
+                self._set_run_warning(f'"{card.name}" has no hotspots to navigate.')
             return
         self.card_canvas.set_hotspots(
             revision.hotspot_set,
@@ -1595,9 +1376,7 @@ class MainWindow(QMainWindow):
                 None,
             )
             if interaction is None:
-                self.inspector.set_hotspot_error(
-                    "The hotspot being edited no longer exists."
-                )
+                self.inspector.set_hotspot_error("The hotspot being edited no longer exists.")
                 self.render_document()
                 return
             command = AddPolygonCommand(
@@ -1610,8 +1389,7 @@ class MainWindow(QMainWindow):
             selected_polygon_index = len(interaction.polygons)
         else:
             existing_labels = {
-                interaction.label.casefold()
-                for interaction in hotspot_set.interactions
+                interaction.label.casefold() for interaction in hotspot_set.interactions
             }
             number = len(hotspot_set.interactions) + 1
             while f"Hotspot {number}".casefold() in existing_labels:
@@ -1646,10 +1424,7 @@ class MainWindow(QMainWindow):
         card_id, revision_id, hotspot_set = context
         interaction_id = self.inspector.selected_interaction_id
         if interaction_id is None:
-            used = {
-                interaction.label.casefold()
-                for interaction in hotspot_set.interactions
-            }
+            used = {interaction.label.casefold() for interaction in hotspot_set.interactions}
             number = 1
             while f"Hotspot {number}".casefold() in used:
                 number += 1
@@ -1751,10 +1526,7 @@ class MainWindow(QMainWindow):
         self.render_document(changed)
         self.inspector.select_interaction(selected_interaction_id)
         self.card_canvas.select_interaction(selected_interaction_id)
-        if (
-            selected_interaction_id is not None
-            and selected_polygon_index is not None
-        ):
+        if selected_interaction_id is not None and selected_polygon_index is not None:
             self.card_canvas.select_polygon(
                 selected_interaction_id,
                 selected_polygon_index,
@@ -1771,11 +1543,7 @@ class MainWindow(QMainWindow):
         self,
     ) -> tuple[UUID, UUID, HotspotSet] | None:
         card = next(
-            (
-                card
-                for card in self.controller.document.cards
-                if card.id == self._selected_card_id
-            ),
+            (card for card in self.controller.document.cards if card.id == self._selected_card_id),
             None,
         )
         if card is None:
@@ -1909,12 +1677,8 @@ class MainWindow(QMainWindow):
 
     def _update_run_actions(self) -> None:
         state = self._run_session.state
-        self.back_action.setEnabled(
-            self._is_running and bool(state.history)
-        )
-        self.restart_action.setEnabled(
-            self._is_running and state.current_card_id is not None
-        )
+        self.back_action.setEnabled(self._is_running and bool(state.history))
+        self.restart_action.setEnabled(self._is_running and state.current_card_id is not None)
 
     def _set_run_warning(self, message: str) -> None:
         if message:
@@ -1925,7 +1689,6 @@ class MainWindow(QMainWindow):
     def _cancel_ai_activity_for_run(self) -> None:
         self._cancel_diagnostics()
         self.scene_enrichment_workflow.cancel()
-        self.hotspot_remap_workflow.cancel()
         if self.background_workflow is not None and self.background_workflow.busy:
             self.background_workflow.cancel()
 
@@ -1980,7 +1743,6 @@ class MainWindow(QMainWindow):
         if self.background_workflow is not None:
             self.background_workflow.close()
         self.scene_enrichment_workflow.close()
-        self.hotspot_remap_workflow.close()
         if self._owns_workers:
             self.workers.shutdown(wait_milliseconds=100)
         super().closeEvent(event)

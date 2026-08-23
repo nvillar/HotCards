@@ -39,13 +39,11 @@ first when needed. Canvas editing uses hierarchical hotspot, area, and vertex
 selection: drag an area or vertex to move it, use the edge `+` or double-click
 an edge to add a vertex, press Delete to remove the selected vertex or area,
 and press Escape to step back through the selection. Context menus expose the
-same geometry actions, and successful edits offer a dismissible Undo. Remap
-asks the local vision model only to relocate existing hotspots on the active
-image. It cannot add, delete, rename, reorder, or retarget them, and unmatched
-hotspots retain their previous geometry. Run mode supports deterministic
-hotspot navigation, Back/Restart history, and configurable overlays. Local AI
-services are checked automatically when Author mode is entered; Run mode starts
-no AI work.
+same geometry actions, and successful edits offer a dismissible Undo. Replacing
+a background preserves its hotspots so the author can review and adjust them
+manually. Run mode supports deterministic hotspot navigation, Back/Restart
+history, and configurable overlays. Local AI services are checked automatically
+when Author mode is entered; Run mode starts no AI work.
 
 Transient outcomes, failures, Run warnings, and Undo actions appear in one
 notification bar below the toolbar. Reversible deletions and replacements apply
@@ -67,9 +65,8 @@ uv run hypergen
 
 ```sh
 uv run hypergen-eval smoke
-uv run hypergen-eval hotspots
 uv run hypergen-eval images
-uv run hypergen-eval e2e
+uv run hypergen-eval flux-references --stack /path/to/Stack.hypergen
 ```
 
 Each command creates one immutable directory under `evals/runs/` with an
@@ -84,7 +81,7 @@ tradeoffs are in [`evals/DECISION.md`](evals/DECISION.md).
 - `domain/` — in-memory stack model, geometry, validation.
 - `storage/` — human-readable `*.hypergen` bundle storage.
 - `generation/` — deterministic MFLUX prompt composition, image generation,
-  Description enrichment, and Ollama hotspot Remap adapters.
+  and Description enrichment.
 - `application/` — document controller, typed commands, session undo, workers.
 - `ui/` — PySide6 Author and Run interface.
 - `evaluation/` — `hypergen-eval` harness reusing production adapters.

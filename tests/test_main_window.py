@@ -109,7 +109,6 @@ class FakeWorkers(QObject):
         assert stage in {
             "describing background",
             "enriching Description",
-            "remapping hotspots",
         }
         return FakeOperation()
 
@@ -247,13 +246,7 @@ def test_card_header_displays_serialized_active_revision(
     stack = _stack()
     card = stack.cards[0]
     stack = stack.model_copy(
-        update={
-            "cards": (
-                card.model_copy(
-                    update={"active_revision_id": card.revisions[1].id}
-                ),
-            )
-        }
+        update={"cards": (card.model_copy(update={"active_revision_id": card.revisions[1].id}),)}
     )
     serialized_stack = Stack.model_validate_json(stack.model_dump_json())
 
@@ -285,14 +278,13 @@ def test_card_name_edit_uses_controller_and_restores_invalid_value(
     assert not hasattr(window.inspector, "validation_error")
     assert card_id == controller.document.cards[0].id
 
+
 def test_card_name_validation_error_does_not_follow_card_selection(
     application: QApplication,
 ) -> None:
     first = Card(name="First")
     second = Card(name="Second")
-    window, _controller, _workers, _background = _window(
-        Stack(name="Demo", cards=(first, second))
-    )
+    window, _controller, _workers, _background = _window(Stack(name="Demo", cards=(first, second)))
     window.canvas_card_name.setText("   ")
     window._commit_canvas_card_name()
     assert not window.canvas_card_name_error.isHidden()
@@ -373,9 +365,7 @@ def test_final_revision_cannot_be_deleted(
     application: QApplication,
 ) -> None:
     card = Card(name="Only")
-    window, _controller, _workers, _background = _window(
-        Stack(name="Demo", cards=(card,))
-    )
+    window, _controller, _workers, _background = _window(Stack(name="Demo", cards=(card,)))
     assert not window.delete_revision_button.isEnabled()
 
 
@@ -426,9 +416,7 @@ def test_successful_save_as_cancels_generation_and_expires_undo(
         start_diagnostics=False,
     )
     card = controller.document.cards[0]
-    changed = controller.execute(
-        RenameCardCommand(card_id=card.id, name="Renamed")
-    )
+    changed = controller.execute(RenameCardCommand(card_id=card.id, name="Renamed"))
     window.render_document(changed)
     token = controller.current_undo_token
     assert token is not None
@@ -515,9 +503,7 @@ def test_status_bar_is_passive_and_ai_recovery_uses_notification_bar(
     assert window.notification_bar.current_key == "ai-services"
 
     card = controller.document.cards[0]
-    changed = controller.execute(
-        RenameCardCommand(card_id=card.id, name="Renamed")
-    )
+    changed = controller.execute(RenameCardCommand(card_id=card.id, name="Renamed"))
     window.render_document(changed)
     token = controller.current_undo_token
     assert token is not None
@@ -578,9 +564,7 @@ def test_notification_undo_cannot_mutate_document_in_run_mode(
 ) -> None:
     window, controller, _workers, _background = _window()
     card = controller.document.cards[0]
-    changed = controller.execute(
-        RenameCardCommand(card_id=card.id, name="Renamed")
-    )
+    changed = controller.execute(RenameCardCommand(card_id=card.id, name="Renamed"))
     window.render_document(changed)
     token = controller.current_undo_token
     assert token is not None
@@ -674,13 +658,9 @@ def test_hotspot_geometry_change_shows_targeted_undo(
             ),
         ),
     )
-    revision = CardRevision(
-        hotspot_set=HotspotSet(interactions=(interaction,))
-    )
+    revision = CardRevision(hotspot_set=HotspotSet(interactions=(interaction,)))
     card = Card(name="Card", revisions=(revision,))
-    window, controller, _workers, _background = _window(
-        Stack(name="Demo", cards=(card,))
-    )
+    window, controller, _workers, _background = _window(Stack(name="Demo", cards=(card,)))
 
     window._delete_hotspot_polygon(interaction.id, 0)
 
@@ -701,9 +681,7 @@ def test_empty_canvas_request_creates_and_selects_blank_hotspot(
     application: QApplication,
 ) -> None:
     card = Card(name="Card")
-    window, controller, _workers, _background = _window(
-        Stack(name="Demo", cards=(card,))
-    )
+    window, controller, _workers, _background = _window(Stack(name="Demo", cards=(card,)))
 
     window._begin_implicit_hotspot_area(Point(x=0.2, y=0.3))
 

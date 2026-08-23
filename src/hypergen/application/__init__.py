@@ -41,10 +41,6 @@ from hypergen.application.document_session import (
     DocumentSessionError,
     DocumentSessionState,
 )
-from hypergen.application.hotspot_remap_workflow import (
-    HotspotRemapWorkflow,
-    HotspotRemapWorkflowError,
-)
 from hypergen.application.scene_enrichment_workflow import (
     SceneEnrichmentWorkflow,
     SceneEnrichmentWorkflowError,
@@ -85,8 +81,6 @@ __all__ = [
     "DuplicateRevisionCommand",
     "EditRevisionDescriptionCommand",
     "EditStyleCommand",
-    "HotspotRemapWorkflow",
-    "HotspotRemapWorkflowError",
     "OperationStatus",
     "RenameCardCommand",
     "ReorderCardCommand",

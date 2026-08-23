@@ -520,7 +520,7 @@ def run_flux_reference_evaluation(
     *,
     output_dir: Path,
     stack_path: Path,
-    graphic_style_path: Path = Path("evals/cases/hotspots/workshop.png"),
+    graphic_style_path: Path = Path("evals/cases/references/workshop.png"),
     model_identifier: str = "flux2-klein-4b",
     quantization: int | None = None,
     seed: int = 42,

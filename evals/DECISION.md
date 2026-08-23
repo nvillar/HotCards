@@ -1,7 +1,12 @@
 # Local model defaults decision
 
 **Decision date:** 2026-07-21
-**Status:** provisional defaults; human quality review remains required
+**Status:** Remap findings retired; image-model findings remain historical
+
+Hotspot Remap was removed from HyperGen after authoring review found manual
+geometry adjustment more reliable and enjoyable. The Remap evidence below is
+retained only as historical context and no longer describes production
+behavior.
 
 ## Ollama default: `qwen3.5:9b-mlx` (provisional)
 
