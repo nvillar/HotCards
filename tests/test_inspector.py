@@ -126,7 +126,7 @@ def test_reference_selectors_assign_distinct_cards_with_undo(
     assert inspector._combo_index_for_data(
         inspector.visual_style_reference_combo,
         portrait.id,
-    ) == -1
+    ) >= 0
     assert applied[-1][0] == "Identity reference changed"
     assert controller.undo_if_current(applied[-1][1])  # type: ignore[arg-type]
     inspector.render(controller.document, source.id)
@@ -158,7 +158,7 @@ def test_deleted_reference_is_shown_as_unresolved(
     )
 
 
-def test_render_preserves_focused_description_and_hotspot_label_drafts(
+def test_render_preserves_focused_description_draft(
     application: QApplication,
 ) -> None:
     interaction = _interaction()
@@ -179,11 +179,7 @@ def test_render_preserves_focused_description_and_hotspot_label_drafts(
     inspector.render(changed, card.id)
     assert inspector.scene_edit.toPlainText() == "Uncommitted description"
 
-    inspector.hotspot_label_edit.setFocus()
-    inspector.hotspot_label_edit.setText("Uncommitted label")
-    application.processEvents()
-    inspector.render(controller.document, card.id)
-    assert inspector.hotspot_label_edit.text() == "Uncommitted label"
+    assert not hasattr(inspector, "hotspot_label_edit")
     inspector.close()
 
 
@@ -201,10 +197,9 @@ def test_add_hotspot_persists_and_selects_area_less_entry(
     assert hotspot_set is not None
     assert len(hotspot_set.interactions) == 1
     interaction = hotspot_set.interactions[0]
-    assert interaction.label == "Hotspot 1"
+    assert interaction.label == "Unresolved"
     assert interaction.polygons == ()
     assert inspector.selected_interaction_id == interaction.id
-    assert inspector.hotspot_label_edit.isEnabled()
 
 
 def test_hotspot_properties_reorder_and_delete_use_commands(
@@ -228,12 +223,10 @@ def test_hotspot_properties_reorder_and_delete_use_commands(
     inspector.select_interaction(second.id)
     inspector.move_hotspot_up_button.click()
     assert [
-        item.label
+        item.id
         for item in controller.document.cards[0].active_revision.hotspot_set.interactions  # type: ignore[union-attr]
-    ] == ["Second", "First"]
+    ] == [second.id, first.id]
 
-    inspector.hotspot_label_edit.setText("Renamed")
-    inspector.hotspot_label_edit.editingFinished.emit()
     destination_index = next(
         index
         for index in range(inspector.hotspot_destination_combo.count())
@@ -243,7 +236,7 @@ def test_hotspot_properties_reorder_and_delete_use_commands(
     application.processEvents()
     changed = controller.document.cards[0].active_revision.hotspot_set
     assert changed is not None
-    assert changed.interactions[0].label == "Renamed"
+    assert changed.interactions[0].label == "Destination"
     assert changed.interactions[0].action.target == ResolvedCardReference(
         target_card_id=destination.id
     )
@@ -253,7 +246,7 @@ def test_hotspot_properties_reorder_and_delete_use_commands(
     inspector.delete_hotspot_button.click()
     remaining = controller.document.cards[0].active_revision.hotspot_set
     assert remaining is not None
-    assert [item.label for item in remaining.interactions] == ["First"]
+    assert [item.id for item in remaining.interactions] == [first.id]
     assert applied and applied[0][0] == "Hotspot deleted"
     assert controller.undo_if_current(applied[0][1])  # type: ignore[arg-type]
 
@@ -278,24 +271,11 @@ def test_ai_activity_is_reflected_on_the_initiating_buttons(
     assert inspector.enrich_scene_button.text() == "Enriching…"
 
 
-def test_enrichment_proposal_can_be_edited_applied_or_discarded(
+def test_enrichment_has_no_proposal_editor(
     application: QApplication,
 ) -> None:
     inspector = Inspector(DocumentController(Stack(name="Demo")))
-    applied: list[str] = []
-    discarded: list[bool] = []
-    inspector.enrichment_apply_requested.connect(applied.append)
-    inspector.enrichment_discard_requested.connect(
-        lambda: discarded.append(True)
-    )
 
-    inspector.show_enrichment_proposal("Expanded description")
-    assert not inspector.enrichment_review.isHidden()
-    inspector.enrichment_review_edit.setPlainText("Edited description")
-    inspector.apply_enrichment_button.click()
-    inspector.discard_enrichment_button.click()
-
-    assert applied == ["Edited description"]
-    assert discarded == [True]
-    inspector.clear_enrichment_proposal()
-    assert inspector.enrichment_review.isHidden()
+    assert not hasattr(inspector, "enrichment_review")
+    assert not hasattr(inspector, "apply_enrichment_button")
+    assert not hasattr(inspector, "discard_enrichment_button")

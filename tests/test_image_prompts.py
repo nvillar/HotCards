@@ -52,3 +52,23 @@ def test_reference_roles_are_ordered_and_missing_slots_are_renumbered() -> None:
     assert "REFERENCE IMAGE 3" not in prompt
     assert "VISUAL STYLE" not in prompt
     assert prompt.endswith("SCENE\nA knight crossing a market square")
+
+
+def test_one_reference_image_can_supply_multiple_roles() -> None:
+    castle = ImageReferenceSnapshot(
+        card_id=uuid4(),
+        revision_id=uuid4(),
+        background_id=uuid4(),
+    )
+
+    prompt = compose_image_prompt(
+        ImageGenerationInputs(
+            description="The outer gate of the same castle",
+            identity_reference=castle,
+            setting_reference=castle,
+        )
+    )
+
+    assert prompt.count("REFERENCE IMAGE") == 1
+    assert "REFERENCE IMAGE 1\nIDENTITY + SETTING" in prompt
+    assert "REFERENCE IMAGE 2" not in prompt

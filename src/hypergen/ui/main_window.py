@@ -319,12 +319,6 @@ class MainWindow(QMainWindow):
         self.inspector.document_changed.connect(self.render_document)
         self.inspector.render_inputs_changed.connect(self._authoring_inputs_changed)
         self.inspector.enrich_scene_requested.connect(self._enrich_scene)
-        self.inspector.enrichment_apply_requested.connect(
-            self._apply_enrichment_proposal
-        )
-        self.inspector.enrichment_discard_requested.connect(
-            self.scene_enrichment_workflow.discard_proposal
-        )
         self.inspector.generate_background_requested.connect(self._generate_background)
         self.inspector.clear_background_requested.connect(self._clear_background)
         self.inspector.change_applied.connect(self._show_undo_notification)
@@ -352,12 +346,6 @@ class MainWindow(QMainWindow):
             self._scene_enrichment_progress_changed
         )
         self.scene_enrichment_workflow.failed.connect(self._scene_enrichment_failed)
-        self.scene_enrichment_workflow.proposal_ready.connect(
-            self.inspector.show_enrichment_proposal
-        )
-        self.scene_enrichment_workflow.proposal_cleared.connect(
-            self.inspector.clear_enrichment_proposal
-        )
         self.scene_enrichment_workflow.document_changed.connect(self.render_document)
         self.scene_enrichment_workflow.change_applied.connect(self._show_undo_notification)
         self.pane_splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -1013,17 +1001,6 @@ class MainWindow(QMainWindow):
         )
         self._update_generation_actions()
 
-    def _apply_enrichment_proposal(self, description: str) -> None:
-        self.notification_bar.clear_notification("enrichment-error")
-        try:
-            self.scene_enrichment_workflow.apply_proposal(description)
-        except SceneEnrichmentWorkflowError as error:
-            self._show_error(
-                "enrichment-error",
-                "Could not apply enriched Description",
-                detail=str(error),
-            )
-
     def _clear_background(self) -> None:
         workflow = self.background_workflow
         card_id = self._selected_card_id
@@ -1428,14 +1405,7 @@ class MainWindow(QMainWindow):
             selected_id = interaction_id
             selected_polygon_index = len(interaction.polygons)
         else:
-            existing_labels = {
-                interaction.label.casefold() for interaction in hotspot_set.interactions
-            }
-            number = len(hotspot_set.interactions) + 1
-            while f"Hotspot {number}".casefold() in existing_labels:
-                number += 1
             interaction = Interaction(
-                label=f"Hotspot {number}",
                 action=NavigateAction(target=UnresolvedCardReference()),
                 polygons=(polygon,),
             )
@@ -1464,12 +1434,7 @@ class MainWindow(QMainWindow):
         card_id, revision_id, hotspot_set = context
         interaction_id = self.inspector.selected_interaction_id
         if interaction_id is None:
-            used = {interaction.label.casefold() for interaction in hotspot_set.interactions}
-            number = 1
-            while f"Hotspot {number}".casefold() in used:
-                number += 1
             interaction = Interaction(
-                label=f"Hotspot {number}",
                 action=NavigateAction(target=UnresolvedCardReference()),
             )
             interaction_id = interaction.id

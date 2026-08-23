@@ -430,33 +430,6 @@ class AddInteractionCommand:
 
 
 @dataclass(frozen=True, slots=True)
-class RenameInteractionCommand:
-    """Change one interaction label."""
-
-    card_id: UUID
-    revision_id: UUID
-    interaction_id: UUID
-    label: str
-
-    def apply(self, document: Stack) -> Stack:
-        interaction = _interaction(
-            document,
-            card_id=self.card_id,
-            revision_id=self.revision_id,
-            interaction_id=self.interaction_id,
-        ).model_copy(update={"label": self.label})
-        return validated_copy(
-            _replace_interaction(
-                document,
-                card_id=self.card_id,
-                revision_id=self.revision_id,
-                interaction_id=self.interaction_id,
-                replacement=interaction,
-            )
-        )
-
-
-@dataclass(frozen=True, slots=True)
 class DeleteInteractionCommand:
     """Delete one interaction while retaining the applied hotspot set."""
 
@@ -702,7 +675,6 @@ __all__ = [
     "DuplicateRevisionCommand",
     "EditRevisionDescriptionCommand",
     "RenameCardCommand",
-    "RenameInteractionCommand",
     "ReorderCardCommand",
     "ReorderHotspotCommand",
     "ReplaceHotspotSetCommand",

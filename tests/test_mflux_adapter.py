@@ -133,6 +133,32 @@ def test_reference_paths_must_match_snapshot_count(tmp_path: Path) -> None:
         )
 
 
+def test_multi_role_snapshot_requires_one_unique_image_path(
+    tmp_path: Path,
+) -> None:
+    snapshot = ImageReferenceSnapshot(
+        card_id=uuid4(),
+        revision_id=uuid4(),
+        background_id=uuid4(),
+    )
+
+    generation_request = MfluxGenerationRequest(
+        inputs=ImageGenerationInputs(
+            description="Same castle",
+            identity_reference=snapshot,
+            setting_reference=snapshot,
+        ),
+        render_prompt="Same castle",
+        output_path=tmp_path / "multi-role.png",
+        reference_image_paths=(tmp_path / "castle.png",),
+        seed=1,
+    )
+
+    assert generation_request.reference_image_paths == (
+        tmp_path / "castle.png",
+    )
+
+
 def test_switching_generation_modes_evicts_the_previous_model(
     tmp_path: Path,
 ) -> None:

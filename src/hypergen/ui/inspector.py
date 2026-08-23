@@ -13,7 +13,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QInputDialog,
     QLabel,
-    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QPlainTextEdit,
@@ -35,7 +34,6 @@ from hypergen.application.commands import (
     DeleteInteractionCommand,
     DocumentCommand,
     EditRevisionDescriptionCommand,
-    RenameInteractionCommand,
     ReorderHotspotCommand,
     SetRevisionReferenceCommand,
 )
@@ -43,7 +41,6 @@ from hypergen.application.document_controller import DocumentController
 from hypergen.domain.models import (
     Card,
     CardRevision,
-    HotspotSet,
     Interaction,
     NavigateAction,
     ReferenceRole,
@@ -99,8 +96,6 @@ class Inspector(QWidget):
     generate_background_requested = Signal()
     clear_background_requested = Signal()
     enrich_scene_requested = Signal()
-    enrichment_apply_requested = Signal(str)
-    enrichment_discard_requested = Signal()
     hotspot_selected = Signal(object)
     change_applied = Signal(str, object)
     render_inputs_changed = Signal()
@@ -164,26 +159,6 @@ class Inspector(QWidget):
         self.enrich_scene_button = QPushButton("Enrich Description")
         self.enrich_scene_button.setObjectName("enrichSceneButton")
         layout.addWidget(self.enrich_scene_button)
-
-        self.enrichment_review = QFrame()
-        self.enrichment_review.setObjectName("enrichmentReview")
-        review_layout = QVBoxLayout(self.enrichment_review)
-        review_layout.addWidget(QLabel("Enriched Description"))
-        self.enrichment_review_edit = QPlainTextEdit()
-        self.enrichment_review_edit.setObjectName("enrichmentReviewEdit")
-        self.enrichment_review_edit.setAccessibleName("Enriched Description")
-        self.enrichment_review_edit.setMaximumHeight(180)
-        review_layout.addWidget(self.enrichment_review_edit)
-        review_actions = QHBoxLayout()
-        self.apply_enrichment_button = QPushButton("Apply")
-        self.apply_enrichment_button.setObjectName("applyEnrichmentButton")
-        self.discard_enrichment_button = QPushButton("Discard")
-        self.discard_enrichment_button.setObjectName("discardEnrichmentButton")
-        review_actions.addWidget(self.apply_enrichment_button)
-        review_actions.addWidget(self.discard_enrichment_button)
-        review_layout.addLayout(review_actions)
-        self.enrichment_review.setVisible(False)
-        layout.addWidget(self.enrichment_review)
 
         layout.addSpacing(8)
         self.identity_reference_combo = QComboBox()
@@ -285,12 +260,6 @@ class Inspector(QWidget):
         controls.addWidget(self.delete_hotspot_button)
         layout.addLayout(controls)
 
-        self.hotspot_label_edit = QLineEdit()
-        self.hotspot_label_edit.setObjectName("hotspotLabelEdit")
-        self.hotspot_label_edit.setPlaceholderText("Hotspot name")
-        self.hotspot_label_edit.setAccessibleName("Hotspot name")
-        layout.addWidget(self.hotspot_label_edit)
-
         self.hotspot_destination_combo = QComboBox()
         self.hotspot_destination_combo.setObjectName("hotspotDestinationCombo")
         self.hotspot_destination_combo.setAccessibleName("Hotspot destination")
@@ -307,14 +276,6 @@ class Inspector(QWidget):
         self.scene_edit.editing_finished.connect(self.commit_revision_metadata)
         self.scene_edit.textChanged.connect(self._render_inputs_changed)
         self.enrich_scene_button.clicked.connect(self.enrich_scene_requested)
-        self.apply_enrichment_button.clicked.connect(
-            lambda: self.enrichment_apply_requested.emit(
-                self.enrichment_review_edit.toPlainText()
-            )
-        )
-        self.discard_enrichment_button.clicked.connect(
-            self.enrichment_discard_requested
-        )
         self.generate_background_button.clicked.connect(self.generate_background_requested)
         for role, combo in self.reference_combos.items():
             combo.currentIndexChanged.connect(
@@ -329,7 +290,6 @@ class Inspector(QWidget):
         self.move_hotspot_down_button.clicked.connect(lambda: self._move_hotspot(1))
         self.add_hotspot_button.clicked.connect(self._add_hotspot)
         self.delete_hotspot_button.clicked.connect(self._delete_hotspot)
-        self.hotspot_label_edit.editingFinished.connect(self._commit_hotspot_label)
         self.hotspot_destination_combo.currentIndexChanged.connect(self._destination_changed)
 
     def _render_inputs_changed(self) -> None:
@@ -339,11 +299,8 @@ class Inspector(QWidget):
     def render(self, document: Stack, selected_card_id: UUID | None) -> None:
         previous_card_id = self.selected_card_id
         previous_revision_id = self._rendered_revision_id
-        selected_interaction_id = self.selected_interaction_id
         preserve_description = self.scene_edit.hasFocus()
         description_draft = self.scene_edit.toPlainText()
-        preserve_label = self.hotspot_label_edit.hasFocus()
-        label_draft = self.hotspot_label_edit.text()
         self._rendering = True
         try:
             card = next(
@@ -376,12 +333,6 @@ class Inspector(QWidget):
             )
             self._render_references(document, card, revision)
             self._render_hotspots(document, revision)
-            if (
-                preserve_label
-                and same_revision
-                and self.selected_interaction_id == selected_interaction_id
-            ):
-                self.hotspot_label_edit.setText(label_draft)
             self.clear_background_button.setEnabled(revision.background is not None)
         finally:
             self._rendering = False
@@ -443,14 +394,6 @@ class Inspector(QWidget):
         )
         self.enrich_scene_button.setToolTip(reason)
 
-    def show_enrichment_proposal(self, description: str) -> None:
-        self.enrichment_review_edit.setPlainText(description)
-        self.enrichment_review.setVisible(True)
-
-    def clear_enrichment_proposal(self) -> None:
-        self.enrichment_review_edit.clear()
-        self.enrichment_review.setVisible(False)
-
     @property
     def selected_interaction_id(self) -> UUID | None:
         item = self.hotspot_list.currentItem()
@@ -484,32 +427,13 @@ class Inspector(QWidget):
         card: Card,
         revision: CardRevision,
     ) -> None:
-        selected_ids = {
-            role: (
-                reference.target_card_id
-                if isinstance(
-                    reference := getattr(revision, role.value),
-                    ResolvedCardReference,
-                )
-                else None
-            )
-            for role in ReferenceRole
-        }
         for role, combo in self.reference_combos.items():
             reference = getattr(revision, role.value)
-            used_elsewhere = {
-                target_id
-                for other_role, target_id in selected_ids.items()
-                if other_role is not role and target_id is not None
-            }
             with QSignalBlocker(combo):
                 combo.clear()
                 combo.addItem("No reference", None)
                 for candidate in document.cards:
-                    if (
-                        candidate.id == card.id
-                        or candidate.id in used_elsewhere
-                    ):
+                    if candidate.id == card.id:
                         continue
                     combo.addItem(candidate.name, candidate.id)
                 if isinstance(reference, ResolvedCardReference):
@@ -585,7 +509,6 @@ class Inspector(QWidget):
         interaction: Interaction | None,
     ) -> None:
         has_interaction = interaction is not None
-        self.hotspot_label_edit.setEnabled(has_interaction)
         self.hotspot_destination_combo.setEnabled(has_interaction)
         self.delete_hotspot_button.setEnabled(has_interaction)
         current_row = self.hotspot_list.currentRow()
@@ -593,8 +516,6 @@ class Inspector(QWidget):
         self.move_hotspot_down_button.setEnabled(
             has_interaction and current_row < self.hotspot_list.count() - 1
         )
-        with QSignalBlocker(self.hotspot_label_edit):
-            self.hotspot_label_edit.setText(interaction.label if interaction is not None else "")
         with QSignalBlocker(self.hotspot_destination_combo):
             self.hotspot_destination_combo.clear()
             self.hotspot_destination_combo.addItem("Unresolved", None)
@@ -611,11 +532,6 @@ class Inspector(QWidget):
                     )
                 )
             else:
-                target = interaction.action.target
-                self.hotspot_destination_combo.setItemText(
-                    0,
-                    (f"Unresolved ({target.target_name})" if target.target_name else "Unresolved"),
-                )
                 self.hotspot_destination_combo.setCurrentIndex(0)
 
     def _hotspot_selection_changed(
@@ -636,13 +552,7 @@ class Inspector(QWidget):
         card = self._selected_card()
         if card is None:
             return
-        hotspot_set = card.active_revision.hotspot_set or HotspotSet()
-        used = {interaction.label.casefold() for interaction in hotspot_set.interactions}
-        number = 1
-        while f"Hotspot {number}".casefold() in used:
-            number += 1
         interaction = Interaction(
-            label=f"Hotspot {number}",
             action=NavigateAction(target=UnresolvedCardReference()),
         )
         if self._execute(
@@ -654,25 +564,6 @@ class Inspector(QWidget):
         ):
             self.select_interaction(interaction.id)
             self.hotspot_selected.emit(interaction.id)
-
-    def _commit_hotspot_label(self) -> None:
-        card = self._selected_card()
-        interaction = self._selected_interaction()
-        if (
-            self._rendering
-            or card is None
-            or interaction is None
-            or self.hotspot_label_edit.text() == interaction.label
-        ):
-            return
-        self._execute(
-            RenameInteractionCommand(
-                card_id=card.id,
-                revision_id=card.active_revision.id,
-                interaction_id=interaction.id,
-                label=self.hotspot_label_edit.text(),
-            )
-        )
 
     def _destination_changed(self, index: int) -> None:
         if self._rendering or index < 0:

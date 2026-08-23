@@ -170,7 +170,7 @@ def test_generate_applies_to_active_revision_and_preserves_other_content(
     assert revision.background.type == "generated"
     assert revision.description == "A garden"
     assert revision.hotspot_set is not None
-    assert revision.hotspot_set.interactions[0].label == "Gate"
+    assert revision.hotspot_set.interactions[0].label == "Unresolved"
     metadata = revision.generation_metadata
     assert metadata is not None
     assert metadata.inputs.description == "A garden"
@@ -240,6 +240,14 @@ def test_references_capture_exact_source_and_suppress_stale_results(
             reference=ResolvedCardReference(target_card_id=source.id),
         )
     )
+    controller.execute(
+        SetRevisionReferenceCommand(
+            card_id=target.id,
+            revision_id=target.active_revision.id,
+            role=ReferenceRole.SETTING,
+            reference=ResolvedCardReference(target_card_id=source.id),
+        )
+    )
     workflow.generate(target.id)
     _complete_generation(workers)
 
@@ -252,7 +260,11 @@ def test_references_capture_exact_source_and_suppress_stale_results(
     assert metadata.inputs.identity_reference.background_id == (
         source_revision.background.id
     )
-    assert "REFERENCE IMAGE 1\nIDENTITY" in metadata.render_prompt
+    assert metadata.inputs.setting_reference == (
+        metadata.inputs.identity_reference
+    )
+    assert "REFERENCE IMAGE 1\nIDENTITY + SETTING" in metadata.render_prompt
+    assert metadata.effective_settings["reference_count"] == 1
 
     failures: list[object] = []
     workflow.failed.connect(failures.append)

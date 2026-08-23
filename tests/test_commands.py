@@ -20,7 +20,6 @@ from hypergen.application.commands import (
     DuplicateRevisionCommand,
     EditRevisionDescriptionCommand,
     RenameCardCommand,
-    RenameInteractionCommand,
     ReorderCardCommand,
     ReorderHotspotCommand,
     ReplaceHotspotSetCommand,
@@ -150,7 +149,14 @@ def test_revision_activation_and_complete_hotspot_replacement() -> None:
 
     changed_revision = document.cards[0].revisions[1]
     assert document.cards[0].active_revision_id == second_revision.id
-    assert changed_revision.hotspot_set == replacement
+    assert changed_revision.hotspot_set is not None
+    assert [
+        item.id for item in changed_revision.hotspot_set.interactions
+    ] == [item.id for item in replacement.interactions]
+    assert all(
+        item.label == "Unresolved"
+        for item in changed_revision.hotspot_set.interactions
+    )
     assert (
         ReplaceHotspotSetCommand(
             card_id=source.id,
@@ -233,6 +239,15 @@ def test_polygon_destination_and_hotspot_order_changes() -> None:
     assert hotspots.interactions[1].action.target == ResolvedCardReference(
         target_card_id=destination.id
     )
+    assert hotspots.interactions[1].label == "Hall"
+
+    renamed = RenameCardCommand(
+        card_id=destination.id,
+        name="Great Hall",
+    ).apply(document)
+    renamed_hotspots = renamed.cards[0].active_revision.hotspot_set
+    assert renamed_hotspots is not None
+    assert renamed_hotspots.interactions[1].label == "Great Hall"
 
 
 def test_interaction_and_polygon_component_lifecycle() -> None:
@@ -246,12 +261,6 @@ def test_interaction_and_polygon_component_lifecycle() -> None:
         card_id=source.id,
         revision_id=revision.id,
         interaction=second,
-    ).apply(document)
-    document = RenameInteractionCommand(
-        card_id=source.id,
-        revision_id=revision.id,
-        interaction_id=first.id,
-        label="Archway",
     ).apply(document)
     document = AddPolygonCommand(
         card_id=source.id,
@@ -274,7 +283,7 @@ def test_interaction_and_polygon_component_lifecycle() -> None:
     hotspot_set = document.cards[0].revisions[0].hotspot_set
     assert hotspot_set is not None
     assert len(hotspot_set.interactions) == 1
-    assert hotspot_set.interactions[0].label == "Archway"
+    assert hotspot_set.interactions[0].label == "Unresolved"
     assert hotspot_set.interactions[0].polygons == (extra,)
 
 
@@ -346,6 +355,7 @@ def test_delete_card_converts_all_inbound_references_and_clears_start() -> None:
     assert hotspot_set is not None
     target = hotspot_set.interactions[0].action.target
     assert target == UnresolvedCardReference(target_name="Former Hall")
+    assert hotspot_set.interactions[0].label == "Unresolved"
     assert changed.cards[0].active_revision.identity == UnresolvedCardReference(
         target_name="Former Hall"
     )

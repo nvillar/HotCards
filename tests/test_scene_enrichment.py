@@ -8,9 +8,11 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
+from hypergen.domain.models import ReferenceRole
 from hypergen.generation.ollama_client import OllamaRuntime, OllamaSettings
 from hypergen.generation.scene_enrichment import (
     OllamaSceneEnricher,
+    SceneEnrichmentReference,
     SceneEnrichmentRequest,
     build_scene_enrichment_prompt,
 )
@@ -60,6 +62,33 @@ def test_scene_enrichment_prompt_expands_authored_visual_details() -> None:
     assert "Do not add interactions" in prompt
     assert "resolution or dimensions" in prompt
     assert "interaction_description" not in prompt
+
+
+def test_scene_enrichment_prompt_scopes_grouped_reference_provenance() -> None:
+    prompt = build_scene_enrichment_prompt(
+        SceneEnrichmentRequest(
+            scene="A guard approaches the outer gate",
+            references=(
+                SceneEnrichmentReference(
+                    roles=(
+                        ReferenceRole.IDENTITY,
+                        ReferenceRole.SETTING,
+                    ),
+                    source_description=(
+                        "A black basalt castle with copper roofs, seen from "
+                        "its drawbridge"
+                    ),
+                ),
+            ),
+        )
+    )
+
+    assert '"roles": [' in prompt
+    assert '"identity"' in prompt
+    assert '"setting"' in prompt
+    assert "black basalt castle" in prompt
+    assert "source scenes" in prompt
+    assert "mention references" in prompt
 
 
 def test_scene_enrichment_rejects_empty_authored_description() -> None:

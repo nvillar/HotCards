@@ -1,4 +1,4 @@
-"""Text-only, review-first Description enrichment workflow."""
+"""Text-only, directly applied Description enrichment workflow."""
 
 from __future__ import annotations
 
@@ -13,10 +13,18 @@ from PySide6.QtCore import QObject, Signal
 from hypergen.application.commands import EditRevisionDescriptionCommand
 from hypergen.application.document_controller import DocumentController
 from hypergen.application.workers import AdapterWorkers, WorkerOperation
-from hypergen.domain.models import Card, Stack
+from hypergen.domain.models import (
+    Card,
+    CardReference,
+    ReferenceRole,
+    ResolvedCardReference,
+    Stack,
+    UnresolvedCardReference,
+)
 from hypergen.generation.ollama_client import OllamaRuntime, OllamaSettings
 from hypergen.generation.scene_enrichment import (
     OllamaSceneEnricher,
+    SceneEnrichmentReference,
     SceneEnrichmentRequest,
     SceneEnrichmentResult,
 )
@@ -44,22 +52,24 @@ class _EnrichmentTarget:
     card_id: UUID
     revision_id: UUID
     source_description: str
+    references: tuple[_EnrichmentReferenceTarget, ...]
 
 
 @dataclass(frozen=True, slots=True)
-class _EnrichmentProposal:
-    target: _EnrichmentTarget
-    description: str
+class _EnrichmentReferenceTarget:
+    role: ReferenceRole
+    assignment: CardReference
+    source_revision_id: UUID | None
+    source_background_id: UUID | None
+    source_generation_description: str | None
 
 
 class SceneEnrichmentWorkflow(QObject):
-    """Produce an editable Description proposal and apply it only on request."""
+    """Enrich and immediately apply one Description through an undoable command."""
 
     busy_changed = Signal(bool)
     progress_changed = Signal(str)
     failed = Signal(object)
-    proposal_ready = Signal(str)
-    proposal_cleared = Signal()
     document_changed = Signal(object)
     change_applied = Signal(str, object)
 
@@ -80,16 +90,11 @@ class SceneEnrichmentWorkflow(QObject):
         self._operation: WorkerOperation | None = None
         self._request_id: UUID | None = None
         self._target: _EnrichmentTarget | None = None
-        self._proposal: _EnrichmentProposal | None = None
         self._busy = False
 
     @property
     def busy(self) -> bool:
         return self._busy
-
-    @property
-    def has_proposal(self) -> bool:
-        return self._proposal is not None
 
     def start(self, card_id: UUID) -> WorkerOperation:
         if self._busy:
@@ -103,12 +108,13 @@ class SceneEnrichmentWorkflow(QObject):
             raise SceneEnrichmentWorkflowError(
                 "enter a Description before enriching it"
             )
-        self.discard_proposal()
+        references = self._reference_targets(document, card)
         target = _EnrichmentTarget(
             stack_id=document.id,
             card_id=card.id,
             revision_id=revision.id,
             source_description=revision.description,
+            references=references,
         )
         settings = self._settings_provider()
         request_id = uuid4()
@@ -117,7 +123,12 @@ class SceneEnrichmentWorkflow(QObject):
         self._set_busy(True, "Enriching Description...")
         operation = self.workers.run_ollama(
             lambda: self._enricher_factory(settings).enrich(
-                SceneEnrichmentRequest(scene=target.source_description)
+                SceneEnrichmentRequest(
+                    scene=target.source_description,
+                    references=self._reference_contexts(
+                        target.references
+                    ),
+                )
             ),
             stage="enriching Description",
         )
@@ -134,47 +145,12 @@ class SceneEnrichmentWorkflow(QObject):
         )
         return operation
 
-    def apply_proposal(self, description: str) -> Stack:
-        proposal = self._proposal
-        if proposal is None:
-            raise SceneEnrichmentWorkflowError(
-                "there is no Description enrichment proposal to apply"
-            )
-        if not description.strip():
-            raise SceneEnrichmentWorkflowError(
-                "the enriched Description must not be empty"
-            )
-        if not self._target_is_current(proposal.target):
-            self.discard_proposal()
-            raise SceneEnrichmentWorkflowError(
-                "the Description changed before the enrichment proposal was applied"
-            )
-        previous_token = self.controller.current_undo_token
-        changed = self.controller.execute(
-            EditRevisionDescriptionCommand(
-                card_id=proposal.target.card_id,
-                revision_id=proposal.target.revision_id,
-                value=description,
-            )
-        )
-        self._clear_proposal()
-        self.document_changed.emit(changed)
-        token = self.controller.current_undo_token
-        if token is not None and token != previous_token:
-            self.change_applied.emit("Description enriched", token)
-        return changed
-
-    def discard_proposal(self) -> None:
-        if self._proposal is not None:
-            self._clear_proposal()
-
     def cancel(self) -> None:
         if self._operation is not None and not self._operation.is_finished:
             self._operation.cancel()
         self._operation = None
         self._request_id = None
         self._target = None
-        self.discard_proposal()
         if self._busy:
             self._set_busy(False, "Description enrichment cancelled")
 
@@ -206,15 +182,30 @@ class SceneEnrichmentWorkflow(QObject):
                 "Description enrichment failed",
             )
             return
+        if not result.scene.strip():
+            self._finish_with_error(
+                SceneEnrichmentWorkflowError(
+                    "Description enrichment returned an empty Description"
+                ),
+                "Description enrichment failed",
+            )
+            return
+        previous_token = self.controller.current_undo_token
+        changed = self.controller.execute(
+            EditRevisionDescriptionCommand(
+                card_id=target.card_id,
+                revision_id=target.revision_id,
+                value=result.scene,
+            )
+        )
         self._operation = None
         self._request_id = None
         self._target = None
-        self._proposal = _EnrichmentProposal(
-            target=target,
-            description=result.scene,
-        )
-        self._set_busy(False, "Description enrichment ready for review")
-        self.proposal_ready.emit(result.scene)
+        self._set_busy(False, "Description enriched")
+        self.document_changed.emit(changed)
+        token = self.controller.current_undo_token
+        if token is not None and token != previous_token:
+            self.change_applied.emit("Description enriched", token)
 
     def _operation_failed(
         self,
@@ -231,10 +222,6 @@ class SceneEnrichmentWorkflow(QObject):
         self._target = None
         self._set_busy(False, progress)
         self.failed.emit(failure)
-
-    def _clear_proposal(self) -> None:
-        self._proposal = None
-        self.proposal_cleared.emit()
 
     def _set_busy(self, busy: bool, progress: str) -> None:
         self._busy = busy
@@ -253,6 +240,89 @@ class SceneEnrichmentWorkflow(QObject):
             card is not None
             and card.active_revision_id == target.revision_id
             and card.active_revision.description == target.source_description
+            and self._reference_targets(document, card) == target.references
+        )
+
+    @staticmethod
+    def _reference_targets(
+        document: Stack,
+        card: Card,
+    ) -> tuple[_EnrichmentReferenceTarget, ...]:
+        targets: list[_EnrichmentReferenceTarget] = []
+        for role in ReferenceRole:
+            assignment = getattr(card.active_revision, role.value)
+            if assignment is None:
+                continue
+            if isinstance(assignment, UnresolvedCardReference):
+                targets.append(
+                    _EnrichmentReferenceTarget(
+                        role=role,
+                        assignment=assignment,
+                        source_revision_id=None,
+                        source_background_id=None,
+                        source_generation_description=None,
+                    )
+                )
+                continue
+            source = next(
+                candidate
+                for candidate in document.cards
+                if candidate.id == assignment.target_card_id
+            )
+            source_revision = source.active_revision
+            background = source_revision.background
+            targets.append(
+                _EnrichmentReferenceTarget(
+                    role=role,
+                    assignment=assignment,
+                    source_revision_id=source_revision.id,
+                    source_background_id=(
+                        background.id if background is not None else None
+                    ),
+                    source_generation_description=(
+                        background.generation_metadata.inputs.description
+                        if background is not None
+                        else None
+                    ),
+                )
+            )
+        return tuple(targets)
+
+    @staticmethod
+    def _reference_contexts(
+        targets: tuple[_EnrichmentReferenceTarget, ...],
+    ) -> tuple[SceneEnrichmentReference, ...]:
+        groups: list[tuple[tuple[UUID, UUID], list[ReferenceRole], str]] = []
+        indexes: dict[tuple[UUID, UUID], int] = {}
+        for target in targets:
+            if (
+                not isinstance(target.assignment, ResolvedCardReference)
+                or target.source_background_id is None
+                or not target.source_generation_description
+            ):
+                continue
+            key = (
+                target.assignment.target_card_id,
+                target.source_background_id,
+            )
+            index = indexes.get(key)
+            if index is None:
+                indexes[key] = len(groups)
+                groups.append(
+                    (
+                        key,
+                        [target.role],
+                        target.source_generation_description,
+                    )
+                )
+            else:
+                groups[index][1].append(target.role)
+        return tuple(
+            SceneEnrichmentReference(
+                roles=tuple(roles),
+                source_description=description,
+            )
+            for _key, roles, description in groups
         )
 
     @staticmethod

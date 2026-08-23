@@ -135,7 +135,7 @@ def test_hotspot_set_distinguishes_never_applied_from_applied_empty() -> None:
     assert applied_empty.hotspot_set.interactions == ()
 
 
-def test_stack_rejects_self_and_duplicate_reference_cards() -> None:
+def test_stack_rejects_self_references_and_accepts_multi_role_sources() -> None:
     source = Card(name="Source")
     with pytest.raises(ValidationError, match="own card"):
         Stack(
@@ -161,11 +161,49 @@ def test_stack_rejects_self_and_duplicate_reference_cards() -> None:
         identity=ResolvedCardReference(target_card_id=reference.id),
         setting=ResolvedCardReference(target_card_id=reference.id),
     )
-    with pytest.raises(ValidationError, match="only one reference role"):
-        Stack(
-            name="Castle",
-            cards=(Card(name="Source", revisions=(revision,)), reference),
-        )
+    stack = Stack(
+        name="Castle",
+        cards=(Card(name="Source", revisions=(revision,)), reference),
+    )
+
+    assert stack.cards[0].active_revision.identity == (
+        stack.cards[0].active_revision.setting
+    )
+
+
+def test_hotspot_labels_are_derived_from_destinations() -> None:
+    destination = Card(name="Castle Gate")
+    resolved = Interaction(
+        label="Author-entered value",
+        action=NavigateAction(
+            target=ResolvedCardReference(target_card_id=destination.id)
+        ),
+    )
+    unresolved = Interaction(
+        label="Former label",
+        action=NavigateAction(
+            target=UnresolvedCardReference(target_name="Former room")
+        ),
+    )
+    source = Card(
+        name="Source",
+        revisions=(
+            CardRevision(
+                hotspot_set=HotspotSet(
+                    interactions=(resolved, unresolved)
+                )
+            ),
+        ),
+    )
+
+    stack = Stack(name="Castle", cards=(source, destination))
+
+    interactions = stack.cards[0].active_revision.hotspot_set
+    assert interactions is not None
+    assert [item.label for item in interactions.interactions] == [
+        "Castle Gate",
+        "Unresolved",
+    ]
 
 
 def test_generation_inputs_capture_exact_reference_source_state() -> None:
@@ -220,7 +258,13 @@ def test_hotspots_are_nested_in_their_image_revision() -> None:
 
     assert loaded == stack
     assert loaded.cards[0].revisions[0].hotspot_set is not None
-    assert loaded.cards[0].revisions[0].hotspot_set.interactions[0] == interaction
+    loaded_interaction = (
+        loaded.cards[0].revisions[0].hotspot_set.interactions[0]
+    )
+    assert loaded_interaction.id == interaction.id
+    assert loaded_interaction.label == "Unresolved"
+    assert loaded_interaction.action == interaction.action
+    assert loaded_interaction.polygons == interaction.polygons
 
 
 def test_generated_background_requires_reproducibility_metadata() -> None:
@@ -329,8 +373,8 @@ def test_revision_cannot_be_attached_to_multiple_cards() -> None:
 
 def test_blank_hotspot_is_valid_but_has_no_hit_geometry() -> None:
     interaction = Interaction(
-        label="Hotspot 1",
         action=NavigateAction(target=UnresolvedCardReference()),
     )
 
+    assert interaction.label == "Unresolved"
     assert interaction.polygons == ()
