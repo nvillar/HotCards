@@ -9,7 +9,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 from PySide6.QtWidgets import QApplication, QLabel
 
-from hypergen.application.commands import RenameCardCommand
+from hypergen.application.commands import DeleteCardCommand, RenameCardCommand
 from hypergen.application.document_controller import DocumentController
 from hypergen.domain.models import (
     Card,
@@ -92,6 +92,70 @@ def test_description_edits_target_active_revision(
     assert revision.description == "New description"
     assert controller.undo()
     assert controller.document.cards[0].active_revision.description == "Old"
+
+
+def test_reference_selectors_assign_distinct_cards_with_undo(
+    application: QApplication,
+) -> None:
+    source = Card(name="Source")
+    portrait = Card(name="Portrait")
+    landscape = Card(name="Landscape")
+    controller = DocumentController(
+        Stack(name="Demo", cards=(source, portrait, landscape))
+    )
+    inspector = Inspector(controller)
+    inspector.render(controller.document, source.id)
+    applied: list[tuple[str, object]] = []
+    inspector.change_applied.connect(
+        lambda message, token: applied.append((message, token))
+    )
+
+    assert inspector._combo_index_for_data(
+        inspector.identity_reference_combo,
+        source.id,
+    ) == -1
+    identity_index = inspector._combo_index_for_data(
+        inspector.identity_reference_combo,
+        portrait.id,
+    )
+    inspector.identity_reference_combo.setCurrentIndex(identity_index)
+
+    assert controller.document.cards[0].active_revision.identity == (
+        ResolvedCardReference(target_card_id=portrait.id)
+    )
+    assert inspector._combo_index_for_data(
+        inspector.visual_style_reference_combo,
+        portrait.id,
+    ) == -1
+    assert applied[-1][0] == "Identity reference changed"
+    assert controller.undo_if_current(applied[-1][1])  # type: ignore[arg-type]
+    inspector.render(controller.document, source.id)
+    assert controller.document.cards[0].active_revision.identity is None
+
+
+def test_deleted_reference_is_shown_as_unresolved(
+    application: QApplication,
+) -> None:
+    destination = Card(name="Former portrait")
+    revision = CardRevision(
+        identity=ResolvedCardReference(target_card_id=destination.id)
+    )
+    source = Card(name="Source", revisions=(revision,))
+    controller = DocumentController(
+        Stack(name="Demo", cards=(source, destination))
+    )
+    inspector = Inspector(controller)
+    inspector.render(controller.document, source.id)
+
+    changed = controller.execute(DeleteCardCommand(card_id=destination.id))
+    inspector.render(changed, source.id)
+
+    assert inspector.identity_reference_combo.currentText() == (
+        "Missing: Former portrait"
+    )
+    assert controller.document.cards[0].active_revision.identity == (
+        UnresolvedCardReference(target_name="Former portrait")
+    )
 
 
 def test_render_preserves_focused_description_and_hotspot_label_drafts(

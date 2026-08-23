@@ -50,6 +50,9 @@ for live Ollama and MFLUX runs.
   Visible revision numbers are positional; stable UUIDs remain internal.
 - Keep at least one revision per card. Duplicate a complete revision, including
   its hotspot semantics and immutable background reference.
+- Keep exactly three optional card-reference roles: Identity, Visual style, and
+  Setting. Each accepts at most one other card; reject self-references and the
+  same source card in multiple roles.
 - Compose background prompts deterministically from the active revision's
   Description. Hotspots must not alter image prompts.
 - Support generated backgrounds only; do not add image import. Apply Generate
