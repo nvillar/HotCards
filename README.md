@@ -44,6 +44,9 @@ provenance so the enriched target stays compatible with their Identity, Visual
 style, and Setting contributions. Assigned references replace conflicting
 authored details within their roles; for example, an assigned photorealistic
 Visual style replaces an authored sketch style rather than blending with it.
+Enriched text follows FLUX.2 prompt guidance: one concise natural-language
+paragraph ordered by subject, action, style, context, then secondary details,
+using positive descriptions and object-specific colors and materials.
 A rewrite that omits its assigned reference traits, retains a recognized
 conflicting authored style, or invents quoted visible text is rejected without
 changing the Description.

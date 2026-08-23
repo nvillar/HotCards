@@ -59,9 +59,19 @@ def test_scene_enrichment_prompt_expands_authored_visual_details() -> None:
     assert "A mysterious wood" in prompt
     assert "materials" in prompt
     assert "lighting quality and direction" in prompt
-    assert "Preserve requested visible text exactly" in prompt
-    assert "Do not add interactions" in prompt
-    assert "resolution or dimensions" in prompt
+    assert "Use 30 to 80 words by default" in prompt
+    assert "Expand only as needed to preserve explicit input details" in prompt
+    assert "main subject, key action or pose, critical visual" in prompt
+    assert "Important elements come first" in prompt
+    assert "direct, positive language" in prompt
+    assert "with its specific object" in prompt
+    assert "Preserve exact" in prompt
+    assert "authored color names and hex codes" in prompt
+    assert "authored" in prompt
+    assert "or assigned Visual style is explicitly photographic" in prompt
+    assert "Preserve authored visible text exactly" in prompt
+    assert "without inventing story facts, interactions" in prompt
+    assert "dimensions, model settings" in prompt
     assert "interaction_description" not in prompt
 
 
@@ -87,29 +97,21 @@ def test_scene_enrichment_prompt_scopes_grouped_reference_provenance() -> None:
     assert '"identity"' in prompt
     assert '"setting"' in prompt
     assert "black basalt castle" in prompt
-    assert "source scenes" in prompt
-    assert "mention references" in prompt
-    assert "mandatory constraints" in prompt
-    assert "Resolve conflicts by" in prompt
-    assert "replacement, never by blending" in prompt
-    assert "delete authored details that conflict" in prompt
-    assert "do not repeat, negate, discuss, compare" in prompt
-    assert "Use the authored Description as the scene skeleton" in prompt
-    assert "references never govern actions, poses, or object states" in prompt
-    assert "discard conflicting source facts" in prompt
+    assert "source Descriptions" in prompt
+    assert "never mention sources, references, roles" in prompt
+    assert "Assigned references are mandatory" in prompt
+    assert "Resolve every conflict by replacement" in prompt
+    assert "remove the losing detail completely" in prompt
+    assert "authored Description is the scene skeleton" in prompt
+    assert "References never override authored actions, poses, or object states" in prompt
+    assert "Discard conflicting" in prompt
     assert "replace conflicting authored identity and appearance" in prompt
-    assert "remove conflicting authored medium and rendering traits" in prompt
-    assert "remove a conflicting authored location or environment" in prompt
-    assert "Assigned-role precedence always wins" in prompt
-    assert "source style into generic realism" in prompt
+    assert "replace conflicting authored style" in prompt
+    assert "replace a conflicting authored location or environment" in prompt
     assert "distinctive source phrase verbatim" in prompt
-    assert "Never invent words" in prompt
-    assert "contain no quotation marks" in prompt
-    assert "must not introduce any visible words" in prompt
-    assert "Do not concatenate" in prompt
-    assert "object states" in prompt
-    assert "open or closed doors" in prompt
-    assert "internally consistent" in prompt
+    assert "introduce no visible words" in prompt
+    assert "one synthesis" in prompt
+    assert "open versus closed" in prompt
 
 
 def test_scene_enrichment_rejects_empty_authored_description() -> None:

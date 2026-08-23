@@ -4,24 +4,29 @@ from __future__ import annotations
 
 from hypergen.domain.models import ImageGenerationInputs, ReferenceRole
 
-IMAGE_PROMPT_VERSION = "image-prompt-v5"
+IMAGE_PROMPT_VERSION = "image-prompt-v6"
+
+_SCENE_AUTHORITY = (
+    "SCENE AUTHORITY\n"
+    "SCENE supplies actions, poses, object states, time, weather, camera, mood, "
+    "composition, and every property not assigned to a labeled reference role."
+)
 
 _REFERENCE_INSTRUCTIONS = {
     ReferenceRole.IDENTITY: (
         "IDENTITY",
-        "Preserve the recognizable appearance and identity of the referenced "
-        "subject, object, person, or place. Construct everything else from the "
-        "Description.",
+        "Derive the recognizable appearance and identity of the subject, "
+        "object, person, or place from this image.",
     ),
     ReferenceRole.VISUAL_STYLE: (
         "VISUAL STYLE",
-        "Use only the referenced medium, linework, texture, palette, lighting, "
-        "and rendering treatment. Ignore its depicted content and composition.",
+        "Derive medium, linework, texture, palette, lighting, and rendering "
+        "treatment from this image.",
     ),
     ReferenceRole.SETTING: (
         "SETTING",
-        "Preserve the referenced environment, architecture, materials, and "
-        "location vocabulary. Do not copy unrelated subjects from it.",
+        "Derive environment, architecture, materials, terrain, and location "
+        "character from this image.",
     ),
 }
 
@@ -36,14 +41,10 @@ def compose_image_prompt(inputs: ImageGenerationInputs) -> str:
         start=1,
     ):
         labels = " + ".join(_REFERENCE_INSTRUCTIONS[role][0] for role in roles)
-        instructions = "\n".join(
-            _REFERENCE_INSTRUCTIONS[role][1] for role in roles
-        )
-        reference_sections.append(
-            f"REFERENCE IMAGE {index}\n{labels}\n{instructions}"
-        )
+        instructions = "\n".join(_REFERENCE_INSTRUCTIONS[role][1] for role in roles)
+        reference_sections.append(f"REFERENCE IMAGE {index}\n{labels}\n{instructions}")
     return "\n\n".join(
-        (*reference_sections, f"SCENE\n{inputs.description}")
+        (_SCENE_AUTHORITY, *reference_sections, f"SCENE\n{inputs.description}")
         if reference_sections
         else (inputs.description,)
     )
