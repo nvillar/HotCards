@@ -31,7 +31,7 @@ RANDOM_SEED_KEY = "generation/random_seed"
 FIXED_SEED_KEY = "generation/fixed_seed"
 MFLUX_MODEL_OPTIONS = (
     ("FLUX.2 Klein 4B", "flux2-klein-4b"),
-    ("FLUX.2 Klein 9B KV (Non-Commercial)", "flux2-klein-9b-kv"),
+    ("FLUX.2 Klein 9B KV", "flux2-klein-9b-kv"),
 )
 
 
