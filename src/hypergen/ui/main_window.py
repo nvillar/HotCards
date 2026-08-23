@@ -92,7 +92,6 @@ from hypergen.ui.settings_dialog import (
     SettingsStore,
     load_machine_settings,
 )
-from hypergen.ui.styles_dialog import StylesDialog
 
 AvailabilityChecks = Mapping[AdapterKind, Callable[[], Any]]
 AvailabilityChecksFactory = Callable[[], AvailabilityChecks]
@@ -209,13 +208,6 @@ class MainWindow(QMainWindow):
             self.overlay_selector.addItem(label, mode)
         self.overlay_selector.currentIndexChanged.connect(self._overlay_changed)
         toolbar.addWidget(self.overlay_selector)
-        toolbar.addSeparator()
-
-        self.styles_button = QPushButton("Styles")
-        self.styles_button.setObjectName("stylesButton")
-        self.styles_button.setToolTip("Manage image-generation styles")
-        self.styles_button.clicked.connect(self._open_styles)
-        toolbar.addWidget(self.styles_button)
         toolbar.addSeparator()
 
         self.back_action = QAction("Back", self)
@@ -604,14 +596,6 @@ class MainWindow(QMainWindow):
         revision_id = self.revision_combo.currentData()
         if isinstance(revision_id, UUID):
             self._delete_revision(revision_id)
-
-    def _open_styles(self) -> None:
-        if self._is_running or not self._commit_authoring_metadata():
-            return
-        dialog = StylesDialog(self.controller, self)
-        dialog.document_changed.connect(self.render_document)
-        dialog.exec()
-        self.render_document()
 
     def _show_undo_notification(self, message: str, token: object) -> None:
         if self._is_running or not isinstance(token, UndoToken):
@@ -1192,7 +1176,7 @@ class MainWindow(QMainWindow):
                 )
             )
         elif not has_render_prompt:
-            generate_reason = "Enter a Description or Style before generating"
+            generate_reason = "Enter a Description before generating"
         elif not mflux_available:
             generate_reason = self._action_diagnostic(AdapterKind.MFLUX)
         self.inspector.set_background_capabilities(
@@ -1636,8 +1620,6 @@ class MainWindow(QMainWindow):
         )
         self.overlay_label.setVisible(True)
         self.overlay_selector.setVisible(True)
-        self.styles_button.setVisible(True)
-        self.styles_button.setEnabled(authoring)
         for action in self.player_navigation_actions:
             action.setVisible(self._is_running)
         self.service_status_label.setVisible(authoring)

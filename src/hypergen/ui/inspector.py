@@ -37,7 +37,6 @@ from hypergen.application.commands import (
     EditRevisionDescriptionCommand,
     RenameInteractionCommand,
     ReorderHotspotCommand,
-    SetRevisionStyleCommand,
 )
 from hypergen.application.document_controller import DocumentController
 from hypergen.domain.models import (
@@ -189,17 +188,6 @@ class Inspector(QWidget):
         self.generate_background_button.setObjectName("generateBackgroundButton")
         layout.addWidget(self.generate_background_button)
 
-        self.style_combo = QComboBox()
-        self.style_combo.setObjectName("generationStyleCombo")
-        self.style_combo.setAccessibleName("Generate style")
-        self.style_combo.setToolTip("Style used when generating this revision's image")
-        layout.addWidget(self.style_combo)
-        self.style_error = QLabel()
-        self.style_error.setObjectName("styleValidationError")
-        self.style_error.setWordWrap(True)
-        self.style_error.setVisible(False)
-        layout.addWidget(self.style_error)
-
         self.clear_background_button = QPushButton("Clear Image")
         self.clear_background_button.setObjectName("clearBackgroundButton")
         layout.addWidget(self.clear_background_button)
@@ -285,8 +273,6 @@ class Inspector(QWidget):
             self.enrichment_discard_requested
         )
         self.generate_background_button.clicked.connect(self.generate_background_requested)
-        self.style_combo.currentIndexChanged.connect(self._style_changed)
-        self.style_combo.currentIndexChanged.connect(self.render_inputs_changed)
         self.clear_background_button.clicked.connect(self.clear_background_requested)
         self.hotspot_list.currentItemChanged.connect(self._hotspot_selection_changed)
         self.move_hotspot_up_button.clicked.connect(lambda: self._move_hotspot(-1))
@@ -319,10 +305,8 @@ class Inspector(QWidget):
                 self._rendered_revision_id = None
                 self.pages.setCurrentIndex(0)
                 self._set_error(self.description_error, "")
-                self._set_error(self.style_error, "")
                 self.set_hotspot_error("")
                 self.scene_edit.clear()
-                self.style_combo.clear()
                 self.hotspot_list.clear()
                 self._render_hotspot_properties(document, None)
                 return
@@ -331,7 +315,6 @@ class Inspector(QWidget):
             same_revision = previous_card_id == card.id and previous_revision_id == revision.id
             if not same_revision:
                 self._set_error(self.description_error, "")
-                self._set_error(self.style_error, "")
                 self.set_hotspot_error("")
             self._rendered_revision_id = revision.id
             self.scene_edit.setPlainText(
@@ -339,17 +322,6 @@ class Inspector(QWidget):
                 if preserve_description and same_revision
                 else revision.description
             )
-            with QSignalBlocker(self.style_combo):
-                self.style_combo.clear()
-                self.style_combo.addItem("No style", None)
-                for style in document.styles:
-                    self.style_combo.addItem(style.name, style.id)
-                self.style_combo.setCurrentIndex(
-                    self._combo_index_for_data(
-                        self.style_combo,
-                        revision.style_id,
-                    )
-                )
             self._render_hotspots(document, revision)
             if (
                 preserve_label
@@ -384,21 +356,7 @@ class Inspector(QWidget):
         return self.commit_revision_metadata()
 
     def has_render_prompt_input(self) -> bool:
-        card = self._selected_card()
-        if card is None:
-            return False
-        style_id = self.style_combo.currentData()
-        style = next(
-            (
-                candidate
-                for candidate in self.controller.document.styles
-                if candidate.id == style_id
-            ),
-            None,
-        )
-        return bool(
-            self.scene_edit.toPlainText().strip() or (style is not None and style.prompt.strip())
-        )
+        return self.has_description_input()
 
     def has_description_input(self) -> bool:
         return bool(self.selected_card_id is not None and self.scene_edit.toPlainText().strip())
@@ -464,7 +422,6 @@ class Inspector(QWidget):
         self.selected_card_id = None
         self._rendered_revision_id = None
         self._set_error(self.description_error, "")
-        self._set_error(self.style_error, "")
         self.set_hotspot_error("")
 
     def _render_hotspots(
@@ -532,24 +489,6 @@ class Inspector(QWidget):
                     (f"Unresolved ({target.target_name})" if target.target_name else "Unresolved"),
                 )
                 self.hotspot_destination_combo.setCurrentIndex(0)
-
-    def _style_changed(self, index: int) -> None:
-        if self._rendering or index < 0:
-            return
-        card = self._selected_card()
-        if card is None:
-            return
-        style_id = self.style_combo.itemData(index)
-        if style_id == card.active_revision.style_id:
-            return
-        self._execute(
-            SetRevisionStyleCommand(
-                card_id=card.id,
-                revision_id=card.active_revision.id,
-                style_id=style_id if isinstance(style_id, UUID) else None,
-            ),
-            error_label=self.style_error,
-        )
 
     def _hotspot_selection_changed(
         self,

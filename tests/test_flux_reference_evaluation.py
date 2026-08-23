@@ -7,7 +7,14 @@ from uuid import uuid4
 
 from PIL import Image
 
-from hypergen.domain.models import Card, CardRevision, ImportedBackground, Stack
+from hypergen.domain.models import (
+    Card,
+    CardRevision,
+    GeneratedBackground,
+    ImageGenerationInputs,
+    ImageGenerationMetadata,
+    Stack,
+)
 from hypergen.evaluation.flux_references import (
     _model_config,
     run_flux_reference_evaluation,
@@ -59,18 +66,30 @@ def _card_with_image(
 ) -> Card:
     card_id = uuid4()
     background_id = uuid4()
-    image_path = store.import_image(
+    image_path = store.store_image_asset(
         source,
         card_id=card_id,
         asset_id=background_id,
     )
+    generated_at = datetime.now(UTC)
     revision = CardRevision(
         description=description,
-        background=ImportedBackground(
+        background=GeneratedBackground(
             id=background_id,
             image_path=image_path,
-            source_filename=source.name,
-            created_at=datetime.now(UTC),
+            generation_metadata=ImageGenerationMetadata(
+                inputs=ImageGenerationInputs(description=description),
+                render_prompt=description,
+                model_identifier="test",
+                mflux_version="test",
+                seed=1,
+                width=1024,
+                height=768,
+                step_count=4,
+                generated_at=generated_at,
+                duration_seconds=1,
+            ),
+            created_at=generated_at,
         ),
     )
     return Card(

@@ -36,7 +36,7 @@ from hypergen.generation.mflux_generator import (
 )
 
 DEFAULT_MFLUX_MODELS = ("flux2-klein-4b", "flux2-klein-9b")
-IMAGE_CASE_VERSION = "image-case-v2"
+IMAGE_CASE_VERSION = "image-case-v3"
 IMAGE_RESULT_VERSION = "image-result-v2"
 HUMAN_RUBRIC_FIELDS = (
     "scene_fidelity",
@@ -51,7 +51,7 @@ HUMAN_RUBRIC_FIELDS = (
 class ImageEvaluationCase(DomainModel):
     """One version-controlled input and rubric for the image suite."""
 
-    case_version: Literal["image-case-v2"] = IMAGE_CASE_VERSION
+    case_version: Literal["image-case-v3"] = IMAGE_CASE_VERSION
     case_id: SafeCaseId
     inputs: ImageGenerationInputs
     required_visual_elements: tuple[NonEmptyString, ...] = Field(min_length=1)

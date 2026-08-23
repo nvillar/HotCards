@@ -16,8 +16,7 @@ from uuid import UUID
 from PIL import Image, UnidentifiedImageError
 from pydantic import ValidationError
 
-from hypergen.domain.models import Stack
-from hypergen.storage.migrations import MigrationError, migrate_document
+from hypergen.domain.models import CURRENT_SCHEMA_VERSION, Stack
 
 STACK_FILENAME = "stack.json"
 ASSET_ROOT = PurePosixPath("assets/cards")
@@ -121,7 +120,7 @@ class StackStore:
                     )
 
     def load(self) -> Stack:
-        """Load, migrate, validate, and verify a bundle document."""
+        """Load and validate an exact-current-schema bundle document."""
         try:
             payload = json.loads(self.stack_path.read_text(encoding="utf-8"))
         except FileNotFoundError as error:
@@ -132,10 +131,15 @@ class StackStore:
             ) from error
         if not isinstance(payload, dict):
             raise StackStoreError("stack document root must be a JSON object")
+        version = payload.get("schema_version")
+        if type(version) is not int or version != CURRENT_SCHEMA_VERSION:
+            raise StackStoreError(
+                "invalid stack document: schema_version must be "
+                f"{CURRENT_SCHEMA_VERSION}"
+            )
         try:
-            migrated = migrate_document(payload)
-            stack = Stack.model_validate_json(json.dumps(migrated))
-        except (MigrationError, ValidationError) as error:
+            stack = Stack.model_validate_json(json.dumps(payload))
+        except ValidationError as error:
             raise StackStoreError(f"invalid stack document: {error}") from error
         self._validate_assets(stack)
         return stack
@@ -187,7 +191,7 @@ class StackStore:
             if temporary_path is not None:
                 temporary_path.unlink(missing_ok=True)
 
-    def import_image(
+    def store_image_asset(
         self,
         source_path: Path,
         *,
@@ -244,7 +248,7 @@ class StackStore:
                 f"refusing to overwrite existing image asset: {relative_path}"
             ) from error
         except OSError as error:
-            raise StackStoreError(f"could not import image asset {source_path}: {error}") from error
+            raise StackStoreError(f"could not store image asset {source_path}: {error}") from error
         finally:
             if temporary_path is not None:
                 temporary_path.unlink(missing_ok=True)
@@ -278,7 +282,7 @@ class StackStore:
                         or background.image_path in copied_paths
                     ):
                         continue
-                    temporary_store.import_image(
+                    temporary_store.store_image_asset(
                         self.asset_path(background.image_path),
                         card_id=card.id,
                         asset_id=background.id,

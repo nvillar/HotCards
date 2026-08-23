@@ -16,16 +16,12 @@ from hypergen.application.background_workflow import (
     BackgroundWorkflow,
     BackgroundWorkflowError,
 )
-from hypergen.application.commands import (
-    EditRevisionDescriptionCommand,
-    EditStyleCommand,
-)
+from hypergen.application.commands import EditRevisionDescriptionCommand
 from hypergen.application.document_controller import DocumentController, UndoToken
 from hypergen.application.document_session import DocumentSession
 from hypergen.domain.models import (
     Card,
     CardRevision,
-    GenerationStyle,
     HotspotSet,
     Interaction,
     NavigateAction,
@@ -105,14 +101,12 @@ def _bound_workflow(
     FakeWorkers,
     Card,
 ]:
-    style = GenerationStyle(name="Pencil", prompt="Fine pencil illustration")
     hotspot = Interaction(
         label="Gate",
         action=NavigateAction(target=UnresolvedCardReference()),
     )
     revision = CardRevision(
         description="A garden",
-        style_id=style.id,
         hotspot_set=HotspotSet(interactions=(hotspot,)),
     )
     card = Card(
@@ -123,7 +117,6 @@ def _bound_workflow(
     controller = DocumentController(
         Stack(
             name="Stack",
-            styles=(style,),
             cards=(card,),
             start_card_id=card.id,
         )
@@ -167,14 +160,12 @@ def test_generate_applies_to_active_revision_and_preserves_other_content(
     assert revision.background is not None
     assert revision.background.type == "generated"
     assert revision.description == "A garden"
-    assert revision.style_id == controller.document.styles[0].id
     assert revision.hotspot_set is not None
     assert revision.hotspot_set.interactions[0].label == "Gate"
     metadata = revision.generation_metadata
     assert metadata is not None
     assert metadata.inputs.description == "A garden"
-    assert metadata.inputs.style_name == "Pencil"
-    assert metadata.inputs.style_prompt == "Fine pencil illustration"
+    assert metadata.inputs.identity_reference is None
     assert session.flush()
     assert StackStore(session.state.bundle_path).load() == controller.document
     assert applied[0][0] == "Image generated"
@@ -210,20 +201,6 @@ def test_generation_failure_and_stale_result_preserve_current_revision(
     assert controller.document.cards[0].active_revision.background is None
     assert "changed before generation completed" in str(failures[-1])
     assert not list((tmp_path / "temporary").glob("generated-*.png"))
-
-    workflow.generate(card.id)
-    style = controller.document.styles[0]
-    controller.execute(
-        EditStyleCommand(
-            style_id=style.id,
-            name=style.name,
-            prompt="Changed while generating",
-        )
-    )
-    _complete_generation(workers)
-    assert controller.document.cards[0].active_revision.background is None
-    assert "changed before generation completed" in str(failures[-1])
-
 
 def test_revision_duplicate_activate_delete_round_trip(tmp_path: Path) -> None:
     workflow, controller, _session, _workers, card = _bound_workflow(tmp_path)

@@ -52,12 +52,10 @@ def _write_case(case_dir: Path) -> None:
     (case_dir / "one.json").write_text(
         json.dumps(
             {
-                "case_version": "image-case-v2",
+                "case_version": "image-case-v3",
                 "case_id": "one",
                 "inputs": {
-                    "description": "Courtyard",
-                    "style_name": "Storybook",
-                    "style_prompt": "Watercolor",
+                    "description": "A storybook watercolor courtyard",
                 },
                 "required_visual_elements": ["gate"],
                 "unwanted_artifacts": ["text"],
@@ -78,12 +76,10 @@ def test_image_case_id_is_safe_for_artifact_paths() -> None:
     with pytest.raises(ValidationError, match="string_pattern_mismatch"):
         ImageEvaluationCase.model_validate(
             {
-                "case_version": "image-case-v2",
+                "case_version": "image-case-v3",
                 "case_id": "../escape",
                 "inputs": {
-                    "description": "Courtyard",
-                    "style_name": "Storybook",
-                    "style_prompt": "Watercolor",
+                    "description": "A storybook watercolor courtyard",
                 },
                 "required_visual_elements": ["gate"],
             }
@@ -108,17 +104,23 @@ def test_image_suite_uses_deterministic_prompts_for_mflux_candidates(
     assert "prompt_downstream_axis" not in result
     assert len(result["mflux_axis"]) == 2
     assert {row["model"] for row in result["mflux_axis"]} == set(DEFAULT_MFLUX_MODELS)
-    assert {row["render_prompt"] for row in result["mflux_axis"]} == {"Courtyard\n\nWatercolor"}
-    assert {request["prompt"] for request in requests} == {"Courtyard\n\nWatercolor"}
+    assert {row["render_prompt"] for row in result["mflux_axis"]} == {
+        "A storybook watercolor courtyard"
+    }
+    assert {request["prompt"] for request in requests} == {
+        "A storybook watercolor courtyard"
+    }
     assert result["mflux_axis"][0]["cold"]["metadata"]["render_prompt"] == (
-        "Courtyard\n\nWatercolor"
+        "A storybook watercolor courtyard"
     )
     assert result["mflux_axis"][0]["warm"]["inference_duration_seconds"] >= 0
     assert "hotspot_suitability" in result["mflux_axis"][0]["rubric"]
     assert len(list((tmp_path / "run" / "images" / "mflux-axis").rglob("*.png"))) == 4
     summary = json.loads((tmp_path / "run" / "summary.json").read_text())
     assert {row["axis"] for row in summary["rows"]} == {"mflux"}
-    assert {row["render_prompt"] for row in summary["rows"]} == {"Courtyard\n\nWatercolor"}
+    assert {row["render_prompt"] for row in summary["rows"]} == {
+        "A storybook watercolor courtyard"
+    }
 
 
 def test_image_suite_isolates_mflux_candidate_failure(tmp_path: Path) -> None:

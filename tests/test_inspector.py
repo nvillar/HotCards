@@ -14,7 +14,6 @@ from hypergen.application.document_controller import DocumentController
 from hypergen.domain.models import (
     Card,
     CardRevision,
-    GenerationStyle,
     HotspotSet,
     Interaction,
     NavigateAction,
@@ -23,7 +22,6 @@ from hypergen.domain.models import (
     UnresolvedCardReference,
 )
 from hypergen.ui.inspector import Inspector
-from hypergen.ui.styles_dialog import StylesDialog
 
 
 @pytest.fixture(scope="module")
@@ -41,18 +39,16 @@ def _interaction(label: str = "Door") -> Interaction:
 def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     application: QApplication,
 ) -> None:
-    style = GenerationStyle(name="Watercolor", prompt="Soft watercolor")
     card = Card(
         name="Courtyard",
         revisions=(
             CardRevision(
                 description="A moonlit courtyard",
-                style_id=style.id,
                 hotspot_set=HotspotSet(interactions=(_interaction(),)),
             ),
         ),
     )
-    controller = DocumentController(Stack(name="Demo", styles=(style,), cards=(card,)))
+    controller = DocumentController(Stack(name="Demo", cards=(card,)))
     inspector = Inspector(controller)
     inspector.render(controller.document, card.id)
 
@@ -62,7 +58,7 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     assert inspector.scene_edit.placeholderText() == "Description"
     assert inspector.enrich_scene_button.text() == "Enrich Description"
     assert inspector.generate_background_button.text() == "Generate Image"
-    assert inspector.style_combo.currentText() == "Watercolor"
+    assert not hasattr(inspector, "style_combo")
     assert inspector.clear_background_button.text() == "Clear Image"
 
     visible_copy = " ".join(label.text() for label in inspector.findChildren(QLabel))
@@ -78,28 +74,24 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
         assert obsolete not in visible_copy
 
 
-def test_description_and_style_edits_target_active_revision(
+def test_description_edits_target_active_revision(
     application: QApplication,
 ) -> None:
-    first = GenerationStyle(name="Ink", prompt="Black ink")
-    second = GenerationStyle(name="Paint", prompt="Thick paint")
     card = Card(
         name="Card",
-        revisions=(CardRevision(description="Old", style_id=first.id),),
+        revisions=(CardRevision(description="Old"),),
     )
-    controller = DocumentController(Stack(name="Demo", styles=(first, second), cards=(card,)))
+    controller = DocumentController(Stack(name="Demo", cards=(card,)))
     inspector = Inspector(controller)
     inspector.render(controller.document, card.id)
 
     inspector.scene_edit.setPlainText("New description")
     assert inspector.commit_revision_metadata()
-    inspector.style_combo.setCurrentIndex(2)
 
     revision = controller.document.cards[0].active_revision
     assert revision.description == "New description"
-    assert revision.style_id == second.id
     assert controller.undo()
-    assert controller.document.cards[0].active_revision.style_id == first.id
+    assert controller.document.cards[0].active_revision.description == "Old"
 
 
 def test_render_preserves_focused_description_and_hotspot_label_drafts(
@@ -243,30 +235,3 @@ def test_enrichment_proposal_can_be_edited_applied_or_discarded(
     assert discarded == [True]
     inspector.clear_enrichment_proposal()
     assert inspector.enrichment_review.isHidden()
-
-
-def test_styles_dialog_manages_styles_and_blocks_in_use_deletion(
-    application: QApplication,
-) -> None:
-    style = GenerationStyle(name="Ink", prompt="Black ink")
-    card = Card(
-        name="Card",
-        revisions=(CardRevision(style_id=style.id),),
-    )
-    controller = DocumentController(Stack(name="Demo", styles=(style,), cards=(card,)))
-    dialog = StylesDialog(controller)
-
-    assert dialog.style_list.count() == 1
-    dialog._add_style()
-    assert [item.name for item in controller.document.styles] == ["Ink", "Style 1"]
-    dialog.name_edit.setText("Gouache")
-    dialog.prompt_edit.setPlainText("Opaque paint")
-    dialog._commit_selected()
-    assert controller.document.styles[-1].name == "Gouache"
-    assert controller.document.styles[-1].prompt == "Opaque paint"
-
-    dialog.style_list.setCurrentRow(0)
-    dialog._delete_style()
-    assert not dialog.error_label.isHidden()
-    assert "used by a revision" in dialog.error_label.text()
-    assert len(controller.document.styles) == 2

@@ -20,8 +20,9 @@ from hypergen.application.document_session import DocumentSession, DocumentSessi
 from hypergen.domain.models import (
     Card,
     CardRevision,
-    GenerationStyle,
-    ImportedBackground,
+    GeneratedBackground,
+    ImageGenerationInputs,
+    ImageGenerationMetadata,
     Stack,
 )
 from hypergen.storage.stack_store import StackStore, StackStoreError
@@ -38,10 +39,8 @@ def test_create_binds_bundle_before_mutations_and_flushes_autosave(
     controller = DocumentController(Stack(name="Welcome"))
     session = DocumentSession(controller)
     first_card = Card(name="Card 1")
-    style = GenerationStyle(name="Pencil", prompt="Pencil sketch")
     created = Stack(
         name="Garden",
-        styles=(style,),
         cards=(first_card,),
         start_card_id=first_card.id,
     )
@@ -141,16 +140,28 @@ def test_save_as_copies_assets_and_rebinds_autosave(tmp_path: Path) -> None:
     source_store = StackStore(source_bundle)
     card = Card(name="Garden")
     asset_id = uuid4()
+    generated_at = datetime.now(UTC)
     revision = CardRevision(
-        background=ImportedBackground(
+        background=GeneratedBackground(
             id=asset_id,
-            image_path=source_store.import_image(
+            image_path=source_store.store_image_asset(
                 source_image,
                 card_id=card.id,
                 asset_id=asset_id,
             ),
-            source_filename=source_image.name,
-            created_at=datetime.now(UTC),
+            generation_metadata=ImageGenerationMetadata(
+                inputs=ImageGenerationInputs(description="A garden"),
+                render_prompt="A garden",
+                model_identifier="test",
+                mflux_version="test",
+                seed=1,
+                width=1024,
+                height=768,
+                step_count=4,
+                generated_at=generated_at,
+                duration_seconds=1,
+            ),
+            created_at=generated_at,
         ),
     )
     card = card.model_copy(
