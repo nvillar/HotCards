@@ -34,7 +34,7 @@ def build_availability_checks(
                 endpoint=values.ollama_endpoint,
                 model=values.ollama_model,
             )
-        ).require_model(capabilities=frozenset({"vision"}))
+        ).require_model()
 
     def check_mflux() -> None:
         from huggingface_hub import snapshot_download

@@ -5,6 +5,9 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+import pytest
+from pydantic import ValidationError
+
 from hypergen.generation.ollama_client import OllamaRuntime, OllamaSettings
 from hypergen.generation.scene_enrichment import (
     OllamaSceneEnricher,
@@ -27,45 +30,23 @@ class FakeOllamaClient:
         )
 
 
-def test_scene_enrichment_prompt_uses_description_and_style_without_interactions() -> None:
+def test_scene_enrichment_prompt_expands_authored_visual_details() -> None:
     prompt = build_scene_enrichment_prompt(
-        SceneEnrichmentRequest(
-            scene="A mysterious wood",
-            effective_style="Ink and watercolor",
-        )
+        SceneEnrichmentRequest(scene='A mysterious wood with a sign saying "Enter"')
     )
 
     assert "A mysterious wood" in prompt
-    assert "Ink and watercolor" in prompt
+    assert "materials" in prompt
+    assert "lighting quality and direction" in prompt
+    assert "visible text in quotation marks" in prompt
     assert "Do not add interactions" in prompt
     assert "resolution or dimensions" in prompt
     assert "interaction_description" not in prompt
 
 
-def test_scene_enrichment_prompt_merges_visible_image_details() -> None:
-    prompt = build_scene_enrichment_prompt(
-        SceneEnrichmentRequest(
-            scene="A mysterious wood",
-            effective_style="Ink and watercolor",
-            image_description=(
-                "Silver birches seen from below beneath a violet moon"
-            ),
-        )
-    )
-
-    assert '"authored_description": "A mysterious wood"' in prompt
-    assert "Silver birches seen from below" in prompt
-    assert "authoritative if it conflicts" in prompt
-    assert "hidden story facts" in prompt
-
-
-def test_scene_enrichment_accepts_image_context_without_authored_description() -> None:
-    request = SceneEnrichmentRequest(
-        image_description="A moonlit stone bridge over dark water"
-    )
-
-    assert request.scene == ""
-    assert request.image_description
+def test_scene_enrichment_rejects_empty_authored_description() -> None:
+    with pytest.raises(ValidationError):
+        SceneEnrichmentRequest(scene="")
 
 
 def test_ollama_scene_enricher_parses_structured_output() -> None:

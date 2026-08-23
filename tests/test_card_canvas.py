@@ -1,4 +1,4 @@
-"""Offscreen tests for the shared image viewport and import crop preview."""
+"""Offscreen tests for the shared image viewport."""
 
 from __future__ import annotations
 
@@ -15,7 +15,6 @@ from PySide6.QtWidgets import QApplication
 
 from hypergen.domain.models import CanvasSize
 from hypergen.ui.card_canvas import CardCanvas
-from hypergen.ui.crop_dialog import CropDialog
 
 
 @pytest.fixture(scope="module")
@@ -81,27 +80,3 @@ def test_canvas_reports_missing_image(application: QApplication, tmp_path: Path)
     assert canvas._message_item is not None
     assert "Image unavailable" in canvas._message_item.toPlainText()
     canvas.close()
-
-
-def test_crop_dialog_enables_only_relevant_axis(
-    application: QApplication,
-    tmp_path: Path,
-) -> None:
-    wide = tmp_path / "wide.png"
-    tall = tmp_path / "tall.png"
-    Image.new("RGB", (200, 100), "red").save(wide)
-    Image.new("RGB", (100, 200), "blue").save(tall)
-    size = CanvasSize(width=100, height=100)
-
-    wide_dialog = CropDialog(wide, size)
-    assert wide_dialog.horizontal_slider.isEnabled()
-    assert not wide_dialog.vertical_slider.isEnabled()
-    wide_dialog.horizontal_slider.setValue(250)
-    assert wide_dialog.position_x == 0.25
-    assert CropDialog.requires_crop(wide, size)
-    wide_dialog.close()
-
-    tall_dialog = CropDialog(tall, size)
-    assert not tall_dialog.horizontal_slider.isEnabled()
-    assert tall_dialog.vertical_slider.isEnabled()
-    tall_dialog.close()

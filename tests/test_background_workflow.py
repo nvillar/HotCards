@@ -15,7 +15,6 @@ from hypergen.application.background_workflow import (
     BackgroundGenerationSettings,
     BackgroundWorkflow,
     BackgroundWorkflowError,
-    prepare_import_image,
 )
 from hypergen.application.commands import (
     EditRevisionDescriptionCommand,
@@ -185,26 +184,6 @@ def test_generate_applies_to_active_revision_and_preserves_other_content(
     assert controller.document.cards[0].active_revision.background is None
 
 
-def test_import_and_clear_apply_directly_with_undo_tokens(tmp_path: Path) -> None:
-    workflow, controller, _session, _workers, card = _bound_workflow(tmp_path)
-    source = tmp_path / "source.jpg"
-    Image.new("RGB", (120, 80), "green").save(source)
-    tokens: list[object] = []
-    workflow.change_applied.connect(lambda _message, token: tokens.append(token))
-
-    workflow.import_image(card.id, source, position_x=0.25)
-    imported = controller.document.cards[0].active_revision
-    assert imported.background is not None
-    assert imported.background.type == "imported"
-    assert imported.source_filename == "source.jpg"
-    assert imported.hotspot_set is not None
-
-    workflow.clear_background(card.id)
-    assert controller.document.cards[0].active_revision.background is None
-    assert controller.undo_if_current(tokens[-1])  # type: ignore[arg-type]
-    assert controller.document.cards[0].active_revision.background == imported.background
-
-
 def test_generation_failure_and_stale_result_preserve_current_revision(
     tmp_path: Path,
 ) -> None:
@@ -276,37 +255,5 @@ def test_unbound_stack_rejects_image_changes(tmp_path: Path) -> None:
         _settings,
         temporary_directory=tmp_path / "temporary",
     )
-    source = tmp_path / "source.png"
-    Image.new("RGB", (20, 20), "red").save(source)
-
     with pytest.raises(BackgroundWorkflowError, match="save the stack"):
         workflow.generate(card.id)
-    with pytest.raises(BackgroundWorkflowError, match="save the stack"):
-        workflow.import_image(card.id, source)
-
-
-def test_prepare_import_crops_to_fill_and_rejects_invalid_position(
-    tmp_path: Path,
-) -> None:
-    source = tmp_path / "source.png"
-    output = tmp_path / "output.png"
-    Image.new("RGB", (200, 100), "red").save(source)
-
-    prepare_import_image(
-        source,
-        output,
-        width=100,
-        height=100,
-        position_x=0.25,
-    )
-    with Image.open(output) as image:
-        assert image.size == (100, 100)
-
-    with pytest.raises(BackgroundWorkflowError, match="between zero and one"):
-        prepare_import_image(
-            source,
-            tmp_path / "invalid.png",
-            width=100,
-            height=100,
-            position_x=2,
-        )

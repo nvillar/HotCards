@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from pydantic import ValidationError, model_validator
+from pydantic import ValidationError
 
 from hypergen.domain.models import (
     DomainModel,
@@ -15,25 +15,14 @@ from hypergen.generation.errors import ModelResponseError
 from hypergen.generation.ollama_client import OllamaRuntime
 from hypergen.generation.structured_output import structured_json_content
 
-SCENE_ENRICHMENT_PROMPT_VERSION = "scene-enrichment-v2"
+SCENE_ENRICHMENT_PROMPT_VERSION = "scene-enrichment-v3"
 
 
 class SceneEnrichmentRequest(DomainModel):
-    """Author Description plus optional visible image and Style context."""
+    """One non-empty author-written Description to expand."""
 
-    scene: str = ""
-    effective_style: str = ""
-    image_description: str | None = None
+    scene: NonEmptyString
     prompt_version: NonEmptyString = SCENE_ENRICHMENT_PROMPT_VERSION
-
-    @model_validator(mode="after")
-    def require_description_or_image(self) -> SceneEnrichmentRequest:
-        """Require at least one source of visual authoring context."""
-        if not self.scene.strip() and not (
-            self.image_description is not None and self.image_description.strip()
-        ):
-            raise ValueError("Description or image description must not be empty")
-        return self
 
 
 class SceneEnrichmentModelOutput(DomainModel):
@@ -58,13 +47,9 @@ class SceneEnrichmentResult(DomainModel):
 
 
 def build_scene_enrichment_prompt(request: SceneEnrichmentRequest) -> str:
-    """Build a bounded rewrite prompt from revision-local visual context."""
+    """Build a bounded FLUX-oriented rewrite prompt from authored text."""
     source = json.dumps(
-        {
-            "authored_description": request.scene,
-            "effective_style": request.effective_style,
-            "visible_image_description": request.image_description,
-        },
+        {"authored_description": request.scene},
         ensure_ascii=False,
         indent=2,
     )
@@ -72,13 +57,11 @@ def build_scene_enrichment_prompt(request: SceneEnrichmentRequest) -> str:
 Write a richer text-to-image Description for one illustrated card.
 
 Return JSON matching the supplied schema.
-- Preserve the authored Description's subject, setting, mood, and factual intent when it is
-  present. It is authoritative if it conflicts with the visible image description.
-- Treat visible_image_description only as evidence of visible details in the active accepted
-  background. Incorporate compatible composition, viewpoint, spatial relationships, lighting,
-  color, materials, atmosphere, and rendering characteristics.
-- If the authored Description is empty, construct the result from visible_image_description.
-- Treat effective_style as read-only visual context. Do not repeat it mechanically.
+- Preserve the authored subject, setting, mood, visible text, and factual intent.
+- Add concrete form, scale, texture, materials, lighting quality and direction, shadows,
+  spatial relationships, environment, atmosphere, and camera or composition details.
+- Keep requested visible text in quotation marks.
+- Make abstract qualities visually concrete without inventing new story facts.
 - Do not add interactions, navigation instructions, hotspots, captions, labels, signs, or
   interface elements unless the authored Description explicitly requests them.
 - Do not add hidden story facts, destinations, resolution or dimensions, step counts, model

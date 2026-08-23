@@ -96,9 +96,10 @@ class Inspector(QWidget):
 
     document_changed = Signal(object)
     generate_background_requested = Signal()
-    import_background_requested = Signal()
     clear_background_requested = Signal()
     enrich_scene_requested = Signal()
+    enrichment_apply_requested = Signal(str)
+    enrichment_discard_requested = Signal()
     hotspot_selected = Signal(object)
     change_applied = Signal(str, object)
     render_inputs_changed = Signal()
@@ -159,9 +160,29 @@ class Inspector(QWidget):
         self.description_error.setVisible(False)
         layout.addWidget(self.description_error)
 
-        self.enrich_scene_button = QPushButton("Enrich")
+        self.enrich_scene_button = QPushButton("Enrich Description")
         self.enrich_scene_button.setObjectName("enrichSceneButton")
         layout.addWidget(self.enrich_scene_button)
+
+        self.enrichment_review = QFrame()
+        self.enrichment_review.setObjectName("enrichmentReview")
+        review_layout = QVBoxLayout(self.enrichment_review)
+        review_layout.addWidget(QLabel("Enriched Description"))
+        self.enrichment_review_edit = QPlainTextEdit()
+        self.enrichment_review_edit.setObjectName("enrichmentReviewEdit")
+        self.enrichment_review_edit.setAccessibleName("Enriched Description")
+        self.enrichment_review_edit.setMaximumHeight(180)
+        review_layout.addWidget(self.enrichment_review_edit)
+        review_actions = QHBoxLayout()
+        self.apply_enrichment_button = QPushButton("Apply")
+        self.apply_enrichment_button.setObjectName("applyEnrichmentButton")
+        self.discard_enrichment_button = QPushButton("Discard")
+        self.discard_enrichment_button.setObjectName("discardEnrichmentButton")
+        review_actions.addWidget(self.apply_enrichment_button)
+        review_actions.addWidget(self.discard_enrichment_button)
+        review_layout.addLayout(review_actions)
+        self.enrichment_review.setVisible(False)
+        layout.addWidget(self.enrichment_review)
 
         layout.addSpacing(8)
         self.generate_background_button = QPushButton("Generate Image")
@@ -179,9 +200,6 @@ class Inspector(QWidget):
         self.style_error.setVisible(False)
         layout.addWidget(self.style_error)
 
-        self.import_background_button = QPushButton("Import Image...")
-        self.import_background_button.setObjectName("importBackgroundButton")
-        layout.addWidget(self.import_background_button)
         self.clear_background_button = QPushButton("Clear Image")
         self.clear_background_button.setObjectName("clearBackgroundButton")
         layout.addWidget(self.clear_background_button)
@@ -256,12 +274,19 @@ class Inspector(QWidget):
 
     def _connect_signals(self) -> None:
         self.scene_edit.editing_finished.connect(self.commit_revision_metadata)
-        self.scene_edit.textChanged.connect(self.render_inputs_changed)
+        self.scene_edit.textChanged.connect(self._render_inputs_changed)
         self.enrich_scene_button.clicked.connect(self.enrich_scene_requested)
+        self.apply_enrichment_button.clicked.connect(
+            lambda: self.enrichment_apply_requested.emit(
+                self.enrichment_review_edit.toPlainText()
+            )
+        )
+        self.discard_enrichment_button.clicked.connect(
+            self.enrichment_discard_requested
+        )
         self.generate_background_button.clicked.connect(self.generate_background_requested)
         self.style_combo.currentIndexChanged.connect(self._style_changed)
         self.style_combo.currentIndexChanged.connect(self.render_inputs_changed)
-        self.import_background_button.clicked.connect(self.import_background_requested)
         self.clear_background_button.clicked.connect(self.clear_background_requested)
         self.hotspot_list.currentItemChanged.connect(self._hotspot_selection_changed)
         self.move_hotspot_up_button.clicked.connect(lambda: self._move_hotspot(-1))
@@ -270,6 +295,10 @@ class Inspector(QWidget):
         self.delete_hotspot_button.clicked.connect(self._delete_hotspot)
         self.hotspot_label_edit.editingFinished.connect(self._commit_hotspot_label)
         self.hotspot_destination_combo.currentIndexChanged.connect(self._destination_changed)
+
+    def _render_inputs_changed(self) -> None:
+        if not self._rendering:
+            self.render_inputs_changed.emit()
 
     def render(self, document: Stack, selected_card_id: UUID | None) -> None:
         previous_card_id = self.selected_card_id
@@ -379,8 +408,6 @@ class Inspector(QWidget):
         *,
         can_generate: bool,
         generate_reason: str,
-        can_import: bool,
-        import_reason: str,
         can_clear: bool = False,
         clear_reason: str = "",
         busy: bool,
@@ -389,8 +416,6 @@ class Inspector(QWidget):
         self.generate_background_button.setEnabled(can_generate and not busy)
         self.generate_background_button.setText("Generating…" if generating else "Generate Image")
         self.generate_background_button.setToolTip(generate_reason)
-        self.import_background_button.setEnabled(can_import and not busy)
-        self.import_background_button.setToolTip(import_reason)
         self.clear_background_button.setEnabled(can_clear and not busy)
         self.clear_background_button.setToolTip(clear_reason)
 
@@ -402,8 +427,18 @@ class Inspector(QWidget):
         busy: bool,
     ) -> None:
         self.enrich_scene_button.setEnabled(can_enrich)
-        self.enrich_scene_button.setText("Enriching…" if busy else "Enrich")
+        self.enrich_scene_button.setText(
+            "Enriching…" if busy else "Enrich Description"
+        )
         self.enrich_scene_button.setToolTip(reason)
+
+    def show_enrichment_proposal(self, description: str) -> None:
+        self.enrichment_review_edit.setPlainText(description)
+        self.enrichment_review.setVisible(True)
+
+    def clear_enrichment_proposal(self) -> None:
+        self.enrichment_review_edit.clear()
+        self.enrichment_review.setVisible(False)
 
     @property
     def selected_interaction_id(self) -> UUID | None:

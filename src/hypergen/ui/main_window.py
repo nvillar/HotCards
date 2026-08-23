@@ -78,7 +78,6 @@ from hypergen.generation.ollama_client import OllamaSettings
 from hypergen.storage.stack_store import StackStoreError
 from hypergen.ui.card_canvas import CardCanvas
 from hypergen.ui.card_sidebar import CardSidebar
-from hypergen.ui.crop_dialog import CropDialog
 from hypergen.ui.inspector import Inspector
 from hypergen.ui.new_stack_dialog import NewStackDialog
 from hypergen.ui.notification_bar import (
@@ -161,7 +160,6 @@ class MainWindow(QMainWindow):
                 controller,
                 workers,
                 self._ollama_settings,
-                self._resolve_revision_image_path,
                 parent=self,
             )
         self.setWindowTitle(f"HyperGen — {controller.document.name}")
@@ -324,10 +322,15 @@ class MainWindow(QMainWindow):
 
         self.inspector = Inspector(self.controller)
         self.inspector.document_changed.connect(self.render_document)
-        self.inspector.render_inputs_changed.connect(self._update_generation_actions)
+        self.inspector.render_inputs_changed.connect(self._authoring_inputs_changed)
         self.inspector.enrich_scene_requested.connect(self._enrich_scene)
+        self.inspector.enrichment_apply_requested.connect(
+            self._apply_enrichment_proposal
+        )
+        self.inspector.enrichment_discard_requested.connect(
+            self.scene_enrichment_workflow.discard_proposal
+        )
         self.inspector.generate_background_requested.connect(self._generate_background)
-        self.inspector.import_background_requested.connect(self._import_background)
         self.inspector.clear_background_requested.connect(self._clear_background)
         self.inspector.change_applied.connect(self._show_undo_notification)
         self.inspector.hotspot_selected.connect(self.card_canvas.select_interaction)
@@ -354,6 +357,12 @@ class MainWindow(QMainWindow):
             self._scene_enrichment_progress_changed
         )
         self.scene_enrichment_workflow.failed.connect(self._scene_enrichment_failed)
+        self.scene_enrichment_workflow.proposal_ready.connect(
+            self.inspector.show_enrichment_proposal
+        )
+        self.scene_enrichment_workflow.proposal_cleared.connect(
+            self.inspector.clear_enrichment_proposal
+        )
         self.scene_enrichment_workflow.document_changed.connect(self.render_document)
         self.scene_enrichment_workflow.change_applied.connect(self._show_undo_notification)
         self.pane_splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -621,6 +630,7 @@ class MainWindow(QMainWindow):
     def _undo_notification(self) -> None:
         if self._is_running:
             return
+        self.scene_enrichment_workflow.cancel()
         token = self._undo_notification_token
         self._undo_notification_token = None
         self.notification_bar.clear_notification("undo")
@@ -755,6 +765,7 @@ class MainWindow(QMainWindow):
             self._show_document_error("Could Not Save Stack As", str(error))
             return
         self._cancel_background_generation()
+        self.scene_enrichment_workflow.cancel()
         self._undo_notification_token = None
         self.notification_bar.clear_notification("undo")
         self._update_document_actions()
@@ -772,6 +783,10 @@ class MainWindow(QMainWindow):
         self.notification_bar.clear_notification("undo")
         if self.controller.redo():
             self.render_document()
+
+    def _authoring_inputs_changed(self) -> None:
+        self.scene_enrichment_workflow.cancel()
+        self._update_generation_actions()
 
     def _primary_empty_action(self) -> None:
         if self._is_running:
@@ -989,47 +1004,16 @@ class MainWindow(QMainWindow):
         )
         self._update_generation_actions()
 
-    def _import_background(self) -> None:
-        workflow = self.background_workflow
-        card_id = self._selected_card_id
-        if workflow is None or card_id is None:
-            return
-        self.notification_bar.clear_notification("background-error")
-        self.notification_bar.clear_notification("background-warning")
-        if not self._commit_authoring_metadata():
-            return
-        selected_path, _filter = QFileDialog.getOpenFileName(
-            self,
-            "Import Image",
-            "",
-            "Images (*.png *.jpg *.jpeg *.webp *.tif *.tiff)",
-        )
-        if not selected_path:
-            return
-        source_path = Path(selected_path)
-        position_x = 0.5
-        position_y = 0.5
+    def _apply_enrichment_proposal(self, description: str) -> None:
+        self.notification_bar.clear_notification("enrichment-error")
         try:
-            canvas_size = self.controller.document.canvas
-            if CropDialog.requires_crop(source_path, canvas_size):
-                crop_dialog = CropDialog(source_path, canvas_size, self)
-                if crop_dialog.exec() != QDialog.DialogCode.Accepted:
-                    return
-                position_x = crop_dialog.position_x
-                position_y = crop_dialog.position_y
-            workflow.import_image(
-                card_id,
-                source_path,
-                position_x=position_x,
-                position_y=position_y,
-            )
-        except (BackgroundWorkflowError, ValueError) as error:
+            self.scene_enrichment_workflow.apply_proposal(description)
+        except SceneEnrichmentWorkflowError as error:
             self._show_error(
-                "background-error",
-                "Could not import image",
+                "enrichment-error",
+                "Could not apply enriched Description",
                 detail=str(error),
             )
-        self._update_generation_actions()
 
     def _clear_background(self) -> None:
         workflow = self.background_workflow
@@ -1211,39 +1195,22 @@ class MainWindow(QMainWindow):
             generate_reason = "Enter a Description or Style before generating"
         elif not mflux_available:
             generate_reason = self._action_diagnostic(AdapterKind.MFLUX)
-        import_reason = (
-            "Ready to import"
-            if has_card and not workflow_busy
-            else (
-                "Wait for background generation to finish"
-                if workflow_busy
-                else "Select a card in a saved stack"
-            )
-        )
         self.inspector.set_background_capabilities(
             can_generate=(has_card and has_render_prompt and mflux_available),
             generate_reason=generate_reason,
-            can_import=has_card,
-            import_reason=import_reason,
             can_clear=has_card and has_image,
             clear_reason=("Clear the current image" if has_image else "This revision has no image"),
             busy=workflow_busy,
             generating=workflow_busy,
         )
-        active_image_path = (
-            self._resolve_revision_image_path(active_revision.image_path)
-            if active_revision is not None and active_revision.image_path is not None
-            else None
-        )
-        has_readable_active_image = active_image_path is not None and active_image_path.is_file()
         enrichment_busy = self.scene_enrichment_workflow.busy
-        has_enrichment_input = self.inspector.has_description_input() or has_readable_active_image
+        has_enrichment_input = self.inspector.has_description_input()
         can_enrich = has_card and has_enrichment_input and ollama_available and not enrichment_busy
         enrich_reason = "Ready to enrich Description"
         if not has_card:
             enrich_reason = "Select a card in a saved stack"
         elif not has_enrichment_input:
-            enrich_reason = "Enter a Description or apply an available background before enriching"
+            enrich_reason = "Enter a Description before enriching"
         elif enrichment_busy:
             enrich_reason = "Description enrichment is running"
         elif not ollama_available:
