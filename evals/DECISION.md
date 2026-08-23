@@ -1,7 +1,7 @@
 # Local model defaults decision
 
 **Decision date:** 2026-08-22
-**Status:** Active; 9B KV live validation is blocked on gated repository access
+**Status:** Active
 
 ## Ollama default: `qwen3.5:9b-mlx`
 
@@ -26,9 +26,10 @@ claim.
 The optional FLUX.2 Klein 9B KV selection is adopted for users who accept the
 FLUX Non-Commercial License. A zero-reference request uses regular 9B; a
 reference request uses the 9B KV edit configuration. Both repositories must be
-cached. Comparative local evaluation is not required for adoption, but live
-smoke validation remains pending because the current Hugging Face account does
-not have access to the gated 9B KV repository.
+cached. Live validation on 2026-08-23 completed both production dispatch paths:
+a zero-reference request used regular 9B with KV disabled, and a three-reference
+Identity, Visual style, and Setting request used the 9B KV edit model with KV
+enabled. Both produced readable 1024x768 RGB images without warnings.
 
 ## Card-reference contract
 
@@ -61,5 +62,5 @@ not retained in memory simultaneously.
 - **Four or more references: NO-GO** because local evidence showed worse
   resource use and role competition.
 - **Novel-view identity claims: NO-GO** because local evidence was weak.
-- **9B KV production smoke: BLOCKED** until gated model access is granted and
-  both zero-reference and three-reference paths complete locally.
+- **9B KV production smoke: GO** for both regular-9B zero-reference generation
+  and three-reference KV edit generation.
