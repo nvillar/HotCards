@@ -37,6 +37,7 @@ from hypergen.application.commands import (
     EditRevisionDescriptionCommand,
     RenameInteractionCommand,
     ReorderHotspotCommand,
+    SetRevisionReferenceCommand,
 )
 from hypergen.application.document_controller import DocumentController
 from hypergen.domain.models import (
@@ -45,6 +46,7 @@ from hypergen.domain.models import (
     HotspotSet,
     Interaction,
     NavigateAction,
+    ReferenceRole,
     ResolvedCardReference,
     Stack,
     UnresolvedCardReference,
@@ -184,6 +186,47 @@ class Inspector(QWidget):
         layout.addWidget(self.enrichment_review)
 
         layout.addSpacing(8)
+        self.identity_reference_combo = QComboBox()
+        self.visual_style_reference_combo = QComboBox()
+        self.setting_reference_combo = QComboBox()
+        self.reference_combos = {
+            ReferenceRole.IDENTITY: self.identity_reference_combo,
+            ReferenceRole.VISUAL_STYLE: self.visual_style_reference_combo,
+            ReferenceRole.SETTING: self.setting_reference_combo,
+        }
+        reference_details = (
+            (
+                ReferenceRole.IDENTITY,
+                "Identity",
+                "Preserve the recognizable appearance of a subject, object, or place",
+            ),
+            (
+                ReferenceRole.VISUAL_STYLE,
+                "Visual style",
+                "Transfer medium, linework, texture, palette, and lighting treatment",
+            ),
+            (
+                ReferenceRole.SETTING,
+                "Setting",
+                "Preserve environment, architecture, materials, and location vocabulary",
+            ),
+        )
+        for role, label_text, tooltip in reference_details:
+            label = QLabel(label_text)
+            label.setToolTip(tooltip)
+            layout.addWidget(label)
+            combo = self.reference_combos[role]
+            combo.setObjectName(f"{role.value}ReferenceCombo")
+            combo.setAccessibleName(f"{label_text} reference card")
+            combo.setToolTip(tooltip)
+            layout.addWidget(combo)
+        self.reference_error = QLabel()
+        self.reference_error.setObjectName("referenceValidationError")
+        self.reference_error.setWordWrap(True)
+        self.reference_error.setVisible(False)
+        layout.addWidget(self.reference_error)
+
+        layout.addSpacing(8)
         self.generate_background_button = QPushButton("Generate Image")
         self.generate_background_button.setObjectName("generateBackgroundButton")
         layout.addWidget(self.generate_background_button)
@@ -273,6 +316,13 @@ class Inspector(QWidget):
             self.enrichment_discard_requested
         )
         self.generate_background_button.clicked.connect(self.generate_background_requested)
+        for role, combo in self.reference_combos.items():
+            combo.currentIndexChanged.connect(
+                lambda index, selected_role=role: self._reference_changed(
+                    selected_role,
+                    index,
+                )
+            )
         self.clear_background_button.clicked.connect(self.clear_background_requested)
         self.hotspot_list.currentItemChanged.connect(self._hotspot_selection_changed)
         self.move_hotspot_up_button.clicked.connect(lambda: self._move_hotspot(-1))
@@ -305,6 +355,7 @@ class Inspector(QWidget):
                 self._rendered_revision_id = None
                 self.pages.setCurrentIndex(0)
                 self._set_error(self.description_error, "")
+                self._set_error(self.reference_error, "")
                 self.set_hotspot_error("")
                 self.scene_edit.clear()
                 self.hotspot_list.clear()
@@ -315,6 +366,7 @@ class Inspector(QWidget):
             same_revision = previous_card_id == card.id and previous_revision_id == revision.id
             if not same_revision:
                 self._set_error(self.description_error, "")
+                self._set_error(self.reference_error, "")
                 self.set_hotspot_error("")
             self._rendered_revision_id = revision.id
             self.scene_edit.setPlainText(
@@ -322,6 +374,7 @@ class Inspector(QWidget):
                 if preserve_description and same_revision
                 else revision.description
             )
+            self._render_references(document, card, revision)
             self._render_hotspots(document, revision)
             if (
                 preserve_label
@@ -422,7 +475,82 @@ class Inspector(QWidget):
         self.selected_card_id = None
         self._rendered_revision_id = None
         self._set_error(self.description_error, "")
+        self._set_error(self.reference_error, "")
         self.set_hotspot_error("")
+
+    def _render_references(
+        self,
+        document: Stack,
+        card: Card,
+        revision: CardRevision,
+    ) -> None:
+        selected_ids = {
+            role: (
+                reference.target_card_id
+                if isinstance(
+                    reference := getattr(revision, role.value),
+                    ResolvedCardReference,
+                )
+                else None
+            )
+            for role in ReferenceRole
+        }
+        for role, combo in self.reference_combos.items():
+            reference = getattr(revision, role.value)
+            used_elsewhere = {
+                target_id
+                for other_role, target_id in selected_ids.items()
+                if other_role is not role and target_id is not None
+            }
+            with QSignalBlocker(combo):
+                combo.clear()
+                combo.addItem("No reference", None)
+                for candidate in document.cards:
+                    if (
+                        candidate.id == card.id
+                        or candidate.id in used_elsewhere
+                    ):
+                        continue
+                    combo.addItem(candidate.name, candidate.id)
+                if isinstance(reference, ResolvedCardReference):
+                    combo.setCurrentIndex(
+                        self._combo_index_for_data(
+                            combo,
+                            reference.target_card_id,
+                        )
+                    )
+                elif isinstance(reference, UnresolvedCardReference):
+                    name = reference.target_name or "Unknown card"
+                    combo.addItem(f"Missing: {name}", reference)
+                    combo.setCurrentIndex(combo.count() - 1)
+                else:
+                    combo.setCurrentIndex(0)
+
+    def _reference_changed(self, role: ReferenceRole, index: int) -> None:
+        if self._rendering or index < 0:
+            return
+        card = self._selected_card()
+        if card is None:
+            return
+        value = self.reference_combos[role].itemData(index)
+        if isinstance(value, UUID):
+            reference = ResolvedCardReference(target_card_id=value)
+        elif isinstance(value, UnresolvedCardReference):
+            reference = value
+        else:
+            reference = None
+        if reference == getattr(card.active_revision, role.value):
+            return
+        self._execute(
+            SetRevisionReferenceCommand(
+                card_id=card.id,
+                revision_id=card.active_revision.id,
+                role=role,
+                reference=reference,
+            ),
+            error_label=self.reference_error,
+            undo_message=f"{role.value.replace('_', ' ').title()} reference changed",
+        )
 
     def _render_hotspots(
         self,

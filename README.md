@@ -25,8 +25,10 @@ Setting card references, and hotspot set. The compact header above the canvas
 edits the card name and selects, duplicates, or deletes revisions; the toolbar
 manages Mode and hotspot visibility.
 
-The Background inspector contains Description, Enrich Description, Generate
-Image, and Clear Image controls. Background prompts are composed
+The Background inspector contains Description, Enrich Description, Identity,
+Visual style, and Setting card selectors, Generate Image, and Clear Image
+controls. Each reference role can select one other card; the same card cannot
+fill multiple roles. Background prompts are composed
 deterministically from the revision Description. Generated images are the only
 supported background source. Generate and Clear apply
 directly to the active revision; Enrich Description produces an editable,
