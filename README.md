@@ -41,7 +41,12 @@ changes offer a dismissible, history-safe Undo action in the notification bar.
 Enrichment never reads an image and requires authored Description text. It uses
 the generation-time Descriptions of referenced backgrounds as role-scoped text
 provenance so the enriched target stays compatible with their Identity, Visual
-style, and Setting contributions.
+style, and Setting contributions. Assigned references replace conflicting
+authored details within their roles; for example, an assigned photorealistic
+Visual style replaces an authored sketch style rather than blending with it.
+A rewrite that omits its assigned reference traits, retains a recognized
+conflicting authored style, or invents quoted visible text is rejected without
+changing the Description.
 
 The Hotspots inspector is the sole source of interaction semantics. A new
 hotspot is persisted and selected immediately, even before it has an area;
