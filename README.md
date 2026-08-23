@@ -83,11 +83,11 @@ uv run hypergen-eval flux-references --stack /path/to/Stack.hypergen
 ```
 
 Each command creates one immutable directory under `evals/runs/` with an
-immediate, failure-safe `manifest.json`, retained raw/completed artifacts,
-checksums, JSON/CSV summaries, and a static HTML report. Image and hotspot
-reports include contact sheets or annotated predictions. Report rendering is
-offline and never calls a model. The tracked default decision and evidence
-tradeoffs are in [`evals/DECISION.md`](evals/DECISION.md).
+immediate, failure-safe `manifest.json` and retained artifacts. Smoke and image
+runs add checksums, JSON/CSV summaries, and a static HTML report. Reference runs
+write detailed JSON results plus overall and per-case contact sheets. Report
+rendering is offline and never calls a model. The tracked default decision and
+evidence tradeoffs are in [`evals/DECISION.md`](evals/DECISION.md).
 
 ## Architecture at a glance
 
