@@ -71,8 +71,7 @@ a background preserves its hotspots so the author can review and adjust them
 manually. Run mode supports deterministic hotspot navigation, Back/Restart
 history, and configurable overlays. Local AI services are checked automatically
 when Author mode is entered; Run mode starts no AI work. The status bar selects
-an installed Ollama LLM and either FLUX.2 Klein 4B or FLUX.2 Klein 9B KV. The
-9B KV option is visibly marked Non-Commercial.
+an installed Ollama LLM and either FLUX.2 Klein 4B or FLUX.2 Klein 9B KV.
 
 Transient outcomes, failures, Run warnings, and Undo actions appear in one
 notification bar below the toolbar. Reversible deletions and replacements apply

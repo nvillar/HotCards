@@ -561,7 +561,8 @@ def test_bottom_model_selectors_persist_and_follow_operation_state(
         window.image_model_combo.findData("flux2-klein-9b-kv")
     )
     assert settings.values["generation/mflux_model"] == "flux2-klein-9b-kv"
-    assert "non-commercial" in window.image_model_combo.toolTip().lower()
+    assert window.image_model_combo.currentText() == "FLUX.2 Klein 9B KV"
+    assert window.image_model_combo.toolTip() == window.llm_model_combo.toolTip()
 
     background.busy = True
     window.scene_enrichment_workflow._busy = True

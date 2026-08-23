@@ -1255,14 +1255,7 @@ class MainWindow(QMainWindow):
             for adapter in AdapterKind
         )
         self.llm_model_combo.setToolTip(self._service_status_detail)
-        image_license = (
-            "\nFLUX.2 Klein 9B KV is licensed for non-commercial use."
-            if self.image_model_combo.currentData() == "flux2-klein-9b-kv"
-            else ""
-        )
-        self.image_model_combo.setToolTip(
-            self._service_status_detail + image_license
-        )
+        self.image_model_combo.setToolTip(self._service_status_detail)
         if (
             unavailable
             and not pending

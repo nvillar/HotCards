@@ -108,8 +108,8 @@ for live Ollama and MFLUX runs.
   deduplicated. Entering Run mode must not start AI work and must suppress
   pending AI results.
 - Keep LLM and image-model selectors in the status bar and persist them through
-  Qt settings. List installed Ollama models; offer FLUX.2 Klein 4B and visibly
-  Non-Commercial 9B KV. Keep model fields out of Advanced Settings.
+  Qt settings. List installed Ollama models; offer FLUX.2 Klein 4B and FLUX.2
+  Klein 9B KV. Keep model fields out of Advanced Settings.
 - Represent a revision's applied hotspot set as `HotspotSet | None`.
   `None` means no set has been applied; an empty `HotspotSet` means an applied
   set currently contains no interactions.
