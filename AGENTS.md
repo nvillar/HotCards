@@ -52,9 +52,12 @@ for live Ollama and MFLUX runs.
   its hotspot semantics and immutable background reference.
 - Keep exactly three optional card-reference roles: Identity, Visual style, and
   Setting. Each accepts at most one other card; reject self-references and the
-  same source card in multiple roles.
+  same source card in multiple roles. Feed active source backgrounds to MFLUX
+  in that fixed order, omit missing roles, and do not inject source
+  Descriptions.
 - Compose background prompts deterministically from the active revision's
-  Description. Hotspots must not alter image prompts.
+  Description plus fixed instructions for assigned reference roles. Hotspots
+  must not alter image prompts.
 - Support generated backgrounds only; do not add image import. Apply Generate
   and Clear directly through document commands. Keep an existing image visible
   until replacement succeeds, then expose a dismissible Undo bound to the exact
