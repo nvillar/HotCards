@@ -6,10 +6,11 @@
 ## Ollama default: `qwen3.5:9b-mlx`
 
 Ollama is used only for text-only Description enrichment. Enrich takes the
-authored Description, returns one editable proposal, and never reads current or
-referenced images. The 9B MLX build remains the development default because it
-is the locally optimized middle resource point among the previously exercised
-4B, 9B, and 35B candidates.
+authored Description and role-scoped generation-time text provenance for
+referenced backgrounds, applies one undoable rewrite, and never reads current
+or referenced images. The 9B MLX build remains the development default because
+it is the locally optimized middle resource point among the previously
+exercised 4B, 9B, and 35B candidates.
 
 Hotspot geometry is authored manually. Earlier Remap experiments are retired
 and do not describe production behavior.
@@ -41,10 +42,12 @@ three optional, revision-local roles:
 2. Visual style
 3. Setting
 
-Each role accepts at most one other card. The referenced card's active
-background is authoritative; source Descriptions are not injected. Missing
-roles are omitted and remaining images are renumbered. Fixed role instructions
-and the target Description form the deterministic prompt.
+Each role accepts at most one other card, and one card may fill several roles.
+The referenced card's active background is authoritative. Assignments sharing
+one background are grouped into one unique image with combined role
+instructions. Missing roles are omitted and remaining images are renumbered.
+Source Descriptions are not injected into the MFLUX prompt; fixed role
+instructions and the target Description form that deterministic prompt.
 
 Generation metadata captures the source card, active revision, and background
 IDs used by the request. Results are discarded if a role assignment or any

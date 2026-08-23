@@ -8,7 +8,6 @@ from hypergen.application.commands import (
     DeleteCardCommand,
     EditRevisionDescriptionCommand,
     RenameCardCommand,
-    RenameInteractionCommand,
     ReplaceHotspotSetCommand,
 )
 from hypergen.application.document_controller import DocumentController
@@ -122,14 +121,26 @@ def test_complete_hotspot_replacement_is_one_atomic_undo_step() -> None:
         )
     )
     changed = controller.document.cards[0].revisions[0].hotspot_set
-    assert changed == replacement
+    assert changed is not None
+    assert [item.id for item in changed.interactions] == [
+        item.id for item in replacement.interactions
+    ]
+    assert all(item.label == "Unresolved" for item in changed.interactions)
 
     assert controller.undo()
     restored = controller.document.cards[0].revisions[0].hotspot_set
     assert restored is not None
-    assert restored.interactions == (original,)
+    assert restored.interactions[0].id == original.id
+    assert restored.interactions[0].label == "Unresolved"
+    assert restored.interactions[0].action == original.action
+    assert restored.interactions[0].polygons == original.polygons
     assert controller.redo()
-    assert controller.document.cards[0].revisions[0].hotspot_set == replacement
+    redone = controller.document.cards[0].revisions[0].hotspot_set
+    assert redone is not None
+    assert [item.id for item in redone.interactions] == [
+        item.id for item in replacement.interactions
+    ]
+    assert all(item.label == "Unresolved" for item in redone.interactions)
 
 
 def test_destination_resolution_is_one_undoable_command() -> None:
@@ -153,7 +164,7 @@ def test_destination_resolution_is_one_undoable_command() -> None:
     assert hotspot_target(controller) == UnresolvedCardReference(target_name="Retained destination")
 
 
-def test_manual_interaction_edits_have_individual_undo_boundaries() -> None:
+def test_manual_interaction_add_has_an_undo_boundary() -> None:
     document, source, revision, _hotspot = document_with_hotspot()
     controller = DocumentController(document)
     added = interaction("New destination")
@@ -165,22 +176,9 @@ def test_manual_interaction_edits_have_individual_undo_boundaries() -> None:
             interaction=added,
         )
     )
-    controller.execute(
-        RenameInteractionCommand(
-            card_id=source.id,
-            revision_id=revision.id,
-            interaction_id=added.id,
-            label="Renamed",
-        )
-    )
-
     hotspot_set = controller.document.cards[0].revisions[0].hotspot_set
     assert hotspot_set is not None
-    assert hotspot_set.interactions[-1].label == "Renamed"
-    assert controller.undo()
-    hotspot_set = controller.document.cards[0].revisions[0].hotspot_set
-    assert hotspot_set is not None
-    assert hotspot_set.interactions[-1].label == "Door"
+    assert hotspot_set.interactions[-1].label == "Unresolved"
     assert controller.undo()
     hotspot_set = controller.document.cards[0].revisions[0].hotspot_set
     assert hotspot_set is not None

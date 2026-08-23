@@ -137,10 +137,10 @@ class NavigateAction(DomainModel):
 
 
 class Interaction(DomainModel):
-    """One semantic interaction with one or more polygon components."""
+    """One destination-derived interaction with one or more polygon components."""
 
     id: UUID = Field(default_factory=uuid4)
-    label: NonEmptyString
+    label: NonEmptyString = "Unresolved"
     action: NavigateAction
     polygons: tuple[Polygon, ...] = Field(default_factory=tuple)
 
@@ -160,6 +160,47 @@ class ImageGenerationInputs(DomainModel):
     identity_reference: ImageReferenceSnapshot | None = None
     visual_style_reference: ImageReferenceSnapshot | None = None
     setting_reference: ImageReferenceSnapshot | None = None
+
+    def references_by_role(
+        self,
+    ) -> tuple[tuple[ReferenceRole, ImageReferenceSnapshot], ...]:
+        """Return assigned references in deterministic role order."""
+        return tuple(
+            (role, reference)
+            for role in ReferenceRole
+            if (
+                reference := getattr(self, f"{role.value}_reference")
+            )
+            is not None
+        )
+
+    def grouped_references(
+        self,
+    ) -> tuple[
+        tuple[ImageReferenceSnapshot, tuple[ReferenceRole, ...]],
+        ...,
+    ]:
+        """Group roles that use the same unique source background."""
+        groups: list[
+            tuple[ImageReferenceSnapshot, list[ReferenceRole]]
+        ] = []
+        group_indexes: dict[tuple[UUID, UUID, UUID], int] = {}
+        for role, reference in self.references_by_role():
+            key = (
+                reference.card_id,
+                reference.revision_id,
+                reference.background_id,
+            )
+            index = group_indexes.get(key)
+            if index is None:
+                group_indexes[key] = len(groups)
+                groups.append((reference, [role]))
+            else:
+                groups[index][1].append(role)
+        return tuple(
+            (reference, tuple(roles))
+            for reference, roles in groups
+        )
 
 
 class ImageGenerationMetadata(DomainModel):
@@ -313,6 +354,7 @@ class Stack(DomainModel):
 
         card_ids = [card.id for card in self.cards]
         known_card_ids = set(card_ids)
+        card_names = {card.id: card.name for card in self.cards}
         if len(card_ids) != len(known_card_ids):
             raise ValueError("card IDs must be unique within a stack")
         require_unique_card_names(self.cards)
@@ -323,7 +365,6 @@ class Stack(DomainModel):
             raise ValueError("revision IDs must be unique within a stack")
         for card in self.cards:
             for revision in card.revisions:
-                reference_ids: list[UUID] = []
                 for reference in (
                     revision.identity,
                     revision.visual_style,
@@ -337,11 +378,6 @@ class Stack(DomainModel):
                         )
                     if reference.target_card_id == card.id:
                         raise ValueError("a card revision cannot reference its own card")
-                    reference_ids.append(reference.target_card_id)
-                if len(reference_ids) != len(set(reference_ids)):
-                    raise ValueError(
-                        "a source card may occupy only one reference role per revision"
-                    )
                 if revision.hotspot_set is None:
                     continue
                 for interaction in revision.hotspot_set.interactions:
@@ -352,5 +388,16 @@ class Stack(DomainModel):
                     ):
                         raise ValueError(
                             "resolved card references must identify a card in this stack"
+                        )
+                    derived_label = (
+                        card_names[target.target_card_id]
+                        if isinstance(target, ResolvedCardReference)
+                        else "Unresolved"
+                    )
+                    if interaction.label != derived_label:
+                        object.__setattr__(
+                            interaction,
+                            "label",
+                            derived_label,
                         )
         return self

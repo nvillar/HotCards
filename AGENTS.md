@@ -51,10 +51,11 @@ for live Ollama and MFLUX runs.
 - Keep at least one revision per card. Duplicate a complete revision, including
   its hotspot semantics and immutable background reference.
 - Keep exactly three optional card-reference roles: Identity, Visual style, and
-  Setting. Each accepts at most one other card; reject self-references and the
-  same source card in multiple roles. Feed active source backgrounds to MFLUX
-  in that fixed order, omit missing roles, and do not inject source
-  Descriptions.
+  Setting. Each accepts at most one other card and rejects self-references, but
+  one source card may fill multiple roles. Group roles by active source
+  background, feed each unique image to MFLUX once in first-role order, combine
+  its role instructions, and do not inject source Descriptions into the image
+  prompt.
 - Compose background prompts deterministically from the active revision's
   Description plus fixed instructions for assigned reference roles. Hotspots
   must not alter image prompts.
@@ -68,20 +69,24 @@ for live Ollama and MFLUX runs.
   blocking decision dialog only when proceeding could lose persisted work and
   Undo cannot recover it.
 - Enrich Description is text-only and requires authored Description text. It
-  must not send current or referenced images to Ollama. Present an editable,
-  session-only proposal and apply only the accepted Description through one
-  undoable command.
+  must not send current or referenced images to Ollama. Give it role-scoped
+  generation-time Description provenance for referenced backgrounds, then
+  apply its result directly through one undoable command.
 - Store each hotspot set under exactly one complete card revision. Replacing a
   background preserves its hotspots so the author can review and adjust them
   manually.
-- Hotspots may have no polygons. Area-less hotspots retain their label and
-  destination in storage and are ignored by Run-mode hit testing.
+- Hotspots may have no polygons. Derive every hotspot's label from its resolved
+  destination card's current name, or `Unresolved`; do not expose separate
+  label editing. Area-less hotspots retain their destination in storage and are
+  ignored by Run-mode hit testing.
 - Keep Author canvas selection hierarchical: a selected vertex belongs to a
   selected polygon, which belongs to the selected hotspot. Inspector
   synchronization and same-revision edits must not discard a valid more
   specific selection.
-- Suppress stale enrichment results after relevant revision, Description,
-  project, or mode changes.
+- Suppress stale enrichment results after relevant target revision,
+  Description, reference assignment, source revision/background, project, or
+  mode changes. Editing source text without regenerating its referenced
+  background must not stale generation-time provenance.
 - Check local AI services on entry to Author mode, with concurrent checks
   deduplicated. Entering Run mode must not start AI work and must suppress
   pending AI results.

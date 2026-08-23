@@ -28,19 +28,26 @@ manages Mode and hotspot visibility.
 The Background inspector contains Description, Enrich Description, Identity,
 Visual style, and Setting card selectors, Generate Image, and Clear Image
 controls. Each reference role can select one other card; the same card cannot
-fill multiple roles. Generate uses each referenced card's active background in
-Identity, Visual style, Setting order; missing roles are omitted and source
-Descriptions are not injected. Background prompts are composed deterministically
-from the target revision Description and fixed role instructions. Generated
-images are the only supported background source. Generate and Clear apply
-directly to the active revision; Enrich Description produces an editable,
-session-only text proposal that must be applied or discarded explicitly.
+reference itself. Generate groups roles that use the same active source
+background, sends each unique image once in Identity, Visual style, Setting
+order, and combines its role instructions. Source Descriptions are not injected
+into the MFLUX prompt. Background prompts are composed deterministically from
+the target revision Description and fixed role instructions. Generated images
+are the only supported background source. Generate, Clear, and Enrich
+Description apply directly to the active revision and expose a history-safe
+Undo action.
 Existing images remain in place until replacement succeeds, and successful
 changes offer a dismissible, history-safe Undo action in the notification bar.
-Enrichment never reads the current image and requires authored Description text.
+Enrichment never reads an image and requires authored Description text. It uses
+the generation-time Descriptions of referenced backgrounds as role-scoped text
+provenance so the enriched target stays compatible with their Identity, Visual
+style, and Setting contributions.
 
 The Hotspots inspector is the sole source of interaction semantics. A new
 hotspot is persisted and selected immediately, even before it has an area;
+its displayed name is always its destination card's current name, or
+`Unresolved` when it has no resolved destination. Hotspot names are not edited
+separately.
 clicking empty canvas begins a polygon for the selected hotspot and creates one
 first when needed. Canvas editing uses hierarchical hotspot, area, and vertex
 selection: drag an area or vertex to move it, use the edge `+` or double-click

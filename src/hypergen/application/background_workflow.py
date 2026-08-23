@@ -154,7 +154,7 @@ class BackgroundWorkflow(QObject):
         settings = self._settings_provider()
         reference_image_paths = tuple(
             self._reference_asset_path(reference)
-            for reference in references
+            for reference in self._unique_references(references)
         )
         request_id = uuid4()
         asset_id = uuid4()
@@ -500,6 +500,23 @@ class BackgroundWorkflow(QObject):
                 "reference image is unavailable"
             )
         return path
+
+    @staticmethod
+    def _unique_references(
+        references: tuple[_GenerationReferenceTarget, ...],
+    ) -> tuple[_GenerationReferenceTarget, ...]:
+        unique: list[_GenerationReferenceTarget] = []
+        seen: set[tuple[UUID, UUID, UUID]] = set()
+        for reference in references:
+            key = (
+                reference.card_id,
+                reference.revision_id,
+                reference.background_id,
+            )
+            if key not in seen:
+                seen.add(key)
+                unique.append(reference)
+        return tuple(unique)
 
     @staticmethod
     def _card(document: Stack, card_id: UUID) -> Card:
