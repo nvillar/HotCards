@@ -71,7 +71,12 @@ for live Ollama and MFLUX runs.
 - Enrich Description is text-only and requires authored Description text. It
   must not send current or referenced images to Ollama. Give it role-scoped
   generation-time Description provenance for referenced backgrounds, then
-  apply its result directly through one undoable command.
+  apply its result directly through one undoable command. Assigned references
+  replace conflicting authored details within their role rather than blending
+  both versions. Require distinctive source-language overlap for every assigned
+  role, including style-specific cues for Visual style, reject recognized
+  conflicting authored styles that remain, and reject newly invented quoted
+  visible text.
 - Store each hotspot set under exactly one complete card revision. Replacing a
   background preserves its hotspots so the author can review and adjust them
   manually.
