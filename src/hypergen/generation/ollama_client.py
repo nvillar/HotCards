@@ -116,8 +116,8 @@ class OllamaRuntime:
             timeout=settings.request_timeout_seconds,
         )
 
-    def require_model(self, *, capabilities: frozenset[str] = frozenset()) -> None:
-        """Check model availability and required capabilities with actionable errors."""
+    def installed_models(self) -> tuple[str, ...]:
+        """List installed model tags in stable display order."""
         try:
             listed = self._client.list()
         except (httpx.HTTPError, RequestError, ResponseError) as error:
@@ -125,12 +125,20 @@ class OllamaRuntime:
                 f"Cannot reach Ollama at {self.settings.endpoint}. "
                 "Start the Ollama daemon and verify the configured endpoint."
             ) from error
+        return tuple(
+            sorted(
+                {
+                    model.model
+                    for model in getattr(listed, "models", ())
+                    if getattr(model, "model", None) is not None
+                },
+                key=str.casefold,
+            )
+        )
 
-        available_models = {
-            model.model
-            for model in getattr(listed, "models", ())
-            if getattr(model, "model", None) is not None
-        }
+    def require_model(self, *, capabilities: frozenset[str] = frozenset()) -> None:
+        """Check model availability and required capabilities with actionable errors."""
+        available_models = set(self.installed_models())
         if self.settings.model not in available_models:
             raise ModelUnavailableError(
                 f"Ollama model {self.settings.model!r} is not installed. "

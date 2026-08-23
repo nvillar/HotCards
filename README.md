@@ -48,18 +48,22 @@ same geometry actions, and successful edits offer a dismissible Undo. Replacing
 a background preserves its hotspots so the author can review and adjust them
 manually. Run mode supports deterministic hotspot navigation, Back/Restart
 history, and configurable overlays. Local AI services are checked automatically
-when Author mode is entered; Run mode starts no AI work.
+when Author mode is entered; Run mode starts no AI work. The status bar selects
+an installed Ollama LLM and either FLUX.2 Klein 4B or FLUX.2 Klein 9B KV. The
+9B KV option is visibly marked Non-Commercial.
 
 Transient outcomes, failures, Run warnings, and Undo actions appear in one
 notification bar below the toolbar. Reversible deletions and replacements apply
-directly and offer Undo; field validation remains beside the responsible input,
-while the status bar is reserved for passive document and AI-service state.
+directly and offer Undo; field validation remains beside the responsible input.
+AI failures and recovery actions stay in the notification bar rather than the
+model selectors.
 
 ## Setup and run
 
 Prerequisites: Python 3.12 and [uv](https://docs.astral.sh/uv/). To enable
-generation, also run Ollama with the configured model (default:
-`qwen3.5:9b-mlx`) and cache the selected MFLUX model locally.
+generation, also run Ollama with an installed text model (default:
+`qwen3.5:9b-mlx`) and cache the selected MFLUX model locally. FLUX.2 Klein 4B
+uses Apache 2.0; FLUX.2 Klein 9B KV uses the FLUX Non-Commercial License.
 
 ```sh
 uv sync

@@ -87,6 +87,7 @@ def _default_model_factory(model_identifier: str, quantization: int | None) -> M
     configurations = {
         "flux2-klein-4b": ModelConfig.flux2_klein_4b,
         "flux2-klein-9b": ModelConfig.flux2_klein_9b,
+        "flux2-klein-9b-kv": ModelConfig.flux2_klein_9b,
     }
     configuration_factory = configurations.get(model_identifier)
     if configuration_factory is None:

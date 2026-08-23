@@ -82,6 +82,9 @@ for live Ollama and MFLUX runs.
 - Check local AI services on entry to Author mode, with concurrent checks
   deduplicated. Entering Run mode must not start AI work and must suppress
   pending AI results.
+- Keep LLM and image-model selectors in the status bar and persist them through
+  Qt settings. List installed Ollama models; offer FLUX.2 Klein 4B and visibly
+  Non-Commercial 9B KV. Keep model fields out of Advanced Settings.
 - Represent a revision's applied hotspot set as `HotspotSet | None`.
   `None` means no set has been applied; an empty `HotspotSet` means an applied
   set currently contains no interactions.
@@ -103,7 +106,7 @@ for live Ollama and MFLUX runs.
 - Validate model responses strictly. No arbitrary model output may become
   executable.
 - Treat paths in stack JSON as untrusted relative data. Prevent path traversal
-  outside the stack directory and never allow image imports to overwrite
+  outside the stack directory and never allow image asset writes to overwrite
   arbitrary files.
 - Keep stack-owned settings limited to portable document behavior. Store
   machine-local model/service settings through Qt settings and evaluation
