@@ -8,11 +8,6 @@ from hypergen.generation.errors import (
     ModelUnavailableError,
     ServiceUnavailableError,
 )
-from hypergen.generation.image_description import (
-    ImageDescriptionRequest,
-    ImageDescriptionResult,
-    OllamaImageDescriber,
-)
 from hypergen.generation.scene_enrichment import (
     OllamaSceneEnricher,
     SceneEnrichmentRequest,
@@ -21,13 +16,10 @@ from hypergen.generation.scene_enrichment import (
 
 __all__ = [
     "GenerationError",
-    "ImageDescriptionRequest",
-    "ImageDescriptionResult",
     "ImageGenerationError",
     "ModelLoadError",
     "ModelResponseError",
     "ModelUnavailableError",
-    "OllamaImageDescriber",
     "OllamaSceneEnricher",
     "SceneEnrichmentRequest",
     "SceneEnrichmentResult",

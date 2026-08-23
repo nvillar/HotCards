@@ -52,17 +52,19 @@ for live Ollama and MFLUX runs.
   its hotspot semantics and immutable background reference.
 - Compose background prompts deterministically from the active revision's
   Description plus selected stack Style. Hotspots must not alter image prompts.
-- Apply Generate, Import, Clear, and Enrich directly through document
-  commands. Keep an existing image visible until replacement succeeds, then
-  expose a dismissible Undo bound to the exact current history token.
+- Support generated backgrounds only; do not add image import. Apply Generate
+  and Clear directly through document commands. Keep an existing image visible
+  until replacement succeeds, then expose a dismissible Undo bound to the exact
+  current history token.
 - Apply reversible deletions and replacements without confirmation. Report
   outcomes, failures, Run warnings, and Undo actions in the global notification
   bar; keep field validation beside its input and the status bar passive. Use a
   blocking decision dialog only when proceeding could lose persisted work and
   Undo cannot recover it.
-- With a readable active background, Enrich describes its visible details and
-  merges them with the authored Description and selected Style; without one, it
-  is text-only. Apply only the final Description through one undoable command.
+- Enrich Description is text-only and requires authored Description text. It
+  must not send current or referenced images to Ollama. Present an editable,
+  session-only proposal and apply only the accepted Description through one
+  undoable command.
 - Store each hotspot set under exactly one complete card revision. Replacing a
   background preserves its hotspots so the author can review and adjust them
   manually.
@@ -72,8 +74,8 @@ for live Ollama and MFLUX runs.
   selected polygon, which belongs to the selected hotspot. Inspector
   synchronization and same-revision edits must not discard a valid more
   specific selection.
-- Suppress stale model results after relevant revision, image, Description,
-  Style, project, or mode changes.
+- Suppress stale enrichment results after relevant revision, Description,
+  project, or mode changes.
 - Check local AI services on entry to Author mode, with concurrent checks
   deduplicated. Entering Run mode must not start AI work and must suppress
   pending AI results.

@@ -18,19 +18,20 @@ autosaved atomically after creation or opening. At startup, HyperGen lists
 projects in `~/Documents/HyperGen` and offers direct Open and Create actions.
 
 Each card owns one or more numbered revisions. A revision contains its
-Description, selected stack Style, optional blank/generated/imported background,
-and hotspot set. The compact header above the canvas edits the card name and
-selects, duplicates, or deletes revisions; the toolbar manages Mode, hotspot
-visibility, and the stack-wide Style library.
+Description, selected stack Style, optional generated background, and hotspot
+set. The compact header above the canvas edits the card name and selects,
+duplicates, or deletes revisions; the toolbar manages Mode, hotspot visibility,
+and the stack-wide Style library.
 
-The Background inspector contains Description, Enrich, Generate Image, Style,
-Import Image, and Clear Image controls. Background prompts are composed
-deterministically from the revision Description and selected Style. Generate,
-Import, Clear, and Enrich apply directly to the active revision. Existing
-images remain in place until replacement succeeds, and successful changes
-offer a dismissible, history-safe Undo action in the notification bar. With a
-readable image, Enrich first describes visible details and incorporates them
-into the revised Description; otherwise it performs text-only enrichment.
+The Background inspector contains Description, Enrich Description, Generate
+Image, Style, and Clear Image controls. Background prompts are composed
+deterministically from the revision Description and selected Style. Generated
+images are the only supported background source. Generate and Clear apply
+directly to the active revision; Enrich Description produces an editable,
+session-only text proposal that must be applied or discarded explicitly.
+Existing images remain in place until replacement succeeds, and successful
+changes offer a dismissible, history-safe Undo action in the notification bar.
+Enrichment never reads the current image and requires authored Description text.
 
 The Hotspots inspector is the sole source of interaction semantics. A new
 hotspot is persisted and selected immediately, even before it has an area;

@@ -6,12 +6,10 @@ import secrets
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
 from uuid import UUID, uuid4
 
-from PIL import Image, ImageOps, UnidentifiedImageError
 from pydantic import ValidationError
 from PySide6.QtCore import QObject, Signal
 
@@ -69,69 +67,6 @@ class _GenerationTarget:
 
 
 GenerationSettingsProvider = Callable[[], BackgroundGenerationSettings]
-
-
-def _crop_box(
-    source_width: int,
-    source_height: int,
-    target_width: int,
-    target_height: int,
-    *,
-    position_x: float,
-    position_y: float,
-) -> tuple[int, int, int, int]:
-    source_ratio = source_width / source_height
-    target_ratio = target_width / target_height
-    if source_ratio > target_ratio:
-        crop_width = source_height * target_ratio
-        left = (source_width - crop_width) * position_x
-        return round(left), 0, round(left + crop_width), source_height
-    crop_height = source_width / target_ratio
-    top = (source_height - crop_height) * position_y
-    return 0, round(top), source_width, round(top + crop_height)
-
-
-def prepare_import_image(
-    source_path: Path,
-    output_path: Path,
-    *,
-    width: int,
-    height: int,
-    position_x: float = 0.5,
-    position_y: float = 0.5,
-) -> None:
-    """Decode, orient, crop-to-fill, and write a correctly sized PNG."""
-    if not 0.0 <= position_x <= 1.0 or not 0.0 <= position_y <= 1.0:
-        raise BackgroundWorkflowError("crop positions must be between zero and one")
-    if output_path.exists():
-        raise BackgroundWorkflowError(f"candidate output already exists: {output_path}")
-    try:
-        with Image.open(source_path) as opened:
-            image = ImageOps.exif_transpose(opened)
-            image.load()
-            crop_box = _crop_box(
-                image.width,
-                image.height,
-                width,
-                height,
-                position_x=position_x,
-                position_y=position_y,
-            )
-            prepared = image.crop(crop_box).resize(
-                (width, height),
-                Image.Resampling.LANCZOS,
-            )
-            if prepared.mode not in {"RGB", "RGBA"}:
-                prepared = prepared.convert(
-                    "RGBA" if "A" in prepared.getbands() else "RGB"
-                )
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            prepared.save(output_path, format="PNG")
-    except (OSError, UnidentifiedImageError, Image.DecompressionBombError) as error:
-        output_path.unlink(missing_ok=True)
-        raise BackgroundWorkflowError(
-            f"Could not import image {source_path.name!r}: {error}"
-        ) from error
 
 
 class BackgroundWorkflow(QObject):
@@ -234,50 +169,6 @@ class BackgroundWorkflow(QObject):
         )
         operation.failed.connect(partial(self._operation_failed, request_id))
         return operation
-
-    def import_image(
-        self,
-        card_id: UUID,
-        source_path: Path,
-        *,
-        position_x: float = 0.5,
-        position_y: float = 0.5,
-    ) -> Stack:
-        """Prepare, store, and directly apply one imported image."""
-        self._require_ready(card_id)
-        document = self.controller.document
-        card = self._card(document, card_id)
-        asset_id = uuid4()
-        temporary_path = self._temporary_directory / f"import-{asset_id}.png"
-        prepare_import_image(
-            source_path,
-            temporary_path,
-            width=document.canvas.width,
-            height=document.canvas.height,
-            position_x=position_x,
-            position_y=position_y,
-        )
-        try:
-            store = self._require_store()
-            image_path = store.import_image(
-                temporary_path,
-                card_id=card.id,
-                asset_id=asset_id,
-            )
-        finally:
-            temporary_path.unlink(missing_ok=True)
-        background = ImportedBackground(
-            id=asset_id,
-            image_path=image_path,
-            source_filename=source_path.name,
-            created_at=datetime.now(UTC),
-        )
-        return self._apply_background(
-            card.id,
-            card.active_revision.id,
-            background,
-            "Image imported",
-        )
 
     def clear_background(self, card_id: UUID) -> Stack:
         """Clear only the active revision's background."""
@@ -529,5 +420,4 @@ __all__ = [
     "BackgroundWorkflow",
     "BackgroundWorkflowError",
     "GenerationSettingsProvider",
-    "prepare_import_image",
 ]

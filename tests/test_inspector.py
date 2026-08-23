@@ -60,10 +60,9 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     assert inspector.inspector_tabs.tabText(0) == "Background"
     assert inspector.inspector_tabs.tabText(1) == "Hotspots"
     assert inspector.scene_edit.placeholderText() == "Description"
-    assert inspector.enrich_scene_button.text() == "Enrich"
+    assert inspector.enrich_scene_button.text() == "Enrich Description"
     assert inspector.generate_background_button.text() == "Generate Image"
     assert inspector.style_combo.currentText() == "Watercolor"
-    assert inspector.import_background_button.text() == "Import Image..."
     assert inspector.clear_background_button.text() == "Clear Image"
 
     visible_copy = " ".join(label.text() for label in inspector.findChildren(QLabel))
@@ -210,8 +209,6 @@ def test_ai_activity_is_reflected_on_the_initiating_buttons(
     inspector.set_background_capabilities(
         can_generate=False,
         generate_reason="Generating",
-        can_import=False,
-        import_reason="Generating",
         busy=True,
         generating=True,
     )
@@ -223,6 +220,29 @@ def test_ai_activity_is_reflected_on_the_initiating_buttons(
 
     assert inspector.generate_background_button.text() == "Generating…"
     assert inspector.enrich_scene_button.text() == "Enriching…"
+
+
+def test_enrichment_proposal_can_be_edited_applied_or_discarded(
+    application: QApplication,
+) -> None:
+    inspector = Inspector(DocumentController(Stack(name="Demo")))
+    applied: list[str] = []
+    discarded: list[bool] = []
+    inspector.enrichment_apply_requested.connect(applied.append)
+    inspector.enrichment_discard_requested.connect(
+        lambda: discarded.append(True)
+    )
+
+    inspector.show_enrichment_proposal("Expanded description")
+    assert not inspector.enrichment_review.isHidden()
+    inspector.enrichment_review_edit.setPlainText("Edited description")
+    inspector.apply_enrichment_button.click()
+    inspector.discard_enrichment_button.click()
+
+    assert applied == ["Edited description"]
+    assert discarded == [True]
+    inspector.clear_enrichment_proposal()
+    assert inspector.enrichment_review.isHidden()
 
 
 def test_styles_dialog_manages_styles_and_blocks_in_use_deletion(

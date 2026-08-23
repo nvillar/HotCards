@@ -106,10 +106,7 @@ class FakeWorkers(QObject):
         return operation
 
     def run_ollama(self, _work: object, *, stage: str) -> FakeOperation:
-        assert stage in {
-            "describing background",
-            "enriching Description",
-        }
+        assert stage == "enriching Description"
         return FakeOperation()
 
     def shutdown(self, *, wait_milliseconds: int = 0) -> None:
@@ -128,16 +125,12 @@ class FakeBackgroundWorkflow(QObject):
         self.controller = controller
         self.busy = False
         self.generate_calls: list[object] = []
-        self.import_calls: list[tuple[object, Path]] = []
         self.clear_calls: list[object] = []
         self.cancel_calls = 0
         self.closed = False
 
     def generate(self, card_id: object) -> None:
         self.generate_calls.append(card_id)
-
-    def import_image(self, card_id: object, source_path: Path, **_kwargs: object) -> None:
-        self.import_calls.append((card_id, source_path))
 
     def clear_background(self, card_id: object) -> None:
         self.clear_calls.append(card_id)
@@ -429,10 +422,17 @@ def test_successful_save_as_cancels_generation_and_expires_undo(
             "HyperGen Stack (*.hypergen)",
         ),
     )
+    enrichment_cancellations: list[bool] = []
+    monkeypatch.setattr(
+        window.scene_enrichment_workflow,
+        "cancel",
+        lambda: enrichment_cancellations.append(True),
+    )
 
     window.save_as()
 
     assert background.cancel_calls == 1
+    assert enrichment_cancellations == [True]
     assert window.notification_bar.current_key != "undo"
     assert not controller.can_undo
 
@@ -559,6 +559,33 @@ def test_notification_undo_expires_after_another_command(
     assert controller.document.cards[0].name == "Second"
 
 
+def test_description_edits_and_notification_undo_cancel_enrichment(
+    application: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window, controller, _workers, _background = _window()
+    cancellations: list[bool] = []
+    monkeypatch.setattr(
+        window.scene_enrichment_workflow,
+        "cancel",
+        lambda: cancellations.append(True),
+    )
+
+    window.inspector.scene_edit.setPlainText("Edited draft")
+    assert cancellations == [True]
+
+    card = controller.document.cards[0]
+    changed = controller.execute(RenameCardCommand(card_id=card.id, name="Renamed"))
+    window.render_document(changed)
+    token = controller.current_undo_token
+    assert token is not None
+    window._show_undo_notification("Renamed", token)
+    window._undo_notification()
+
+    assert cancellations == [True, True]
+    assert controller.document.cards[0].name == "Foyer"
+
+
 def test_notification_undo_cannot_mutate_document_in_run_mode(
     application: QApplication,
 ) -> None:
@@ -602,7 +629,7 @@ def test_background_success_clears_previous_cancellation_notice(
     window._background_progress_changed("Generation cancelled")
     assert window.notification_bar.current_key == "background-cancelled"
 
-    window._background_progress_changed("Image imported")
+    window._background_progress_changed("Image generated")
     assert window.notification_bar.isHidden()
 
 
