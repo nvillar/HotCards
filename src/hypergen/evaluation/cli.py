@@ -11,6 +11,10 @@ from hypergen.evaluation.e2e import (
     default_e2e_output_dir,
     run_e2e_evaluation,
 )
+from hypergen.evaluation.flux_references import (
+    default_reference_output_dir,
+    run_flux_reference_evaluation,
+)
 from hypergen.evaluation.hotspots import (
     DEFAULT_OLLAMA_MODELS,
     HotspotEvaluationSettings,
@@ -114,6 +118,28 @@ def build_parser() -> argparse.ArgumentParser:
     e2e.add_argument("--ollama-timeout", type=_positive_float, default=120.0)
     e2e.add_argument("--ollama-num-predict", type=_positive_int, default=1024)
     e2e.add_argument("--ollama-context-length", type=_positive_int, default=8192)
+    references = subparsers.add_parser(
+        "flux-references",
+        help="measure FLUX.2 Klein multi-reference identity and style behavior",
+    )
+    references.add_argument("--output-dir", type=Path)
+    references.add_argument("--stack", type=Path, required=True)
+    references.add_argument(
+        "--graphic-style-image",
+        type=Path,
+        default=Path("evals/cases/hotspots/workshop.png"),
+    )
+    references.add_argument("--mflux-model", default="flux2-klein-4b")
+    references.add_argument("--seed", type=int, default=42)
+    references.add_argument("--quantization", type=int)
+    references.add_argument("--width", type=_positive_int, default=1024)
+    references.add_argument("--height", type=_positive_int, default=768)
+    references.add_argument("--steps", type=_positive_int, default=4)
+    references.add_argument(
+        "--kv-cache",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
     return parser
 
 
@@ -173,6 +199,19 @@ def run_cli(arguments: Sequence[str] | None = None) -> int:
                     ollama_num_predict=args.ollama_num_predict,
                     ollama_context_length=args.ollama_context_length,
                 )
+            )
+        elif args.command == "flux-references":
+            result_path = run_flux_reference_evaluation(
+                output_dir=args.output_dir or default_reference_output_dir(),
+                stack_path=args.stack,
+                graphic_style_path=args.graphic_style_image,
+                model_identifier=args.mflux_model,
+                quantization=args.quantization,
+                seed=args.seed,
+                width=args.width,
+                height=args.height,
+                step_count=args.steps,
+                use_kv_cache=args.kv_cache,
             )
         else:
             build_parser().error(f"unsupported command: {args.command}")
