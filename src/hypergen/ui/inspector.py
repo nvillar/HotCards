@@ -99,7 +99,6 @@ class Inspector(QWidget):
     import_background_requested = Signal()
     clear_background_requested = Signal()
     enrich_scene_requested = Signal()
-    remap_hotspots_requested = Signal()
     hotspot_selected = Signal(object)
     change_applied = Signal(str, object)
     render_inputs_changed = Signal()
@@ -218,8 +217,6 @@ class Inspector(QWidget):
             accessible_name="Move hotspot down",
             tooltip="Move hotspot down",
         )
-        self.remap_hotspots_button = QPushButton("Remap")
-        self.remap_hotspots_button.setObjectName("remapHotspotsButton")
         self.add_hotspot_button = _compact_text_button(
             "+",
             object_name="addHotspotButton",
@@ -234,7 +231,6 @@ class Inspector(QWidget):
         )
         controls.addWidget(self.move_hotspot_up_button)
         controls.addWidget(self.move_hotspot_down_button)
-        controls.addWidget(self.remap_hotspots_button)
         controls.addStretch(1)
         controls.addWidget(self.add_hotspot_button)
         controls.addWidget(self.delete_hotspot_button)
@@ -262,37 +258,18 @@ class Inspector(QWidget):
         self.scene_edit.editing_finished.connect(self.commit_revision_metadata)
         self.scene_edit.textChanged.connect(self.render_inputs_changed)
         self.enrich_scene_button.clicked.connect(self.enrich_scene_requested)
-        self.generate_background_button.clicked.connect(
-            self.generate_background_requested
-        )
+        self.generate_background_button.clicked.connect(self.generate_background_requested)
         self.style_combo.currentIndexChanged.connect(self._style_changed)
         self.style_combo.currentIndexChanged.connect(self.render_inputs_changed)
-        self.import_background_button.clicked.connect(
-            self.import_background_requested
-        )
-        self.clear_background_button.clicked.connect(
-            self.clear_background_requested
-        )
-        self.hotspot_list.currentItemChanged.connect(
-            self._hotspot_selection_changed
-        )
-        self.move_hotspot_up_button.clicked.connect(
-            lambda: self._move_hotspot(-1)
-        )
-        self.move_hotspot_down_button.clicked.connect(
-            lambda: self._move_hotspot(1)
-        )
-        self.remap_hotspots_button.clicked.connect(
-            self.remap_hotspots_requested
-        )
+        self.import_background_button.clicked.connect(self.import_background_requested)
+        self.clear_background_button.clicked.connect(self.clear_background_requested)
+        self.hotspot_list.currentItemChanged.connect(self._hotspot_selection_changed)
+        self.move_hotspot_up_button.clicked.connect(lambda: self._move_hotspot(-1))
+        self.move_hotspot_down_button.clicked.connect(lambda: self._move_hotspot(1))
         self.add_hotspot_button.clicked.connect(self._add_hotspot)
         self.delete_hotspot_button.clicked.connect(self._delete_hotspot)
-        self.hotspot_label_edit.editingFinished.connect(
-            self._commit_hotspot_label
-        )
-        self.hotspot_destination_combo.currentIndexChanged.connect(
-            self._destination_changed
-        )
+        self.hotspot_label_edit.editingFinished.connect(self._commit_hotspot_label)
+        self.hotspot_destination_combo.currentIndexChanged.connect(self._destination_changed)
 
     def render(self, document: Stack, selected_card_id: UUID | None) -> None:
         previous_card_id = self.selected_card_id
@@ -305,11 +282,7 @@ class Inspector(QWidget):
         self._rendering = True
         try:
             card = next(
-                (
-                    candidate
-                    for candidate in document.cards
-                    if candidate.id == selected_card_id
-                ),
+                (candidate for candidate in document.cards if candidate.id == selected_card_id),
                 None,
             )
             self.selected_card_id = card.id if card is not None else None
@@ -326,10 +299,7 @@ class Inspector(QWidget):
                 return
             self.pages.setCurrentIndex(1)
             revision = card.active_revision
-            same_revision = (
-                previous_card_id == card.id
-                and previous_revision_id == revision.id
-            )
+            same_revision = previous_card_id == card.id and previous_revision_id == revision.id
             if not same_revision:
                 self._set_error(self.description_error, "")
                 self._set_error(self.style_error, "")
@@ -398,15 +368,11 @@ class Inspector(QWidget):
             None,
         )
         return bool(
-            self.scene_edit.toPlainText().strip()
-            or (style is not None and style.prompt.strip())
+            self.scene_edit.toPlainText().strip() or (style is not None and style.prompt.strip())
         )
 
     def has_description_input(self) -> bool:
-        return bool(
-            self.selected_card_id is not None
-            and self.scene_edit.toPlainText().strip()
-        )
+        return bool(self.selected_card_id is not None and self.scene_edit.toPlainText().strip())
 
     def set_background_capabilities(
         self,
@@ -421,9 +387,7 @@ class Inspector(QWidget):
         generating: bool,
     ) -> None:
         self.generate_background_button.setEnabled(can_generate and not busy)
-        self.generate_background_button.setText(
-            "Generating…" if generating else "Generate Image"
-        )
+        self.generate_background_button.setText("Generating…" if generating else "Generate Image")
         self.generate_background_button.setToolTip(generate_reason)
         self.import_background_button.setEnabled(can_import and not busy)
         self.import_background_button.setToolTip(import_reason)
@@ -440,17 +404,6 @@ class Inspector(QWidget):
         self.enrich_scene_button.setEnabled(can_enrich)
         self.enrich_scene_button.setText("Enriching…" if busy else "Enrich")
         self.enrich_scene_button.setToolTip(reason)
-
-    def set_hotspot_remap_capabilities(
-        self,
-        *,
-        can_remap: bool,
-        reason: str,
-        busy: bool,
-    ) -> None:
-        self.remap_hotspots_button.setEnabled(can_remap)
-        self.remap_hotspots_button.setText("Remapping…" if busy else "Remap")
-        self.remap_hotspots_button.setToolTip(reason)
 
     @property
     def selected_interaction_id(self) -> UUID | None:
@@ -485,11 +438,7 @@ class Inspector(QWidget):
         revision: CardRevision,
     ) -> None:
         desired_id = self.selected_interaction_id
-        interactions = (
-            revision.hotspot_set.interactions
-            if revision.hotspot_set is not None
-            else ()
-        )
+        interactions = revision.hotspot_set.interactions if revision.hotspot_set is not None else ()
         with QSignalBlocker(self.hotspot_list):
             self.hotspot_list.clear()
             for interaction in interactions:
@@ -500,8 +449,7 @@ class Inspector(QWidget):
                 (
                     row
                     for row in range(self.hotspot_list.count())
-                    if self.hotspot_list.item(row).data(Qt.ItemDataRole.UserRole)
-                    == desired_id
+                    if self.hotspot_list.item(row).data(Qt.ItemDataRole.UserRole) == desired_id
                 ),
                 0 if interactions else -1,
             )
@@ -526,9 +474,7 @@ class Inspector(QWidget):
             has_interaction and current_row < self.hotspot_list.count() - 1
         )
         with QSignalBlocker(self.hotspot_label_edit):
-            self.hotspot_label_edit.setText(
-                interaction.label if interaction is not None else ""
-            )
+            self.hotspot_label_edit.setText(interaction.label if interaction is not None else "")
         with QSignalBlocker(self.hotspot_destination_combo):
             self.hotspot_destination_combo.clear()
             self.hotspot_destination_combo.addItem("Unresolved", None)
@@ -548,11 +494,7 @@ class Inspector(QWidget):
                 target = interaction.action.target
                 self.hotspot_destination_combo.setItemText(
                     0,
-                    (
-                        f"Unresolved ({target.target_name})"
-                        if target.target_name
-                        else "Unresolved"
-                    ),
+                    (f"Unresolved ({target.target_name})" if target.target_name else "Unresolved"),
                 )
                 self.hotspot_destination_combo.setCurrentIndex(0)
 
@@ -581,11 +523,7 @@ class Inspector(QWidget):
     ) -> None:
         if self._rendering:
             return
-        interaction_id = (
-            current.data(Qt.ItemDataRole.UserRole)
-            if current is not None
-            else None
-        )
+        interaction_id = current.data(Qt.ItemDataRole.UserRole) if current is not None else None
         self._render_hotspot_properties(
             self.controller.document,
             self._selected_interaction(),
@@ -727,9 +665,7 @@ class Inspector(QWidget):
         error_label: QLabel | None = None,
         undo_message: str | None = None,
     ) -> bool:
-        target_error = (
-            error_label if error_label is not None else self.hotspot_error
-        )
+        target_error = error_label if error_label is not None else self.hotspot_error
         previous_token = self.controller.current_undo_token
         try:
             changed = self.controller.execute(command)
@@ -741,11 +677,7 @@ class Inspector(QWidget):
         self.render(changed, self.selected_card_id)
         self.document_changed.emit(changed)
         token = self.controller.current_undo_token
-        if (
-            undo_message is not None
-            and token is not None
-            and token != previous_token
-        ):
+        if undo_message is not None and token is not None and token != previous_token:
             self.change_applied.emit(undo_message, token)
         return True
 
@@ -756,22 +688,14 @@ class Inspector(QWidget):
 
     def _selected_card(self) -> Card | None:
         return next(
-            (
-                card
-                for card in self.controller.document.cards
-                if card.id == self.selected_card_id
-            ),
+            (card for card in self.controller.document.cards if card.id == self.selected_card_id),
             None,
         )
 
     def _selected_interaction(self) -> Interaction | None:
         card = self._selected_card()
         interaction_id = self.selected_interaction_id
-        if (
-            card is None
-            or interaction_id is None
-            or card.active_revision.hotspot_set is None
-        ):
+        if card is None or interaction_id is None or card.active_revision.hotspot_set is None:
             return None
         return next(
             (
@@ -785,11 +709,7 @@ class Inspector(QWidget):
     @staticmethod
     def _combo_index_for_data(combo: QComboBox, value: object) -> int:
         return next(
-            (
-                index
-                for index in range(combo.count())
-                if combo.itemData(index) == value
-            ),
+            (index for index in range(combo.count()) if combo.itemData(index) == value),
             -1,
         )
 

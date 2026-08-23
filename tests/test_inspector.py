@@ -52,9 +52,7 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
             ),
         ),
     )
-    controller = DocumentController(
-        Stack(name="Demo", styles=(style,), cards=(card,))
-    )
+    controller = DocumentController(Stack(name="Demo", styles=(style,), cards=(card,)))
     inspector = Inspector(controller)
     inspector.render(controller.document, card.id)
 
@@ -67,11 +65,8 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     assert inspector.style_combo.currentText() == "Watercolor"
     assert inspector.import_background_button.text() == "Import Image..."
     assert inspector.clear_background_button.text() == "Clear Image"
-    assert inspector.remap_hotspots_button.text() == "Remap"
 
-    visible_copy = " ".join(
-        label.text() for label in inspector.findChildren(QLabel)
-    )
+    visible_copy = " ".join(label.text() for label in inspector.findChildren(QLabel))
     for obsolete in (
         "Inspector",
         "Scene",
@@ -93,9 +88,7 @@ def test_description_and_style_edits_target_active_revision(
         name="Card",
         revisions=(CardRevision(description="Old", style_id=first.id),),
     )
-    controller = DocumentController(
-        Stack(name="Demo", styles=(first, second), cards=(card,))
-    )
+    controller = DocumentController(Stack(name="Demo", styles=(first, second), cards=(card,)))
     inspector = Inspector(controller)
     inspector.render(controller.document, card.id)
 
@@ -127,9 +120,7 @@ def test_render_preserves_focused_description_and_hotspot_label_drafts(
     inspector.scene_edit.setFocus()
     inspector.scene_edit.setPlainText("Uncommitted description")
     application.processEvents()
-    changed = controller.execute(
-        RenameCardCommand(card_id=card.id, name="Renamed")
-    )
+    changed = controller.execute(RenameCardCommand(card_id=card.id, name="Renamed"))
     inspector.render(changed, card.id)
     assert inspector.scene_edit.toPlainText() == "Uncommitted description"
 
@@ -175,9 +166,7 @@ def test_hotspot_properties_reorder_and_delete_use_commands(
             ),
         ),
     )
-    controller = DocumentController(
-        Stack(name="Demo", cards=(source, destination))
-    )
+    controller = DocumentController(Stack(name="Demo", cards=(source, destination)))
     inspector = Inspector(controller)
     inspector.render(controller.document, source.id)
 
@@ -205,9 +194,7 @@ def test_hotspot_properties_reorder_and_delete_use_commands(
     )
 
     applied: list[tuple[str, object]] = []
-    inspector.change_applied.connect(
-        lambda message, token: applied.append((message, token))
-    )
+    inspector.change_applied.connect(lambda message, token: applied.append((message, token)))
     inspector.delete_hotspot_button.click()
     remaining = controller.document.cards[0].active_revision.hotspot_set
     assert remaining is not None
@@ -233,15 +220,9 @@ def test_ai_activity_is_reflected_on_the_initiating_buttons(
         reason="Enriching",
         busy=True,
     )
-    inspector.set_hotspot_remap_capabilities(
-        can_remap=False,
-        reason="Remapping",
-        busy=True,
-    )
 
     assert inspector.generate_background_button.text() == "Generating…"
     assert inspector.enrich_scene_button.text() == "Enriching…"
-    assert inspector.remap_hotspots_button.text() == "Remapping…"
 
 
 def test_styles_dialog_manages_styles_and_blocks_in_use_deletion(
@@ -252,9 +233,7 @@ def test_styles_dialog_manages_styles_and_blocks_in_use_deletion(
         name="Card",
         revisions=(CardRevision(style_id=style.id),),
     )
-    controller = DocumentController(
-        Stack(name="Demo", styles=(style,), cards=(card,))
-    )
+    controller = DocumentController(Stack(name="Demo", styles=(style,), cards=(card,)))
     dialog = StylesDialog(controller)
 
     assert dialog.style_list.count() == 1

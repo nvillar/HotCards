@@ -17,9 +17,8 @@ uv run pytest
 uv run ruff check .
 uv run ruff format .
 uv run hypergen-eval smoke
-uv run hypergen-eval hotspots
 uv run hypergen-eval images
-uv run hypergen-eval e2e
+uv run hypergen-eval flux-references --stack /path/to/Stack.hypergen
 ```
 
 Ordinary automated tests must not require live model calls. Use recorded
@@ -53,7 +52,7 @@ for live Ollama and MFLUX runs.
   its hotspot semantics and immutable background reference.
 - Compose background prompts deterministically from the active revision's
   Description plus selected stack Style. Hotspots must not alter image prompts.
-- Apply Generate, Import, Clear, Enrich, and Remap directly through document
+- Apply Generate, Import, Clear, and Enrich directly through document
   commands. Keep an existing image visible until replacement succeeds, then
   expose a dismissible Undo bound to the exact current history token.
 - Apply reversible deletions and replacements without confirmation. Report
@@ -65,20 +64,16 @@ for live Ollama and MFLUX runs.
   merges them with the authored Description and selected Style; without one, it
   is text-only. Apply only the final Description through one undoable command.
 - Store each hotspot set under exactly one complete card revision. Replacing a
-  background preserves its hotspots so the author can Remap them.
+  background preserves its hotspots so the author can review and adjust them
+  manually.
 - Hotspots may have no polygons. Area-less hotspots retain their label and
   destination in storage and are ignored by Run-mode hit testing.
 - Keep Author canvas selection hierarchical: a selected vertex belongs to a
   selected polygon, which belongs to the selected hotspot. Inspector
   synchronization and same-revision edits must not discard a valid more
   specific selection.
-- Remap may return only polygons or an unlocated result for opaque,
-  request-local tokens representing existing hotspots. It must preserve IDs,
-  labels, destinations, actions, and order; invalid or missing geometry retains
-  the existing polygons. Apply all batches through one undoable replacement.
-- Do not allow background replacement and Remap to overlap. Suppress stale
-  model results after relevant revision, image, Description, Style, project, or
-  mode changes.
+- Suppress stale model results after relevant revision, image, Description,
+  Style, project, or mode changes.
 - Check local AI services on entry to Author mode, with concurrent checks
   deduplicated. Entering Run mode must not start AI work and must suppress
   pending AI results.
@@ -89,7 +84,7 @@ for live Ollama and MFLUX runs.
   nullable UUID plus status boolean. Store resolved runtime targets by UUID
   after selection. If a destination card is deleted, convert inbound references to
   unresolved while retaining the former target name; do not delete inbound
-  hotspots. Request-local Remap tokens must not enter stack JSON.
+  hotspots.
 - Expose and execute only the `navigate` action initially. Keep the stored action
   representation typed and forward-compatible, and reject unknown action types.
 - Do not add a database, web server, browser UI, plugin system,
