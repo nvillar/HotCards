@@ -52,7 +52,7 @@ def test_smoke_runner_writes_cold_and_warm_stage_results(tmp_path: Path) -> None
     assert set(result["stages"]) == {"image_generation"}
     assert result["render_prompt"] == (
         "A quiet stone castle courtyard at dusk with an arched wooden gate, "
-        "a red travel chest, and a leafy tree.\n\n"
+        "a red travel chest, and a leafy tree. "
         "Restrained storybook ink and watercolor illustration with cool "
         "twilight shadows and warm lantern light."
     )

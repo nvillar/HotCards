@@ -21,8 +21,10 @@ from hypergen.application.run_session import RunSession
 from hypergen.domain.models import (
     Card,
     CardRevision,
+    GeneratedBackground,
     HotspotSet,
-    ImportedBackground,
+    ImageGenerationInputs,
+    ImageGenerationMetadata,
     Interaction,
     NavigateAction,
     Point,
@@ -244,17 +246,29 @@ def build_run_window(
         image = tmp_path / f"{name}.png"
         Image.new("RGB", (1024, 768), color).save(image)
         asset_id = uuid4()
-        image_path = store.import_image(
+        image_path = store.store_image_asset(
             image,
             card_id=card.id,
             asset_id=asset_id,
         )
+        generated_at = datetime.now(UTC)
         return CardRevision(
-            background=ImportedBackground(
+            background=GeneratedBackground(
                 id=asset_id,
                 image_path=image_path,
-                source_filename=image.name,
-                created_at=datetime.now(UTC),
+                generation_metadata=ImageGenerationMetadata(
+                    inputs=ImageGenerationInputs(description=name),
+                    render_prompt=name,
+                    model_identifier="test",
+                    mflux_version="test",
+                    seed=1,
+                    width=1024,
+                    height=768,
+                    step_count=4,
+                    generated_at=generated_at,
+                    duration_seconds=1,
+                ),
+                created_at=generated_at,
             ),
             hotspot_set=HotspotSet(interactions=interactions),
         )

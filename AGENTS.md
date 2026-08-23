@@ -28,7 +28,7 @@ for live Ollama and MFLUX runs.
 ## Repository layout
 
 - `src/hypergen/domain/` — stack models, geometry, validation.
-- `src/hypergen/storage/` — bundle persistence and migrations.
+- `src/hypergen/storage/` — exact-current-schema bundle persistence.
 - `src/hypergen/generation/` — prompt builders and model adapters.
 - `src/hypergen/application/` — document controller, commands, workers.
 - `src/hypergen/ui/` — PySide6 widgets.
@@ -46,12 +46,12 @@ for live Ollama and MFLUX runs.
 - Reuse production prompt builders, schemas, adapters, and geometry validation
   in the evaluation harness. Do not fork generation behavior.
 - Keep each card's complete authoring state in one of its numbered revisions:
-  Description, selected stack Style, optional background, and hotspot set.
+  Description, optional background, fixed card-reference roles, and hotspot set.
   Visible revision numbers are positional; stable UUIDs remain internal.
 - Keep at least one revision per card. Duplicate a complete revision, including
   its hotspot semantics and immutable background reference.
 - Compose background prompts deterministically from the active revision's
-  Description plus selected stack Style. Hotspots must not alter image prompts.
+  Description. Hotspots must not alter image prompts.
 - Support generated backgrounds only; do not add image import. Apply Generate
   and Clear directly through document commands. Keep an existing image visible
   until replacement succeeds, then expose a dismissible Undo bound to the exact

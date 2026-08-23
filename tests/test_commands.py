@@ -10,7 +10,6 @@ from hypergen.application.commands import (
     ActivateRevisionCommand,
     AddInteractionCommand,
     AddPolygonCommand,
-    AddStyleCommand,
     ChangeHotspotDestinationCommand,
     CommandError,
     CreateCardCommand,
@@ -18,10 +17,8 @@ from hypergen.application.commands import (
     DeleteInteractionCommand,
     DeletePolygonCommand,
     DeleteRevisionCommand,
-    DeleteStyleCommand,
     DuplicateRevisionCommand,
     EditRevisionDescriptionCommand,
-    EditStyleCommand,
     RenameCardCommand,
     RenameInteractionCommand,
     ReorderCardCommand,
@@ -30,20 +27,22 @@ from hypergen.application.commands import (
     ReplaceInteractionPolygonsCommand,
     ReplacePolygonCommand,
     ReplaceRevisionBackgroundCommand,
-    SetRevisionStyleCommand,
+    SetRevisionReferenceCommand,
     SetStartCardCommand,
 )
 from hypergen.application.document_controller import DocumentController
 from hypergen.domain.models import (
     Card,
     CardRevision,
-    GenerationStyle,
+    GeneratedBackground,
     HotspotSet,
-    ImportedBackground,
+    ImageGenerationInputs,
+    ImageGenerationMetadata,
     Interaction,
     NavigateAction,
     Point,
     Polygon,
+    ReferenceRole,
     ResolvedCardReference,
     Stack,
     UnresolvedCardReference,
@@ -103,10 +102,10 @@ def test_card_create_rename_reorder_and_start_selection() -> None:
     assert SetStartCardCommand(card_id=None).apply(document).start_card_id is None
 
 
-def test_revision_description_and_style_edits_are_typed_changes() -> None:
+def test_revision_description_and_reference_edits_are_typed_changes() -> None:
     card = Card(name="Card")
-    style = GenerationStyle(name="Woodcut", prompt="Strong carved lines")
-    document = Stack(name="Stack", styles=(style,), cards=(card,))
+    reference = Card(name="Reference")
+    document = Stack(name="Stack", cards=(card, reference))
     revision_id = card.active_revision_id
     assert revision_id is not None
 
@@ -115,22 +114,16 @@ def test_revision_description_and_style_edits_are_typed_changes() -> None:
         revision_id=revision_id,
         value="A quiet library",
     ).apply(document)
-    document = SetRevisionStyleCommand(
+    document = SetRevisionReferenceCommand(
         card_id=card.id,
         revision_id=revision_id,
-        style_id=style.id,
-    ).apply(document)
-    document = EditStyleCommand(
-        style_id=style.id,
-        name="Detailed woodcut",
-        prompt="Fine carved lines",
+        role=ReferenceRole.IDENTITY,
+        reference=ResolvedCardReference(target_card_id=reference.id),
     ).apply(document)
 
     changed = document.cards[0].active_revision
     assert changed.description == "A quiet library"
-    assert changed.style_id == style.id
-    assert document.styles[0].name == "Detailed woodcut"
-    assert document.styles[0].prompt == "Fine carved lines"
+    assert changed.identity == ResolvedCardReference(target_card_id=reference.id)
 
 
 def test_revision_activation_and_complete_hotspot_replacement() -> None:
@@ -326,6 +319,19 @@ def test_delete_card_converts_all_inbound_references_and_clears_start() -> None:
         }
     )
     source, _ = card_with_revision(inbound)
+    source = source.model_copy(
+        update={
+            "revisions": (
+                source.active_revision.model_copy(
+                    update={
+                        "identity": ResolvedCardReference(
+                            target_card_id=destination.id
+                        )
+                    }
+                ),
+            )
+        }
+    )
     document = Stack(
         name="Stack",
         cards=(source, destination),
@@ -340,6 +346,9 @@ def test_delete_card_converts_all_inbound_references_and_clears_start() -> None:
     assert hotspot_set is not None
     target = hotspot_set.interactions[0].action.target
     assert target == UnresolvedCardReference(target_name="Former Hall")
+    assert changed.cards[0].active_revision.identity == UnresolvedCardReference(
+        target_name="Former Hall"
+    )
 
 
 def test_commands_reject_missing_targets_and_invalid_domain_results() -> None:
@@ -354,24 +363,45 @@ def test_commands_reject_missing_targets_and_invalid_domain_results() -> None:
         CreateCardCommand(name=" card ").apply(document)
 
 
-def test_style_deletion_and_background_replacement_are_guarded() -> None:
-    style = GenerationStyle(name="Watercolor", prompt="Soft washes")
+def test_reference_assignment_and_background_replacement_are_guarded() -> None:
     card = Card(name="Card")
+    reference = Card(name="Reference")
     revision_id = card.active_revision_id
     assert revision_id is not None
-    document = Stack(name="Stack", styles=(style,), cards=(card,))
-    document = SetRevisionStyleCommand(
+    document = Stack(name="Stack", cards=(card, reference))
+    document = SetRevisionReferenceCommand(
         card_id=card.id,
         revision_id=revision_id,
-        style_id=style.id,
+        role=ReferenceRole.SETTING,
+        reference=ResolvedCardReference(target_card_id=reference.id),
     ).apply(document)
 
-    with pytest.raises(CommandError, match="used by a revision"):
-        DeleteStyleCommand(style_id=style.id).apply(document)
+    with pytest.raises(ValidationError, match="own card"):
+        SetRevisionReferenceCommand(
+            card_id=card.id,
+            revision_id=revision_id,
+            role=ReferenceRole.IDENTITY,
+            reference=ResolvedCardReference(target_card_id=card.id),
+        ).apply(document)
 
-    background = ImportedBackground(
-        image_path=f"assets/cards/{card.id}/image-{uuid4()}.png",
-        created_at=datetime.now(UTC),
+    asset_id = uuid4()
+    generated_at = datetime.now(UTC)
+    background = GeneratedBackground(
+        id=asset_id,
+        image_path=f"assets/cards/{card.id}/image-{asset_id}.png",
+        generation_metadata=ImageGenerationMetadata(
+            inputs=ImageGenerationInputs(description="A card"),
+            render_prompt="A card",
+            model_identifier="test",
+            mflux_version="test",
+            seed=1,
+            width=1024,
+            height=768,
+            step_count=4,
+            generated_at=generated_at,
+            duration_seconds=1,
+        ),
+        created_at=generated_at,
     )
     document = ReplaceRevisionBackgroundCommand(
         card_id=card.id,
@@ -380,20 +410,10 @@ def test_style_deletion_and_background_replacement_are_guarded() -> None:
     ).apply(document)
     assert document.cards[0].active_revision.background == background
 
-    document = SetRevisionStyleCommand(
+    document = SetRevisionReferenceCommand(
         card_id=card.id,
         revision_id=revision_id,
-        style_id=None,
+        role=ReferenceRole.SETTING,
+        reference=None,
     ).apply(document)
-    document = DeleteStyleCommand(style_id=style.id).apply(document)
-    assert document.styles == ()
-
-
-def test_add_style_rejects_duplicate_names_case_insensitively() -> None:
-    style = GenerationStyle(name="Watercolor", prompt="Soft washes")
-    document = AddStyleCommand(style=style).apply(Stack(name="Stack"))
-
-    with pytest.raises(CommandError, match="already in use"):
-        AddStyleCommand(
-            style=GenerationStyle(name="watercolor", prompt="Other"),
-        ).apply(document)
+    assert document.cards[0].active_revision.setting is None

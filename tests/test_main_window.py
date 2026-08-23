@@ -6,7 +6,7 @@ import os
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -28,9 +28,10 @@ from hypergen.application.workers import AdapterKind, AvailabilityDiagnostic
 from hypergen.domain.models import (
     Card,
     CardRevision,
-    GenerationStyle,
+    GeneratedBackground,
     HotspotSet,
-    ImportedBackground,
+    ImageGenerationInputs,
+    ImageGenerationMetadata,
     Interaction,
     NavigateAction,
     Point,
@@ -184,15 +185,40 @@ def application() -> QApplication:
 
 
 def _stack() -> Stack:
-    style = GenerationStyle(name="Ink", prompt="Detailed ink illustration")
-    first = CardRevision(description="First", style_id=style.id)
+    first = CardRevision(description="First")
     second = CardRevision(description="Second")
     card = Card(
         name="Foyer",
         revisions=(first, second),
         active_revision_id=first.id,
     )
-    return Stack(name="Demo", styles=(style,), cards=(card,), start_card_id=card.id)
+    return Stack(name="Demo", cards=(card,), start_card_id=card.id)
+
+
+def _generated_background(
+    *,
+    asset_id: UUID,
+    image_path: str,
+    description: str = "Test image",
+) -> GeneratedBackground:
+    generated_at = datetime.now(UTC)
+    return GeneratedBackground(
+        id=asset_id,
+        image_path=image_path,
+        generation_metadata=ImageGenerationMetadata(
+            inputs=ImageGenerationInputs(description=description),
+            render_prompt=description,
+            model_identifier="test",
+            mflux_version="test",
+            seed=1,
+            width=1024,
+            height=768,
+            step_count=4,
+            generated_at=generated_at,
+            duration_seconds=1,
+        ),
+        created_at=generated_at,
+    )
 
 
 def _window(
@@ -229,7 +255,7 @@ def test_card_header_and_toolbar_match_revision_hierarchy(
     assert window.add_revision_button.text() == "+"
     assert window.delete_revision_button.text() == "−"
     assert window.overlay_label.text() == "Hotspots"
-    assert window.styles_button.text() == "Styles"
+    assert not hasattr(window, "styles_button")
     assert window.inspector.inspector_tabs.tabText(0) == "Background"
 
 
@@ -449,14 +475,12 @@ def test_author_and_run_modes_apply_consistent_read_only_chrome(
     assert window.delete_revision_button.isHidden()
     assert window.card_sidebar.isHidden()
     assert window.inspector.isHidden()
-    assert not window.styles_button.isEnabled()
     assert not window.overlay_selector.isHidden()
 
     window.mode_selector.setCurrentText("Author")
     assert not window.canvas_card_name.isReadOnly()
     assert window.revision_combo.isEnabled()
     assert not window.add_revision_button.isHidden()
-    assert window.styles_button.isEnabled()
 
 
 def test_status_bar_is_passive_and_ai_recovery_uses_notification_bar(
@@ -527,11 +551,9 @@ def test_generate_replacement_starts_without_a_second_confirmation(
         ReplaceRevisionBackgroundCommand(
             card_id=card_id,
             revision_id=revision.id,
-            background=ImportedBackground(
-                id=asset_id,
+            background=_generated_background(
+                asset_id=asset_id,
                 image_path=f"assets/cards/{card_id}/image-{asset_id}.png",
-                source_filename="image.png",
-                created_at=datetime.now(UTC),
             ),
         )
     )
@@ -719,38 +741,14 @@ def test_empty_canvas_request_creates_and_selects_blank_hotspot(
     assert window.inspector.selected_interaction_id == hotspot_set.interactions[0].id
 
 
-def test_new_stack_dialog_has_no_legacy_global_style(
+def test_new_stack_dialog_creates_one_blank_revision(
     application: QApplication,
 ) -> None:
     dialog = NewStackDialog()
     assert not hasattr(dialog, "global_style_edit")
     stack = dialog.stack()
-    assert stack.styles == ()
     assert len(stack.cards) == 1
     assert len(stack.cards[0].revisions) == 1
-
-
-def test_styles_button_opens_stack_manager(
-    application: QApplication,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    window, _controller, _workers, _background = _window()
-    opened: list[bool] = []
-
-    class FakeStylesDialog:
-        def __init__(self, *_args: object) -> None:
-            self.document_changed = SignalProxy()
-
-        def exec(self) -> None:
-            opened.append(True)
-
-    class SignalProxy:
-        def connect(self, _slot: object) -> None:
-            pass
-
-    monkeypatch.setattr(main_window_module, "StylesDialog", FakeStylesDialog)
-    window.styles_button.click()
-    assert opened == [True]
 
 
 def test_empty_stack_has_clear_first_card_path(

@@ -43,11 +43,9 @@ class CorruptGeneratedImage:
 def request(output_path: Path) -> MfluxGenerationRequest:
     return MfluxGenerationRequest(
         inputs=ImageGenerationInputs(
-            description="Courtyard",
-            style_name="Storybook",
-            style_prompt="Watercolor",
+            description="A storybook watercolor courtyard"
         ),
-        render_prompt="Courtyard\n\nWatercolor",
+        render_prompt="A storybook watercolor courtyard",
         output_path=output_path,
         seed=42,
     )
@@ -74,7 +72,7 @@ def test_mflux_adapter_loads_once_and_records_effective_metadata(tmp_path: Path)
     assert first.metadata.width == 1024
     assert first.metadata.height == 768
     assert first.metadata.step_count == 4
-    assert first.metadata.render_prompt == "Courtyard\n\nWatercolor"
+    assert first.metadata.render_prompt == "A storybook watercolor courtyard"
     assert first.load_duration_seconds >= 0
     assert first.generation_duration_seconds >= 0
     assert first.serialization_duration_seconds >= 0

@@ -12,10 +12,10 @@ from hypergen.domain.models import (
     Card,
     CardRevision,
     GeneratedBackground,
-    GenerationStyle,
     HotspotSet,
     ImageGenerationInputs,
     ImageGenerationMetadata,
+    ImageReferenceSnapshot,
     Interaction,
     NavigateAction,
     Point,
@@ -29,12 +29,8 @@ from hypergen.domain.models import (
 
 def image_metadata() -> ImageGenerationMetadata:
     return ImageGenerationMetadata(
-        inputs=ImageGenerationInputs(
-            description="A moonlit courtyard",
-            style_name="Ink wash",
-            style_prompt="Ink and watercolor",
-        ),
-        render_prompt="A moonlit courtyard\n\nInk and watercolor",
+        inputs=ImageGenerationInputs(description="A moonlit courtyard"),
+        render_prompt="A moonlit courtyard",
         model_identifier="flux2-klein-4b",
         mflux_version="0.18.0",
         dependency_versions={"mlx": "0.31.2"},
@@ -50,28 +46,28 @@ def image_metadata() -> ImageGenerationMetadata:
 def test_stack_defaults_match_document_contract() -> None:
     stack = Stack(name="Castle")
 
-    assert stack.schema_version == 3
+    assert stack.schema_version == 4
     assert (stack.canvas.width, stack.canvas.height) == (1024, 768)
     assert stack.run_overlay_mode is RunOverlayMode.HIDDEN
     assert stack.cards == ()
 
 
-def test_stack_serializes_named_styles_without_legacy_style_keys() -> None:
-    style = GenerationStyle(name="Ink wash", prompt="Loose ink and watercolor")
-    stack = Stack(name="Castle", styles=(style,))
+def test_stack_serializes_fixed_reference_slots_without_legacy_style_keys() -> None:
+    destination = Card(name="Portrait")
+    revision = CardRevision(
+        identity=ResolvedCardReference(target_card_id=destination.id)
+    )
+    source = Card(name="Source", revisions=(revision,))
+    stack = Stack(name="Castle", cards=(source, destination))
 
     values = stack.model_dump(mode="json")
 
-    assert values["styles"] == [
-        {
-            "id": str(style.id),
-            "name": "Ink wash",
-            "prompt": "Loose ink and watercolor",
-        }
-    ]
-    assert "global_style" not in values
-    with pytest.raises(ValidationError, match="global_style"):
-        Stack.model_validate({"name": "Castle", "global_style": "Legacy"})
+    serialized_revision = values["cards"][0]["revisions"][0]
+    assert serialized_revision["identity"]["target_card_id"] == str(destination.id)
+    assert serialized_revision["visual_style"] is None
+    assert serialized_revision["setting"] is None
+    assert "style_id" not in serialized_revision
+    assert "styles" not in values
 
 
 def test_revalidated_dump_preserves_pydantic_field_selection() -> None:
@@ -139,15 +135,52 @@ def test_hotspot_set_distinguishes_never_applied_from_applied_empty() -> None:
     assert applied_empty.hotspot_set.interactions == ()
 
 
-def test_stack_rejects_duplicate_style_names_case_insensitively() -> None:
-    with pytest.raises(ValidationError, match="style names must be unique"):
+def test_stack_rejects_self_and_duplicate_reference_cards() -> None:
+    source = Card(name="Source")
+    with pytest.raises(ValidationError, match="own card"):
         Stack(
             name="Castle",
-            styles=(
-                GenerationStyle(name="Moonlit", prompt="First"),
-                GenerationStyle(name="moonlit", prompt="Second"),
+            cards=(
+                source.model_copy(
+                    update={
+                        "revisions": (
+                            source.active_revision.model_copy(
+                                update={
+                                    "identity": ResolvedCardReference(
+                                        target_card_id=source.id
+                                    )
+                                }
+                            ),
+                        )
+                    }
+                ),
             ),
         )
+    reference = Card(name="Reference")
+    revision = CardRevision(
+        identity=ResolvedCardReference(target_card_id=reference.id),
+        setting=ResolvedCardReference(target_card_id=reference.id),
+    )
+    with pytest.raises(ValidationError, match="only one reference role"):
+        Stack(
+            name="Castle",
+            cards=(Card(name="Source", revisions=(revision,)), reference),
+        )
+
+
+def test_generation_inputs_capture_exact_reference_source_state() -> None:
+    snapshot = ImageReferenceSnapshot(
+        card_id=uuid4(),
+        revision_id=uuid4(),
+        background_id=uuid4(),
+    )
+    inputs = ImageGenerationInputs(
+        description="Portrait at dusk",
+        identity_reference=snapshot,
+    )
+
+    assert inputs.identity_reference == snapshot
+    assert inputs.visual_style_reference is None
 
 
 def test_hotspots_are_nested_in_their_image_revision() -> None:

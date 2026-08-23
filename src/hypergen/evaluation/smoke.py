@@ -102,13 +102,10 @@ def run_smoke(
         inputs = ImageGenerationInputs(
             description=(
                 "A quiet stone castle courtyard at dusk with an arched wooden gate, "
-                "a red travel chest, and a leafy tree."
-            ),
-            style_name="Twilight Storybook",
-            style_prompt=(
+                "a red travel chest, and a leafy tree. "
                 "Restrained storybook ink and watercolor illustration with "
                 "cool twilight shadows and warm lantern light."
-            ),
+            )
         )
         render_prompt = compose_image_prompt(inputs)
         result["render_prompt"] = render_prompt

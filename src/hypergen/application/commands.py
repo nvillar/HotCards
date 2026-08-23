@@ -9,12 +9,13 @@ from uuid import UUID, uuid4
 from hypergen.domain.models import (
     Background,
     Card,
+    CardReference,
     CardRevision,
-    GenerationStyle,
     HotspotSet,
     Interaction,
     NavigateAction,
     Polygon,
+    ReferenceRole,
     ResolvedCardReference,
     RunOverlayMode,
     Stack,
@@ -178,8 +179,18 @@ def _unresolve_inbound_references(
 ) -> Card:
     revisions: list[CardRevision] = []
     for revision in card.revisions:
+        updates: dict[str, object] = {}
+        for role in ReferenceRole:
+            reference = getattr(revision, role.value)
+            if (
+                isinstance(reference, ResolvedCardReference)
+                and reference.target_card_id == deleted_card_id
+            ):
+                updates[role.value] = UnresolvedCardReference(
+                    target_name=deleted_card_name
+                )
         if revision.hotspot_set is None:
-            revisions.append(revision)
+            revisions.append(revision.model_copy(update=updates))
             continue
         interactions = tuple(
             _replace_deleted_target(
@@ -190,7 +201,8 @@ def _unresolve_inbound_references(
             for interaction in revision.hotspot_set.interactions
         )
         hotspot_set = revision.hotspot_set.model_copy(update={"interactions": interactions})
-        revisions.append(revision.model_copy(update={"hotspot_set": hotspot_set}))
+        updates["hotspot_set"] = hotspot_set
+        revisions.append(revision.model_copy(update=updates))
     return card.model_copy(update={"revisions": tuple(revisions)})
 
 
@@ -262,112 +274,20 @@ class EditRevisionDescriptionCommand:
 
 
 @dataclass(frozen=True, slots=True)
-class EditGlobalStyleCommand:
-    """Compatibility command for editing the first stack style."""
-
-    value: str
-
-    def apply(self, document: Stack) -> Stack:
-        if document.styles:
-            style = document.styles[0]
-            return EditStyleCommand(
-                style_id=style.id,
-                name=style.name,
-                prompt=self.value,
-            ).apply(document)
-        return AddStyleCommand(
-            style=GenerationStyle(name="Default", prompt=self.value)
-        ).apply(document)
-
-
-@dataclass(frozen=True, slots=True)
-class AddStyleCommand:
-    """Append one named stack style."""
-
-    style: GenerationStyle
-
-    def apply(self, document: Stack) -> Stack:
-        if any(style.id == self.style.id for style in document.styles):
-            raise CommandError(f"style {self.style.id} already exists")
-        if any(
-            style.name.casefold() == self.style.name.casefold()
-            for style in document.styles
-        ):
-            raise CommandError(f"style name {self.style.name!r} is already in use")
-        return validated_copy(
-            document.model_copy(update={"styles": (*document.styles, self.style)})
-        )
-
-
-@dataclass(frozen=True, slots=True)
-class EditStyleCommand:
-    """Edit one stack style's name and prompt."""
-
-    style_id: UUID
-    name: str
-    prompt: str
-
-    def apply(self, document: Stack) -> Stack:
-        style_index = next(
-            (
-                index
-                for index, style in enumerate(document.styles)
-                if style.id == self.style_id
-            ),
-            None,
-        )
-        if style_index is None:
-            raise CommandError(f"style {self.style_id} does not exist")
-        if any(
-            style.id != self.style_id
-            and style.name.casefold() == self.name.strip().casefold()
-            for style in document.styles
-        ):
-            raise CommandError(f"style name {self.name!r} is already in use")
-        styles = list(document.styles)
-        styles[style_index] = styles[style_index].model_copy(
-            update={"name": self.name, "prompt": self.prompt}
-        )
-        return validated_copy(document.model_copy(update={"styles": tuple(styles)}))
-
-
-@dataclass(frozen=True, slots=True)
-class DeleteStyleCommand:
-    """Delete one unused stack style."""
-
-    style_id: UUID
-
-    def apply(self, document: Stack) -> Stack:
-        if any(
-            revision.style_id == self.style_id
-            for card in document.cards
-            for revision in card.revisions
-        ):
-            raise CommandError("cannot delete a style used by a revision")
-        styles = tuple(style for style in document.styles if style.id != self.style_id)
-        if len(styles) == len(document.styles):
-            raise CommandError(f"style {self.style_id} does not exist")
-        return validated_copy(document.model_copy(update={"styles": styles}))
-
-
-@dataclass(frozen=True, slots=True)
-class SetRevisionStyleCommand:
-    """Select a stack style, or no style, for one revision."""
+class SetRevisionReferenceCommand:
+    """Assign or clear one fixed image-reference role."""
 
     card_id: UUID
     revision_id: UUID
-    style_id: UUID | None
+    role: ReferenceRole
+    reference: CardReference | None
 
     def apply(self, document: Stack) -> Stack:
-        if self.style_id is not None and not any(
-            style.id == self.style_id for style in document.styles
-        ):
-            raise CommandError(f"style {self.style_id} does not exist")
         card_index = _card_index(document, self.card_id)
         card = document.cards[card_index]
         revision_index = _revision_index(card, self.revision_id)
         revision = card.revisions[revision_index].model_copy(
-            update={"style_id": self.style_id}
+            update={self.role.value: self.reference}
         )
         card = _replace_revision(card, revision_index, revision)
         return validated_copy(_replace_card(document, card_index, card))
@@ -770,7 +690,6 @@ __all__ = [
     "ActivateRevisionCommand",
     "AddInteractionCommand",
     "AddPolygonCommand",
-    "AddStyleCommand",
     "ChangeHotspotDestinationCommand",
     "CommandError",
     "CreateCardAndResolveCommand",
@@ -779,12 +698,9 @@ __all__ = [
     "DeleteInteractionCommand",
     "DeleteRevisionCommand",
     "DeletePolygonCommand",
-    "DeleteStyleCommand",
     "DocumentCommand",
     "DuplicateRevisionCommand",
-    "EditGlobalStyleCommand",
     "EditRevisionDescriptionCommand",
-    "EditStyleCommand",
     "RenameCardCommand",
     "RenameInteractionCommand",
     "ReorderCardCommand",
@@ -794,6 +710,6 @@ __all__ = [
     "ReplacePolygonCommand",
     "ReplaceRevisionBackgroundCommand",
     "SetRunOverlayModeCommand",
-    "SetRevisionStyleCommand",
+    "SetRevisionReferenceCommand",
     "SetStartCardCommand",
 ]

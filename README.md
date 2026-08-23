@@ -16,17 +16,19 @@ authoring shell remains usable when either service is unavailable.
 Stacks are stored as self-contained `.hypergen` directory bundles and
 autosaved atomically after creation or opening. At startup, HyperGen lists
 projects in `~/Documents/HyperGen` and offers direct Open and Create actions.
+Bundles must use the current schema version; legacy stack schemas are
+intentionally unsupported and are not migrated on load.
 
 Each card owns one or more numbered revisions. A revision contains its
-Description, selected stack Style, optional generated background, and hotspot
-set. The compact header above the canvas edits the card name and selects,
-duplicates, or deletes revisions; the toolbar manages Mode, hotspot visibility,
-and the stack-wide Style library.
+Description, optional generated background, fixed Identity, Visual style, and
+Setting card references, and hotspot set. The compact header above the canvas
+edits the card name and selects, duplicates, or deletes revisions; the toolbar
+manages Mode and hotspot visibility.
 
 The Background inspector contains Description, Enrich Description, Generate
-Image, Style, and Clear Image controls. Background prompts are composed
-deterministically from the revision Description and selected Style. Generated
-images are the only supported background source. Generate and Clear apply
+Image, and Clear Image controls. Background prompts are composed
+deterministically from the revision Description. Generated images are the only
+supported background source. Generate and Clear apply
 directly to the active revision; Enrich Description produces an editable,
 session-only text proposal that must be applied or discarded explicitly.
 Existing images remain in place until replacement succeeds, and successful

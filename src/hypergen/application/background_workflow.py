@@ -27,7 +27,6 @@ from hypergen.domain.models import (
     Card,
     GeneratedBackground,
     ImageGenerationInputs,
-    ImportedBackground,
     Stack,
 )
 from hypergen.generation.image_prompts import compose_image_prompt
@@ -60,8 +59,6 @@ class _GenerationTarget:
     card_id: UUID
     revision_id: UUID
     description: str
-    style_id: UUID | None
-    style_prompt: str
     background_id: UUID | None
     bundle_path: Path
 
@@ -70,7 +67,7 @@ GenerationSettingsProvider = Callable[[], BackgroundGenerationSettings]
 
 
 class BackgroundWorkflow(QObject):
-    """Generate, import, clear, and manage complete card revisions."""
+    """Generate, clear, and manage complete card revisions."""
 
     busy_changed = Signal(bool)
     progress_changed = Signal(str)
@@ -123,15 +120,7 @@ class BackgroundWorkflow(QObject):
         document = self.controller.document
         card = self._card(document, card_id)
         revision = card.active_revision
-        style = next(
-            (style for style in document.styles if style.id == revision.style_id),
-            None,
-        )
-        inputs = ImageGenerationInputs(
-            description=revision.description,
-            style_name=style.name if style is not None else None,
-            style_prompt=style.prompt if style is not None else "",
-        )
+        inputs = ImageGenerationInputs(description=revision.description)
         try:
             render_prompt = compose_image_prompt(inputs)
         except ValueError as error:
@@ -255,13 +244,13 @@ class BackgroundWorkflow(QObject):
         if not self._target_is_current(target):
             self._finish_with_error(
                 BackgroundWorkflowError(
-                    "the stack, revision, Description, Style, or image changed "
+                    "the stack, revision, Description, or image changed "
                     "before generation completed"
                 )
             )
             return
         try:
-            image_path = self._require_store().import_image(
+            image_path = self._require_store().store_image_asset(
                 result.output_path,
                 card_id=target.card_id,
                 asset_id=asset_id,
@@ -292,7 +281,7 @@ class BackgroundWorkflow(QObject):
         self,
         card_id: UUID,
         revision_id: UUID,
-        background: GeneratedBackground | ImportedBackground | None,
+        background: GeneratedBackground | None,
         message: str,
     ) -> Stack:
         previous_token = self.controller.current_undo_token
@@ -357,17 +346,11 @@ class BackgroundWorkflow(QObject):
         if bundle_path is None:
             raise BackgroundWorkflowError("save the stack before changing an image")
         revision = card.active_revision
-        style = next(
-            (style for style in document.styles if style.id == revision.style_id),
-            None,
-        )
         return _GenerationTarget(
             stack_id=document.id,
             card_id=card.id,
             revision_id=revision.id,
             description=revision.description,
-            style_id=revision.style_id,
-            style_prompt=style.prompt if style is not None else "",
             background_id=(
                 revision.background.id if revision.background is not None else None
             ),
@@ -388,14 +371,8 @@ class BackgroundWorkflow(QObject):
         if card is None or card.active_revision_id != target.revision_id:
             return False
         revision = card.active_revision
-        style = next(
-            (style for style in document.styles if style.id == revision.style_id),
-            None,
-        )
         return (
             revision.description == target.description
-            and revision.style_id == target.style_id
-            and (style.prompt if style is not None else "") == target.style_prompt
             and (
                 revision.background.id
                 if revision.background is not None

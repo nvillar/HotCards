@@ -21,7 +21,7 @@ from pydantic import (
     model_validator,
 )
 
-CURRENT_SCHEMA_VERSION = 3
+CURRENT_SCHEMA_VERSION = 4
 
 NonEmptyString = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 NormalizedCoordinate = Annotated[float, Field(ge=0.0, le=1.0)]
@@ -68,13 +68,6 @@ class RunOverlayMode(StrEnum):
     HIDDEN = "hidden"
     HOVER = "hover"
     VISIBLE = "visible"
-
-
-class ImageOrigin(StrEnum):
-    """How a revision background entered a stack."""
-
-    GENERATED = "generated"
-    IMPORTED = "imported"
 
 
 class CanvasSize(DomainModel):
@@ -128,6 +121,14 @@ CardReference = Annotated[
 ]
 
 
+class ReferenceRole(StrEnum):
+    """One deterministic image-reference role."""
+
+    IDENTITY = "identity"
+    VISUAL_STYLE = "visual_style"
+    SETTING = "setting"
+
+
 class NavigateAction(DomainModel):
     """Navigate to another card or retain an unresolved destination."""
 
@@ -144,20 +145,21 @@ class Interaction(DomainModel):
     polygons: tuple[Polygon, ...] = Field(default_factory=tuple)
 
 
-class GenerationStyle(DomainModel):
-    """One named, stack-owned image-generation style."""
+class ImageReferenceSnapshot(DomainModel):
+    """Exact source state used for one historical image generation."""
 
-    id: UUID = Field(default_factory=uuid4)
-    name: NonEmptyString
-    prompt: str = ""
+    card_id: UUID
+    revision_id: UUID
+    background_id: UUID
 
 
 class ImageGenerationInputs(DomainModel):
     """Author-controlled inputs captured for a generated image."""
 
     description: str
-    style_name: str | None = None
-    style_prompt: str = ""
+    identity_reference: ImageReferenceSnapshot | None = None
+    visual_style_reference: ImageReferenceSnapshot | None = None
+    setting_reference: ImageReferenceSnapshot | None = None
 
 
 class ImageGenerationMetadata(DomainModel):
@@ -185,30 +187,10 @@ class ImageGenerationMetadata(DomainModel):
         return value
 
 
-class HotspotRemapProvenance(DomainModel):
-    """Reproducibility data for an applied hotspot remap."""
-
-    model_identifier: NonEmptyString
-    ollama_version: str | None = None
-    prompt_version: NonEmptyString
-    schema_version: NonEmptyString
-    effective_settings: dict[str, JsonValue] = Field(default_factory=dict)
-    generated_at: AwareDatetime
-    duration_seconds: NonNegativeFiniteFloat
-
-    @field_validator("effective_settings")
-    @classmethod
-    def require_json_safe_settings(cls, value: dict[str, JsonValue]) -> dict[str, JsonValue]:
-        """Ensure effective settings have a lossless JSON representation."""
-        _reject_nonfinite_json_numbers(value)
-        return value
-
-
 class HotspotSet(DomainModel):
     """The complete applied hotspot set for one card revision."""
 
     interactions: tuple[Interaction, ...] = Field(default_factory=tuple)
-    remap_provenance: HotspotRemapProvenance | None = None
 
     @model_validator(mode="after")
     def require_unique_interaction_ids(self) -> HotspotSet:
@@ -229,20 +211,7 @@ class GeneratedBackground(DomainModel):
     created_at: AwareDatetime
 
 
-class ImportedBackground(DomainModel):
-    """One immutable imported image asset."""
-
-    id: UUID = Field(default_factory=uuid4)
-    type: Literal["imported"] = "imported"
-    image_path: NonEmptyString
-    source_filename: str | None = None
-    created_at: AwareDatetime
-
-
-Background = Annotated[
-    GeneratedBackground | ImportedBackground,
-    Field(discriminator="type"),
-]
+Background = GeneratedBackground
 
 
 class CardRevision(DomainModel):
@@ -250,9 +219,11 @@ class CardRevision(DomainModel):
 
     id: UUID = Field(default_factory=uuid4)
     description: str = ""
-    style_id: UUID | None = None
     background: Background | None = None
     hotspot_set: HotspotSet | None = None
+    identity: CardReference | None = None
+    visual_style: CardReference | None = None
+    setting: CardReference | None = None
 
     @field_validator("hotspot_set")
     @classmethod
@@ -266,25 +237,13 @@ class CardRevision(DomainModel):
         return self.background.image_path if self.background is not None else None
 
     @property
-    def origin(self) -> ImageOrigin | None:
-        """Return how the background entered the stack."""
-        if self.background is None:
-            return None
-        return ImageOrigin(self.background.type)
-
-    @property
-    def source_filename(self) -> str | None:
-        """Return imported source provenance when available."""
-        if isinstance(self.background, ImportedBackground):
-            return self.background.source_filename
-        return None
-
-    @property
     def generation_metadata(self) -> ImageGenerationMetadata | None:
         """Return generated-image provenance when available."""
-        if isinstance(self.background, GeneratedBackground):
-            return self.background.generation_metadata
-        return None
+        return (
+            self.background.generation_metadata
+            if self.background is not None
+            else None
+        )
 
     @property
     def created_at(self) -> datetime:
@@ -334,7 +293,6 @@ class Stack(DomainModel):
     schema_version: int = Field(default=CURRENT_SCHEMA_VERSION, strict=True)
     id: UUID = Field(default_factory=uuid4)
     name: NonEmptyString
-    styles: tuple[GenerationStyle, ...] = Field(default_factory=tuple)
     canvas: CanvasSize = Field(default_factory=CanvasSize)
     run_overlay_mode: RunOverlayMode = RunOverlayMode.HIDDEN
     start_card_id: UUID | None = None
@@ -358,13 +316,6 @@ class Stack(DomainModel):
         if len(card_ids) != len(known_card_ids):
             raise ValueError("card IDs must be unique within a stack")
         require_unique_card_names(self.cards)
-        style_ids = [style.id for style in self.styles]
-        if len(style_ids) != len(set(style_ids)):
-            raise ValueError("style IDs must be unique within a stack")
-        style_names = [style.name.casefold() for style in self.styles]
-        if len(style_names) != len(set(style_names)):
-            raise ValueError("style names must be unique within a stack")
-        known_style_ids = set(style_ids)
         if self.start_card_id is not None and self.start_card_id not in known_card_ids:
             raise ValueError("start_card_id must identify a card in this stack")
         revision_ids = [revision.id for card in self.cards for revision in card.revisions]
@@ -372,12 +323,24 @@ class Stack(DomainModel):
             raise ValueError("revision IDs must be unique within a stack")
         for card in self.cards:
             for revision in card.revisions:
-                if (
-                    revision.style_id is not None
-                    and revision.style_id not in known_style_ids
+                reference_ids: list[UUID] = []
+                for reference in (
+                    revision.identity,
+                    revision.visual_style,
+                    revision.setting,
                 ):
+                    if not isinstance(reference, ResolvedCardReference):
+                        continue
+                    if reference.target_card_id not in known_card_ids:
+                        raise ValueError(
+                            "resolved card references must identify a card in this stack"
+                        )
+                    if reference.target_card_id == card.id:
+                        raise ValueError("a card revision cannot reference its own card")
+                    reference_ids.append(reference.target_card_id)
+                if len(reference_ids) != len(set(reference_ids)):
                     raise ValueError(
-                        "revision style_id must identify a style in this stack"
+                        "a source card may occupy only one reference role per revision"
                     )
                 if revision.hotspot_set is None:
                     continue
