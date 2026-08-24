@@ -7,7 +7,13 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtWidgets import QApplication, QLabel, QRadioButton, QStyle
+from PySide6.QtWidgets import (
+    QApplication,
+    QFrame,
+    QLabel,
+    QRadioButton,
+    QStyle,
+)
 
 from hypergen.application.commands import DeleteCardCommand, RenameCardCommand
 from hypergen.application.document_controller import DocumentController
@@ -78,6 +84,8 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     assert inspector.description_toggle.isHidden()
     assert isinstance(inspector.description_button, QRadioButton)
     assert isinstance(inspector.image_prompt_button, QRadioButton)
+    assert not isinstance(inspector.reference_panel, QFrame)
+    assert inspector.reference_panel.layout().contentsMargins().isNull()
     content_layout = inspector.reference_panel.parentWidget().layout()
     assert content_layout is not None
     assert content_layout.stretch(
