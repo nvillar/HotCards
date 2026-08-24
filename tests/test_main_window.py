@@ -11,8 +11,9 @@ from uuid import UUID, uuid4
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtCore import QObject, Signal
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QObject, QSize, Signal
+from PySide6.QtGui import QColor, QPixmap
+from PySide6.QtWidgets import QApplication, QLabel
 
 import hypergen.ui.main_window as main_window_module
 from hypergen.application.commands import (
@@ -40,6 +41,7 @@ from hypergen.domain.models import (
     Stack,
     UnresolvedCardReference,
 )
+from hypergen.ui.card_sidebar import CardSidebar
 from hypergen.ui.main_window import MainWindow
 from hypergen.ui.new_stack_dialog import NewStackDialog
 
@@ -253,11 +255,75 @@ def test_card_header_and_toolbar_match_revision_hierarchy(
         "2",
     ]
     assert window.revision_combo.currentText() == "1"
+    assert window.revision_label.text() == "Version:"
+    assert window.revision_combo.width() < 100
+    assert window.revision_combo.width() >= (
+        window.revision_combo.fontMetrics().horizontalAdvance("0000")
+    )
     assert window.add_revision_button.text() == "+"
     assert window.delete_revision_button.text() == "−"
     assert window.overlay_label.text() == "Hotspots"
     assert not hasattr(window, "styles_button")
     assert window.inspector.inspector_tabs.tabText(0) == "Background"
+    assert window.fit_canvas_button.size() == window.clear_background_button.size()
+
+
+def test_card_browser_uses_thumbnails_and_compact_action_row(
+    application: QApplication,
+    tmp_path: Path,
+) -> None:
+    thumbnail_path = tmp_path / "thumbnail.png"
+    thumbnail = QPixmap(144, 96)
+    thumbnail.fill(QColor("red"))
+    assert thumbnail.save(str(thumbnail_path))
+    asset_id = uuid4()
+    revision = CardRevision(
+        background=_generated_background(
+            asset_id=asset_id,
+            image_path=f"assets/cards/card/image-{asset_id}.png",
+        )
+    )
+    card = Card(name="Preview", revisions=(revision,))
+    controller = DocumentController(
+        Stack(name="Demo", cards=(card,), start_card_id=card.id)
+    )
+    sidebar = CardSidebar(
+        controller,
+        image_path_resolver=lambda _path: thumbnail_path,
+    )
+
+    assert not any(
+        label.text() == "Cards" for label in sidebar.findChildren(QLabel)
+    )
+    item = sidebar.card_list.item(0)
+    icon = item.icon().pixmap(QSize(72, 48))
+    assert icon.size() == QSize(72, 48)
+    assert icon.toImage().pixelColor(10, 10) == QColor("red")
+    assert not sidebar.start_button.icon().isNull()
+    assert sidebar.start_button.toolTip() == (
+        "Make the selected card the start card"
+    )
+    assert sidebar.add_button.toolTip() == "Add a new card"
+    assert sidebar.delete_button.toolTip() == "Delete the selected card"
+    assert sidebar.card_actions.indexOf(sidebar.move_up_button) == 0
+    assert sidebar.card_actions.indexOf(sidebar.move_down_button) == 1
+    assert sidebar.card_actions.indexOf(sidebar.start_button) == 3
+    assert sidebar.card_actions.indexOf(sidebar.add_button) == 4
+    assert sidebar.card_actions.indexOf(sidebar.delete_button) == 5
+    control_sizes = {
+        button.size()
+        for button in (
+            sidebar.move_up_button,
+            sidebar.move_down_button,
+            sidebar.start_button,
+            sidebar.add_button,
+            sidebar.delete_button,
+        )
+    }
+    assert len(control_sizes) == 1
+    assert sidebar.add_button.font().pointSizeF() > (
+        sidebar.move_up_button.font().pointSizeF()
+    )
 
 
 def test_card_header_displays_serialized_active_revision(

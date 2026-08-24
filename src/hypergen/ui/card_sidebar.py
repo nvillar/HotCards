@@ -2,18 +2,18 @@
 
 from __future__ import annotations
 
-from collections.abc import Collection
+from collections.abc import Callable, Collection
+from pathlib import Path
 from uuid import UUID
 
 from PySide6.QtCore import QSignalBlocker, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QIcon, QPixmap
+from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
-    QGridLayout,
+    QHBoxLayout,
     QLabel,
     QListWidget,
     QListWidgetItem,
-    QPushButton,
     QStyle,
     QToolButton,
     QVBoxLayout,
@@ -28,7 +28,9 @@ from hypergen.application.commands import (
     SetStartCardCommand,
 )
 from hypergen.application.document_controller import DocumentController
-from hypergen.domain.models import Stack
+from hypergen.domain.models import Card, Stack
+
+ImagePathResolver = Callable[[str], Path | None]
 
 
 class CardSidebar(QWidget):
@@ -38,14 +40,19 @@ class CardSidebar(QWidget):
     delete_requested = Signal(object)
     document_changed = Signal(object)
 
-    def __init__(self, controller: DocumentController, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        controller: DocumentController,
+        parent: QWidget | None = None,
+        *,
+        image_path_resolver: ImagePathResolver | None = None,
+    ) -> None:
         super().__init__(parent)
         self.controller = controller
+        self._image_path_resolver = image_path_resolver
         self.setObjectName("cardSidebar")
         self.setMinimumWidth(180)
 
-        heading = QLabel("Cards")
-        heading.setObjectName("cardSidebarHeading")
         self.card_list = QListWidget()
         self.card_list.setObjectName("cardList")
         self.card_list.setIconSize(QSize(72, 48))
@@ -54,11 +61,17 @@ class CardSidebar(QWidget):
         self.card_list.currentItemChanged.connect(self._selection_changed)
         self.card_list.model().rowsMoved.connect(self._rows_moved)
 
-        self.add_button = QPushButton("Add Card")
+        self.add_button = QToolButton()
         self.add_button.setObjectName("addCardButton")
+        self.add_button.setText("+")
+        self.add_button.setAccessibleName("Add card")
+        self.add_button.setToolTip("Add a new card")
         self.add_button.clicked.connect(self.add_card)
-        self.start_button = QPushButton("Make Start")
+        self.start_button = QToolButton()
         self.start_button.setObjectName("setStartCardButton")
+        self.start_button.setIcon(self._star_icon())
+        self.start_button.setAccessibleName("Make start card")
+        self.start_button.setToolTip("Make the selected card the start card")
         self.start_button.clicked.connect(self.set_selected_as_start)
         self.move_up_button = QToolButton()
         self.move_up_button.setObjectName("moveCardUpButton")
@@ -76,25 +89,50 @@ class CardSidebar(QWidget):
         self.move_down_button.setAccessibleName("Move card down")
         self.move_down_button.setToolTip("Move card down")
         self.move_down_button.clicked.connect(lambda: self._move_selected(1))
-        self.delete_button = QPushButton("Delete Card")
+        self.delete_button = QToolButton()
         self.delete_button.setObjectName("deleteCardButton")
+        self.delete_button.setText("−")
+        self.delete_button.setAccessibleName("Delete card")
+        self.delete_button.setToolTip("Delete the selected card")
         self.delete_button.clicked.connect(self._request_delete)
+        for button in (self.add_button, self.delete_button):
+            font = button.font()
+            font.setPointSizeF(max(font.pointSizeF() + 4.0, 16.0))
+            font.setBold(True)
+            button.setFont(font)
+        control_extent = max(
+            max(button.sizeHint().width(), button.sizeHint().height())
+            for button in (
+                self.move_up_button,
+                self.move_down_button,
+                self.start_button,
+                self.add_button,
+                self.delete_button,
+            )
+        )
+        for button in (
+            self.move_up_button,
+            self.move_down_button,
+            self.start_button,
+            self.add_button,
+            self.delete_button,
+        ):
+            button.setFixedSize(control_extent, control_extent)
         self._document_editable = True
 
         self.empty_label = QLabel("No cards yet")
         self.empty_label.setObjectName("emptyCardListLabel")
         self.empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        self.card_actions = QGridLayout()
-        self.card_actions.addWidget(self.add_button, 0, 0, 1, 3)
-        self.card_actions.addWidget(self.start_button, 1, 0)
-        self.card_actions.addWidget(self.move_up_button, 1, 1)
-        self.card_actions.addWidget(self.move_down_button, 1, 2)
-        self.card_actions.addWidget(self.delete_button, 2, 0, 1, 3)
-        self.card_actions.setColumnStretch(0, 1)
+        self.card_actions = QHBoxLayout()
+        self.card_actions.addWidget(self.move_up_button)
+        self.card_actions.addWidget(self.move_down_button)
+        self.card_actions.addStretch(1)
+        self.card_actions.addWidget(self.start_button)
+        self.card_actions.addWidget(self.add_button)
+        self.card_actions.addWidget(self.delete_button)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(heading)
         layout.addWidget(self.card_list, 1)
         layout.addWidget(self.empty_label)
         layout.addLayout(self.card_actions)
@@ -123,7 +161,7 @@ class CardSidebar(QWidget):
                 has_draft = card.id in draft_ids
                 if has_draft:
                     label = f"{label}  · Draft"
-                item = QListWidgetItem(self._placeholder_icon(), label)
+                item = QListWidgetItem(self._card_icon(card), label)
                 item.setData(Qt.ItemDataRole.UserRole, card.id)
                 states = [
                     state
@@ -261,6 +299,38 @@ class CardSidebar(QWidget):
     def _placeholder_icon() -> QIcon:
         pixmap = QPixmap(72, 48)
         pixmap.fill(QColor("#d7d9dc"))
+        return QIcon(pixmap)
+
+    def _card_icon(self, card: Card) -> QIcon:
+        background = card.active_revision.background
+        if background is None or self._image_path_resolver is None:
+            return self._placeholder_icon()
+        path = self._image_path_resolver(background.image_path)
+        if path is None:
+            return self._placeholder_icon()
+        source = QPixmap(str(path))
+        if source.isNull():
+            return self._placeholder_icon()
+        scaled = source.scaled(
+            72,
+            48,
+            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        x = max(0, (scaled.width() - 72) // 2)
+        y = max(0, (scaled.height() - 48) // 2)
+        return QIcon(scaled.copy(x, y, 72, 48))
+
+    @staticmethod
+    def _star_icon() -> QIcon:
+        pixmap = QPixmap(20, 20)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        font = painter.font()
+        font.setPointSize(15)
+        painter.setFont(font)
+        painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "★")
+        painter.end()
         return QIcon(pixmap)
 
 

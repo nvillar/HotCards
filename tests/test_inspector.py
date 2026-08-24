@@ -7,7 +7,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtWidgets import QApplication, QLabel, QRadioButton
+from PySide6.QtWidgets import QApplication, QLabel, QRadioButton, QStyle
 
 from hypergen.application.commands import DeleteCardCommand, RenameCardCommand
 from hypergen.application.document_controller import DocumentController
@@ -58,13 +58,20 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     assert inspector.inspector_tabs.tabText(1) == "Hotspots"
     root_layout = inspector.layout()
     assert root_layout is not None
-    assert root_layout.contentsMargins().top() == 10
+    assert root_layout.contentsMargins().top() == 16
+    assert root_layout.contentsMargins().left() == inspector.style().pixelMetric(
+        QStyle.PixelMetric.PM_LayoutLeftMargin
+    )
     assert inspector.description_edit.placeholderText() == "Description"
     assert inspector.description_edit.minimumHeight() == (
         inspector.description_edit.maximumHeight()
     )
-    assert inspector.description_edit.minimumHeight() >= (
-        inspector.description_edit.fontMetrics().lineSpacing() * 10
+    assert inspector.description_edit.minimumHeight() == round(
+        (
+            inspector.description_edit.fontMetrics().lineSpacing() * 10
+            + 20
+        )
+        * 1.25
     )
     assert inspector.enrich_scene_button.text() == "Enrich Description"
     assert inspector.generate_background_button.text() == "Generate Image"
