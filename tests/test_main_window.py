@@ -277,6 +277,9 @@ def test_card_header_and_toolbar_match_revision_hierarchy(
     )
     assert window.add_revision_button.text() == "+"
     assert window.delete_revision_button.text() == "−"
+    assert window.card_header.indexOf(window.delete_revision_button) < (
+        window.card_header.indexOf(window.add_revision_button)
+    )
     assert window.overlay_label.text() == "Hotspots"
     assert window.toolbar_leading_spacer.width() == 8
     assert window.mode_button.text() == "Run"
@@ -365,8 +368,8 @@ def test_card_browser_uses_thumbnails_and_compact_action_row(
     assert sidebar.card_actions.indexOf(sidebar.move_up_button) == 0
     assert sidebar.card_actions.indexOf(sidebar.move_down_button) == 1
     assert sidebar.card_actions.indexOf(sidebar.start_button) == 3
-    assert sidebar.card_actions.indexOf(sidebar.add_button) == 4
-    assert sidebar.card_actions.indexOf(sidebar.delete_button) == 5
+    assert sidebar.card_actions.indexOf(sidebar.delete_button) == 4
+    assert sidebar.card_actions.indexOf(sidebar.add_button) == 5
     control_sizes = {
         button.size()
         for button in (

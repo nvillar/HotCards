@@ -129,8 +129,8 @@ class CardSidebar(QWidget):
         self.card_actions.addWidget(self.move_down_button)
         self.card_actions.addStretch(1)
         self.card_actions.addWidget(self.start_button)
-        self.card_actions.addWidget(self.add_button)
         self.card_actions.addWidget(self.delete_button)
+        self.card_actions.addWidget(self.add_button)
 
         layout = QVBoxLayout(self)
         layout.addWidget(self.card_list, 1)
