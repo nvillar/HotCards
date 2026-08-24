@@ -12,8 +12,9 @@ from uuid import UUID, uuid4
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtCore import QObject, QSize, Signal
+from PySide6.QtCore import QObject, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QPixmap
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel
 
 import hypergen.ui.main_window as main_window_module
@@ -726,6 +727,53 @@ def test_notification_undo_expires_after_another_command(
     assert window.notification_bar.isHidden()
     window._undo_notification()
     assert controller.document.cards[0].name == "Second"
+
+
+def test_re_enrich_click_is_not_consumed_by_description_commit(
+    application: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    revision = CardRevision(
+        description="A courtyard",
+        enriched_description=EnrichedDescription(
+            text="A richly detailed courtyard",
+            source_description="A courtyard",
+        ),
+    )
+    card = Card(name="Card", revisions=(revision,))
+    window, _controller, _workers, _background = _window(
+        Stack(name="Demo", cards=(card,))
+    )
+    window.show()
+    window._availability[AdapterKind.OLLAMA] = True
+    window._update_generation_actions()
+    window.inspector.original_description_button.click()
+    window.inspector.description_edit.setPlainText("A changed courtyard")
+    window.inspector.description_edit.setFocus()
+    application.processEvents()
+    starts: list[object] = []
+    monkeypatch.setattr(
+        window.scene_enrichment_workflow,
+        "start",
+        starts.append,
+    )
+
+    QTest.mousePress(
+        window.inspector.enrich_scene_button,
+        Qt.MouseButton.LeftButton,
+    )
+    application.processEvents()
+    assert starts == []
+    assert _controller.document.cards[0].active_revision.description == (
+        "A changed courtyard"
+    )
+    QTest.mouseRelease(
+        window.inspector.enrich_scene_button,
+        Qt.MouseButton.LeftButton,
+    )
+
+    assert starts == [card.id]
+    window.close()
 
 
 def test_generated_result_can_move_to_a_new_complete_version(
