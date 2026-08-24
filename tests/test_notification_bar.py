@@ -64,6 +64,9 @@ def test_notification_actions_and_dismissal_report_stable_ids(
 
     bar.primary_button.click()
     assert actions == ["undo"]
+    assert bar.dismiss_button.text() == "Dismiss"
+    assert type(bar.dismiss_button) is type(bar.primary_button)
+    assert not hasattr(bar, "icon_label")
     bar.dismiss_button.click()
     assert dismissed == ["undo"]
     assert bar.isHidden()
@@ -118,5 +121,6 @@ def test_notification_can_label_its_dismiss_action(
     assert bar.dismiss_button.text() == "Keep"
     assert bar.dismiss_button.icon().isNull()
     assert bar.dismiss_button.accessibleName() == "Keep"
+    assert type(bar.dismiss_button) is type(bar.primary_button)
     bar.dismiss_button.click()
     assert dismissed == ["generation"]
