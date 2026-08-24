@@ -1366,6 +1366,7 @@ class MainWindow(QMainWindow):
             can_enrich=can_enrich,
             reason=enrich_reason,
             busy=enrichment_busy,
+            model_identifier=load_machine_settings(self.settings).ollama_model,
         )
         authoring = not self._is_running
         self.llm_model_combo.setEnabled(authoring and not enrichment_busy)

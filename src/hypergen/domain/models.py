@@ -286,11 +286,17 @@ class EnrichedDescription(DomainModel):
         *,
         source_description: str,
         references: tuple[EnrichmentReferenceSnapshot, ...],
+        model_identifier: str | None = None,
     ) -> bool:
         """Return whether the derived text still matches its upstream inputs."""
         return (
             self.source_description == source_description
             and self.references == references
+            and (
+                self.model_identifier is None
+                or model_identifier is None
+                or self.model_identifier == model_identifier
+            )
         )
 
 

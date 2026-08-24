@@ -66,6 +66,7 @@ def test_revision_uses_enriched_description_when_available() -> None:
         text="A richer courtyard",
         source_description="A courtyard",
         references=(reference,),
+        model_identifier="qwen3.5:9b-mlx",
     )
     revision = CardRevision(
         description="A courtyard",
@@ -80,6 +81,12 @@ def test_revision_uses_enriched_description_when_available() -> None:
     assert enrichment.is_current(
         source_description="A courtyard",
         references=(reference,),
+        model_identifier="qwen3.5:9b-mlx",
+    )
+    assert not enrichment.is_current(
+        source_description="A courtyard",
+        references=(reference,),
+        model_identifier="llama3.2:latest",
     )
     assert not enrichment.is_current(
         source_description="A changed courtyard",
