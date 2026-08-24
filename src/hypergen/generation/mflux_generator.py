@@ -26,6 +26,8 @@ from hypergen.generation.errors import ImageGenerationError, ModelLoadError
 class MfluxModelProtocol(Protocol):
     """Subset of the MFLUX model used by HyperGen."""
 
+    callbacks: MfluxCallbackRegistryProtocol
+
     def generate_image(
         self,
         *,
@@ -41,6 +43,8 @@ class MfluxModelProtocol(Protocol):
 
 class MfluxEditModelProtocol(Protocol):
     """Subset of the MFLUX edit model used for image references."""
+
+    callbacks: MfluxCallbackRegistryProtocol
 
     def generate_image(
         self,
@@ -65,6 +69,57 @@ class GeneratedImageProtocol(Protocol):
 
 MfluxModelFactory = Callable[[str, int | None], MfluxModelProtocol]
 MfluxEditModelFactory = Callable[[str, int | None], MfluxEditModelProtocol]
+MfluxProgressCallback = Callable[[int, int], None]
+
+
+class MfluxCallbackRegistryProtocol(Protocol):
+    """MFLUX callback registration used for inference-step progress."""
+
+    def register(self, callback: object) -> None: ...
+
+
+class _MfluxStepProgress:
+    def __init__(self) -> None:
+        self._sink: MfluxProgressCallback | None = None
+        self._completed_steps = 0
+        self._total_steps = 0
+        self._last_reported_steps = -1
+
+    def set_sink(self, sink: MfluxProgressCallback | None) -> None:
+        self._sink = sink
+
+    def call_before_loop(self, **values: object) -> None:
+        config = values.get("config")
+        total_steps = getattr(config, "num_inference_steps", None)
+        if not isinstance(total_steps, int) or total_steps <= 0:
+            raise ImageGenerationError(
+                "MFLUX reported an invalid inference-step count"
+            )
+        self._completed_steps = 0
+        self._total_steps = total_steps
+        self._last_reported_steps = -1
+        self._report_steps()
+
+    def call_in_loop(self, **_values: object) -> None:
+        self._report_steps()
+        self._completed_steps = min(
+            self._completed_steps + 1,
+            self._total_steps,
+        )
+
+    def call_after_loop(self, **_values: object) -> None:
+        self._completed_steps = self._total_steps
+        self._report_steps()
+        if self._sink is not None:
+            self._sink(0, 0)
+
+    def _report_steps(self) -> None:
+        if (
+            self._sink is not None
+            and self._completed_steps != self._last_reported_steps
+        ):
+            self._sink(self._completed_steps, self._total_steps)
+            self._last_reported_steps = self._completed_steps
 
 
 def _release_model_cache() -> None:
@@ -179,6 +234,7 @@ class MfluxGenerator:
             tuple[str, int | None, bool],
             MfluxModelProtocol | MfluxEditModelProtocol,
         ] = {}
+        self._progress_callbacks: dict[int, _MfluxStepProgress] = {}
 
     def _model_for(
         self,
@@ -189,6 +245,7 @@ class MfluxGenerator:
         if cache_key not in self._models:
             if self._models:
                 self._models.clear()
+                self._progress_callbacks.clear()
                 _release_model_cache()
             try:
                 factory = self._edit_model_factory if edit else self._model_factory
@@ -203,7 +260,24 @@ class MfluxGenerator:
                 ) from error
         return self._models[cache_key]
 
-    def generate(self, request: MfluxGenerationRequest) -> MfluxGenerationResult:
+    def _progress_callback_for(
+        self,
+        model: MfluxModelProtocol | MfluxEditModelProtocol,
+    ) -> _MfluxStepProgress:
+        model_key = id(model)
+        callback = self._progress_callbacks.get(model_key)
+        if callback is None:
+            callback = _MfluxStepProgress()
+            model.callbacks.register(callback)
+            self._progress_callbacks[model_key] = callback
+        return callback
+
+    def generate(
+        self,
+        request: MfluxGenerationRequest,
+        *,
+        progress: MfluxProgressCallback | None = None,
+    ) -> MfluxGenerationResult:
         """Generate and save one candidate image through the cached model."""
         if request.output_path.exists():
             raise ImageGenerationError(
@@ -212,6 +286,13 @@ class MfluxGenerator:
         request.output_path.parent.mkdir(parents=True, exist_ok=True)
         started = perf_counter()
         model = self._model_for(request)
+        progress_callback = (
+            self._progress_callback_for(model)
+            if progress is not None
+            else None
+        )
+        if progress_callback is not None:
+            progress_callback.set_sink(progress)
         load_duration_seconds = perf_counter() - started
         generated_at = datetime.now(UTC)
         generation_started = perf_counter()
@@ -245,6 +326,9 @@ class MfluxGenerator:
             raise ImageGenerationError(
                 f"MFLUX generation failed for {request.model_identifier!r}: {error}"
             ) from error
+        finally:
+            if progress_callback is not None:
+                progress_callback.set_sink(None)
         duration_seconds = perf_counter() - started
         if not request.output_path.is_file():
             raise ImageGenerationError(

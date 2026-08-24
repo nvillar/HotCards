@@ -91,6 +91,7 @@ class BackgroundWorkflow(QObject):
 
     busy_changed = Signal(bool)
     progress_changed = Signal(str)
+    generation_progress_changed = Signal(int, int)
     failed = Signal(object)
     document_changed = Signal(object)
     change_applied = Signal(str, object)
@@ -210,7 +211,13 @@ class BackgroundWorkflow(QObject):
         )
         self._set_busy(True, "Generating image...")
         operation = self.workers.run_mflux(
-            lambda: self._mflux_generator.generate(request),
+            lambda: self._mflux_generator.generate(
+                request,
+                progress=partial(
+                    self._generation_progress,
+                    request_id,
+                ),
+            ),
             stage="generating background image",
         )
         self._operation = operation
@@ -219,6 +226,18 @@ class BackgroundWorkflow(QObject):
         )
         operation.failed.connect(partial(self._operation_failed, request_id))
         return operation
+
+    def _generation_progress(
+        self,
+        request_id: UUID,
+        completed_steps: int,
+        total_steps: int,
+    ) -> None:
+        if request_id == self._request_id:
+            self.generation_progress_changed.emit(
+                completed_steps,
+                total_steps,
+            )
 
     def clear_background(self, card_id: UUID) -> Stack:
         """Clear only the active revision's background."""
