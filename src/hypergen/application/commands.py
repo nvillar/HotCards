@@ -11,12 +11,11 @@ from hypergen.domain.models import (
     Card,
     CardReference,
     CardRevision,
-    EnrichedDescription,
     HotspotSet,
+    ImagePrompt,
     Interaction,
     NavigateAction,
     Polygon,
-    ReferenceRole,
     ResolvedCardReference,
     RunOverlayMode,
     Stack,
@@ -181,15 +180,14 @@ def _unresolve_inbound_references(
     revisions: list[CardRevision] = []
     for revision in card.revisions:
         updates: dict[str, object] = {}
-        for role in ReferenceRole:
-            reference = getattr(revision, role.value)
-            if (
-                isinstance(reference, ResolvedCardReference)
-                and reference.target_card_id == deleted_card_id
-            ):
-                updates[role.value] = UnresolvedCardReference(
-                    target_name=deleted_card_name
-                )
+        reference = revision.reference
+        if (
+            isinstance(reference, ResolvedCardReference)
+            and reference.target_card_id == deleted_card_id
+        ):
+            updates["reference"] = UnresolvedCardReference(
+                target_name=deleted_card_name
+            )
         if revision.hotspot_set is None:
             revisions.append(revision.model_copy(update=updates))
             continue
@@ -275,19 +273,19 @@ class EditRevisionDescriptionCommand:
 
 
 @dataclass(frozen=True, slots=True)
-class SetRevisionEnrichedDescriptionCommand:
-    """Set or clear one revision's derived Description."""
+class SetRevisionImagePromptCommand:
+    """Set or clear one revision's prepared Image Prompt."""
 
     card_id: UUID
     revision_id: UUID
-    value: EnrichedDescription | None
+    value: ImagePrompt | None
 
     def apply(self, document: Stack) -> Stack:
         card_index = _card_index(document, self.card_id)
         card = document.cards[card_index]
         revision_index = _revision_index(card, self.revision_id)
         revision = card.revisions[revision_index].model_copy(
-            update={"enriched_description": self.value}
+            update={"image_prompt": self.value}
         )
         card = _replace_revision(card, revision_index, revision)
         return validated_copy(_replace_card(document, card_index, card))
@@ -295,11 +293,10 @@ class SetRevisionEnrichedDescriptionCommand:
 
 @dataclass(frozen=True, slots=True)
 class SetRevisionReferenceCommand:
-    """Assign or clear one fixed image-reference role."""
+    """Assign or clear the revision's optional image Reference."""
 
     card_id: UUID
     revision_id: UUID
-    role: ReferenceRole
     reference: CardReference | None
 
     def apply(self, document: Stack) -> Stack:
@@ -307,7 +304,7 @@ class SetRevisionReferenceCommand:
         card = document.cards[card_index]
         revision_index = _revision_index(card, self.revision_id)
         revision = card.revisions[revision_index].model_copy(
-            update={self.role.value: self.reference}
+            update={"reference": self.reference}
         )
         card = _replace_revision(card, revision_index, revision)
         return validated_copy(_replace_card(document, card_index, card))
@@ -730,7 +727,7 @@ __all__ = [
     "DocumentCommand",
     "DuplicateRevisionCommand",
     "EditRevisionDescriptionCommand",
-    "SetRevisionEnrichedDescriptionCommand",
+    "SetRevisionImagePromptCommand",
     "RenameCardCommand",
     "ReorderCardCommand",
     "ReorderHotspotCommand",

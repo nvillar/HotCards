@@ -28,7 +28,7 @@ for live Ollama and MFLUX runs.
 ## Repository layout
 
 - `src/hypergen/domain/` — stack models, geometry, validation.
-- `src/hypergen/storage/` — exact-current-schema bundle persistence.
+- `src/hypergen/storage/` — bundle persistence and migrations.
 - `src/hypergen/generation/` — prompt builders and model adapters.
 - `src/hypergen/application/` — document controller, commands, workers.
 - `src/hypergen/ui/` — PySide6 widgets.
@@ -46,45 +46,27 @@ for live Ollama and MFLUX runs.
 - Reuse production prompt builders, schemas, adapters, and geometry validation
   in the evaluation harness. Do not fork generation behavior.
 - Keep each card's complete authoring state in one of its numbered revisions:
-  authored Description, optional Enriched Description with input provenance,
-  optional background, fixed card-reference roles, and hotspot set. Visible
-  revision numbers are positional; stable UUIDs remain internal.
+  Description, prepared Image Prompt with input provenance, optional background,
+  optional Reference card, and hotspot set. Visible revision numbers are
+  positional; stable UUIDs remain internal.
 - Keep at least one revision per card. Duplicate a complete revision, including
   its hotspot semantics and immutable background reference.
-- Keep exactly three optional card-reference roles: Subject, Style, and
-  Setting. Each accepts at most one other card and rejects self-references, but
-  one source card may fill multiple roles. Group roles by active source
-  background, feed each unique image to MFLUX once in first-role order, combine
-  its role instructions, and never inject complete source Descriptions into the
-  final enrichment or image prompt. Put the effective Description first in the
-  FLUX prompt, then use natural-language sentences to state which attributes
-  come from each numbered image. Do not expose internal headings, role labels,
-  or authority metadata to the image model.
-- Compose background prompts deterministically from the active revision's
-  Enriched Description when present, otherwise its authored Description, plus
-  fixed natural-language instructions for assigned reference roles. Extract one
-  strict, flat, scalar profile per image/role from immutable generation-time
-  source text, cache it by background, role, Ollama model, extraction prompt,
-  and source text, then give the enrichment model only validated capsules.
-  Keep Subject to identity, appearance, and intrinsic construction for living
-  subjects, machines, vehicles, props, and other discrete objects; keep Style
-  to reusable rendering treatment and Setting to stable place traits. Record
-  observed weather/time/season in Setting extraction output but never inject
-  them as Setting traits. Append
-  capsules deterministically to the Enriched Description so FLUX.2 receives
-  their exact traits alongside the actual reference images. Enrichment
-  validation keeps authored actions, poses, object states, time, weather,
-  viewpoint, crop, framing, composition, and quoted visible text authoritative.
-  Hotspots must not alter image prompts.
+- Keep at most one optional Reference card per revision and reject
+  self-references. Resolve its active accepted background for both Image Prompt
+  preparation and image generation. Send the Reference image once to MFLUX
+  without hidden role instructions or complete source-card prose.
+- Compose background prompts deterministically from the current reviewed Image
+  Prompt without adding role headings or instructions. Hotspots must not alter
+  image prompts.
 - Keep one Description editor in the Background inspector. Show conditional
-  native Original/Enriched radio controls below it, default to Enriched when it
-  exists, place compact reference rows in a References group before Enrich and
-  Generate, and keep generation provenance in button tooltips. Encode enrichment
-  freshness in the Enrich action from the authored Description, exact usable
-  reference backgrounds, selected Ollama model, and combined extraction and
-  enrichment prompt-version provenance: current is a disabled completed state,
-  stale is Re-enrich. Clearing the Enriched editor removes that derived value.
-  Enable image generation when either Description source is non-empty.
+  native Description/Image Prompt radio controls below it, default to Image
+  Prompt when it exists, place the Reference selector before Enrich and
+  Generate, and keep generation provenance in button tooltips. Encode Image
+  Prompt freshness in the Enrich action from the Description, exact usable
+  Reference background, selected Ollama model, and preparation prompt version:
+  current is a disabled completed state and stale is Re-enrich. Clearing the
+  Image Prompt editor removes that derived value. Require a current Image Prompt
+  for image generation.
 - Support generated backgrounds only; do not add image import. Apply Generate
   and Clear directly through document commands. Keep an existing image visible
   until replacement succeeds. After Description or image generation succeeds,
@@ -97,22 +79,16 @@ for live Ollama and MFLUX runs.
   bar; keep field validation beside its input and the status bar passive. Use a
   blocking decision dialog only when proceeding could lose persisted work and
   Undo cannot recover it.
-- Enrich Description requires authored Description text and must not send
-  current or referenced images to Ollama. Profile only immutable
-  generation-time source Descriptions through strict role schemas, never expose
-  complete source prose to the final enrichment call, and never derive from an
-  existing enrichment. Store the result separately through one undoable
-  command. Track source Description, exact reference provenance, Ollama model,
-  and both prompt versions so enrichment can be marked Current or Out of date
-  without being cleared. Image generation continues using an out-of-date
-  enrichment until it is cleared or replaced.
-  Reject recognized authored object-state reversals after one constrained
-  repair attempt and reject newly invented quoted visible text. Shape the
-  result for FLUX.2 as one concise natural-language paragraph ordered by
-  subject, action, style, context, then secondary details. Use positive
-  desired-image language, preserve narrow viewpoints and crops, associate
-  colors and materials with specific objects, and add photographic camera
-  details only for explicitly photographic authored styles.
+- Enrich requires authored Description text. Without a Reference it is
+  text-only; with a readable active Reference background it is one multimodal
+  Ollama request. The Description is authoritative and the existing Image
+  Prompt is never preparation input. Allow a plausible concrete proposal for
+  ambiguity rather than adding clarification state. Store only the final Image
+  Prompt through one undoable command; private deliberation must not enter the
+  stack. Track source Description, exact Reference provenance, Ollama model,
+  and prompt version so freshness is strict. Reject recognized authored
+  object-state reversals and invented or altered quoted visible text after one
+  constrained repair attempt.
 - Store each hotspot set under exactly one complete card revision. Replacing a
   background preserves its hotspots so the author can review and adjust them
   manually.
@@ -125,8 +101,8 @@ for live Ollama and MFLUX runs.
   synchronization and same-revision edits must not discard a valid more
   specific selection. Enable geometry gestures and authoring overlays only
   while the Hotspots tab is active; leaving it cancels an unfinished polygon.
-- Suppress stale enrichment results after relevant target revision,
-  Description, reference assignment, source revision/background, project, or
+- Suppress stale Image Prompt results after relevant target revision,
+  Description, Reference assignment, source revision/background, project, or
   mode changes. Editing source text without regenerating its referenced
   background must not stale generation-time provenance.
 - Check local AI services on entry to Author mode, with concurrent checks
@@ -136,8 +112,9 @@ for live Ollama and MFLUX runs.
   those cards differ. Show standard-size Back, Restart, and overlay controls
   only in Run mode; hide the card name and version authoring header there.
 - Keep LLM and image-model selectors in the status bar and persist them through
-  Qt settings. List installed Ollama models; offer FLUX.2 Klein 4B and FLUX.2
-  Klein 9B KV. Keep model fields out of Advanced Settings.
+  Qt settings. List only installed Ollama models that advertise vision support;
+  offer FLUX.2 Klein 4B and FLUX.2 Klein 9B KV. Keep model fields out of
+  Advanced Settings.
 - Represent a revision's applied hotspot set as `HotspotSet | None`.
   `None` means no set has been applied; an empty `HotspotSet` means an applied
   set currently contains no interactions.

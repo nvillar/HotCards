@@ -25,7 +25,7 @@ from hypergen.application.commands import (
     ReplaceInteractionPolygonsCommand,
     ReplacePolygonCommand,
     ReplaceRevisionBackgroundCommand,
-    SetRevisionEnrichedDescriptionCommand,
+    SetRevisionImagePromptCommand,
     SetRevisionReferenceCommand,
     SetRunOverlayModeCommand,
     SetStartCardCommand,
@@ -41,9 +41,9 @@ from hypergen.application.document_session import (
     DocumentSessionState,
 )
 from hypergen.application.generated_revision_change import GeneratedRevisionChange
-from hypergen.application.scene_enrichment_workflow import (
-    SceneEnrichmentWorkflow,
-    SceneEnrichmentWorkflowError,
+from hypergen.application.image_prompt_workflow import (
+    ImagePromptWorkflow,
+    ImagePromptWorkflowError,
 )
 from hypergen.application.workers import (
     AdapterKind,
@@ -80,7 +80,7 @@ __all__ = [
     "DuplicateRevisionCommand",
     "EditRevisionDescriptionCommand",
     "GeneratedRevisionChange",
-    "SetRevisionEnrichedDescriptionCommand",
+    "SetRevisionImagePromptCommand",
     "OperationStatus",
     "RenameCardCommand",
     "ReorderCardCommand",
@@ -92,8 +92,8 @@ __all__ = [
     "SetRunOverlayModeCommand",
     "SetRevisionReferenceCommand",
     "SetStartCardCommand",
-    "SceneEnrichmentWorkflow",
-    "SceneEnrichmentWorkflowError",
+    "ImagePromptWorkflow",
+    "ImagePromptWorkflowError",
     "UndoToken",
     "WorkerFailure",
     "WorkerFailureKind",

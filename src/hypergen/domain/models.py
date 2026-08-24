@@ -21,7 +21,7 @@ from pydantic import (
     model_validator,
 )
 
-CURRENT_SCHEMA_VERSION = 5
+CURRENT_SCHEMA_VERSION = 6
 
 NonEmptyString = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 NormalizedCoordinate = Annotated[float, Field(ge=0.0, le=1.0)]
@@ -159,6 +159,23 @@ class ImageGenerationInputs(DomainModel):
     """Author-controlled inputs captured for a generated image."""
 
     description: str
+    image_prompt: NonEmptyString
+    reference: ImageReferenceSnapshot | None = None
+
+    @property
+    def effective_description(self) -> str:
+        """Return the prepared Image Prompt sent to image generation."""
+        return self.image_prompt
+
+    def references(self) -> tuple[ImageReferenceSnapshot, ...]:
+        """Return the optional generation reference as a uniform tuple."""
+        return (self.reference,) if self.reference is not None else ()
+
+
+class LegacyImageGenerationInputs(DomainModel):
+    """Exact schema-v5 inputs retained in historical generation metadata."""
+
+    description: str
     enriched_description: str | None = None
     subject_reference: ImageReferenceSnapshot | None = None
     style_reference: ImageReferenceSnapshot | None = None
@@ -214,7 +231,7 @@ class ImageGenerationInputs(DomainModel):
 class ImageGenerationMetadata(DomainModel):
     """Reproducibility metadata for an accepted generated image."""
 
-    inputs: ImageGenerationInputs
+    inputs: ImageGenerationInputs | LegacyImageGenerationInputs
     render_prompt: NonEmptyString
     model_identifier: NonEmptyString
     mflux_version: NonEmptyString
@@ -263,21 +280,12 @@ class GeneratedBackground(DomainModel):
 Background = GeneratedBackground
 
 
-class EnrichmentReferenceSnapshot(DomainModel):
-    """Legacy reference provenance retained for schema-v5 compatibility."""
-
-    role: ReferenceRole
-    card_id: UUID
-    revision_id: UUID
-    background_id: UUID
-
-
-class EnrichedDescription(DomainModel):
-    """One derived Description and the inputs that established its freshness."""
+class ImagePrompt(DomainModel):
+    """One prepared Image Prompt and the inputs that established its freshness."""
 
     text: NonEmptyString
     source_description: str
-    references: tuple[EnrichmentReferenceSnapshot, ...] = ()
+    reference: ImageReferenceSnapshot | None = None
     model_identifier: NonEmptyString | None = None
     prompt_version: NonEmptyString | None = None
 
@@ -285,22 +293,20 @@ class EnrichedDescription(DomainModel):
         self,
         *,
         source_description: str,
-        references: tuple[EnrichmentReferenceSnapshot, ...] = (),
+        reference: ImageReferenceSnapshot | None = None,
         model_identifier: str | None = None,
         prompt_version: str | None = None,
     ) -> bool:
         """Return whether the derived text still matches its upstream inputs."""
         return (
             self.source_description == source_description
-            and self.references == references
+            and self.reference == reference
             and (
-                self.model_identifier is None
-                or model_identifier is None
+                model_identifier is None
                 or self.model_identifier == model_identifier
             )
             and (
-                self.prompt_version is None
-                or prompt_version is None
+                prompt_version is None
                 or self.prompt_version == prompt_version
             )
         )
@@ -311,12 +317,10 @@ class CardRevision(DomainModel):
 
     id: UUID = Field(default_factory=uuid4)
     description: str = ""
-    enriched_description: EnrichedDescription | None = None
+    image_prompt: ImagePrompt | None = None
     background: Background | None = None
     hotspot_set: HotspotSet | None = None
-    subject: CardReference | None = None
-    style: CardReference | None = None
-    setting: CardReference | None = None
+    reference: CardReference | None = None
 
     @field_validator("hotspot_set")
     @classmethod
@@ -417,13 +421,8 @@ class Stack(DomainModel):
             raise ValueError("revision IDs must be unique within a stack")
         for card in self.cards:
             for revision in card.revisions:
-                for reference in (
-                    revision.subject,
-                    revision.style,
-                    revision.setting,
-                ):
-                    if not isinstance(reference, ResolvedCardReference):
-                        continue
+                reference = revision.reference
+                if isinstance(reference, ResolvedCardReference):
                     if reference.target_card_id not in known_card_ids:
                         raise ValueError(
                             "resolved card references must identify a card in this stack"

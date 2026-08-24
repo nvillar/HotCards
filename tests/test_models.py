@@ -11,18 +11,16 @@ from hypergen.domain.models import (
     CanvasSize,
     Card,
     CardRevision,
-    EnrichedDescription,
-    EnrichmentReferenceSnapshot,
     GeneratedBackground,
     HotspotSet,
     ImageGenerationInputs,
     ImageGenerationMetadata,
+    ImagePrompt,
     ImageReferenceSnapshot,
     Interaction,
     NavigateAction,
     Point,
     Polygon,
-    ReferenceRole,
     ResolvedCardReference,
     RunOverlayMode,
     Stack,
@@ -32,7 +30,10 @@ from hypergen.domain.models import (
 
 def image_metadata() -> ImageGenerationMetadata:
     return ImageGenerationMetadata(
-        inputs=ImageGenerationInputs(description="A moonlit courtyard"),
+        inputs=ImageGenerationInputs(
+            description="A moonlit courtyard",
+            image_prompt="A moonlit courtyard",
+        ),
         render_prompt="A moonlit courtyard",
         model_identifier="flux2-klein-4b",
         mflux_version="0.18.0",
@@ -49,76 +50,79 @@ def image_metadata() -> ImageGenerationMetadata:
 def test_stack_defaults_match_document_contract() -> None:
     stack = Stack(name="Castle")
 
-    assert stack.schema_version == 5
+    assert stack.schema_version == 6
     assert (stack.canvas.width, stack.canvas.height) == (1024, 768)
     assert stack.run_overlay_mode is RunOverlayMode.HIDDEN
     assert stack.cards == ()
 
 
-def test_revision_uses_enriched_description_when_available() -> None:
-    reference = EnrichmentReferenceSnapshot(
-        role=ReferenceRole.STYLE,
+def test_revision_uses_current_image_prompt_when_available() -> None:
+    reference = ImageReferenceSnapshot(
         card_id=uuid4(),
         revision_id=uuid4(),
         background_id=uuid4(),
     )
-    enrichment = EnrichedDescription(
+    image_prompt = ImagePrompt(
         text="A richer courtyard",
         source_description="A courtyard",
-        references=(reference,),
+        reference=reference,
         model_identifier="qwen3.5:9b-mlx",
-        prompt_version="scene-enrichment-v8",
+        prompt_version="image-prompt-preparation-v1",
     )
     revision = CardRevision(
         description="A courtyard",
-        enriched_description=enrichment,
+        image_prompt=image_prompt,
     )
 
     inputs = ImageGenerationInputs(
         description=revision.description,
-        enriched_description=enrichment.text,
+        image_prompt=image_prompt.text,
+        reference=reference,
     )
     assert inputs.effective_description == "A richer courtyard"
-    assert enrichment.is_current(
+    assert image_prompt.is_current(
         source_description="A courtyard",
-        references=(reference,),
+        reference=reference,
         model_identifier="qwen3.5:9b-mlx",
-        prompt_version="scene-enrichment-v8",
+        prompt_version="image-prompt-preparation-v1",
     )
-    assert not enrichment.is_current(
+    assert not image_prompt.is_current(
         source_description="A courtyard",
-        references=(reference,),
+        reference=reference,
         model_identifier="llama3.2:latest",
-        prompt_version="scene-enrichment-v8",
+        prompt_version="image-prompt-preparation-v1",
     )
-    assert not enrichment.is_current(
+    assert not image_prompt.is_current(
         source_description="A changed courtyard",
-        references=(reference,),
-        prompt_version="scene-enrichment-v8",
+        reference=reference,
+        prompt_version="image-prompt-preparation-v1",
     )
-    assert not enrichment.is_current(
+    assert not image_prompt.is_current(
         source_description="A courtyard",
-        references=(reference,),
+        reference=reference,
         model_identifier="qwen3.5:9b-mlx",
-        prompt_version="scene-enrichment-v7",
+        prompt_version="image-prompt-preparation-v0",
     )
-    assert not enrichment.is_current(
+    assert not image_prompt.is_current(
         source_description="A courtyard",
-        references=(),
+        reference=None,
         model_identifier="qwen3.5:9b-mlx",
-        prompt_version="scene-enrichment-v8",
+        prompt_version="image-prompt-preparation-v1",
     )
-    assert ImageGenerationInputs(
-        description="A courtyard"
-    ).effective_description == (
-        "A courtyard"
+    assert not ImagePrompt(
+        text="A legacy prompt",
+        source_description="A courtyard",
+    ).is_current(
+        source_description="A courtyard",
+        model_identifier="qwen3.5:9b-mlx",
+        prompt_version="image-prompt-preparation-v1",
     )
 
 
-def test_stack_serializes_fixed_reference_slots_without_legacy_style_keys() -> None:
+def test_stack_serializes_one_optional_reference() -> None:
     destination = Card(name="Portrait")
     revision = CardRevision(
-        subject=ResolvedCardReference(target_card_id=destination.id)
+        reference=ResolvedCardReference(target_card_id=destination.id)
     )
     source = Card(name="Source", revisions=(revision,))
     stack = Stack(name="Castle", cards=(source, destination))
@@ -126,11 +130,10 @@ def test_stack_serializes_fixed_reference_slots_without_legacy_style_keys() -> N
     values = stack.model_dump(mode="json")
 
     serialized_revision = values["cards"][0]["revisions"][0]
-    assert serialized_revision["subject"]["target_card_id"] == str(destination.id)
-    assert serialized_revision["style"] is None
-    assert serialized_revision["setting"] is None
-    assert "style_id" not in serialized_revision
-    assert "styles" not in values
+    assert serialized_revision["reference"]["target_card_id"] == str(destination.id)
+    assert "subject" not in serialized_revision
+    assert "style" not in serialized_revision
+    assert "setting" not in serialized_revision
 
 
 def test_revalidated_dump_preserves_pydantic_field_selection() -> None:
@@ -198,7 +201,7 @@ def test_hotspot_set_distinguishes_never_applied_from_applied_empty() -> None:
     assert applied_empty.hotspot_set.interactions == ()
 
 
-def test_stack_rejects_self_references_and_accepts_multi_role_sources() -> None:
+def test_stack_rejects_self_references_and_accepts_one_reference() -> None:
     source = Card(name="Source")
     with pytest.raises(ValidationError, match="own card"):
         Stack(
@@ -209,7 +212,7 @@ def test_stack_rejects_self_references_and_accepts_multi_role_sources() -> None:
                         "revisions": (
                             source.active_revision.model_copy(
                                 update={
-                                    "subject": ResolvedCardReference(
+                                    "reference": ResolvedCardReference(
                                         target_card_id=source.id
                                     )
                                 }
@@ -221,16 +224,15 @@ def test_stack_rejects_self_references_and_accepts_multi_role_sources() -> None:
         )
     reference = Card(name="Reference")
     revision = CardRevision(
-        subject=ResolvedCardReference(target_card_id=reference.id),
-        setting=ResolvedCardReference(target_card_id=reference.id),
+        reference=ResolvedCardReference(target_card_id=reference.id),
     )
     stack = Stack(
         name="Castle",
         cards=(Card(name="Source", revisions=(revision,)), reference),
     )
 
-    assert stack.cards[0].active_revision.subject == (
-        stack.cards[0].active_revision.setting
+    assert stack.cards[0].active_revision.reference == (
+        ResolvedCardReference(target_card_id=reference.id)
     )
 
 
@@ -277,11 +279,11 @@ def test_generation_inputs_capture_exact_reference_source_state() -> None:
     )
     inputs = ImageGenerationInputs(
         description="Portrait at dusk",
-        subject_reference=snapshot,
+        image_prompt="Portrait at dusk",
+        reference=snapshot,
     )
 
-    assert inputs.subject_reference == snapshot
-    assert inputs.style_reference is None
+    assert inputs.reference == snapshot
 
 
 def test_hotspots_are_nested_in_their_image_revision() -> None:

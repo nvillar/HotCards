@@ -150,7 +150,10 @@ def test_save_as_copies_assets_and_rebinds_autosave(tmp_path: Path) -> None:
                 asset_id=asset_id,
             ),
             generation_metadata=ImageGenerationMetadata(
-                inputs=ImageGenerationInputs(description="A garden"),
+                inputs=ImageGenerationInputs(
+                    description="A garden",
+                    image_prompt="A garden",
+                ),
                 render_prompt="A garden",
                 model_identifier="test",
                 mflux_version="test",

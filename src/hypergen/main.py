@@ -15,7 +15,11 @@ from hypergen.application.document_session import DocumentSession, DocumentSessi
 from hypergen.application.workers import AdapterKind, AdapterWorkers
 from hypergen.domain.models import Stack
 from hypergen.generation.errors import ModelUnavailableError
-from hypergen.generation.ollama_client import OllamaRuntime, OllamaSettings
+from hypergen.generation.ollama_client import (
+    VISION_CAPABILITY,
+    OllamaRuntime,
+    OllamaSettings,
+)
 from hypergen.ui.main_window import AvailabilityChecksFactory, MainWindow
 from hypergen.ui.project_paths import default_project_directory
 from hypergen.ui.settings_dialog import SettingsStore, load_machine_settings
@@ -35,7 +39,9 @@ def build_availability_checks(
                 model=values.ollama_model,
             )
         )
-        return runtime.installed_models()
+        return runtime.installed_models(
+            capabilities=frozenset({VISION_CAPABILITY})
+        )
 
     def check_mflux() -> None:
         from huggingface_hub import snapshot_download

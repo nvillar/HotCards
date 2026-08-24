@@ -16,72 +16,58 @@ authoring shell remains usable when either service is unavailable.
 Stacks are stored as self-contained `.hypergen` directory bundles and
 autosaved atomically after creation or opening. At startup, HyperGen lists
 projects in `~/Documents/HyperGen` and offers direct Open and Create actions.
-Bundles must use the current schema version; legacy stack schemas are
-intentionally unsupported and are not migrated on load.
+Schema-v5 bundles are migrated in memory to the current schema when opened;
+unsupported older or future schemas are rejected.
 
 Each card owns one or more numbered revisions. A revision contains its authored
-Description, optional Enriched Description, optional generated background,
-fixed Subject, Style, and Setting card references, and hotspot set. The compact
-header above the canvas edits the card name and selects, duplicates, or deletes
-revisions; the toolbar manages Mode and hotspot visibility.
+Description, optional prepared Image Prompt, optional generated background,
+optional Reference card, and hotspot set. The compact header above the canvas
+edits the card name and selects, duplicates, or deletes revisions; the toolbar
+manages Mode and hotspot visibility.
 
-The Background inspector follows the authoring sequence Description,
-References, Enrich Description, then Image. Description and Enriched Description
-share one editor with native Original and Enriched radio controls that appear
-only after enrichment; the enriched text is shown by default. The editor is
-sized for the recommended prompt length. Reference labels and selectors share
-compact rows inside a References group, and button tooltips identify the inputs
-to Enrich Description and Generate Image.
-Each reference role can select one other card; the same card cannot reference
-itself. Generate groups roles that use the same active source background, sends
-each unique image once in Subject, Style, Setting order, and combines its role
-instructions. Background prompts place Enriched Description when present,
-otherwise Description, before concise natural-language instructions that assign
-each numbered image its roles. Internal headings and complete source-card
-Descriptions are not injected into the MFLUX prompt. Generated images are the
-only supported background source.
-Generate, image removal, and Enrich Description apply directly to the active
-revision. Completed generations can be kept there with Keep, moved into a new
-complete revision, or undone.
-Existing images remain in place until replacement succeeds, and successful
-changes offer a dismissible, history-safe Undo action in the notification bar.
-Enrichment never reads an image and requires authored Description text. For
-each usable assigned reference, Ollama first extracts one strict role-specific
-profile from that background's immutable generation-time Description. Subject
-profiles retain identity, appearance, and intrinsic construction for people,
-creatures, machines, vehicles, props, and other discrete objects. Style
-profiles retain only rendering traits, and Setting profiles retain only stable
-place traits.
-Observed weather, time, and season remain excluded from the injected Setting.
-Profiles use fixed scalar schemas, are cached per background, role, Ollama
-model, and extraction contract for the application session, and never expose
-the complete source scene to the final enrichment call.
+The Background inspector follows the authoring sequence Description, optional
+Reference, Enrich, then Generate Image. Description and Image Prompt share one
+editor with native radio controls that appear after a prompt has been prepared.
+Description is always the authoritative author input. Enrich creates one
+editable Image Prompt proposal from the current Description; it never uses the
+previous Image Prompt as input or inserts a separate clarification step. With a
+Reference, the selected vision-capable Ollama model also inspects that card's
+active generated image in the same preparation request. Without a Reference,
+the request is text-only.
 
-The enrichment call receives the authored Description plus only those validated
-profiles. Their capsules are also appended as natural-language constraints so
-FLUX.2 receives the exact reusable traits alongside the actual reference
-images. An enrichment is Current while its authored Description, exact
-reference backgrounds, selected Ollama model, and combined extraction/enrichment
-prompt contract still match its inputs; otherwise it remains active but is
-marked Out of date. Editing a source card's text without regenerating its
-referenced background does not change that immutable provenance. Enriched text
-may add visual detail but never overrides authored actions, poses, object
-states, time, weather, viewpoint, crop, framing, composition, or quoted visible
-text. Recognized object-state reversals receive one constrained repair attempt
-and are rejected if unresolved. Generate uses Enriched Description when
-present, including when it is out of date, and otherwise falls back to
-Description.
-The Enrich action is disabled and shown as complete while enrichment is current,
-then becomes Re-enrich when any tracked input is out of date. The first use of
-an uncached reference adds one extraction call per assigned role; later uses of
-the same profile reuse the session cache. Clearing all Enriched text removes it.
-Image generation requires at least one non-empty Description source and uses
-only the effective source as scene content.
-Enriched text follows FLUX.2 prompt guidance: one concise natural-language
-paragraph ordered by subject, action, style, context, then secondary details,
-using positive descriptions and object-specific colors and materials.
-A rewrite that invents quoted visible text or reverses a recognized authored
-object state is rejected without changing either Description field.
+The optional Reference has no fixed Subject, Style, or Setting role. The
+Description states what should carry over or change, while Enrich interprets
+the image and produces a concrete final-image proposal for review. Definite
+continuity can retain stable visible identity, construction, and rendering
+treatment; an explicit target subject, state, style, palette, setting,
+viewpoint, or composition overrides the corresponding reference trait. A vague
+change may produce a plausible concrete proposal that the author can edit or
+replace by revising the Description and enriching again.
+
+An Image Prompt is Current only while its source Description, exact Reference
+card/revision/background snapshot, selected Ollama model, and preparation
+contract still match. Out-of-date prompts remain visible and editable, but
+Generate requires a current prompt. Preparation validates structured output,
+preserves exact authored quoted text, rejects recognized object-state
+reversals and model-process language, and makes one constrained repair attempt
+for a valid but conflicting proposal. Private model deliberation is never
+persisted.
+
+MFLUX receives the reviewed Image Prompt unchanged and, when selected, the same
+Reference image exactly once. It receives no hidden role instructions or source
+card prose. Generated images are the only supported background source.
+Generate, image removal, Enrich, and direct Image Prompt edits apply to the
+active revision through document commands. Completed generation can be kept
+there, moved into a new complete revision, or undone. Existing images remain
+visible until replacement succeeds, and successful changes offer a
+dismissible, history-safe Undo action in the notification bar.
+
+When a schema-v5 bundle is opened, legacy Subject, Style, and Setting
+assignments collapse deterministically to one Reference in that order of
+precedence, and Enriched Description becomes Image Prompt. Historical
+generation metadata remains readable in its original role-based form. Migrated
+prompts without current model and contract provenance remain visible but must
+be enriched again before generation.
 
 The Hotspots inspector is the sole source of interaction semantics. A new
 hotspot is persisted and selected immediately, even before it has an area;
@@ -104,7 +90,8 @@ authoring-only card name and version header. Run-only navigation and overlay
 controls stay hidden in Author mode.
 Local AI services are checked automatically when Author mode is entered; Run
 mode starts no AI work. The status bar selects
-an installed Ollama LLM and either FLUX.2 Klein 4B or FLUX.2 Klein 9B KV.
+an installed vision-capable Ollama model and either FLUX.2 Klein 4B or FLUX.2
+Klein 9B KV.
 
 Transient outcomes, failures, Run warnings, and Undo actions appear in one
 notification bar below the toolbar. Reversible deletions and replacements apply
@@ -119,7 +106,7 @@ model selectors.
 ## Setup and run
 
 Prerequisites: Python 3.12 and [uv](https://docs.astral.sh/uv/). To enable
-generation, also run Ollama with an installed text model (default:
+generation, also run Ollama with an installed vision-capable model (default:
 `qwen3.5:9b-mlx`) and cache the selected MFLUX model locally. FLUX.2 Klein 4B
 uses Apache 2.0; FLUX.2 Klein 9B KV uses the FLUX Non-Commercial License. The
 9B KV choice requires both the regular 9B weights for text-only generation and

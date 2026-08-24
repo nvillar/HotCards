@@ -56,6 +56,7 @@ def _write_case(case_dir: Path) -> None:
                 "case_id": "one",
                 "inputs": {
                     "description": "A storybook watercolor courtyard",
+                    "image_prompt": "A storybook watercolor courtyard",
                 },
                 "required_visual_elements": ["gate"],
                 "unwanted_artifacts": ["text"],

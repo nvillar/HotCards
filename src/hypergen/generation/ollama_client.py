@@ -18,6 +18,7 @@ from hypergen.generation.errors import (
 )
 
 DEFAULT_OLLAMA_MODEL = "qwen3.5:9b-mlx"
+VISION_CAPABILITY = "vision"
 
 
 class OllamaClientProtocol(Protocol):
@@ -116,8 +117,12 @@ class OllamaRuntime:
             timeout=settings.request_timeout_seconds,
         )
 
-    def installed_models(self) -> tuple[str, ...]:
-        """List installed model tags in stable display order."""
+    def installed_models(
+        self,
+        *,
+        capabilities: frozenset[str] = frozenset(),
+    ) -> tuple[str, ...]:
+        """List compatible installed model tags in stable display order."""
         try:
             listed = self._client.list()
         except (httpx.HTTPError, RequestError, ResponseError) as error:
@@ -125,7 +130,7 @@ class OllamaRuntime:
                 f"Cannot reach Ollama at {self.settings.endpoint}. "
                 "Start the Ollama daemon and verify the configured endpoint."
             ) from error
-        return tuple(
+        models = tuple(
             sorted(
                 {
                     model.model
@@ -135,6 +140,13 @@ class OllamaRuntime:
                 key=str.casefold,
             )
         )
+        if not capabilities:
+            return models
+        compatible: list[str] = []
+        for model in models:
+            if capabilities <= self._model_capabilities(model):
+                compatible.append(model)
+        return tuple(compatible)
 
     def require_model(self, *, capabilities: frozenset[str] = frozenset()) -> None:
         """Check model availability and required capabilities with actionable errors."""
@@ -147,19 +159,23 @@ class OllamaRuntime:
 
         if not capabilities:
             return
-        try:
-            details = self._client.show(self.settings.model)
-        except (httpx.HTTPError, RequestError, ResponseError) as error:
-            raise ServiceUnavailableError(
-                f"Ollama could not inspect model {self.settings.model!r}."
-            ) from error
-        available_capabilities = frozenset(getattr(details, "capabilities", ()) or ())
+        available_capabilities = self._model_capabilities(self.settings.model)
         missing = capabilities - available_capabilities
         if missing:
             names = ", ".join(sorted(missing))
             raise ModelUnavailableError(
                 f"Ollama model {self.settings.model!r} lacks required capabilities: {names}."
             )
+
+    def _model_capabilities(self, model: str) -> frozenset[str]:
+        """Return one installed model's advertised Ollama capabilities."""
+        try:
+            details = self._client.show(model)
+        except (httpx.HTTPError, RequestError, ResponseError) as error:
+            raise ServiceUnavailableError(
+                f"Ollama could not inspect model {model!r}."
+            ) from error
+        return frozenset(getattr(details, "capabilities", ()) or ())
 
     def unload_model(self) -> None:
         """Unload the configured model so a subsequent call measures cold load."""

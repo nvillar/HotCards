@@ -38,19 +38,18 @@ from hypergen.application.commands import (
     DocumentCommand,
     EditRevisionDescriptionCommand,
     ReorderHotspotCommand,
-    SetRevisionEnrichedDescriptionCommand,
+    SetRevisionImagePromptCommand,
     SetRevisionReferenceCommand,
 )
 from hypergen.application.document_controller import DocumentController
-from hypergen.application.scene_enrichment_workflow import (
-    enrichment_reference_snapshots,
+from hypergen.application.image_prompt_workflow import (
+    image_prompt_reference_snapshot,
 )
 from hypergen.domain.models import (
     Card,
     CardRevision,
     Interaction,
     NavigateAction,
-    ReferenceRole,
     ResolvedCardReference,
     Stack,
     UnresolvedCardReference,
@@ -105,7 +104,7 @@ class Inspector(QWidget):
 
     document_changed = Signal(object)
     generate_background_requested = Signal()
-    enrich_scene_requested = Signal()
+    prepare_image_prompt_requested = Signal()
     hotspot_selected = Signal(object)
     change_applied = Signal(str, object)
     render_inputs_changed = Signal()
@@ -119,17 +118,17 @@ class Inspector(QWidget):
         self.controller = controller
         self.selected_card_id: UUID | None = None
         self._rendered_revision_id: UUID | None = None
-        self._description_mode = "original"
-        self._had_enrichment = False
+        self._description_mode = "description"
+        self._had_image_prompt = False
         self._enrich_using_text = ""
         self._generate_using_text = ""
         self._enrich_reason = ""
         self._generate_reason = ""
         self._can_enrich = False
-        self._enrichment_busy = False
-        self._enrichment_current: bool | None = None
-        self._enrichment_model_identifier: str | None = None
-        self._enrichment_prompt_version: str | None = None
+        self._image_prompt_busy = False
+        self._image_prompt_current: bool | None = None
+        self._image_prompt_model_identifier: str | None = None
+        self._image_prompt_prompt_version: str | None = None
         self._rendering = False
         self.setObjectName("inspector")
         self.setMinimumWidth(300)
@@ -190,90 +189,61 @@ class Inspector(QWidget):
         self.description_toggle.setObjectName("descriptionToggle")
         toggle_layout = QHBoxLayout(self.description_toggle)
         toggle_layout.setContentsMargins(0, 0, 0, 0)
-        self.original_description_button = QRadioButton("Original")
-        self.original_description_button.setObjectName("originalDescriptionButton")
-        self.original_description_button.setToolTip(
+        self.description_button = QRadioButton("Description")
+        self.description_button.setObjectName("descriptionButton")
+        self.description_button.setToolTip(
             "Display and edit the authored Description"
         )
-        self.enriched_description_button = QRadioButton("Enriched")
-        self.enriched_description_button.setObjectName("enrichedDescriptionButton")
-        self.enriched_description_button.setToolTip(
-            "Display and edit the Enriched Description"
+        self.image_prompt_button = QRadioButton("Image Prompt")
+        self.image_prompt_button.setObjectName("imagePromptButton")
+        self.image_prompt_button.setToolTip(
+            "Display and edit the prepared Image Prompt"
         )
         self.description_button_group = QButtonGroup(self)
         self.description_button_group.setExclusive(True)
-        self.description_button_group.addButton(self.original_description_button)
-        self.description_button_group.addButton(self.enriched_description_button)
-        toggle_layout.addWidget(self.original_description_button)
-        toggle_layout.addWidget(self.enriched_description_button)
+        self.description_button_group.addButton(self.description_button)
+        self.description_button_group.addButton(self.image_prompt_button)
+        toggle_layout.addWidget(self.description_button)
+        toggle_layout.addWidget(self.image_prompt_button)
         toggle_layout.addStretch(1)
         layout.addWidget(self.description_toggle)
 
         layout.addSpacing(8)
-        self.references_label = QLabel("References")
-        self.references_label.setObjectName("referencesLabel")
-        layout.addWidget(self.references_label)
-        self.references_panel = QFrame()
-        self.references_panel.setObjectName("referencesPanel")
-        self.references_panel.setFrameShape(QFrame.Shape.StyledPanel)
-        references_layout = QVBoxLayout(self.references_panel)
-        self.subject_reference_combo = QComboBox()
-        self.style_reference_combo = QComboBox()
-        self.setting_reference_combo = QComboBox()
-        self.reference_combos = {
-            ReferenceRole.SUBJECT: self.subject_reference_combo,
-            ReferenceRole.STYLE: self.style_reference_combo,
-            ReferenceRole.SETTING: self.setting_reference_combo,
-        }
-        reference_details = (
-            (
-                ReferenceRole.SUBJECT,
-                "Subject",
-                "Preserve the recognizable appearance of a subject, object, or place",
-            ),
-            (
-                ReferenceRole.STYLE,
-                "Style",
-                "Transfer medium, linework, texture, palette, and lighting treatment",
-            ),
-            (
-                ReferenceRole.SETTING,
-                "Setting",
-                "Preserve environment, architecture, materials, and location vocabulary",
-            ),
+        self.reference_label = QLabel("Reference")
+        self.reference_label.setObjectName("referenceLabel")
+        layout.addWidget(self.reference_label)
+        self.reference_panel = QFrame()
+        self.reference_panel.setObjectName("referencePanel")
+        self.reference_panel.setFrameShape(QFrame.Shape.StyledPanel)
+        reference_layout = QVBoxLayout(self.reference_panel)
+        self.reference_combo = QComboBox()
+        self.reference_combo.setObjectName("referenceCombo")
+        self.reference_combo.setAccessibleName("Reference card")
+        self.reference_combo.setToolTip(
+            "Optional image whose relevant visible characteristics can inform "
+            "the Image Prompt"
         )
-        for role, label_text, tooltip in reference_details:
-            row = QHBoxLayout()
-            label = QLabel(label_text)
-            label.setMinimumWidth(58)
-            label.setToolTip(tooltip)
-            row.addWidget(label)
-            combo = self.reference_combos[role]
-            combo.setObjectName(f"{role.value}ReferenceCombo")
-            combo.setAccessibleName(f"{label_text} reference card")
-            combo.setToolTip(tooltip)
-            row.addWidget(combo, 1)
-            references_layout.addLayout(row)
+        reference_layout.addWidget(self.reference_combo)
         self.reference_error = QLabel()
         self.reference_error.setObjectName("referenceValidationError")
         self.reference_error.setWordWrap(True)
         self.reference_error.setVisible(False)
-        references_layout.addWidget(self.reference_error)
-        layout.addWidget(self.references_panel)
+        reference_layout.addWidget(self.reference_error)
+        layout.addWidget(self.reference_panel)
 
         layout.addSpacing(8)
-        self.enrich_scene_button = QPushButton("Enrich Description")
-        self.enrich_scene_button.setObjectName("enrichSceneButton")
-        layout.addWidget(self.enrich_scene_button)
+        self.enrich_button = QPushButton("Enrich")
+        self.enrich_button.setObjectName("enrichButton")
+        layout.addWidget(self.enrich_button)
 
         layout.addSpacing(8)
         self.generate_background_button = QPushButton("Generate Image")
         self.generate_background_button.setObjectName("generateBackgroundButton")
         layout.addWidget(self.generate_background_button)
         self._focus_commit_targets = {
-            self.original_description_button,
-            self.enriched_description_button,
-            self.enrich_scene_button,
+            self.description_button,
+            self.image_prompt_button,
+            self.enrich_button,
             self.generate_background_button,
         }
 
@@ -378,21 +348,17 @@ class Inspector(QWidget):
             self._description_editing_finished
         )
         self.description_edit.textChanged.connect(self._render_inputs_changed)
-        self.original_description_button.clicked.connect(
-            lambda: self._switch_description_mode("original")
+        self.description_button.clicked.connect(
+            lambda: self._switch_description_mode("description")
         )
-        self.enriched_description_button.clicked.connect(
-            lambda: self._switch_description_mode("enriched")
+        self.image_prompt_button.clicked.connect(
+            lambda: self._switch_description_mode("image_prompt")
         )
-        self.enrich_scene_button.clicked.connect(self.enrich_scene_requested)
+        self.enrich_button.clicked.connect(self.prepare_image_prompt_requested)
         self.generate_background_button.clicked.connect(self.generate_background_requested)
-        for role, combo in self.reference_combos.items():
-            combo.currentIndexChanged.connect(
-                lambda index, selected_role=role: self._reference_changed(
-                    selected_role,
-                    index,
-                )
-            )
+        self.reference_combo.currentIndexChanged.connect(
+            self._reference_changed
+        )
         self.hotspot_list.currentItemChanged.connect(self._hotspot_selection_changed)
         self.move_hotspot_up_button.clicked.connect(lambda: self._move_hotspot(-1))
         self.move_hotspot_down_button.clicked.connect(lambda: self._move_hotspot(1))
@@ -402,7 +368,7 @@ class Inspector(QWidget):
 
     def _render_inputs_changed(self) -> None:
         if not self._rendering:
-            self._update_enrichment_freshness()
+            self._update_image_prompt_freshness()
             self.render_inputs_changed.emit()
 
     def _description_editing_finished(self, next_focus: object) -> None:
@@ -413,7 +379,7 @@ class Inspector(QWidget):
     def render(self, document: Stack, selected_card_id: UUID | None) -> None:
         previous_card_id = self.selected_card_id
         previous_revision_id = self._rendered_revision_id
-        previous_had_enrichment = self._had_enrichment
+        previous_had_image_prompt = self._had_image_prompt
         preserve_description = self.description_edit.hasFocus()
         description_draft = self.description_edit.toPlainText()
         previous_mode = self._description_mode
@@ -426,14 +392,14 @@ class Inspector(QWidget):
             self.selected_card_id = card.id if card is not None else None
             if card is None:
                 self._rendered_revision_id = None
-                self._had_enrichment = False
+                self._had_image_prompt = False
                 self.pages.setCurrentIndex(0)
                 self._set_error(self.description_error, "")
                 self._set_error(self.reference_error, "")
                 self.set_hotspot_error("")
                 self.description_edit.clear()
                 self.description_toggle.hide()
-                self._enrichment_current = None
+                self._image_prompt_current = None
                 self._update_enrich_button()
                 self.hotspot_list.clear()
                 self._render_hotspot_properties(document, None)
@@ -446,18 +412,18 @@ class Inspector(QWidget):
                 self._set_error(self.reference_error, "")
                 self.set_hotspot_error("")
             self._rendered_revision_id = revision.id
-            if revision.enriched_description is None:
-                self._description_mode = "original"
-            elif not same_revision or not previous_had_enrichment:
-                self._description_mode = "enriched"
+            if revision.image_prompt is None:
+                self._description_mode = "description"
+            elif not same_revision or not previous_had_image_prompt:
+                self._description_mode = "image_prompt"
             else:
                 self._description_mode = previous_mode
-            self._had_enrichment = revision.enriched_description is not None
+            self._had_image_prompt = revision.image_prompt is not None
             displayed_value = (
-                revision.enriched_description.text
+                revision.image_prompt.text
                 if (
-                    self._description_mode == "enriched"
-                    and revision.enriched_description is not None
+                    self._description_mode == "image_prompt"
+                    and revision.image_prompt is not None
                 )
                 else revision.description
             )
@@ -466,7 +432,7 @@ class Inspector(QWidget):
                 if preserve_description and same_revision
                 else displayed_value
             )
-            self._render_references(document, card, revision)
+            self._render_reference(document, card, revision)
             self._render_description_workflow(document, card, revision)
             self._render_hotspots(document, revision)
         finally:
@@ -479,7 +445,7 @@ class Inspector(QWidget):
         if card is None:
             return False
         value = self.description_edit.toPlainText()
-        if self._description_mode == "original":
+        if self._description_mode == "description":
             if value == card.active_revision.description:
                 return True
             return self._execute(
@@ -491,22 +457,22 @@ class Inspector(QWidget):
                 error_label=self.description_error,
                 render_change=render_change,
             )
-        existing = card.active_revision.enriched_description
+        existing = card.active_revision.image_prompt
         if existing is None or value.strip() == existing.text:
             return True
         if not value.strip():
             return self._execute(
-                SetRevisionEnrichedDescriptionCommand(
+                SetRevisionImagePromptCommand(
                     card_id=card.id,
                     revision_id=card.active_revision.id,
                     value=None,
                 ),
                 error_label=self.description_error,
-                undo_message="Enrichment removed",
+                undo_message="Image Prompt removed",
                 render_change=render_change,
             )
         return self._execute(
-            SetRevisionEnrichedDescriptionCommand(
+            SetRevisionImagePromptCommand(
                 card_id=card.id,
                 revision_id=card.active_revision.id,
                 value=existing.model_copy(update={"text": value.strip()}),
@@ -519,51 +485,54 @@ class Inspector(QWidget):
         """Compatibility alias while MainWindow is migrated."""
         return self.commit_revision_metadata()
 
-    def has_render_prompt_input(self) -> bool:
+    def has_current_image_prompt(self) -> bool:
         card = self._selected_card()
         if card is None:
             return False
         visible_value = self.description_edit.toPlainText().strip()
-        if self._description_mode == "original":
-            original = visible_value
-            enriched = (
-                card.active_revision.enriched_description.text
-                if card.active_revision.enriched_description is not None
+        image_prompt = (
+            visible_value
+            if self._description_mode == "image_prompt"
+            else (
+                card.active_revision.image_prompt.text
+                if card.active_revision.image_prompt is not None
                 else ""
             )
-        else:
-            original = card.active_revision.description
-            enriched = visible_value
-        return bool(original.strip() or enriched.strip())
+        )
+        return (
+            bool(card.active_revision.description.strip())
+            and bool(image_prompt)
+            and self._image_prompt_current is True
+        )
 
     def has_description_input(self) -> bool:
         card = self._selected_card()
         if card is None:
             return False
-        if self._description_mode == "original":
+        if self._description_mode == "description":
             return bool(self.description_edit.toPlainText().strip())
         return bool(card.active_revision.description.strip())
 
-    def show_enriched_description(
+    def show_image_prompt(
         self,
         card_id: UUID,
         revision_id: UUID,
     ) -> None:
-        """Display a newly applied enrichment when its revision is still active."""
+        """Display a newly prepared prompt when its revision is still active."""
         card = self._selected_card()
         if (
             card is None
             or card.id != card_id
             or card.active_revision.id != revision_id
-            or card.active_revision.enriched_description is None
+            or card.active_revision.image_prompt is None
         ):
             return
-        self._description_mode = "enriched"
+        self._description_mode = "image_prompt"
         self.render(self.controller.document, self.selected_card_id)
-        enrichment = card.active_revision.enriched_description
-        assert enrichment is not None
+        image_prompt = card.active_revision.image_prompt
+        assert image_prompt is not None
         with QSignalBlocker(self.description_edit):
-            self.description_edit.setPlainText(enrichment.text)
+            self.description_edit.setPlainText(image_prompt.text)
 
     def _switch_description_mode(self, mode: str) -> None:
         if self._rendering or mode == self._description_mode:
@@ -572,8 +541,8 @@ class Inspector(QWidget):
         if (
             card is None
             or (
-                mode == "enriched"
-                and card.active_revision.enriched_description is None
+                mode == "image_prompt"
+                and card.active_revision.image_prompt is None
             )
             or not self.commit_revision_metadata()
         ):
@@ -588,57 +557,49 @@ class Inspector(QWidget):
         card: Card,
         revision: CardRevision,
     ) -> None:
-        roles = [
-            role.value.title()
-            for role in ReferenceRole
-            if getattr(revision, role.value) is not None
-        ]
-        reference_suffix = (
-            f" + References ({', '.join(roles)})"
-            if roles
-            else ""
-        )
-        self.references_label.setText(
-            f"References ({len(roles)})" if roles else "References"
-        )
+        reference_suffix = " + Reference" if revision.reference is not None else ""
         self._enrich_using_text = f"Using: Description{reference_suffix}"
-        enrichment = revision.enriched_description
-        if enrichment is None:
-            generation_sources = "Description"
-            self._enrichment_current = None
+        image_prompt = revision.image_prompt
+        if image_prompt is None:
+            self._image_prompt_current = None
         else:
             authored_description = (
                 self.description_edit.toPlainText()
-                if self._description_mode == "original"
+                if self._description_mode == "description"
                 else revision.description
             )
-            self._enrichment_current = enrichment.is_current(
-                source_description=authored_description,
-                references=enrichment_reference_snapshots(document, card),
-                model_identifier=self._enrichment_model_identifier,
-                prompt_version=self._enrichment_prompt_version,
+            reference_snapshot = image_prompt_reference_snapshot(
+                document,
+                card,
             )
-            generation_sources = "Enriched Description"
-        self.description_toggle.setVisible(enrichment is not None)
-        self.original_description_button.setChecked(
-            self._description_mode == "original"
+            reference_is_usable = (
+                revision.reference is None or reference_snapshot is not None
+            )
+            self._image_prompt_current = (
+                reference_is_usable
+                and image_prompt.is_current(
+                    source_description=authored_description,
+                    reference=reference_snapshot,
+                    model_identifier=self._image_prompt_model_identifier,
+                    prompt_version=self._image_prompt_prompt_version,
+                )
+            )
+        self.description_toggle.setVisible(image_prompt is not None)
+        self.description_button.setChecked(
+            self._description_mode == "description"
         )
-        self.enriched_description_button.setChecked(
-            self._description_mode == "enriched"
+        self.image_prompt_button.setChecked(
+            self._description_mode == "image_prompt"
         )
-        self.description_edit.setAccessibleName(
-            "Enriched Description"
-            if self._description_mode == "enriched"
+        label = (
+            "Image Prompt"
+            if self._description_mode == "image_prompt"
             else "Description"
         )
-        self.description_edit.setPlaceholderText(
-            "Enriched Description"
-            if self._description_mode == "enriched"
-            else "Description"
-        )
-        self._generate_using_text = (
-            f"Using: {generation_sources}{reference_suffix}"
-        )
+        self.description_label.setText(label)
+        self.description_edit.setAccessibleName(label)
+        self.description_edit.setPlaceholderText(label)
+        self._generate_using_text = f"Using: Image Prompt{reference_suffix}"
         self._update_enrich_button()
         self._refresh_generation_tooltips()
 
@@ -660,7 +621,7 @@ class Inspector(QWidget):
         )
         self._refresh_generation_tooltips()
 
-    def set_scene_enrichment_capabilities(
+    def set_image_prompt_capabilities(
         self,
         *,
         can_enrich: bool,
@@ -671,30 +632,36 @@ class Inspector(QWidget):
     ) -> None:
         self._enrich_reason = reason
         self._can_enrich = can_enrich
-        self._enrichment_busy = busy
-        self._enrichment_model_identifier = model_identifier
-        self._enrichment_prompt_version = prompt_version
-        self._update_enrichment_freshness()
+        self._image_prompt_busy = busy
+        self._image_prompt_model_identifier = model_identifier
+        self._image_prompt_prompt_version = prompt_version
+        self._update_image_prompt_freshness()
 
-    def _update_enrichment_freshness(self) -> None:
+    def _update_image_prompt_freshness(self) -> None:
         card = self._selected_card()
-        if card is None or card.active_revision.enriched_description is None:
-            self._enrichment_current = None
+        if card is None or card.active_revision.image_prompt is None:
+            self._image_prompt_current = None
         else:
             source_description = (
                 self.description_edit.toPlainText()
-                if self._description_mode == "original"
+                if self._description_mode == "description"
                 else card.active_revision.description
             )
-            self._enrichment_current = (
-                card.active_revision.enriched_description.is_current(
+            reference_snapshot = image_prompt_reference_snapshot(
+                self.controller.document,
+                card,
+            )
+            reference_is_usable = (
+                card.active_revision.reference is None
+                or reference_snapshot is not None
+            )
+            self._image_prompt_current = (
+                reference_is_usable
+                and card.active_revision.image_prompt.is_current(
                     source_description=source_description,
-                    references=enrichment_reference_snapshots(
-                        self.controller.document,
-                        card,
-                    ),
-                    model_identifier=self._enrichment_model_identifier,
-                    prompt_version=self._enrichment_prompt_version,
+                    reference=reference_snapshot,
+                    model_identifier=self._image_prompt_model_identifier,
+                    prompt_version=self._image_prompt_prompt_version,
                 )
             )
         self._update_enrich_button()
@@ -702,31 +669,27 @@ class Inspector(QWidget):
 
     def _update_enrich_button(self) -> None:
         card = self._selected_card()
-        has_enrichment = (
+        has_image_prompt = (
             card is not None
-            and card.active_revision.enriched_description is not None
+            and card.active_revision.image_prompt is not None
         )
-        if self._enrichment_busy:
+        if self._image_prompt_busy:
             text = "Enriching…"
             enabled = False
-        elif self._enrichment_current is True:
-            text = "Description Enriched ✓"
+        elif self._image_prompt_current is True:
+            text = "Image Prompt Current ✓"
             enabled = False
         else:
-            text = (
-                "Re-enrich Description"
-                if has_enrichment
-                else "Enrich Description"
-            )
+            text = "Re-enrich" if has_image_prompt else "Enrich"
             enabled = self._can_enrich
-        self.enrich_scene_button.setText(text)
-        self.enrich_scene_button.setEnabled(enabled)
-        self.enrich_scene_button.setAccessibleDescription(
+        self.enrich_button.setText(text)
+        self.enrich_button.setEnabled(enabled)
+        self.enrich_button.setAccessibleDescription(
             self._enrich_state_reason()
         )
 
     def _refresh_generation_tooltips(self) -> None:
-        self.enrich_scene_button.setToolTip(
+        self.enrich_button.setToolTip(
             self._tooltip_with_using(
                 self._enrich_state_reason(),
                 self._enrich_using_text,
@@ -740,11 +703,11 @@ class Inspector(QWidget):
         )
 
     def _enrich_state_reason(self) -> str:
-        if self._enrichment_busy:
-            return "Description enrichment is running"
-        if self._enrichment_current is True:
+        if self._image_prompt_busy:
+            return "Image Prompt preparation is running"
+        if self._image_prompt_current is True:
             return "Current"
-        if self._enrichment_current is False:
+        if self._image_prompt_current is False:
             return self._tooltip_with_using(
                 "Out of date",
                 self._enrich_reason,
@@ -782,59 +745,59 @@ class Inspector(QWidget):
         self._set_error(self.reference_error, "")
         self.set_hotspot_error("")
 
-    def _render_references(
+    def _render_reference(
         self,
         document: Stack,
         card: Card,
         revision: CardRevision,
     ) -> None:
-        for role, combo in self.reference_combos.items():
-            reference = getattr(revision, role.value)
-            with QSignalBlocker(combo):
-                combo.clear()
-                combo.addItem("No reference", None)
-                for candidate in document.cards:
-                    if candidate.id == card.id:
-                        continue
-                    combo.addItem(candidate.name, candidate.id)
-                if isinstance(reference, ResolvedCardReference):
-                    combo.setCurrentIndex(
-                        self._combo_index_for_data(
-                            combo,
-                            reference.target_card_id,
-                        )
+        reference = revision.reference
+        with QSignalBlocker(self.reference_combo):
+            self.reference_combo.clear()
+            self.reference_combo.addItem("No reference", None)
+            for candidate in document.cards:
+                if candidate.id == card.id:
+                    continue
+                self.reference_combo.addItem(candidate.name, candidate.id)
+            if isinstance(reference, ResolvedCardReference):
+                self.reference_combo.setCurrentIndex(
+                    self._combo_index_for_data(
+                        self.reference_combo,
+                        reference.target_card_id,
                     )
-                elif isinstance(reference, UnresolvedCardReference):
-                    name = reference.target_name or "Unknown card"
-                    combo.addItem(f"Missing: {name}", reference)
-                    combo.setCurrentIndex(combo.count() - 1)
-                else:
-                    combo.setCurrentIndex(0)
+                )
+            elif isinstance(reference, UnresolvedCardReference):
+                name = reference.target_name or "Unknown card"
+                self.reference_combo.addItem(f"Missing: {name}", reference)
+                self.reference_combo.setCurrentIndex(
+                    self.reference_combo.count() - 1
+                )
+            else:
+                self.reference_combo.setCurrentIndex(0)
 
-    def _reference_changed(self, role: ReferenceRole, index: int) -> None:
+    def _reference_changed(self, index: int) -> None:
         if self._rendering or index < 0:
             return
         card = self._selected_card()
         if card is None:
             return
-        value = self.reference_combos[role].itemData(index)
+        value = self.reference_combo.itemData(index)
         if isinstance(value, UUID):
             reference = ResolvedCardReference(target_card_id=value)
         elif isinstance(value, UnresolvedCardReference):
             reference = value
         else:
             reference = None
-        if reference == getattr(card.active_revision, role.value):
+        if reference == card.active_revision.reference:
             return
         self._execute(
             SetRevisionReferenceCommand(
                 card_id=card.id,
                 revision_id=card.active_revision.id,
-                role=role,
                 reference=reference,
             ),
             error_label=self.reference_error,
-            undo_message=f"{role.value.replace('_', ' ').title()} reference changed",
+            undo_message="Reference changed",
         )
 
     def _render_hotspots(

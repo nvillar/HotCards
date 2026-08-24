@@ -26,7 +26,7 @@ from hypergen.application.commands import (
     ReplaceInteractionPolygonsCommand,
     ReplacePolygonCommand,
     ReplaceRevisionBackgroundCommand,
-    SetRevisionEnrichedDescriptionCommand,
+    SetRevisionImagePromptCommand,
     SetRevisionReferenceCommand,
     SetStartCardCommand,
 )
@@ -34,16 +34,15 @@ from hypergen.application.document_controller import DocumentController
 from hypergen.domain.models import (
     Card,
     CardRevision,
-    EnrichedDescription,
     GeneratedBackground,
     HotspotSet,
     ImageGenerationInputs,
     ImageGenerationMetadata,
+    ImagePrompt,
     Interaction,
     NavigateAction,
     Point,
     Polygon,
-    ReferenceRole,
     ResolvedCardReference,
     Stack,
     UnresolvedCardReference,
@@ -118,39 +117,38 @@ def test_revision_description_and_reference_edits_are_typed_changes() -> None:
     document = SetRevisionReferenceCommand(
         card_id=card.id,
         revision_id=revision_id,
-        role=ReferenceRole.SUBJECT,
         reference=ResolvedCardReference(target_card_id=reference.id),
     ).apply(document)
 
     changed = document.cards[0].active_revision
     assert changed.description == "A quiet library"
-    assert changed.subject == ResolvedCardReference(target_card_id=reference.id)
+    assert changed.reference == ResolvedCardReference(target_card_id=reference.id)
 
 
-def test_enriched_description_is_set_and_cleared_independently() -> None:
+def test_image_prompt_is_set_and_cleared_independently() -> None:
     revision = CardRevision(description="A courtyard")
     card = Card(name="Card", revisions=(revision,))
     document = Stack(name="Stack", cards=(card,))
-    enrichment = EnrichedDescription(
+    image_prompt = ImagePrompt(
         text="A richer courtyard",
         source_description="A courtyard",
     )
 
-    changed = SetRevisionEnrichedDescriptionCommand(
+    changed = SetRevisionImagePromptCommand(
         card_id=card.id,
         revision_id=revision.id,
-        value=enrichment,
+        value=image_prompt,
     ).apply(document)
 
     assert changed.cards[0].active_revision.description == "A courtyard"
-    assert changed.cards[0].active_revision.enriched_description == enrichment
+    assert changed.cards[0].active_revision.image_prompt == image_prompt
 
-    cleared = SetRevisionEnrichedDescriptionCommand(
+    cleared = SetRevisionImagePromptCommand(
         card_id=card.id,
         revision_id=revision.id,
         value=None,
     ).apply(changed)
-    assert cleared.cards[0].active_revision.enriched_description is None
+    assert cleared.cards[0].active_revision.image_prompt is None
 
 
 def test_revision_activation_and_complete_hotspot_replacement() -> None:
@@ -361,7 +359,7 @@ def test_delete_card_converts_all_inbound_references_and_clears_start() -> None:
             "revisions": (
                 source.active_revision.model_copy(
                     update={
-                        "subject": ResolvedCardReference(
+                        "reference": ResolvedCardReference(
                             target_card_id=destination.id
                         )
                     }
@@ -384,7 +382,7 @@ def test_delete_card_converts_all_inbound_references_and_clears_start() -> None:
     target = hotspot_set.interactions[0].action.target
     assert target == UnresolvedCardReference(target_name="Former Hall")
     assert hotspot_set.interactions[0].label == "Unresolved"
-    assert changed.cards[0].active_revision.subject == UnresolvedCardReference(
+    assert changed.cards[0].active_revision.reference == UnresolvedCardReference(
         target_name="Former Hall"
     )
 
@@ -410,7 +408,6 @@ def test_reference_assignment_and_background_replacement_are_guarded() -> None:
     document = SetRevisionReferenceCommand(
         card_id=card.id,
         revision_id=revision_id,
-        role=ReferenceRole.SETTING,
         reference=ResolvedCardReference(target_card_id=reference.id),
     ).apply(document)
 
@@ -418,7 +415,6 @@ def test_reference_assignment_and_background_replacement_are_guarded() -> None:
         SetRevisionReferenceCommand(
             card_id=card.id,
             revision_id=revision_id,
-            role=ReferenceRole.SUBJECT,
             reference=ResolvedCardReference(target_card_id=card.id),
         ).apply(document)
 
@@ -428,7 +424,10 @@ def test_reference_assignment_and_background_replacement_are_guarded() -> None:
         id=asset_id,
         image_path=f"assets/cards/{card.id}/image-{asset_id}.png",
         generation_metadata=ImageGenerationMetadata(
-            inputs=ImageGenerationInputs(description="A card"),
+            inputs=ImageGenerationInputs(
+                description="A card",
+                image_prompt="A card",
+            ),
             render_prompt="A card",
             model_identifier="test",
             mflux_version="test",
@@ -451,7 +450,6 @@ def test_reference_assignment_and_background_replacement_are_guarded() -> None:
     document = SetRevisionReferenceCommand(
         card_id=card.id,
         revision_id=revision_id,
-        role=ReferenceRole.SETTING,
         reference=None,
     ).apply(document)
-    assert document.cards[0].active_revision.setting is None
+    assert document.cards[0].active_revision.reference is None
