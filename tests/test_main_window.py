@@ -312,7 +312,10 @@ def test_card_header_and_toolbar_match_revision_hierarchy(
     assert not window.overlay_selector_action.isVisible()
     assert not hasattr(window, "styles_button")
     assert not hasattr(window, "document_status_label")
-    assert window.generation_progress_bar.isHidden()
+    assert window.generation_progress_container.isHidden()
+    margins = window.generation_progress_layout.contentsMargins()
+    assert margins.left() == 8
+    assert margins.right() == 8
     assert window.inspector.inspector_tabs.tabText(0) == "Background"
     assert window.fit_canvas_button.size() == window.clear_background_button.size()
 
@@ -767,7 +770,7 @@ def test_changing_llm_model_re_enables_image_prompt_preparation(
             text="A richly detailed courtyard",
             source_description="A courtyard",
             model_identifier="qwen3.5:9b-mlx",
-            prompt_version="image-prompt-preparation-v5",
+            prompt_version="image-prompt-preparation-v6",
         ),
     )
     card = Card(name="Card", revisions=(revision,))
@@ -1166,24 +1169,25 @@ def test_generation_progress_bar_is_indeterminate_for_text_and_uses_image_steps(
     application: QApplication,
 ) -> None:
     window, _controller, _workers, background = _window()
+    progress_container = window.generation_progress_container
     progress = window.generation_progress_bar
 
     window.image_prompt_workflow._busy = True
     window.image_prompt_workflow.progress_changed.emit(
         "Preparing Image Prompt..."
     )
-    assert not progress.isHidden()
+    assert not progress_container.isHidden()
     assert progress.minimum() == 0
     assert progress.maximum() == 0
     assert not progress.isTextVisible()
 
     window.image_prompt_workflow._busy = False
     window.image_prompt_workflow.progress_changed.emit("Image Prompt prepared")
-    assert progress.isHidden()
+    assert progress_container.isHidden()
 
     background.busy = True
     background.progress_changed.emit("Generating image...")
-    assert not progress.isHidden()
+    assert not progress_container.isHidden()
     assert progress.minimum() == 0
     assert progress.maximum() == 0
 
@@ -1211,13 +1215,13 @@ def test_generation_progress_bar_is_indeterminate_for_text_and_uses_image_steps(
 
     background.busy = False
     background.progress_changed.emit("Image generated")
-    assert not progress.isHidden()
+    assert not progress_container.isHidden()
     assert progress.minimum() == 0
     assert progress.maximum() == 0
 
     window.image_prompt_workflow._busy = False
     window.image_prompt_workflow.progress_changed.emit("Image Prompt prepared")
-    assert progress.isHidden()
+    assert progress_container.isHidden()
 
 
 def test_background_success_clears_previous_cancellation_notice(

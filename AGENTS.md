@@ -93,8 +93,9 @@ for live Ollama and MFLUX runs.
   undoable command; private deliberation must not enter the stack. Track source
   Description, exact Reference provenance, Ollama model,
   and prompt version so freshness is strict. Reject recognized authored
-  object-state reversals and invented or altered quoted visible text after one
-  constrained repair attempt.
+  object-state reversals, invented or altered affirmative quoted visible text,
+  and violations of explicit quoted-text exclusions after one constrained
+  repair attempt.
 - Store each hotspot set under exactly one complete card revision. Replacing a
   background preserves its hotspots so the author can review and adjust them
   manually.
