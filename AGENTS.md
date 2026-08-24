@@ -82,14 +82,15 @@ for live Ollama and MFLUX runs.
 - Image Prompt preparation requires authored Description text. Without a Reference it is
   text-only; with a readable active Reference background it is one multimodal
   Ollama request. The target Description is authoritative and the existing
-  Image Prompt is never preparation input. Use the immutable authored
-  Description captured in the exact Reference background's generation metadata
-  as the primary semantic source for applicable identity and style language;
-  use the image as visual evidence and to fill gaps rather than relabeling
-  explicit authored treatment. Allow a plausible concrete proposal for
-  ambiguity rather than adding clarification state. Store only the final Image
-  Prompt through one undoable command; private deliberation must not enter the
-  stack. Track source Description, exact Reference provenance, Ollama model,
+  Image Prompt is never preparation input. Use the immutable effective prompt
+  captured in the exact Reference background's generation metadata, including a
+  reviewed Image Prompt or legacy enriched text, as the primary semantic source
+  for applicable identity and style language; use the image as visual evidence
+  and to fill gaps rather than relabeling explicit authored treatment. Preserve
+  explicit target style terminology verbatim. Allow a plausible concrete
+  proposal for ambiguity rather than adding clarification state. Store only the
+  final Image Prompt through one undoable command; private deliberation must not
+  enter the stack. Track source Description, exact Reference provenance, Ollama model,
   and prompt version so freshness is strict. Reject recognized authored
   object-state reversals and invented or altered quoted visible text after one
   constrained repair attempt.
@@ -112,9 +113,11 @@ for live Ollama and MFLUX runs.
 - Check local AI services on entry to Author mode, with concurrent checks
   deduplicated. Entering Run mode must not start AI work and must suppress
   pending AI results. Enter Run on the current Author card, keep the configured
-  start card as Restart's target, and offer Restart in a dismissible banner when
-  those cards differ. Show standard-size Back, Restart, and overlay controls
-  only in Run mode; hide the card name and version authoring header there.
+  start card as Restart's target, and do not show a redundant Run-entry
+  notification. Use one action-oriented mode button labeled Run in Author mode
+  and Author in Run mode. Show standard-size Back, Restart, and overlay controls
+  only in Run mode; hide the card name, version authoring header, and bottom
+  model selectors there.
 - Keep LLM and image-model selectors in the status bar and persist them through
   Qt settings. List only installed Ollama models that advertise vision support;
   offer FLUX.2 Klein 4B and FLUX.2 Klein 9B KV. Keep model fields out of

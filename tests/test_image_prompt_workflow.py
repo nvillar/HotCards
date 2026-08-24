@@ -100,13 +100,18 @@ def _result(
     )
 
 
-def _background(description: str, image_path: str) -> GeneratedBackground:
+def _background(
+    description: str,
+    image_path: str,
+    *,
+    image_prompt: str | None = None,
+) -> GeneratedBackground:
     return GeneratedBackground(
         image_path=image_path,
         generation_metadata=ImageGenerationMetadata(
             inputs=ImageGenerationInputs(
                 description=description,
-                image_prompt=description,
+                image_prompt=image_prompt or description,
             ),
             render_prompt=description,
             model_identifier="flux2-klein-4b",
@@ -264,8 +269,12 @@ def test_current_reference_card_text_does_not_replace_generation_provenance(
             CardRevision(
                 description="Current card text",
                 background=_background(
-                    "Early Mac and HyperCard dithered graphics",
+                    "Plain lab Description",
                     "computer.png",
+                    image_prompt=(
+                        "Black-and-white dithered graphics reminiscent of "
+                        "early Mac and HyperCard."
+                    ),
                 ),
             ),
         ),
@@ -297,7 +306,8 @@ def test_current_reference_card_text_does_not_replace_generation_provenance(
 
     request, _reference_path = preparer.requests[0]
     assert request.reference_description == (
-        "Early Mac and HyperCard dithered graphics"
+        "Black-and-white dithered graphics reminiscent of early Mac and "
+        "HyperCard."
     )
     assert (
         controller.document.cards[0].active_revision.image_prompt

@@ -269,6 +269,50 @@ def test_preparer_repairs_invented_color_under_monochrome_treatment(
     assert client.call_count == 2
 
 
+def test_preparer_repairs_omitted_explicit_authored_style() -> None:
+    preparer, client = _preparer(
+        [
+            _output(
+                "A stark futuristic lab with an open hidden doorway."
+            ),
+            json.dumps(
+                {
+                    "image_prompt": (
+                        "A stark futuristic lab with an open hidden doorway, "
+                        "rendered in HyperCard, early-Mac black and white style."
+                    )
+                }
+            ),
+        ]
+    )
+
+    result = preparer.prepare(
+        ImagePromptPreparationRequest(
+            description=(
+                "A stark futuristic lab with an open hidden doorway. "
+                "HyperCard, early-Mac black and white style."
+            )
+        )
+    )
+
+    assert "HyperCard, early-Mac black and white style" in result.image_prompt
+    assert client.call_count == 2
+
+
+def test_preparer_does_not_require_generic_same_style_process_language() -> None:
+    prompt = "A boxy CRT monitor displays dense static in stark monochrome dithering."
+    preparer, client = _preparer(_output(prompt))
+
+    result = preparer.prepare(
+        ImagePromptPreparationRequest(
+            description="The monitor displays dense static in the same style."
+        )
+    )
+
+    assert result.image_prompt == prompt
+    assert client.call_count == 1
+
+
 def test_preparer_repairs_explicit_object_state_conflict() -> None:
     preparer, client = _preparer(
         [

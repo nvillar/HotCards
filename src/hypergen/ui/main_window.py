@@ -200,14 +200,12 @@ class MainWindow(QMainWindow):
         self.toolbar_leading_spacer = QWidget()
         self.toolbar_leading_spacer.setFixedWidth(8)
         toolbar.addWidget(self.toolbar_leading_spacer)
-        self.mode_label = QLabel("Mode")
-        toolbar.addWidget(self.mode_label)
-        self.mode_selector = QComboBox()
-        self.mode_selector.setObjectName("modeSelector")
-        self.mode_selector.addItems(["Author", "Run"])
-        self.mode_selector.setToolTip("Switch between authoring and interactive preview")
-        self.mode_selector.currentIndexChanged.connect(self._mode_changed)
-        toolbar.addWidget(self.mode_selector)
+        self.mode_button = QPushButton("Run")
+        self.mode_button.setObjectName("modeButton")
+        self.mode_button.setAccessibleName("Switch mode")
+        self.mode_button.setToolTip("Switch to Run mode")
+        self.mode_button.clicked.connect(self._toggle_mode)
+        self.mode_button_action = toolbar.addWidget(self.mode_button)
         self.run_controls_separator = toolbar.addSeparator()
 
         self.back_action = QAction("Back", self)
@@ -798,8 +796,6 @@ class MainWindow(QMainWindow):
             self._undo_notification()
         elif action_id == "create-generated-revision" and not self._is_running:
             self._create_generated_revision()
-        elif action_id == "restart-run-from-start" and self._is_running:
-            self._run_restart()
         elif action_id == "open-settings" and not self._is_running:
             self.open_advanced_settings()
         elif action_id == "check-services" and not self._is_running:
@@ -1054,7 +1050,7 @@ class MainWindow(QMainWindow):
         self.undo_action.setEnabled(bound and not self._is_running and self.controller.can_undo)
         self.redo_action.setEnabled(bound and not self._is_running and self.controller.can_redo)
         self.advanced_settings_action.setEnabled(not self._is_running)
-        self.mode_selector.setEnabled(bound)
+        self.mode_button.setEnabled(bound)
         self.overlay_selector.setEnabled(bound and self._is_running)
         self.card_sidebar.set_document_editable(bound and not self._is_running)
 
@@ -1774,16 +1770,14 @@ class MainWindow(QMainWindow):
         changed = self.controller.execute(SetRunOverlayModeCommand(mode=overlay_mode))
         self.render_document(changed)
 
-    def _mode_changed(self, index: int) -> None:
+    def _toggle_mode(self) -> None:
         if self._rendering:
             return
-        should_run = self.mode_selector.itemText(index) == "Run"
+        should_run = not self._is_running
         if should_run == self._is_running:
             return
         if should_run:
             if not self._commit_authoring_metadata():
-                with QSignalBlocker(self.mode_selector):
-                    self.mode_selector.setCurrentText("Author")
                 return
             self.card_canvas.cancel_drawing()
             self._cancel_ai_activity_for_run()
@@ -1805,36 +1799,7 @@ class MainWindow(QMainWindow):
         self.render_document()
         if state is not None and state.warning is not None:
             self._set_run_warning(state.warning)
-        elif (
-            state is not None
-            and self.controller.document.start_card_id is not None
-            and state.current_card_id != self.controller.document.start_card_id
-        ):
-            card = next(
-                (
-                    candidate
-                    for candidate in self.controller.document.cards
-                    if candidate.id == state.current_card_id
-                ),
-                None,
-            )
-            self.notification_bar.show_notification(
-                "run-entry",
-                Notification(
-                    message=(
-                        f'Run started from current card "{card.name}".'
-                        if card is not None
-                        else "Run started from the current card."
-                    ),
-                    kind=NotificationKind.INFO,
-                    primary_action=NotificationAction(
-                        "restart-run-from-start",
-                        "Restart from Start Card",
-                    ),
-                ),
-            )
         if not should_run:
-            self.notification_bar.clear_notification("run-entry")
             self.run_availability_checks()
 
     def _run_interaction_activated(self, interaction_id: object) -> None:
@@ -1852,7 +1817,6 @@ class MainWindow(QMainWindow):
 
     def _run_restart(self) -> None:
         if self._is_running:
-            self.notification_bar.clear_notification("run-entry")
             self._apply_run_state(self._run_session.restart())
 
     def _apply_run_state(self, state: RunSessionState) -> None:
@@ -1864,6 +1828,10 @@ class MainWindow(QMainWindow):
 
     def _apply_mode_chrome(self) -> None:
         authoring = not self._is_running
+        self.mode_button.setText("Run" if authoring else "Author")
+        self.mode_button.setToolTip(
+            "Switch to Run mode" if authoring else "Switch to Author mode"
+        )
         self.canvas_card_name.setReadOnly(not authoring)
         self.canvas_card_name.setVisible(authoring)
         self.canvas_card_name_error.setVisible(
@@ -1879,6 +1847,10 @@ class MainWindow(QMainWindow):
         self.fit_canvas_button.setVisible(authoring)
         self.clear_background_button.setVisible(authoring)
         self.create_first_card_button.setVisible(authoring)
+        self.llm_model_label.setVisible(authoring)
+        self.llm_model_combo.setVisible(authoring)
+        self.image_model_label.setVisible(authoring)
+        self.image_model_combo.setVisible(authoring)
         self.empty_canvas_title.setText(
             "Create your first card" if authoring else "No cards to run"
         )

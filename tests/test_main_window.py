@@ -278,6 +278,8 @@ def test_card_header_and_toolbar_match_revision_hierarchy(
     assert window.delete_revision_button.text() == "−"
     assert window.overlay_label.text() == "Hotspots"
     assert window.toolbar_leading_spacer.width() == 8
+    assert window.mode_button.text() == "Run"
+    assert window.mode_button.toolTip() == "Switch to Run mode"
     toolbar_actions = window.authoring_toolbar.actions()
     assert toolbar_actions.index(window.back_button_action) < toolbar_actions.index(
         window.restart_button_action
@@ -292,16 +294,16 @@ def test_card_header_and_toolbar_match_revision_hierarchy(
         toolbar_actions.index(window.overlay_selector_action)
     )
     assert window.back_button.font().pointSizeF() == (
-        window.mode_selector.font().pointSizeF()
+        window.mode_button.font().pointSizeF()
     )
     assert window.restart_button.font().pointSizeF() == (
-        window.mode_selector.font().pointSizeF()
+        window.mode_button.font().pointSizeF()
     )
     assert window.back_button.sizeHint().height() >= (
-        window.mode_selector.sizeHint().height()
+        window.mode_button.sizeHint().height()
     )
     assert window.restart_button.sizeHint().height() >= (
-        window.mode_selector.sizeHint().height()
+        window.mode_button.sizeHint().height()
     )
     assert not window.run_controls_separator.isVisible()
     assert not window.run_overlay_separator.isVisible()
@@ -435,12 +437,12 @@ def test_focus_triggered_name_failure_aborts_run_transition(
     window.canvas_card_name.setText("   ")
     application.processEvents()
 
-    window.mode_selector.setFocus()
+    window.mode_button.setFocus()
     application.processEvents()
     assert not window.canvas_card_name_error.isHidden()
-    window.mode_selector.setCurrentText("Run")
+    window.mode_button.click()
 
-    assert window.mode_selector.currentText() == "Author"
+    assert window.mode_button.text() == "Run"
     assert not window._is_running
     window.close()
 
@@ -582,8 +584,10 @@ def test_author_and_run_modes_apply_consistent_read_only_chrome(
     window.show()
     application.processEvents()
 
-    window.mode_selector.setCurrentText("Run")
+    window.mode_button.click()
     application.processEvents()
+    assert window.mode_button.text() == "Author"
+    assert window.mode_button.toolTip() == "Switch to Author mode"
     assert window.canvas_card_name.isReadOnly()
     assert window.canvas_card_name.isHidden()
     assert window.canvas_card_name_error.isHidden()
@@ -605,15 +609,25 @@ def test_author_and_run_modes_apply_consistent_read_only_chrome(
     assert window.overlay_label_action.isVisible()
     assert window.overlay_selector_action.isVisible()
     assert not window.overlay_selector.isHidden()
+    assert window.llm_model_label.isHidden()
+    assert window.llm_model_combo.isHidden()
+    assert window.image_model_label.isHidden()
+    assert window.image_model_combo.isHidden()
 
-    window.mode_selector.setCurrentText("Author")
+    window.mode_button.click()
     application.processEvents()
+    assert window.mode_button.text() == "Run"
+    assert window.mode_button.toolTip() == "Switch to Run mode"
     assert not window.canvas_card_name.isReadOnly()
     assert not window.canvas_card_name.isHidden()
     assert not window.revision_label.isHidden()
     assert not window.revision_combo.isHidden()
     assert window.revision_combo.isEnabled()
     assert not window.add_revision_button.isHidden()
+    assert not window.llm_model_label.isHidden()
+    assert not window.llm_model_combo.isHidden()
+    assert not window.image_model_label.isHidden()
+    assert not window.image_model_combo.isHidden()
     assert not window.run_controls_separator.isVisible()
     assert not window.run_overlay_separator.isVisible()
     assert not window.back_action.isVisible()
@@ -717,7 +731,7 @@ def test_bottom_model_selectors_persist_and_follow_operation_state(
 
     background.busy = False
     window.image_prompt_workflow._busy = False
-    window.mode_selector.setCurrentText("Run")
+    window.mode_button.click()
     assert not window.llm_model_combo.isEnabled()
     assert not window.image_model_combo.isEnabled()
 
@@ -751,7 +765,7 @@ def test_changing_llm_model_re_enables_image_prompt_preparation(
             text="A richly detailed courtyard",
             source_description="A courtyard",
             model_identifier="qwen3.5:9b-mlx",
-            prompt_version="image-prompt-preparation-v3",
+            prompt_version="image-prompt-preparation-v4",
         ),
     )
     card = Card(name="Card", revisions=(revision,))
@@ -1121,7 +1135,7 @@ def test_notification_undo_cannot_mutate_document_in_run_mode(
     assert token is not None
     window._show_undo_notification("Renamed", token)
 
-    window.mode_selector.setCurrentText("Run")
+    window.mode_button.click()
     assert window.notification_bar.current_key != "undo"
     window._notification_action_requested("undo")
     assert controller.document.cards[0].name == "Renamed"

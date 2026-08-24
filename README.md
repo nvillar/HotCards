@@ -23,7 +23,7 @@ Each card owns one or more numbered revisions. A revision contains its authored
 Description, optional prepared Image Prompt, optional generated background,
 optional Reference card, and hotspot set. The compact header above the canvas
 edits the card name and selects, duplicates, or deletes revisions; the toolbar
-manages Mode and hotspot visibility.
+provides a single Author/Run mode toggle and manages hotspot visibility.
 
 The Background inspector follows the authoring sequence Description, optional
 Reference, Prepare Image Prompt, then Generate Image. Description and Image Prompt share one
@@ -33,10 +33,10 @@ editable Image Prompt proposal from the current Description; it never uses the
 previous Image Prompt as input or inserts a separate clarification step. With a
 Reference, the selected vision-capable Ollama model also inspects that card's
 active generated image in the same preparation request. The exact authored
-Description captured when that Reference image was generated provides the
-primary semantics for its identity and visual style, while the pixels provide
-visible evidence and missing detail. Without a Reference, the request is
-text-only.
+prompt used to generate that Reference image, including its reviewed Image
+Prompt or legacy enriched text, provides the primary semantics for its identity
+and visual style, while the pixels provide visible evidence and missing detail.
+Without a Reference, the request is text-only.
 
 The optional Reference has no fixed Subject, Style, or Setting role. The
 Description states what should carry over or change, while preparation interprets
@@ -52,9 +52,9 @@ card/revision/background snapshot, selected Ollama model, and preparation
 contract still match. Out-of-date prompts remain visible and editable, but
 Generate requires a current prompt. Preparation validates structured output,
 preserves exact authored quoted text, rejects recognized object-state
-reversals and model-process language, and makes one constrained repair attempt
-for a valid but conflicting proposal. Private model deliberation is never
-persisted.
+reversals and model-process language, requires explicit authored style
+terminology to survive verbatim, and makes one constrained repair attempt for a
+valid but conflicting proposal. Private model deliberation is never persisted.
 
 MFLUX receives the reviewed Image Prompt unchanged and, when selected, the same
 Reference image exactly once. It receives no hidden role instructions or source
@@ -92,7 +92,7 @@ action. Run presents Back and Restart as standard-size controls and hides the
 authoring-only card name and version header. Run-only navigation and overlay
 controls stay hidden in Author mode.
 Local AI services are checked automatically when Author mode is entered; Run
-mode starts no AI work. The status bar selects
+mode starts no AI work and hides model selection. In Author mode, the status bar selects
 an installed vision-capable Ollama model and either FLUX.2 Klein 4B or FLUX.2
 Klein 9B KV.
 
