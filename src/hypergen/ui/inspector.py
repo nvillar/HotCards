@@ -92,6 +92,10 @@ def _compact_text_button(
     button.setText(text)
     button.setAccessibleName(accessible_name)
     button.setToolTip(tooltip)
+    font = button.font()
+    font.setPointSizeF(max(font.pointSizeF() + 4.0, 16.0))
+    font.setBold(True)
+    button.setFont(font)
     return button
 
 
@@ -128,7 +132,7 @@ class Inspector(QWidget):
         self.setMinimumWidth(300)
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
+        root.setContentsMargins(0, 10, 0, 0)
 
         self.pages = QStackedWidget()
         empty_page = QWidget()
@@ -300,6 +304,34 @@ class Inspector(QWidget):
             accessible_name="Delete hotspot",
             tooltip="Delete hotspot",
         )
+        control_extent = max(
+            button.sizeHint().width()
+            for button in (
+                self.move_hotspot_up_button,
+                self.move_hotspot_down_button,
+                self.add_hotspot_button,
+                self.delete_hotspot_button,
+            )
+        )
+        control_extent = max(
+            control_extent,
+            *(
+                button.sizeHint().height()
+                for button in (
+                    self.move_hotspot_up_button,
+                    self.move_hotspot_down_button,
+                    self.add_hotspot_button,
+                    self.delete_hotspot_button,
+                )
+            ),
+        )
+        for button in (
+            self.move_hotspot_up_button,
+            self.move_hotspot_down_button,
+            self.add_hotspot_button,
+            self.delete_hotspot_button,
+        ):
+            button.setFixedSize(control_extent, control_extent)
         controls.addWidget(self.move_hotspot_up_button)
         controls.addWidget(self.move_hotspot_down_button)
         controls.addStretch(1)

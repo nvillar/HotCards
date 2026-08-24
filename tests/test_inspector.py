@@ -56,6 +56,9 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     assert inspector.inspector_tabs.count() == 2
     assert inspector.inspector_tabs.tabText(0) == "Background"
     assert inspector.inspector_tabs.tabText(1) == "Hotspots"
+    root_layout = inspector.layout()
+    assert root_layout is not None
+    assert root_layout.contentsMargins().top() == 10
     assert inspector.description_edit.placeholderText() == "Description"
     assert inspector.description_edit.minimumHeight() == (
         inspector.description_edit.maximumHeight()
@@ -87,6 +90,19 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     )
     assert not hasattr(inspector, "style_combo")
     assert not hasattr(inspector, "clear_background_button")
+    hotspot_control_sizes = {
+        button.size()
+        for button in (
+            inspector.move_hotspot_up_button,
+            inspector.move_hotspot_down_button,
+            inspector.add_hotspot_button,
+            inspector.delete_hotspot_button,
+        )
+    }
+    assert len(hotspot_control_sizes) == 1
+    assert inspector.add_hotspot_button.font().pointSizeF() > (
+        inspector.move_hotspot_up_button.font().pointSizeF()
+    )
 
     visible_copy = " ".join(label.text() for label in inspector.findChildren(QLabel))
     for obsolete in (
