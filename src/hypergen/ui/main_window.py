@@ -39,6 +39,7 @@ from hypergen.application.commands import (
     AddInteractionCommand,
     AddPolygonCommand,
     CommandError,
+    CreateGeneratedRevisionCommand,
     DeleteInteractionCommand,
     DeletePolygonCommand,
     DocumentCommand,
@@ -52,6 +53,7 @@ from hypergen.application.document_session import (
     DocumentSessionError,
     DocumentSessionState,
 )
+from hypergen.application.generated_revision_change import GeneratedRevisionChange
 from hypergen.application.run_session import RunSession, RunSessionState
 from hypergen.application.scene_enrichment_workflow import (
     SceneEnrichmentWorkflow,
@@ -146,6 +148,7 @@ class MainWindow(QMainWindow):
         self._diagnostic_generation = 0
         self._service_notification_dismissed = False
         self._undo_notification_token: UndoToken | None = None
+        self._generated_revision_change: GeneratedRevisionChange | None = None
         self._card_name_commit_failed = False
         self._rendering = False
         self._is_running = False
@@ -377,6 +380,9 @@ class MainWindow(QMainWindow):
             self.background_workflow.failed.connect(self._background_failed)
             self.background_workflow.document_changed.connect(self.render_document)
             self.background_workflow.change_applied.connect(self._show_undo_notification)
+            self.background_workflow.generation_applied.connect(
+                self._show_generated_revision_notification
+            )
         self.scene_enrichment_workflow.busy_changed.connect(
             lambda _busy: self._update_generation_actions()
         )
@@ -386,6 +392,9 @@ class MainWindow(QMainWindow):
         self.scene_enrichment_workflow.failed.connect(self._scene_enrichment_failed)
         self.scene_enrichment_workflow.document_changed.connect(self.render_document)
         self.scene_enrichment_workflow.change_applied.connect(self._show_undo_notification)
+        self.scene_enrichment_workflow.generation_applied.connect(
+            self._show_generated_revision_notification
+        )
         self.pane_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.pane_splitter.setObjectName("threePaneSplitter")
         self.pane_splitter.addWidget(self.card_sidebar)
@@ -486,8 +495,7 @@ class MainWindow(QMainWindow):
             self._undo_notification_token is not None
             and self.controller.current_undo_token != self._undo_notification_token
         ):
-            self._undo_notification_token = None
-            self.notification_bar.clear_notification("undo")
+            self._clear_undo_notification()
         card_ids = {card.id for card in snapshot.cards}
         if self._is_running:
             self._selected_card_id = self._run_session.state.current_card_id
@@ -648,6 +656,7 @@ class MainWindow(QMainWindow):
     def _show_undo_notification(self, message: str, token: object) -> None:
         if self._is_running or not isinstance(token, UndoToken):
             return
+        self._generated_revision_change = None
         self._undo_notification_token = token
         self.notification_bar.show_notification(
             "undo",
@@ -659,19 +668,100 @@ class MainWindow(QMainWindow):
             ),
         )
 
+    def _show_generated_revision_notification(self, change: object) -> None:
+        if self._is_running or not isinstance(change, GeneratedRevisionChange):
+            return
+        self._generated_revision_change = change
+        self._undo_notification_token = change.token
+        self.notification_bar.show_notification(
+            "undo",
+            Notification(
+                message=f"{change.message} on the current version",
+                kind=NotificationKind.SUCCESS,
+                primary_action=NotificationAction(
+                    "create-generated-revision",
+                    "Create New Version",
+                ),
+                secondary_action=NotificationAction("undo", "Undo"),
+                dismiss_label="Keep",
+                priority=3,
+            ),
+        )
+
     def _undo_notification(self) -> None:
         if self._is_running:
             return
         self.scene_enrichment_workflow.cancel()
         token = self._undo_notification_token
-        self._undo_notification_token = None
-        self.notification_bar.clear_notification("undo")
+        self._clear_undo_notification()
         if token is not None and self.controller.undo_if_current(token):
             self.render_document()
+
+    def _create_generated_revision(self) -> None:
+        if self._is_running:
+            return
+        change = self._generated_revision_change
+        if (
+            change is None
+            or self.controller.current_undo_token != change.token
+        ):
+            self._clear_undo_notification()
+            return
+        card = next(
+            (
+                candidate
+                for candidate in self.controller.document.cards
+                if candidate.id == change.card_id
+            ),
+            None,
+        )
+        revision = (
+            next(
+                (
+                    candidate
+                    for candidate in card.revisions
+                    if candidate.id == change.revision_id
+                ),
+                None,
+            )
+            if card is not None
+            else None
+        )
+        if revision is None:
+            self._clear_undo_notification()
+            return
+        self.scene_enrichment_workflow.cancel()
+        self._clear_undo_notification()
+        command = CreateGeneratedRevisionCommand(
+            card_id=change.card_id,
+            revision_id=change.revision_id,
+            previous_revision=change.previous_revision,
+        )
+        try:
+            changed = self.controller.execute(command)
+        except (CommandError, ValidationError) as error:
+            self._show_error(
+                "revision-error",
+                "Could not create a new version",
+                detail=str(error),
+            )
+            return
+        self._selected_card_id = change.card_id
+        self.render_document(changed)
+        token = self.controller.current_undo_token
+        if token is not None:
+            self._show_undo_notification("New version created", token)
+
+    def _clear_undo_notification(self) -> None:
+        self._undo_notification_token = None
+        self._generated_revision_change = None
+        self.notification_bar.clear_notification("undo")
 
     def _notification_action_requested(self, action_id: str) -> None:
         if action_id == "undo" and not self._is_running:
             self._undo_notification()
+        elif action_id == "create-generated-revision" and not self._is_running:
+            self._create_generated_revision()
         elif action_id == "open-settings" and not self._is_running:
             self.open_advanced_settings()
         elif action_id == "check-services" and not self._is_running:
@@ -680,6 +770,7 @@ class MainWindow(QMainWindow):
     def _notification_dismissed(self, key: str) -> None:
         if key == "undo":
             self._undo_notification_token = None
+            self._generated_revision_change = None
         elif key == "ai-services":
             self._service_notification_dismissed = True
 
@@ -798,21 +889,18 @@ class MainWindow(QMainWindow):
             return
         self._cancel_background_generation()
         self.scene_enrichment_workflow.cancel()
-        self._undo_notification_token = None
-        self.notification_bar.clear_notification("undo")
+        self._clear_undo_notification()
         self._update_document_actions()
 
     def undo(self) -> None:
         self.scene_enrichment_workflow.cancel()
-        self._undo_notification_token = None
-        self.notification_bar.clear_notification("undo")
+        self._clear_undo_notification()
         if self.controller.undo():
             self.render_document()
 
     def redo(self) -> None:
         self.scene_enrichment_workflow.cancel()
-        self._undo_notification_token = None
-        self.notification_bar.clear_notification("undo")
+        self._clear_undo_notification()
         if self.controller.redo():
             self.render_document()
 
@@ -875,7 +963,7 @@ class MainWindow(QMainWindow):
     def _document_replaced(self, _document: object) -> None:
         self._cancel_background_generation()
         self.scene_enrichment_workflow.cancel()
-        self._undo_notification_token = None
+        self._clear_undo_notification()
         self._rendered_card_id = None
         self._card_name_commit_failed = False
         self._set_canvas_card_name_error("")
@@ -1636,6 +1724,7 @@ class MainWindow(QMainWindow):
                 return
             self.card_canvas.cancel_drawing()
             self._cancel_ai_activity_for_run()
+            self._generated_revision_change = None
             self._undo_notification_token = None
             self.notification_bar.clear_all()
             self._is_running = True

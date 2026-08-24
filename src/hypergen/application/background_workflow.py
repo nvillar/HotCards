@@ -22,9 +22,11 @@ from hypergen.application.commands import (
 )
 from hypergen.application.document_controller import DocumentController
 from hypergen.application.document_session import DocumentSession
+from hypergen.application.generated_revision_change import GeneratedRevisionChange
 from hypergen.application.workers import AdapterWorkers, WorkerOperation
 from hypergen.domain.models import (
     Card,
+    CardRevision,
     GeneratedBackground,
     ImageGenerationInputs,
     ImageReferenceSnapshot,
@@ -88,6 +90,7 @@ class BackgroundWorkflow(QObject):
     failed = Signal(object)
     document_changed = Signal(object)
     change_applied = Signal(str, object)
+    generation_applied = Signal(object)
 
     def __init__(
         self,
@@ -302,6 +305,7 @@ class BackgroundWorkflow(QObject):
                 target.revision_id,
                 background,
                 "Image generated",
+                generated=True,
             )
         except (CommandError, StackStoreError, ValidationError) as error:
             self._finish_with_error(error)
@@ -319,8 +323,15 @@ class BackgroundWorkflow(QObject):
         revision_id: UUID,
         background: GeneratedBackground | None,
         message: str,
+        *,
+        generated: bool = False,
     ) -> Stack:
         previous_token = self.controller.current_undo_token
+        previous_revision = next(
+            revision
+            for revision in self._card(self.controller.document, card_id).revisions
+            if revision.id == revision_id
+        )
         changed = self.controller.execute(
             ReplaceRevisionBackgroundCommand(
                 card_id=card_id,
@@ -330,17 +341,42 @@ class BackgroundWorkflow(QObject):
         )
         self.progress_changed.emit(message)
         self.document_changed.emit(changed)
-        self._emit_change_applied(message, previous_token)
+        self._emit_change_applied(
+            message,
+            previous_token,
+            card_id=card_id if generated else None,
+            revision_id=revision_id if generated else None,
+            previous_revision=previous_revision if generated else None,
+        )
         return changed
 
     def _emit_change_applied(
         self,
         message: str,
         previous_token: object,
+        *,
+        card_id: UUID | None = None,
+        revision_id: UUID | None = None,
+        previous_revision: CardRevision | None = None,
     ) -> None:
         token = self.controller.current_undo_token
         if token is not None and token != previous_token:
-            self.change_applied.emit(message, token)
+            if (
+                card_id is not None
+                and revision_id is not None
+                and previous_revision is not None
+            ):
+                self.generation_applied.emit(
+                    GeneratedRevisionChange(
+                        message=message,
+                        token=token,
+                        card_id=card_id,
+                        revision_id=revision_id,
+                        previous_revision=previous_revision,
+                    )
+                )
+            else:
+                self.change_applied.emit(message, token)
 
     def _operation_failed(self, request_id: UUID, failure: object) -> None:
         if request_id == self._request_id:

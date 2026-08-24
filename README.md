@@ -39,7 +39,8 @@ instructions. Source Descriptions are not injected into the MFLUX prompt.
 Background prompts use Enriched Description when present and otherwise use
 Description. Generated images are the only supported background source.
 Generate, image removal, and Enrich Description apply directly to the active
-revision and expose a history-safe Undo action.
+revision. Completed generations can be kept there with Keep, moved into a new
+complete revision, or undone.
 Existing images remain in place until replacement succeeds, and successful
 changes offer a dismissible, history-safe Undo action in the notification bar.
 Enrichment never reads an image and requires authored Description text. It
@@ -88,7 +89,11 @@ an installed Ollama LLM and either FLUX.2 Klein 4B or FLUX.2 Klein 9B KV.
 
 Transient outcomes, failures, Run warnings, and Undo actions appear in one
 notification bar below the toolbar. Reversible deletions and replacements apply
-directly and offer Undo; field validation remains beside the responsible input.
+directly and offer Undo. Completed Description and image generations also offer
+Create New Version, which restores the prior current revision and activates a
+complete new revision containing the result, plus an explicit Keep action that
+retains it on the current revision. Field validation remains beside the
+responsible input.
 AI failures and recovery actions stay in the notification bar rather than the
 model selectors.
 

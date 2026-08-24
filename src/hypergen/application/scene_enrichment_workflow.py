@@ -12,6 +12,7 @@ from PySide6.QtCore import QObject, Signal
 
 from hypergen.application.commands import SetRevisionEnrichedDescriptionCommand
 from hypergen.application.document_controller import DocumentController
+from hypergen.application.generated_revision_change import GeneratedRevisionChange
 from hypergen.application.workers import AdapterWorkers, WorkerOperation
 from hypergen.domain.models import (
     Card,
@@ -74,6 +75,7 @@ class SceneEnrichmentWorkflow(QObject):
     failed = Signal(object)
     document_changed = Signal(object)
     change_applied = Signal(str, object)
+    generation_applied = Signal(object)
 
     def __init__(
         self,
@@ -193,6 +195,14 @@ class SceneEnrichmentWorkflow(QObject):
             )
             return
         previous_token = self.controller.current_undo_token
+        previous_revision = next(
+            revision
+            for revision in self._card(
+                self.controller.document,
+                target.card_id,
+            ).revisions
+            if revision.id == target.revision_id
+        )
         changed = self.controller.execute(
             SetRevisionEnrichedDescriptionCommand(
                 card_id=target.card_id,
@@ -213,7 +223,15 @@ class SceneEnrichmentWorkflow(QObject):
         self.document_changed.emit(changed)
         token = self.controller.current_undo_token
         if token is not None and token != previous_token:
-            self.change_applied.emit("Description enriched", token)
+            self.generation_applied.emit(
+                GeneratedRevisionChange(
+                    message="Description enriched",
+                    token=token,
+                    card_id=target.card_id,
+                    revision_id=target.revision_id,
+                    previous_revision=previous_revision,
+                )
+            )
 
     def _operation_failed(
         self,

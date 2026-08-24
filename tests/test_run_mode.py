@@ -48,6 +48,7 @@ class FakeBackgroundWorkflow(QObject):
     failed = Signal(object)
     document_changed = Signal(object)
     change_applied = Signal(str, object)
+    generation_applied = Signal(object)
 
     def __init__(self) -> None:
         super().__init__()
