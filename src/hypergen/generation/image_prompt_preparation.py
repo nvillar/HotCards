@@ -20,7 +20,7 @@ from hypergen.generation.ollama_client import (
 )
 from hypergen.generation.structured_output import structured_json_content
 
-IMAGE_PROMPT_PREPARATION_VERSION = "image-prompt-preparation-v4"
+IMAGE_PROMPT_PREPARATION_VERSION = "image-prompt-preparation-v5"
 
 
 class ImagePromptPreparationRequest(DomainModel):
@@ -138,9 +138,10 @@ OUTPUT
 
 AUTHORITY
 - Preserve every explicit authored subject, action, pose, object state, time, weather,
-  viewpoint, crop, framing, composition, mood, color, and visible object.
-- Preserve explicit authored medium and visual-style terminology verbatim in image_prompt.
-  A phrase ending in "style" is a required target property, not optional guidance.
+  viewpoint, crop, framing, composition, mood, color, visible object, medium, palette,
+  linework, texture, shading, rendering technique, and visual style.
+- Preserve the meaning of explicit visual properties without requiring the same wording.
+  Do not omit, weaken, or reinterpret them as a merely similar treatment.
 - Preserve close-ups, limited fields of view, and statements that a subject fills the frame.
 - Preserve exact authored visible text in quotation marks and on its intended object.
 - When no quoted text is authored, introduce no visible words, lettering, signs, captions,
@@ -160,13 +161,15 @@ PRIVATE DELIBERATION
   visible treatment trait, including color mode, edge or line character, dither or halftone
   pattern, tonal strategy, apparent medium or rendering technology, and detail level. Do not
   reduce a distinctive treatment to a generic era or mood label.
-- target_overrides: concrete requested changes only; otherwise null.
+- target_overrides: concrete requested changes plus every explicit target-authored medium,
+  palette, linework, texture, shading, rendering technique, and visual style; otherwise null.
 
 IMAGE PROMPT
 - Synthesize one concrete, positive, standalone description of only the desired final image.
 - Put the main subject, action, and critical authored changes first.
-- Incorporate every applicable non-null subject_traits, setting_traits, and visual_treatment
-  detail. Private deliberation is a checklist for the final Image Prompt, not optional notes.
+- Incorporate every applicable non-null subject_traits, setting_traits, visual_treatment, and
+  target_overrides detail. Private deliberation is a checklist for the final Image Prompt,
+  not optional notes.
 - Describe continuing entities through their observed distinguishing construction and
   treatment rather than generic stereotypes such as "old", "vintage", or "beige".
 - Add concrete form, scale, materials, lighting, spatial relationships, atmosphere, and
@@ -268,36 +271,10 @@ _CHROMATIC_COLOR = re.compile(
     r"pink|cyan|magenta|teal|turquoise)\b",
     flags=re.IGNORECASE,
 )
-_STYLE_PHRASE_SENTENCE = re.compile(
-    r"(?:^|(?<=[.!?;]))\s*([^.!?;\n]*\bstyle\b[^.!?;\n]*)",
-    flags=re.IGNORECASE,
-)
 
 
 def _words(value: str) -> tuple[str, ...]:
     return tuple(_WORD_PATTERN.findall(value.casefold()))
-
-
-def _style_words(value: str) -> tuple[str, ...]:
-    return _words(value.replace("-", " "))
-
-
-def _explicit_style_phrases(value: str) -> tuple[str, ...]:
-    return tuple(
-        match.group(1).strip(" \t\r\n,.;:")
-        for match in _STYLE_PHRASE_SENTENCE.finditer(value)
-        if match.group(1).strip(" \t\r\n,.;:")
-        and _PROCESS_LANGUAGE.search(match.group(1)) is None
-    )
-
-
-def _contains_words(value: str, expected: tuple[str, ...]) -> bool:
-    words = _style_words(value)
-    length = len(expected)
-    return any(
-        words[index : index + length] == expected
-        for index in range(len(words) - length + 1)
-    )
 
 
 def _quoted_text(value: str) -> tuple[set[str], bool]:
@@ -392,16 +369,6 @@ def _validate_image_prompt(
     if missing_quotes:
         values = ", ".join(sorted(repr(value) for value in missing_quotes))
         raise ValueError(f"Image Prompt omitted or changed visible text: {values}")
-    missing_style_phrases = tuple(
-        phrase
-        for phrase in _explicit_style_phrases(authored)
-        if not _contains_words(image_prompt, _style_words(phrase))
-    )
-    if missing_style_phrases:
-        values = ", ".join(repr(value) for value in missing_style_phrases)
-        raise ValueError(
-            f"Image Prompt omitted explicit authored style terminology: {values}"
-        )
     if (
         visual_treatment is not None
         and _ACHROMATIC_LANGUAGE.search(visual_treatment)

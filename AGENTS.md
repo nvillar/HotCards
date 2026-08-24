@@ -87,10 +87,11 @@ for live Ollama and MFLUX runs.
   reviewed Image Prompt or legacy enriched text, as the primary semantic source
   for applicable identity and style language; use the image as visual evidence
   and to fill gaps rather than relabeling explicit authored treatment. Preserve
-  explicit target style terminology verbatim. Allow a plausible concrete
-  proposal for ambiguity rather than adding clarification state. Store only the
-  final Image Prompt through one undoable command; private deliberation must not
-  enter the stack. Track source Description, exact Reference provenance, Ollama model,
+  the meaning of every explicit target visual property without special keywords
+  or required wording. Allow a plausible concrete proposal for ambiguity rather
+  than adding clarification state. Store only the final Image Prompt through one
+  undoable command; private deliberation must not enter the stack. Track source
+  Description, exact Reference provenance, Ollama model,
   and prompt version so freshness is strict. Reject recognized authored
   object-state reversals and invented or altered quoted visible text after one
   constrained repair attempt.

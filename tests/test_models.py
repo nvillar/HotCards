@@ -67,7 +67,7 @@ def test_revision_uses_current_image_prompt_when_available() -> None:
         source_description="A courtyard",
         reference=reference,
         model_identifier="qwen3.5:9b-mlx",
-        prompt_version="image-prompt-preparation-v4",
+        prompt_version="image-prompt-preparation-v5",
     )
     revision = CardRevision(
         description="A courtyard",
@@ -84,18 +84,18 @@ def test_revision_uses_current_image_prompt_when_available() -> None:
         source_description="A courtyard",
         reference=reference,
         model_identifier="qwen3.5:9b-mlx",
-        prompt_version="image-prompt-preparation-v4",
+        prompt_version="image-prompt-preparation-v5",
     )
     assert not image_prompt.is_current(
         source_description="A courtyard",
         reference=reference,
         model_identifier="llama3.2:latest",
-        prompt_version="image-prompt-preparation-v4",
+        prompt_version="image-prompt-preparation-v5",
     )
     assert not image_prompt.is_current(
         source_description="A changed courtyard",
         reference=reference,
-        prompt_version="image-prompt-preparation-v4",
+        prompt_version="image-prompt-preparation-v5",
     )
     assert not image_prompt.is_current(
         source_description="A courtyard",
@@ -107,7 +107,7 @@ def test_revision_uses_current_image_prompt_when_available() -> None:
         source_description="A courtyard",
         reference=None,
         model_identifier="qwen3.5:9b-mlx",
-        prompt_version="image-prompt-preparation-v4",
+        prompt_version="image-prompt-preparation-v5",
     )
     assert not ImagePrompt(
         text="A legacy prompt",
@@ -115,7 +115,7 @@ def test_revision_uses_current_image_prompt_when_available() -> None:
     ).is_current(
         source_description="A courtyard",
         model_identifier="qwen3.5:9b-mlx",
-        prompt_version="image-prompt-preparation-v4",
+        prompt_version="image-prompt-preparation-v5",
     )
 
 
