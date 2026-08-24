@@ -682,6 +682,52 @@ def test_bottom_model_selectors_persist_and_follow_operation_state(
     assert not window.image_model_combo.isEnabled()
 
 
+def test_changing_llm_model_re_enables_enrichment_after_availability(
+    application: QApplication,
+) -> None:
+    revision = CardRevision(
+        description="A courtyard",
+        enriched_description=EnrichedDescription(
+            text="A richly detailed courtyard",
+            source_description="A courtyard",
+            model_identifier="qwen3.5:9b-mlx",
+        ),
+    )
+    card = Card(name="Card", revisions=(revision,))
+    window, _controller, _workers, _background = _window(
+        Stack(name="Demo", cards=(card,))
+    )
+    models = ("llama3.2:latest", "qwen3.5:9b-mlx")
+    window._availability_check_succeeded(
+        AdapterKind.OLLAMA,
+        window._diagnostic_generation,
+        models,
+    )
+    assert window.inspector.enrich_scene_button.text() == (
+        "Description Enriched ✓"
+    )
+    assert not window.inspector.enrich_scene_button.isEnabled()
+
+    window.llm_model_combo.setCurrentIndex(
+        window.llm_model_combo.findData("llama3.2:latest")
+    )
+    assert window.inspector.enrich_scene_button.text() == (
+        "Re-enrich Description"
+    )
+    assert not window.inspector.enrich_scene_button.isEnabled()
+
+    window._availability_check_succeeded(
+        AdapterKind.OLLAMA,
+        window._diagnostic_generation,
+        models,
+    )
+
+    assert window.inspector.enrich_scene_button.text() == (
+        "Re-enrich Description"
+    )
+    assert window.inspector.enrich_scene_button.isEnabled()
+
+
 def test_generate_replacement_starts_without_a_second_confirmation(
     application: QApplication,
 ) -> None:

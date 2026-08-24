@@ -128,6 +128,7 @@ class Inspector(QWidget):
         self._can_enrich = False
         self._enrichment_busy = False
         self._enrichment_current: bool | None = None
+        self._enrichment_model_identifier: str | None = None
         self._rendering = False
         self.setObjectName("inspector")
         self.setMinimumWidth(300)
@@ -613,6 +614,7 @@ class Inspector(QWidget):
             self._enrichment_current = enrichment.is_current(
                 source_description=authored_description,
                 references=enrichment_reference_snapshots(document, card),
+                model_identifier=self._enrichment_model_identifier,
             )
             generation_sources = "Enriched Description"
         self.description_toggle.setVisible(enrichment is not None)
@@ -662,12 +664,13 @@ class Inspector(QWidget):
         can_enrich: bool,
         reason: str,
         busy: bool,
+        model_identifier: str | None = None,
     ) -> None:
         self._enrich_reason = reason
         self._can_enrich = can_enrich
         self._enrichment_busy = busy
-        self._update_enrich_button()
-        self._refresh_generation_tooltips()
+        self._enrichment_model_identifier = model_identifier
+        self._update_enrichment_freshness()
 
     def _update_enrichment_freshness(self) -> None:
         card = self._selected_card()
@@ -686,6 +689,7 @@ class Inspector(QWidget):
                         self.controller.document,
                         card,
                     ),
+                    model_identifier=self._enrichment_model_identifier,
                 )
             )
         self._update_enrich_button()

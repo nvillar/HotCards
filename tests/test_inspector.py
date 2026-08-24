@@ -308,6 +308,52 @@ def test_enriched_description_status_and_generation_source(
     assert controller.document.cards[0].active_revision.enriched_description is not None
 
 
+def test_changing_enrichment_model_marks_description_out_of_date(
+    application: QApplication,
+) -> None:
+    revision = CardRevision(
+        description="A courtyard",
+        enriched_description=EnrichedDescription(
+            text="A richly detailed courtyard",
+            source_description="A courtyard",
+            model_identifier="qwen3.5:9b-mlx",
+        ),
+    )
+    card = Card(name="Card", revisions=(revision,))
+    controller = DocumentController(Stack(name="Demo", cards=(card,)))
+    inspector = Inspector(controller)
+    inspector.render(controller.document, card.id)
+
+    inspector.set_scene_enrichment_capabilities(
+        can_enrich=True,
+        reason="Ready to enrich Description",
+        busy=False,
+        model_identifier="qwen3.5:9b-mlx",
+    )
+    assert inspector.enrich_scene_button.text() == "Description Enriched ✓"
+    assert not inspector.enrich_scene_button.isEnabled()
+
+    inspector.set_scene_enrichment_capabilities(
+        can_enrich=True,
+        reason="Ready to enrich Description",
+        busy=False,
+        model_identifier="llama3.2:latest",
+    )
+
+    assert inspector.enrich_scene_button.text() == "Re-enrich Description"
+    assert inspector.enrich_scene_button.isEnabled()
+    assert "Out of date" in inspector.enrich_scene_button.toolTip()
+
+    inspector.set_scene_enrichment_capabilities(
+        can_enrich=True,
+        reason="Ready to enrich Description",
+        busy=False,
+        model_identifier="qwen3.5:9b-mlx",
+    )
+    assert inspector.enrich_scene_button.text() == "Description Enriched ✓"
+    assert not inspector.enrich_scene_button.isEnabled()
+
+
 def test_using_labels_name_assigned_reference_roles(
     application: QApplication,
 ) -> None:

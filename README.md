@@ -59,9 +59,9 @@ Recognized object-state reversals receive one constrained repair attempt and
 are rejected if unresolved. Generate uses Enriched Description when present,
 including when it is out of date, and otherwise falls back to Description.
 The Enrich action is disabled and shown as complete while enrichment is current,
-then becomes Re-enrich when its inputs are out of date. Clearing all Enriched
-text removes it. Image generation requires at least one non-empty Description
-source and sends only the effective source to FLUX.
+then becomes Re-enrich when its inputs or selected Ollama model are out of date.
+Clearing all Enriched text removes it. Image generation requires at least one
+non-empty Description source and sends only the effective source to FLUX.
 Enriched text follows FLUX.2 prompt guidance: one concise natural-language
 paragraph ordered by subject, action, style, context, then secondary details,
 using positive descriptions and object-specific colors and materials.

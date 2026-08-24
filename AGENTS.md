@@ -70,9 +70,10 @@ for live Ollama and MFLUX runs.
   native Original/Enriched radio controls below it, default to Enriched when it
   exists, place compact reference rows in a References group before Enrich and
   Generate, and keep generation provenance in button tooltips. Encode enrichment
-  freshness in the Enrich action: current is a disabled completed state, stale
-  is Re-enrich. Clearing the Enriched editor removes that derived value. Enable
-  image generation when either Description source is non-empty.
+  freshness in the Enrich action, including selected Ollama model provenance:
+  current is a disabled completed state, stale is Re-enrich. Clearing the
+  Enriched editor removes that derived value. Enable image generation when
+  either Description source is non-empty.
 - Support generated backgrounds only; do not add image import. Apply Generate
   and Clear directly through document commands. Keep an existing image visible
   until replacement succeeds. After Description or image generation succeeds,
