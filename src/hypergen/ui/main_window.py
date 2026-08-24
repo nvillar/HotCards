@@ -354,6 +354,9 @@ class MainWindow(QMainWindow):
         self.inspector = Inspector(self.controller)
         self.inspector.document_changed.connect(self.render_document)
         self.inspector.render_inputs_changed.connect(self._authoring_inputs_changed)
+        self.inspector.inspector_tabs.currentChanged.connect(
+            self._inspector_tab_changed
+        )
         self.inspector.enrich_scene_requested.connect(self._enrich_scene)
         self.inspector.generate_background_requested.connect(self._generate_background)
         self.inspector.change_applied.connect(self._show_undo_notification)
@@ -1399,9 +1402,13 @@ class MainWindow(QMainWindow):
         self.card_canvas.set_hotspots(
             revision.hotspot_set,
             self.inspector.selected_interaction_id,
-            editable=True,
+            editable=self.inspector.hotspots_active,
             context_id=revision.id,
         )
+
+    def _inspector_tab_changed(self, _index: int) -> None:
+        if not self._rendering and not self._is_running:
+            self.render_document()
 
     def _resolve_revision_image_path(self, image_path: str) -> Path | None:
         if self.document_session is None or self.document_session.store is None:

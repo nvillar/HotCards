@@ -270,6 +270,37 @@ def test_revision_context_change_cancels_polygon_drawing(
     canvas.close()
 
 
+def test_disabling_editing_cancels_drawing_and_hides_authoring_overlays(
+    application: QApplication,
+    tmp_path: Path,
+) -> None:
+    canvas, interaction = configured_canvas(application, tmp_path)
+    context_id = uuid4()
+    hotspot_set = HotspotSet(interactions=(interaction,))
+    canvas.set_hotspots(
+        hotspot_set,
+        interaction.id,
+        editable=True,
+        context_id=context_id,
+    )
+    canvas.begin_polygon(
+        interaction.id,
+        initial_point=Point(x=0.6, y=0.6),
+    )
+
+    canvas.set_hotspots(
+        hotspot_set,
+        interaction.id,
+        editable=False,
+        context_id=context_id,
+    )
+
+    assert not canvas.drawing
+    assert not canvas._editable
+    assert canvas._overlay_items == []
+    canvas.close()
+
+
 def test_selecting_another_hotspot_cancels_polygon_drawing(
     application: QApplication,
     tmp_path: Path,

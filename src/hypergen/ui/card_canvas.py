@@ -164,7 +164,7 @@ class CardCanvas(QGraphicsView):
             and not context_changed
             and selected_interaction_id == self._selected_interaction_id
         )
-        if context_changed or drawing_target_changed:
+        if context_changed or drawing_target_changed or not editable:
             self._drawing_interaction_id = None
             self._draft_points = None
         selected_polygon_index = (
@@ -743,6 +743,8 @@ class CardCanvas(QGraphicsView):
             if item.scene() is self.scene():
                 self.scene().removeItem(item)
         self._overlay_items.clear()
+        if not self._run_mode and not self._editable:
+            return
         if self._hotspot_set is not None:
             for interaction_index, interaction in enumerate(
                 self._hotspot_set.interactions

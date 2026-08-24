@@ -112,7 +112,8 @@ for live Ollama and MFLUX runs.
 - Keep Author canvas selection hierarchical: a selected vertex belongs to a
   selected polygon, which belongs to the selected hotspot. Inspector
   synchronization and same-revision edits must not discard a valid more
-  specific selection.
+  specific selection. Enable geometry gestures and authoring overlays only
+  while the Hotspots tab is active; leaving it cancels an unfinished polygon.
 - Suppress stale enrichment results after relevant target revision,
   Description, reference assignment, source revision/background, project, or
   mode changes. Editing source text without regenerating its referenced
