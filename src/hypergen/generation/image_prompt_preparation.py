@@ -20,7 +20,7 @@ from hypergen.generation.ollama_client import (
 )
 from hypergen.generation.structured_output import structured_json_content
 
-IMAGE_PROMPT_PREPARATION_VERSION = "image-prompt-preparation-v1"
+IMAGE_PROMPT_PREPARATION_VERSION = "image-prompt-preparation-v2"
 
 
 class ImagePromptPreparationRequest(DomainModel):
@@ -76,9 +76,11 @@ def build_image_prompt_preparation_prompt(
         """\
 REFERENCE INTERPRETATION
 - Inspect the attached Reference image directly. The authored Description is authoritative.
-- Definite continuity language such as "the computer", "the person", or "the room" combined
-  with now, still, changed, or another delta identifies that visible entity as continuing.
-  "Same [entity]" also requests continuity.
+- The Reference was selected because the author intends some visible continuity or transfer.
+- A definite phrase identifying a visible entity, such as "the computer", "the monitor",
+  "the person", or "the room", means that entity continues from the Reference even without
+  words such as same, now, still, or changed. Pronouns referring to visible entities and
+  "same [entity]" also request continuity.
 - For a continuing entity, retain unmentioned stable identity and construction plus reusable
   visual treatment unless the Description explicitly overrides them.
 - A request for the same visual style transfers only reusable medium, linework, texture,
@@ -89,6 +91,9 @@ REFERENCE INTERPRETATION
 - Screen or sign contents, object state, pose, action, weather, time, lighting state,
   viewpoint, crop, framing, and surrounding composition are transient unless explicitly
   retained.
+- Treat the visible rendered appearance as truth. Never infer a conventional real-world
+  color, material, age, era, or technology that is not visible or authored. In particular,
+  do not turn a monochrome Reference into a beige, cream, tan, or otherwise colored object.
 - A vague requested change may be resolved as a plausible concrete proposal. Do not ask a
   question or discuss ambiguity; the author will review and edit the Image Prompt.
 """
@@ -130,12 +135,19 @@ PRIVATE DELIBERATION
 - setting_traits: stable architecture and environment only when setting continuity is
   requested; otherwise null.
 - visual_treatment: reusable medium, linework, texture, palette, shading, and rendering only
-  when continuity or style transfer is requested; otherwise null.
+  when continuity or style transfer is requested; otherwise null. Capture every dominant
+  visible treatment trait, including color mode, edge or line character, dither or halftone
+  pattern, tonal strategy, apparent medium or rendering technology, and detail level. Do not
+  reduce a distinctive treatment to a generic era or mood label.
 - target_overrides: concrete requested changes only; otherwise null.
 
 IMAGE PROMPT
 - Synthesize one concrete, positive, standalone description of only the desired final image.
 - Put the main subject, action, and critical authored changes first.
+- Incorporate every applicable non-null subject_traits, setting_traits, and visual_treatment
+  detail. Private deliberation is a checklist for the final Image Prompt, not optional notes.
+- Describe continuing entities through their observed distinguishing construction and
+  treatment rather than generic stereotypes such as "old", "vintage", or "beige".
 - Add concrete form, scale, materials, lighting, spatial relationships, atmosphere, and
   composition only where they support the authored result.
 - Never retain old screen or sign contents when the Description changes that surface.
@@ -226,6 +238,15 @@ _PROCESS_LANGUAGE = re.compile(
     r"|\binstead of\b|\bsame style\b|\binspired by\b|\bhas changed\b",
     flags=re.IGNORECASE,
 )
+_ACHROMATIC_LANGUAGE = re.compile(
+    r"\b(?:black(?:-|\s+)and(?:-|\s+)white|grayscale|greyscale)\b",
+    flags=re.IGNORECASE,
+)
+_CHROMATIC_COLOR = re.compile(
+    r"\b(?:beige|brown|tan|cream|red|orange|yellow|green|blue|purple|violet|"
+    r"pink|cyan|magenta|teal|turquoise)\b",
+    flags=re.IGNORECASE,
+)
 
 
 def _words(value: str) -> tuple[str, ...]:
@@ -298,7 +319,12 @@ def _authored_state_assertions(value: str) -> set[tuple[str, str]]:
     return assertions
 
 
-def _validate_image_prompt(authored: str, image_prompt: str) -> None:
+def _validate_image_prompt(
+    authored: str,
+    image_prompt: str,
+    *,
+    visual_treatment: str | None = None,
+) -> None:
     output_assertions = _authored_state_assertions(image_prompt)
     for noun, state in _authored_state_assertions(authored):
         for opposite in _STATE_OPPOSITES[state]:
@@ -319,6 +345,24 @@ def _validate_image_prompt(authored: str, image_prompt: str) -> None:
     if missing_quotes:
         values = ", ".join(sorted(repr(value) for value in missing_quotes))
         raise ValueError(f"Image Prompt omitted or changed visible text: {values}")
+    if (
+        visual_treatment is not None
+        and _ACHROMATIC_LANGUAGE.search(visual_treatment)
+    ):
+        authored_colors = {
+            match.group(0).casefold()
+            for match in _CHROMATIC_COLOR.finditer(authored)
+        }
+        invented_colors = {
+            match.group(0).casefold()
+            for match in _CHROMATIC_COLOR.finditer(image_prompt)
+        } - authored_colors
+        if invented_colors:
+            values = ", ".join(sorted(invented_colors))
+            raise ValueError(
+                "Image Prompt invented chromatic color under an achromatic "
+                f"Reference treatment: {values}"
+            )
     process_language = _PROCESS_LANGUAGE.search(
         _without_quoted_text(image_prompt)
     )
@@ -384,7 +428,11 @@ class OllamaImagePromptPreparer:
         except ValidationError as error:
             raise _model_response_error(request, call, error) from error
         try:
-            _validate_image_prompt(request.description, output.image_prompt)
+            _validate_image_prompt(
+                request.description,
+                output.image_prompt,
+                visual_treatment=output.visual_treatment,
+            )
         except ValueError as error:
             call = self._runtime.chat_structured(
                 prompt=_build_repair_prompt(
@@ -401,6 +449,7 @@ class OllamaImagePromptPreparer:
                 _validate_image_prompt(
                     request.description,
                     repaired.image_prompt,
+                    visual_treatment=output.visual_treatment,
                 )
                 output = output.model_copy(
                     update={"image_prompt": repaired.image_prompt}

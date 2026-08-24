@@ -49,12 +49,16 @@ class FakeOllamaClient:
         )
 
 
-def _output(image_prompt: str) -> str:
+def _output(
+    image_prompt: str,
+    *,
+    visual_treatment: str = "high-contrast halftone linework",
+) -> str:
     return json.dumps(
         {
             "subject_traits": "boxy CRT terminal",
             "setting_traits": None,
-            "visual_treatment": "high-contrast halftone linework",
+            "visual_treatment": visual_treatment,
             "target_overrides": "screen displays static",
             "image_prompt": image_prompt,
         }
@@ -80,6 +84,9 @@ def test_prompt_defines_one_reviewable_result_without_clarification() -> None:
     assert "question or discuss ambiguity" in prompt
     assert "Inspect the attached Reference image directly" in prompt
     assert "same visual style" in prompt
+    assert '"the monitor"' in prompt
+    assert "Private deliberation is a checklist" in prompt
+    assert "do not turn a monochrome Reference into a beige" in prompt
     assert "private deliberation" in prompt
     assert "Image Prompt" in prompt
 
@@ -215,6 +222,42 @@ def test_preparer_allows_authored_process_words_as_visible_text() -> None:
 
     assert result.image_prompt == proposed
     assert client.call_count == 1
+
+
+def test_preparer_repairs_invented_color_under_monochrome_treatment(
+    tmp_path: Path,
+) -> None:
+    image_path = tmp_path / "reference.png"
+    image_path.write_bytes(b"fixture")
+    preparer, client = _preparer(
+        [
+            _output(
+                "A close-up of an old beige CRT monitor rendered in "
+                "high-contrast black and white halftone.",
+                visual_treatment="high-contrast black and white halftone",
+            ),
+            json.dumps(
+                {
+                    "image_prompt": (
+                        "A close-up of the distinctive computer monitor, "
+                        "rendered in high-contrast black-and-white halftone."
+                    )
+                }
+            ),
+        ]
+    )
+
+    result = preparer.prepare(
+        ImagePromptPreparationRequest(
+            description="A close-up view of the computer monitor.",
+            has_reference=True,
+        ),
+        reference_image_path=image_path,
+    )
+
+    assert "beige" not in result.image_prompt
+    assert "black-and-white halftone" in result.image_prompt
+    assert client.call_count == 2
 
 
 def test_preparer_repairs_explicit_object_state_conflict() -> None:
