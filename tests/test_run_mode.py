@@ -404,6 +404,46 @@ def test_run_starts_from_current_card_and_toolbar_can_restart(
     window.close()
 
 
+def test_run_card_without_hotspots_does_not_warn(
+    application: QApplication,
+    tmp_path: Path,
+) -> None:
+    window, _session, _to_incomplete, _to_third, _unresolved = (
+        build_run_window(tmp_path)
+    )
+    document = window.controller.document
+    third = document.cards[2]
+    revision = third.active_revision.model_copy(
+        update={"hotspot_set": HotspotSet()}
+    )
+    third = third.model_copy(
+        update={
+            "revisions": (revision,),
+            "active_revision_id": revision.id,
+        }
+    )
+    window.controller.replace_document(
+        document.model_copy(
+            update={
+                "cards": (
+                    document.cards[0],
+                    document.cards[1],
+                    third,
+                )
+            }
+        )
+    )
+    window.render_document()
+    window.select_card(third.id)
+
+    window.mode_button.click()
+    application.processEvents()
+
+    assert window.canvas_card_name.text() == "Third"
+    assert window.notification_bar.current_key != "run-warning"
+    window.close()
+
+
 def test_run_overlays_persist_and_incomplete_cards_warn(
     application: QApplication,
     tmp_path: Path,

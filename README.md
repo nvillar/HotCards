@@ -24,9 +24,9 @@ Description, optional prepared Image Prompt, optional generated background,
 optional Reference card, and hotspot set. The compact header above the canvas
 edits the card name and selects, duplicates, or deletes revisions; the toolbar
 provides a single Author/Run mode toggle and manages hotspot visibility. An
-unlabeled progress bar to the left of the model selectors shows actual MFLUX
-inference-step completion during image generation and an indeterminate state
-during Image Prompt preparation.
+adjacent step label and progress bar to the left of the model selectors show
+actual MFLUX inference-step completion during image generation and an
+indeterminate state during Image Prompt preparation.
 
 The Background inspector follows the authoring sequence Description, optional
 Reference, Prepare Image Prompt, then Generate Image. Description and Image Prompt share one
@@ -95,19 +95,20 @@ history, and configurable overlays. It opens on the current Author card and,
 when that differs from the configured start card, offers a dismissible restart
 action. Run presents Back and Restart as standard-size controls and hides the
 authoring-only card name and version header. Run-only navigation and overlay
-controls stay hidden in Author mode.
+controls stay hidden in Author mode. Cards without hotspots are valid terminal
+cards and do not produce a warning.
 Local AI services are checked automatically when Author mode is entered; Run
 mode starts no AI work and hides model selection. In Author mode, the status bar selects
 an installed vision-capable Ollama model and either FLUX.2 Klein 4B or FLUX.2
 Klein 9B KV.
 
 Transient outcomes, failures, Run warnings, and Undo actions appear in one
-notification bar below the toolbar. Reversible deletions and replacements apply
-directly and offer Undo. Completed Description and image generations also offer
-Create New Version, which restores the prior current revision and activates a
-complete new revision containing the result, plus an explicit Keep action that
-retains it on the current revision. Field validation remains beside the
-responsible input.
+notification bar beneath the main panes and directly above the status bar.
+Reversible deletions and replacements apply directly and offer Undo. Completed
+Description and image generations also offer Create New Version, which restores
+the prior current revision and activates a complete new revision containing the
+result, plus an explicit Keep action that retains it on the current revision.
+Field validation remains beside the responsible input.
 AI failures and recovery actions stay in the notification bar rather than the
 model selectors.
 

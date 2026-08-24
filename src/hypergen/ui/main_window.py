@@ -155,6 +155,8 @@ class MainWindow(QMainWindow):
         self._rendering = False
         self._is_running = False
         self._background_step_progress: tuple[int, int] | None = None
+        self._image_prompt_progress_message = ""
+        self._background_progress_message = ""
         self._run_session = RunSession()
         if self.background_workflow is None and self.document_session is not None:
             self.background_workflow = BackgroundWorkflow(
@@ -441,8 +443,8 @@ class MainWindow(QMainWindow):
         central_layout = QVBoxLayout(central_widget)
         central_layout.setContentsMargins(0, 0, 0, 0)
         central_layout.setSpacing(0)
-        central_layout.addWidget(self.notification_bar)
         central_layout.addWidget(self.pane_splitter, 1)
+        central_layout.addWidget(self.notification_bar)
         self.setCentralWidget(central_widget)
 
         values = load_machine_settings(self.settings)
@@ -473,8 +475,18 @@ class MainWindow(QMainWindow):
             self.generation_progress_container
         )
         self.generation_progress_layout.setContentsMargins(8, 0, 8, 0)
+        self.generation_step_label = QLabel()
+        self.generation_step_label.setObjectName("generationStepLabel")
+        self.generation_step_label.setAccessibleName(
+            "Current generation step"
+        )
         self.generation_progress_layout.addWidget(
-            self.generation_progress_bar
+            self.generation_step_label
+        )
+        self.generation_progress_layout.addSpacing(8)
+        self.generation_progress_layout.addWidget(
+            self.generation_progress_bar,
+            1,
         )
         self.generation_progress_container.hide()
         self.statusBar().addWidget(self.generation_progress_container, 1)
@@ -1157,6 +1169,7 @@ class MainWindow(QMainWindow):
 
     def _image_prompt_progress_changed(self, message: str) -> None:
         self.notification_bar.clear_notification("image-prompt-error")
+        self._image_prompt_progress_message = message
         self._update_generation_progress()
         self._update_generation_actions()
 
@@ -1242,6 +1255,7 @@ class MainWindow(QMainWindow):
             self._show_info("background-cancelled", message)
         else:
             self.notification_bar.clear_notification("background-cancelled")
+        self._background_progress_message = message
         self._background_step_progress = None
         self._update_generation_progress()
         self._update_generation_actions()
@@ -1268,7 +1282,19 @@ class MainWindow(QMainWindow):
         )
         if not (background_busy or self.image_prompt_workflow.busy):
             self.generation_progress_container.hide()
+            self.generation_step_label.clear()
             return
+        self.generation_step_label.setText(
+            (
+                self._background_progress_message
+                or "Generating image..."
+            )
+            if background_busy
+            else (
+                self._image_prompt_progress_message
+                or "Preparing Image Prompt..."
+            )
+        )
         if background_busy and self._background_step_progress is not None:
             completed_steps, total_steps = self._background_step_progress
             self.generation_progress_bar.setRange(0, total_steps)
@@ -1574,8 +1600,6 @@ class MainWindow(QMainWindow):
                 revision.hotspot_set,
                 self.controller.document.run_overlay_mode,
             )
-            if revision.hotspot_set is None or not revision.hotspot_set.interactions:
-                self._set_run_warning(f'"{card.name}" has no hotspots to navigate.')
             return
         self.card_canvas.set_hotspots(
             revision.hotspot_set,
