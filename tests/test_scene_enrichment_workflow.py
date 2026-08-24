@@ -223,7 +223,7 @@ def test_result_does_not_apply_after_revision_switch() -> None:
     assert "changed before enrichment completed" in str(failures[-1])
 
 
-def test_enrichment_uses_grouped_generation_time_reference_descriptions() -> None:
+def test_enrichment_does_not_send_reference_descriptions_to_ollama() -> None:
     source = Card(
         name="Castle",
         revisions=(
@@ -254,19 +254,16 @@ def test_enrichment_uses_grouped_generation_time_reference_descriptions() -> Non
     assert callable(work)
     workers.operations[0].succeeded.emit(work())
 
-    context = enricher.requests[0].references[0]
-    assert context.roles == (
-        ReferenceRole.SUBJECT,
-        ReferenceRole.SETTING,
-    )
-    assert context.source_description.startswith("A black basalt castle")
-    assert "Edited after generation" not in context.source_description
+    request = enricher.requests[0]
+    assert request.scene == "A guard approaches the same castle"
+    assert not hasattr(request, "references")
     enriched = controller.document.cards[0].active_revision.enriched_description
     assert enriched is not None
     assert enriched.text == "A richer courtyard"
+    assert enriched.references == ()
 
 
-def test_reference_changes_make_enrichment_result_stale() -> None:
+def test_reference_changes_do_not_invalidate_text_only_enrichment() -> None:
     source = Card(
         name="Castle",
         revisions=(
@@ -289,6 +286,8 @@ def test_reference_changes_make_enrichment_result_stale() -> None:
     workflow.failed.connect(failures.append)
 
     workflow.start(target.id)
+    work = workers.calls[0]
+    assert callable(work)
     controller.execute(
         SetRevisionReferenceCommand(
             card_id=target.id,
@@ -297,12 +296,12 @@ def test_reference_changes_make_enrichment_result_stale() -> None:
             reference=None,
         )
     )
-    workers.operations[0].succeeded.emit(_result("Late"))
+    workers.operations[0].succeeded.emit(work())
 
-    assert controller.document.cards[0].active_revision.description == (
-        "The outer gate"
-    )
-    assert "changed before enrichment completed" in str(failures[-1])
+    enriched = controller.document.cards[0].active_revision.enriched_description
+    assert enriched is not None
+    assert enriched.text == "A richer courtyard"
+    assert failures == []
 
 
 def test_editing_current_source_text_does_not_stale_reference_provenance() -> None:

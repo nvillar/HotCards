@@ -160,10 +160,12 @@ def test_reference_suite_preserves_order_prompts_and_provenance(
         "character_identity.png",
         "map_style.png",
     ]
-    assert combined["prompt"].index("REFERENCE IMAGE 1") < combined["prompt"].index(
-        "REFERENCE IMAGE 2"
-    )
-    assert combined["prompt"].endswith(str(combined["scene"]))
+    assert str(combined["prompt"]).startswith(str(combined["scene"]))
+    assert combined["prompt"].index("Use image 1 as follows:") < combined[
+        "prompt"
+    ].index("Use image 2 as follows:")
+    assert "REFERENCE IMAGE" not in combined["prompt"]
+    assert "SCENE\n" not in combined["prompt"]
     assert [
         Path(path).name
         for path in requests[3]["image_paths"]  # type: ignore[arg-type]

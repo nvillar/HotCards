@@ -46,9 +46,11 @@ def test_referenced_prompt_uses_only_effective_enriched_description() -> None:
         )
     )
 
-    assert "SCENE\nAn open circular hatch reveals" in prompt
+    assert prompt.startswith("An open circular hatch reveals")
     assert "The hatch is open." not in prompt
-    assert "REFERENCE IMAGE 1\nSTYLE" in prompt
+    assert "Use image 1 for the medium, linework, texture" in prompt
+    assert "Preserve the described subjects, actions, poses" in prompt
+    assert "SCENE AUTHORITY" not in prompt
 
 
 def test_both_empty_description_sources_are_rejected() -> None:
@@ -93,16 +95,24 @@ def test_reference_roles_are_ordered_and_missing_slots_are_renumbered() -> None:
         )
     )
 
-    assert prompt.index("REFERENCE IMAGE 1\nSUBJECT") < prompt.index("REFERENCE IMAGE 2\nSETTING")
-    assert "REFERENCE IMAGE 3" not in prompt
-    assert "SCENE AUTHORITY" in prompt
-    assert "SCENE supplies actions, poses, object states" in prompt
-    assert "Derive the recognizable appearance and identity" in prompt
-    assert "Derive environment, architecture, materials, terrain" in prompt
+    assert prompt.startswith("A knight crossing a market square")
+    assert "A knight crossing a market square. Use image 1" in prompt
+    assert prompt.index("Use image 1 for the subject's") < prompt.index(
+        "Use image 2 for the environment"
+    )
+    assert "image 3" not in prompt
+    assert "SCENE AUTHORITY" not in prompt
+    assert "REFERENCE IMAGE" not in prompt
+    assert "SUBJECT" not in prompt
+    assert "SETTING" not in prompt
+    assert "recognizable identity and appearance" in prompt
+    assert "environment, architecture, intrinsic materials, terrain" in prompt
     assert "Ignore" not in prompt
     assert "Do not" not in prompt
-    assert "\nSTYLE\n" not in prompt
-    assert prompt.endswith("SCENE\nA knight crossing a market square")
+    assert prompt.endswith(
+        "Preserve the described subjects, actions, poses, object states, "
+        "time, weather, viewpoint, framing, and composition."
+    )
 
 
 def test_one_reference_image_can_supply_multiple_roles() -> None:
@@ -120,7 +130,41 @@ def test_one_reference_image_can_supply_multiple_roles() -> None:
         )
     )
 
-    assert prompt.count("REFERENCE IMAGE") == 1
-    assert "REFERENCE IMAGE 1\nSUBJECT + SETTING" in prompt
-    assert prompt.count("SCENE AUTHORITY") == 1
-    assert "REFERENCE IMAGE 2" not in prompt
+    assert prompt.count("Use image 1") == 1
+    assert (
+        "Use image 1 for the subject's recognizable identity and appearance, "
+        "including its defining features, body, and clothing and the environment, "
+        "architecture, intrinsic materials, terrain, and spatial character."
+    ) in prompt
+    assert "SCENE AUTHORITY" not in prompt
+    assert "image 2" not in prompt
+
+
+def test_reference_prompt_does_not_expose_internal_role_labels() -> None:
+    style = ImageReferenceSnapshot(
+        card_id=uuid4(),
+        revision_id=uuid4(),
+        background_id=uuid4(),
+    )
+
+    prompt = compose_image_prompt(
+        ImageGenerationInputs(
+            description=(
+                "The computer fills the frame in a direct head-on view, "
+                "showing its screen and top row of keys."
+            ),
+            style_reference=style,
+        )
+    )
+
+    assert prompt.startswith("The computer fills the frame")
+    assert "Use image 1 for the medium, linework, texture" in prompt
+    assert all(
+        label not in prompt
+        for label in (
+            "SCENE AUTHORITY",
+            "REFERENCE IMAGE",
+            "\nSCENE\n",
+            "\nSTYLE\n",
+        )
+    )

@@ -23,6 +23,7 @@ from hypergen.evaluation.manifest import (
     default_environment,
 )
 from hypergen.evaluation.reports import create_contact_sheet
+from hypergen.generation.image_prompts import compose_reference_prompt
 from hypergen.storage.stack_store import StackStore
 
 REFERENCE_RESULT_VERSION = "flux-reference-result-v1"
@@ -220,14 +221,11 @@ def _reference_prompt(
     scene: str,
     instructions: Sequence[str],
 ) -> str:
-    sections = [
-        *(
-            f"REFERENCE IMAGE {index}\n{instruction}"
-            for index, instruction in enumerate(instructions, start=1)
-        ),
-        f"SCENE\n{scene}",
-    ]
-    return "\n\n".join(sections)
+    numbered = tuple(
+        f"Use image {index} as follows: {instruction}"
+        for index, instruction in enumerate(instructions, start=1)
+    )
+    return compose_reference_prompt(scene, numbered)
 
 
 def _case_specs() -> tuple[dict[str, object], ...]:
@@ -255,10 +253,10 @@ def _case_specs() -> tuple[dict[str, object], ...]:
             "case_id": "style-only",
             "reference_keys": ("map_style",),
             "instructions": (
-                "Use only the hand-drawn ink linework, restrained watercolor "
+                "Apply the hand-drawn ink linework, restrained watercolor "
                 "washes, pale blue accents, white paper, and cross-hatched "
-                "shading. Construct all subject matter from the scene; include "
-                "no map, islands, castle, cave, bridges, mountains, or boat.",
+                "shading to the described workshop. Preserve the workshop's "
+                "subjects and composition.",
             ),
             "scene": (
                 "An intimate clockmaker's workshop interior with a tall blue "
@@ -277,9 +275,10 @@ def _case_specs() -> tuple[dict[str, object], ...]:
                 "Preserve the same clockwork knight's helmet silhouette, "
                 "blackened armor, teal enamel, brass trim, and red sash. "
                 "Construct the environment from the scene instruction.",
-                "Use only the hand-drawn ink linework, restrained watercolor "
+                "Apply the hand-drawn ink linework, restrained watercolor "
                 "washes, pale blue accents, white paper, and cross-hatched "
-                "shading. Do not reproduce the map's subjects or composition.",
+                "shading to the described courtyard and preserve its subjects "
+                "and composition.",
             ),
             "scene": (
                 "The same clockwork knight explores a moonlit stone courtyard "
@@ -343,7 +342,8 @@ def _case_specs() -> tuple[dict[str, object], ...]:
             "reference_keys": ("character_identity", "map_style"),
             "instructions": (
                 "Preserve the clockwork knight as the central foreground character.",
-                "Use only the ink-and-watercolor rendering treatment; ignore all map content.",
+                "Apply the ink-and-watercolor rendering treatment to the "
+                "described market square and preserve its content.",
             ),
             "scene": (
                 "A storybook market square with the referenced knight in the "
@@ -360,7 +360,8 @@ def _case_specs() -> tuple[dict[str, object], ...]:
             ),
             "instructions": (
                 "Preserve the clockwork knight as the central foreground character.",
-                "Use only the ink-and-watercolor rendering treatment; ignore all map content.",
+                "Apply the ink-and-watercolor rendering treatment to the "
+                "described market square and preserve its content.",
                 "Use the castle's recognizable architecture as the distant market backdrop.",
             ),
             "scene": (
@@ -379,10 +380,11 @@ def _case_specs() -> tuple[dict[str, object], ...]:
             ),
             "instructions": (
                 "Preserve the clockwork knight as the central foreground character.",
-                "Use the delicate ink outlines and pale watercolor washes; ignore map content.",
+                "Apply the delicate ink outlines and pale watercolor washes to "
+                "the described market square and preserve its content.",
                 "Use the castle's recognizable architecture as the distant market backdrop.",
-                "Use only the bold indigo, ochre, blue, and tan palette from this "
-                "graphic reference; ignore its depicted objects and geometry.",
+                "Apply the bold indigo, ochre, blue, and tan palette from this "
+                "graphic reference to the described market square.",
             ),
             "scene": (
                 "A market square outside the referenced castle with the referenced "

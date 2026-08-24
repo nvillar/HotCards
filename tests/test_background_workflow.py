@@ -361,7 +361,12 @@ def test_references_capture_exact_source_and_suppress_stale_results(
     assert metadata.inputs.setting_reference == (
         metadata.inputs.subject_reference
     )
-    assert "REFERENCE IMAGE 1\nSUBJECT + SETTING" in metadata.render_prompt
+    assert metadata.render_prompt.startswith("A garden")
+    assert "Use image 1 for the subject's recognizable identity" in (
+        metadata.render_prompt
+    )
+    assert "and the environment, architecture" in metadata.render_prompt
+    assert "SCENE AUTHORITY" not in metadata.render_prompt
     assert metadata.effective_settings["reference_count"] == 1
 
     failures: list[object] = []
