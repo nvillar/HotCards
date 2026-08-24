@@ -14,10 +14,43 @@ def test_prompt_uses_the_authored_description_without_rewriting() -> None:
     assert compose_image_prompt(ImageGenerationInputs(description=description)) == description
 
 
-def test_empty_or_whitespace_description_is_rejected() -> None:
+def test_prompt_keeps_authored_intent_authoritative_over_enriched_detail() -> None:
+    prompt = compose_image_prompt(
+        ImageGenerationInputs(
+            description="The hatch is open.",
+            enriched_description=(
+                "A closed circular space-station hatch in a monochrome corridor."
+            ),
+        )
+    )
+
+    assert "AUTHOR INTENT AUTHORITY" in prompt
+    assert "When they conflict, render the state specified by DESCRIPTION" in prompt
+    assert "DESCRIPTION\nThe hatch is open." in prompt
+    assert "ENRICHED VISUAL DETAIL\nA closed circular" in prompt
+    assert prompt.index("DESCRIPTION\n") < prompt.index("ENRICHED VISUAL DETAIL\n")
+
+
+def test_both_empty_description_sources_are_rejected() -> None:
     for description in ("", "   "):
         with pytest.raises(ValueError, match="Description"):
-            compose_image_prompt(ImageGenerationInputs(description=description))
+            compose_image_prompt(
+                ImageGenerationInputs(
+                    description=description,
+                    enriched_description="   ",
+                )
+            )
+
+
+def test_enriched_description_can_be_the_only_text_source() -> None:
+    enriched = "A monochrome circular hatch opens into a station corridor."
+
+    assert compose_image_prompt(
+        ImageGenerationInputs(
+            description="",
+            enriched_description=enriched,
+        )
+    ) == enriched
 
 
 def test_reference_roles_are_ordered_and_missing_slots_are_renumbered() -> None:
@@ -42,15 +75,14 @@ def test_reference_roles_are_ordered_and_missing_slots_are_renumbered() -> None:
 
     assert prompt.index("REFERENCE IMAGE 1\nSUBJECT") < prompt.index("REFERENCE IMAGE 2\nSETTING")
     assert "REFERENCE IMAGE 3" not in prompt
-    assert "SCENE AUTHORITY" in prompt
-    assert "SCENE supplies actions, poses, object states, time, weather, camera, mood" in prompt
-    assert "every property not assigned to a labeled reference role" in prompt
+    assert "DESCRIPTION AUTHORITY" in prompt
+    assert "DESCRIPTION supplies the desired scene" in prompt
     assert "Derive the recognizable appearance and identity" in prompt
     assert "Derive environment, architecture, materials, terrain" in prompt
     assert "Ignore" not in prompt
     assert "Do not" not in prompt
     assert "\nSTYLE\n" not in prompt
-    assert prompt.endswith("SCENE\nA knight crossing a market square")
+    assert prompt.endswith("DESCRIPTION\nA knight crossing a market square")
 
 
 def test_one_reference_image_can_supply_multiple_roles() -> None:
@@ -70,5 +102,5 @@ def test_one_reference_image_can_supply_multiple_roles() -> None:
 
     assert prompt.count("REFERENCE IMAGE") == 1
     assert "REFERENCE IMAGE 1\nSUBJECT + SETTING" in prompt
-    assert prompt.count("SCENE AUTHORITY") == 1
+    assert prompt.count("DESCRIPTION AUTHORITY") == 1
     assert "REFERENCE IMAGE 2" not in prompt

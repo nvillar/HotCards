@@ -8,8 +8,10 @@ from pydantic import ValidationError
 from PySide6.QtCore import QSignalBlocker, Qt, QTimer, Signal
 from PySide6.QtGui import QFocusEvent
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QComboBox,
     QFrame,
+    QGroupBox,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -17,6 +19,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QPlainTextEdit,
     QPushButton,
+    QRadioButton,
     QScrollArea,
     QStackedWidget,
     QStyle,
@@ -45,7 +48,6 @@ from hypergen.application.scene_enrichment_workflow import (
 from hypergen.domain.models import (
     Card,
     CardRevision,
-    EnrichedDescription,
     Interaction,
     NavigateAction,
     ReferenceRole,
@@ -99,7 +101,6 @@ class Inspector(QWidget):
 
     document_changed = Signal(object)
     generate_background_requested = Signal()
-    clear_background_requested = Signal()
     enrich_scene_requested = Signal()
     hotspot_selected = Signal(object)
     change_applied = Signal(str, object)
@@ -114,6 +115,15 @@ class Inspector(QWidget):
         self.controller = controller
         self.selected_card_id: UUID | None = None
         self._rendered_revision_id: UUID | None = None
+        self._description_mode = "original"
+        self._had_enrichment = False
+        self._enrich_using_text = ""
+        self._generate_using_text = ""
+        self._enrich_reason = ""
+        self._generate_reason = ""
+        self._can_enrich = False
+        self._enrichment_busy = False
+        self._enrichment_current: bool | None = None
         self._rendering = False
         self.setObjectName("inspector")
         self.setMinimumWidth(300)
@@ -150,19 +160,46 @@ class Inspector(QWidget):
         layout = QVBoxLayout(page)
 
         layout.addWidget(QLabel("Description"))
-        self.scene_edit = _CommitPlainTextEdit()
-        self.scene_edit.setObjectName("sceneDescriptionEdit")
-        self.scene_edit.setPlaceholderText("Description")
-        self.scene_edit.setAccessibleName("Description")
-        self.scene_edit.setMaximumHeight(180)
-        layout.addWidget(self.scene_edit)
+        self.description_edit = _CommitPlainTextEdit()
+        self.description_edit.setObjectName("descriptionEdit")
+        self.description_edit.setPlaceholderText("Description")
+        self.description_edit.setAccessibleName("Description")
+        editor_height = self.description_edit.fontMetrics().lineSpacing() * 10 + 20
+        self.description_edit.setFixedHeight(editor_height)
+        layout.addWidget(self.description_edit)
         self.description_error = QLabel()
         self.description_error.setObjectName("descriptionValidationError")
         self.description_error.setWordWrap(True)
         self.description_error.setVisible(False)
         layout.addWidget(self.description_error)
 
+        self.description_toggle = QWidget()
+        self.description_toggle.setObjectName("descriptionToggle")
+        toggle_layout = QHBoxLayout(self.description_toggle)
+        toggle_layout.setContentsMargins(0, 0, 0, 0)
+        self.original_description_button = QRadioButton("Original")
+        self.original_description_button.setObjectName("originalDescriptionButton")
+        self.original_description_button.setToolTip(
+            "Display and edit the authored Description"
+        )
+        self.enriched_description_button = QRadioButton("Enriched")
+        self.enriched_description_button.setObjectName("enrichedDescriptionButton")
+        self.enriched_description_button.setToolTip(
+            "Display and edit the Enriched Description"
+        )
+        self.description_button_group = QButtonGroup(self)
+        self.description_button_group.setExclusive(True)
+        self.description_button_group.addButton(self.original_description_button)
+        self.description_button_group.addButton(self.enriched_description_button)
+        toggle_layout.addWidget(self.original_description_button)
+        toggle_layout.addWidget(self.enriched_description_button)
+        toggle_layout.addStretch(1)
+        layout.addWidget(self.description_toggle)
+
         layout.addSpacing(8)
+        self.references_group = QGroupBox("References")
+        self.references_group.setObjectName("referencesGroup")
+        references_layout = QVBoxLayout(self.references_group)
         self.subject_reference_combo = QComboBox()
         self.style_reference_combo = QComboBox()
         self.setting_reference_combo = QComboBox()
@@ -189,63 +226,33 @@ class Inspector(QWidget):
             ),
         )
         for role, label_text, tooltip in reference_details:
+            row = QHBoxLayout()
             label = QLabel(label_text)
+            label.setMinimumWidth(58)
             label.setToolTip(tooltip)
-            layout.addWidget(label)
+            row.addWidget(label)
             combo = self.reference_combos[role]
             combo.setObjectName(f"{role.value}ReferenceCombo")
             combo.setAccessibleName(f"{label_text} reference card")
             combo.setToolTip(tooltip)
-            layout.addWidget(combo)
+            row.addWidget(combo, 1)
+            references_layout.addLayout(row)
         self.reference_error = QLabel()
         self.reference_error.setObjectName("referenceValidationError")
         self.reference_error.setWordWrap(True)
         self.reference_error.setVisible(False)
-        layout.addWidget(self.reference_error)
+        references_layout.addWidget(self.reference_error)
+        layout.addWidget(self.references_group)
 
         layout.addSpacing(8)
         self.enrich_scene_button = QPushButton("Enrich Description")
         self.enrich_scene_button.setObjectName("enrichSceneButton")
         layout.addWidget(self.enrich_scene_button)
-        self.enrich_using_label = QLabel()
-        self.enrich_using_label.setObjectName("enrichUsingLabel")
-        self.enrich_using_label.setWordWrap(True)
-        layout.addWidget(self.enrich_using_label)
-
-        layout.addSpacing(8)
-        enriched_header = QHBoxLayout()
-        enriched_header.addWidget(QLabel("Enriched Description"))
-        enriched_header.addStretch(1)
-        self.enrichment_status_label = QLabel()
-        self.enrichment_status_label.setObjectName("enrichmentStatusLabel")
-        enriched_header.addWidget(self.enrichment_status_label)
-        layout.addLayout(enriched_header)
-        self.enriched_scene_edit = _CommitPlainTextEdit()
-        self.enriched_scene_edit.setObjectName("enrichedDescriptionEdit")
-        self.enriched_scene_edit.setPlaceholderText("No Enriched Description")
-        self.enriched_scene_edit.setAccessibleName("Enriched Description")
-        self.enriched_scene_edit.setMaximumHeight(180)
-        layout.addWidget(self.enriched_scene_edit)
-        self.clear_enriched_description_button = QPushButton(
-            "Clear Enriched Description"
-        )
-        self.clear_enriched_description_button.setObjectName(
-            "clearEnrichedDescriptionButton"
-        )
-        layout.addWidget(self.clear_enriched_description_button)
 
         layout.addSpacing(8)
         self.generate_background_button = QPushButton("Generate Image")
         self.generate_background_button.setObjectName("generateBackgroundButton")
         layout.addWidget(self.generate_background_button)
-        self.generate_using_label = QLabel()
-        self.generate_using_label.setObjectName("generateUsingLabel")
-        self.generate_using_label.setWordWrap(True)
-        layout.addWidget(self.generate_using_label)
-
-        self.clear_background_button = QPushButton("Clear Image")
-        self.clear_background_button.setObjectName("clearBackgroundButton")
-        layout.addWidget(self.clear_background_button)
 
         layout.addStretch(1)
         scroll.setWidget(page)
@@ -310,16 +317,17 @@ class Inspector(QWidget):
         self.inspector_tabs.addTab(page, "Hotspots")
 
     def _connect_signals(self) -> None:
-        self.scene_edit.editing_finished.connect(self.commit_revision_metadata)
-        self.enriched_scene_edit.editing_finished.connect(
+        self.description_edit.editing_finished.connect(
             self.commit_revision_metadata
         )
-        self.scene_edit.textChanged.connect(self._render_inputs_changed)
-        self.enriched_scene_edit.textChanged.connect(self._render_inputs_changed)
-        self.enrich_scene_button.clicked.connect(self.enrich_scene_requested)
-        self.clear_enriched_description_button.clicked.connect(
-            self._clear_enriched_description
+        self.description_edit.textChanged.connect(self._render_inputs_changed)
+        self.original_description_button.clicked.connect(
+            lambda: self._switch_description_mode("original")
         )
+        self.enriched_description_button.clicked.connect(
+            lambda: self._switch_description_mode("enriched")
+        )
+        self.enrich_scene_button.clicked.connect(self.enrich_scene_requested)
         self.generate_background_button.clicked.connect(self.generate_background_requested)
         for role, combo in self.reference_combos.items():
             combo.currentIndexChanged.connect(
@@ -328,7 +336,6 @@ class Inspector(QWidget):
                     index,
                 )
             )
-        self.clear_background_button.clicked.connect(self.clear_background_requested)
         self.hotspot_list.currentItemChanged.connect(self._hotspot_selection_changed)
         self.move_hotspot_up_button.clicked.connect(lambda: self._move_hotspot(-1))
         self.move_hotspot_down_button.clicked.connect(lambda: self._move_hotspot(1))
@@ -338,15 +345,16 @@ class Inspector(QWidget):
 
     def _render_inputs_changed(self) -> None:
         if not self._rendering:
+            self._update_enrichment_freshness()
             self.render_inputs_changed.emit()
 
     def render(self, document: Stack, selected_card_id: UUID | None) -> None:
         previous_card_id = self.selected_card_id
         previous_revision_id = self._rendered_revision_id
-        preserve_description = self.scene_edit.hasFocus()
-        description_draft = self.scene_edit.toPlainText()
-        preserve_enriched_description = self.enriched_scene_edit.hasFocus()
-        enriched_description_draft = self.enriched_scene_edit.toPlainText()
+        previous_had_enrichment = self._had_enrichment
+        preserve_description = self.description_edit.hasFocus()
+        description_draft = self.description_edit.toPlainText()
+        previous_mode = self._description_mode
         self._rendering = True
         try:
             card = next(
@@ -356,15 +364,15 @@ class Inspector(QWidget):
             self.selected_card_id = card.id if card is not None else None
             if card is None:
                 self._rendered_revision_id = None
+                self._had_enrichment = False
                 self.pages.setCurrentIndex(0)
                 self._set_error(self.description_error, "")
                 self._set_error(self.reference_error, "")
                 self.set_hotspot_error("")
-                self.scene_edit.clear()
-                self.enriched_scene_edit.clear()
-                self.enrichment_status_label.clear()
-                self.enrich_using_label.clear()
-                self.generate_using_label.clear()
+                self.description_edit.clear()
+                self.description_toggle.hide()
+                self._enrichment_current = None
+                self._update_enrich_button()
                 self.hotspot_list.clear()
                 self._render_hotspot_properties(document, None)
                 return
@@ -376,24 +384,29 @@ class Inspector(QWidget):
                 self._set_error(self.reference_error, "")
                 self.set_hotspot_error("")
             self._rendered_revision_id = revision.id
-            self.scene_edit.setPlainText(
-                description_draft
-                if preserve_description and same_revision
+            if revision.enriched_description is None:
+                self._description_mode = "original"
+            elif not same_revision or not previous_had_enrichment:
+                self._description_mode = "enriched"
+            else:
+                self._description_mode = previous_mode
+            self._had_enrichment = revision.enriched_description is not None
+            displayed_value = (
+                revision.enriched_description.text
+                if (
+                    self._description_mode == "enriched"
+                    and revision.enriched_description is not None
+                )
                 else revision.description
             )
-            self.enriched_scene_edit.setPlainText(
-                enriched_description_draft
-                if preserve_enriched_description and same_revision
-                else (
-                    revision.enriched_description.text
-                    if revision.enriched_description is not None
-                    else ""
-                )
+            self.description_edit.setPlainText(
+                description_draft
+                if preserve_description and same_revision
+                else displayed_value
             )
             self._render_references(document, card, revision)
             self._render_description_workflow(document, card, revision)
             self._render_hotspots(document, revision)
-            self.clear_background_button.setEnabled(revision.background is not None)
         finally:
             self._rendering = False
 
@@ -403,41 +416,36 @@ class Inspector(QWidget):
         card = self._selected_card()
         if card is None:
             return False
-        value = self.scene_edit.toPlainText()
-        if value != card.active_revision.description and not self._execute(
-            EditRevisionDescriptionCommand(
-                card_id=card.id,
-                revision_id=card.active_revision.id,
-                value=value,
-            ),
-            error_label=self.description_error,
-        ):
-            return False
-        card = self._selected_card()
-        if card is None:
-            return False
-        enriched_value = self.enriched_scene_edit.toPlainText().strip()
-        existing = card.active_revision.enriched_description
-        if enriched_value == (existing.text if existing is not None else ""):
-            return True
-        if not enriched_value:
-            enrichment = None
-        elif existing is not None:
-            enrichment = existing.model_copy(update={"text": enriched_value})
-        else:
-            enrichment = EnrichedDescription(
-                text=enriched_value,
-                source_description=card.active_revision.description,
-                references=enrichment_reference_snapshots(
-                    self.controller.document,
-                    card,
+        value = self.description_edit.toPlainText()
+        if self._description_mode == "original":
+            if value == card.active_revision.description:
+                return True
+            return self._execute(
+                EditRevisionDescriptionCommand(
+                    card_id=card.id,
+                    revision_id=card.active_revision.id,
+                    value=value,
                 ),
+                error_label=self.description_error,
+            )
+        existing = card.active_revision.enriched_description
+        if existing is None or value.strip() == existing.text:
+            return True
+        if not value.strip():
+            return self._execute(
+                SetRevisionEnrichedDescriptionCommand(
+                    card_id=card.id,
+                    revision_id=card.active_revision.id,
+                    value=None,
+                ),
+                error_label=self.description_error,
+                undo_message="Enrichment removed",
             )
         return self._execute(
             SetRevisionEnrichedDescriptionCommand(
                 card_id=card.id,
                 revision_id=card.active_revision.id,
-                value=enrichment,
+                value=existing.model_copy(update={"text": value.strip()}),
             ),
             error_label=self.description_error,
         )
@@ -447,30 +455,46 @@ class Inspector(QWidget):
         return self.commit_revision_metadata()
 
     def has_render_prompt_input(self) -> bool:
-        return bool(
-            self.selected_card_id is not None
-            and (
-                self.enriched_scene_edit.toPlainText().strip()
-                or self.scene_edit.toPlainText().strip()
+        card = self._selected_card()
+        if card is None:
+            return False
+        visible_value = self.description_edit.toPlainText().strip()
+        if self._description_mode == "original":
+            original = visible_value
+            enriched = (
+                card.active_revision.enriched_description.text
+                if card.active_revision.enriched_description is not None
+                else ""
             )
-        )
+        else:
+            original = card.active_revision.description
+            enriched = visible_value
+        return bool(original.strip() or enriched.strip())
 
     def has_description_input(self) -> bool:
-        return bool(self.selected_card_id is not None and self.scene_edit.toPlainText().strip())
-
-    def _clear_enriched_description(self) -> None:
         card = self._selected_card()
-        if card is None or card.active_revision.enriched_description is None:
+        if card is None:
+            return False
+        if self._description_mode == "original":
+            return bool(self.description_edit.toPlainText().strip())
+        return bool(card.active_revision.description.strip())
+
+    def _switch_description_mode(self, mode: str) -> None:
+        if self._rendering or mode == self._description_mode:
             return
-        self._execute(
-            SetRevisionEnrichedDescriptionCommand(
-                card_id=card.id,
-                revision_id=card.active_revision.id,
-                value=None,
-            ),
-            error_label=self.description_error,
-            undo_message="Enriched Description cleared",
-        )
+        card = self._selected_card()
+        if (
+            card is None
+            or (
+                mode == "enriched"
+                and card.active_revision.enriched_description is None
+            )
+            or not self.commit_revision_metadata()
+        ):
+            self.render(self.controller.document, self.selected_card_id)
+            return
+        self._description_mode = mode
+        self.render(self.controller.document, self.selected_card_id)
 
     def _render_description_workflow(
         self,
@@ -488,51 +512,69 @@ class Inspector(QWidget):
             if roles
             else ""
         )
-        self.enrich_using_label.setText(
-            f"Using: Description{reference_suffix}"
+        self.references_group.setTitle(
+            f"References ({len(roles)})" if roles else "References"
         )
+        self._enrich_using_text = f"Using: Description{reference_suffix}"
         enrichment = revision.enriched_description
         if enrichment is None:
-            status = "Not enriched"
-            effective_source = "Description"
+            generation_sources = "Description"
+            self._enrichment_current = None
         else:
-            current = enrichment.is_current(
-                source_description=revision.description,
+            authored_description = (
+                self.description_edit.toPlainText()
+                if self._description_mode == "original"
+                else revision.description
+            )
+            self._enrichment_current = enrichment.is_current(
+                source_description=authored_description,
                 references=enrichment_reference_snapshots(document, card),
             )
-            status = "Current" if current else "Out of date"
-            effective_source = (
-                "Enriched Description"
-                if current
-                else "Enriched Description (Out of date)"
+            generation_sources = (
+                "Description + Enriched Description"
+                if revision.description.strip()
+                else "Enriched Description"
             )
-        self.enrichment_status_label.setText(status)
-        self.clear_enriched_description_button.setEnabled(enrichment is not None)
-        self.clear_enriched_description_button.setVisible(enrichment is not None)
-        self.enrich_scene_button.setText(
-            "Re-enrich Description"
-            if enrichment is not None
-            else "Enrich Description"
+        self.description_toggle.setVisible(enrichment is not None)
+        self.original_description_button.setChecked(
+            self._description_mode == "original"
         )
-        self.generate_using_label.setText(
-            f"Using: {effective_source}{reference_suffix}"
+        self.enriched_description_button.setChecked(
+            self._description_mode == "enriched"
         )
+        self.description_edit.setAccessibleName(
+            "Enriched Description"
+            if self._description_mode == "enriched"
+            else "Description"
+        )
+        self.description_edit.setPlaceholderText(
+            "Enriched Description"
+            if self._description_mode == "enriched"
+            else "Description"
+        )
+        self._generate_using_text = (
+            f"Using: {generation_sources}{reference_suffix}"
+        )
+        self._update_enrich_button()
+        self._refresh_generation_tooltips()
 
     def set_background_capabilities(
         self,
         *,
         can_generate: bool,
         generate_reason: str,
-        can_clear: bool = False,
-        clear_reason: str = "",
+        has_image: bool,
         busy: bool,
         generating: bool,
     ) -> None:
+        self._generate_reason = generate_reason
         self.generate_background_button.setEnabled(can_generate and not busy)
-        self.generate_background_button.setText("Generating…" if generating else "Generate Image")
-        self.generate_background_button.setToolTip(generate_reason)
-        self.clear_background_button.setEnabled(can_clear and not busy)
-        self.clear_background_button.setToolTip(clear_reason)
+        self.generate_background_button.setText(
+            "Generating…"
+            if generating
+            else ("Re-generate Image" if has_image else "Generate Image")
+        )
+        self._refresh_generation_tooltips()
 
     def set_scene_enrichment_capabilities(
         self,
@@ -541,20 +583,88 @@ class Inspector(QWidget):
         reason: str,
         busy: bool,
     ) -> None:
-        self.enrich_scene_button.setEnabled(can_enrich)
-        self.enrich_scene_button.setText(
-            "Enriching…"
-            if busy
-            else (
-                "Re-enrich Description"
-                if (
-                    (card := self._selected_card()) is not None
-                    and card.active_revision.enriched_description is not None
+        self._enrich_reason = reason
+        self._can_enrich = can_enrich
+        self._enrichment_busy = busy
+        self._update_enrich_button()
+        self._refresh_generation_tooltips()
+
+    def _update_enrichment_freshness(self) -> None:
+        card = self._selected_card()
+        if card is None or card.active_revision.enriched_description is None:
+            self._enrichment_current = None
+        else:
+            source_description = (
+                self.description_edit.toPlainText()
+                if self._description_mode == "original"
+                else card.active_revision.description
+            )
+            self._enrichment_current = (
+                card.active_revision.enriched_description.is_current(
+                    source_description=source_description,
+                    references=enrichment_reference_snapshots(
+                        self.controller.document,
+                        card,
+                    ),
                 )
+            )
+        self._update_enrich_button()
+        self._refresh_generation_tooltips()
+
+    def _update_enrich_button(self) -> None:
+        card = self._selected_card()
+        has_enrichment = (
+            card is not None
+            and card.active_revision.enriched_description is not None
+        )
+        if self._enrichment_busy:
+            text = "Enriching…"
+            enabled = False
+        elif self._enrichment_current is True:
+            text = "Description Enriched ✓"
+            enabled = False
+        else:
+            text = (
+                "Re-enrich Description"
+                if has_enrichment
                 else "Enrich Description"
             )
+            enabled = self._can_enrich
+        self.enrich_scene_button.setText(text)
+        self.enrich_scene_button.setEnabled(enabled)
+        self.enrich_scene_button.setAccessibleDescription(
+            self._enrich_state_reason()
         )
-        self.enrich_scene_button.setToolTip(reason)
+
+    def _refresh_generation_tooltips(self) -> None:
+        self.enrich_scene_button.setToolTip(
+            self._tooltip_with_using(
+                self._enrich_state_reason(),
+                self._enrich_using_text,
+            )
+        )
+        self.generate_background_button.setToolTip(
+            self._tooltip_with_using(
+                self._generate_reason,
+                self._generate_using_text,
+            )
+        )
+
+    def _enrich_state_reason(self) -> str:
+        if self._enrichment_busy:
+            return "Description enrichment is running"
+        if self._enrichment_current is True:
+            return "Current"
+        if self._enrichment_current is False:
+            return self._tooltip_with_using(
+                "Out of date",
+                self._enrich_reason,
+            )
+        return self._enrich_reason
+
+    @staticmethod
+    def _tooltip_with_using(reason: str, using: str) -> str:
+        return "\n".join(part for part in (reason, using) if part)
 
     @property
     def selected_interaction_id(self) -> UUID | None:

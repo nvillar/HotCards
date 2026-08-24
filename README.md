@@ -26,16 +26,21 @@ header above the canvas edits the card name and selects, duplicates, or deletes
 revisions; the toolbar manages Mode and hotspot visibility.
 
 The Background inspector follows the authoring sequence Description,
-references, Enriched Description, then Image. `Using:` lines identify the
-inputs to Enrich Description and Generate Image. Each reference role can select
-one other card; the same card cannot reference itself. Generate groups roles
-that use the same active source background, sends each unique image once in
-Subject, Style, Setting order, and combines its role instructions. Source
-Descriptions are not injected into the MFLUX prompt. Background prompts are
-composed deterministically from the Enriched Description when present, falling
-back to Description, plus fixed role instructions. Generated images are the
-only supported background source. Generate, Clear, and Enrich Description
-apply directly to the active revision and expose a history-safe Undo action.
+References, Enrich Description, then Image. Description and Enriched Description
+share one editor with native Original and Enriched radio controls that appear
+only after enrichment; the enriched text is shown by default. The editor is
+sized for the recommended prompt length. Reference labels and selectors share
+compact rows inside a References group, and button tooltips identify the inputs
+to Enrich Description and Generate Image.
+Each reference role can select one other card; the same card cannot reference
+itself. Generate groups roles that use the same active source background, sends
+each unique image once in Subject, Style, Setting order, and combines its role
+instructions. Source Descriptions are not injected into the MFLUX prompt.
+Background prompts pass the authored Description as authoritative intent and
+the optional Enriched Description as visual detail. Generated images are the
+only supported background source. Generate, image removal, and Enrich
+Description apply directly to the active revision and expose a history-safe
+Undo action.
 Existing images remain in place until replacement succeeds, and successful
 changes offer a dismissible, history-safe Undo action in the notification bar.
 Enrichment never reads an image and requires authored Description text. It
@@ -47,8 +52,16 @@ references replace conflicting authored details within their roles; for
 example, an assigned photorealistic Style replaces an authored sketch style
 rather than blending with it. An enrichment is Current while its authored
 Description and usable reference-image provenance still match its inputs;
-otherwise it remains active but is marked Out of date. Generate always prefers
-the Enriched Description, including an out-of-date one, until it is cleared.
+otherwise it remains active but is marked Out of date. References and enriched
+text may add visual detail but never override authored actions, poses, object
+states, time, weather, camera, mood, composition, or quoted visible text.
+Recognized object-state reversals receive one constrained repair attempt and
+are rejected if unresolved. Generate passes both texts with the same authority
+rule, including when enrichment is out of date.
+The Enrich action is disabled and shown as complete while enrichment is current,
+then becomes Re-enrich when its inputs are out of date. Clearing all Enriched
+text removes it. Image generation requires at least one non-empty Description
+source and uses whichever source is available.
 Enriched text follows FLUX.2 prompt guidance: one concise natural-language
 paragraph ordered by subject, action, style, context, then secondary details,
 using positive descriptions and object-specific colors and materials.

@@ -288,7 +288,7 @@ class SceneEnrichmentWorkflow(QObject):
                         background.id if background is not None else None
                     ),
                     source_generation_description=(
-                        background.generation_metadata.inputs.description
+                        background.generation_metadata.inputs.enrichment_context
                         if background is not None
                         else None
                     ),

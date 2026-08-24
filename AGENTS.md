@@ -60,9 +60,18 @@ for live Ollama and MFLUX runs.
   attributes come from each image and which come from the scene or other
   assigned references.
 - Compose background prompts deterministically from the active revision's
-  Enriched Description when present, falling back to Description, plus fixed
-  instructions for assigned reference roles. Hotspots must not alter image
-  prompts.
+  authored Description, optional Enriched Description, and fixed instructions
+  for assigned reference roles. The authored Description remains authoritative
+  for actions, poses, object states, time, weather, camera, mood, composition,
+  and quoted visible text; enrichment and references add visual detail within
+  their scopes. Hotspots must not alter image prompts.
+- Keep one Description editor in the Background inspector. Show conditional
+  native Original/Enriched radio controls below it, default to Enriched when it
+  exists, place compact reference rows in a References group before Enrich and
+  Generate, and keep generation provenance in button tooltips. Encode enrichment
+  freshness in the Enrich action: current is a disabled completed state, stale
+  is Re-enrich. Clearing the Enriched editor removes that derived value. Enable
+  image generation when either Description source is non-empty.
 - Support generated backgrounds only; do not add image import. Apply Generate
   and Clear directly through document commands. Keep an existing image visible
   until replacement succeeds, then expose a dismissible Undo bound to the exact
@@ -75,13 +84,16 @@ for live Ollama and MFLUX runs.
 - Enrich Description is text-only and requires authored Description text. It
   must not send current or referenced images to Ollama. Always derive it from
   the authored Description, never from an existing enrichment. Give it
-  role-scoped generation-time effective-Description provenance for referenced
-  backgrounds, then store the result separately through one undoable command.
+  role-scoped generation-time authored and enriched Description provenance for
+  referenced backgrounds, then store the result separately through one
+  undoable command.
   Track source Description and exact usable reference-image provenance so an
   enrichment can be marked Current or Out of date without being cleared; image
-  generation still prefers an out-of-date enrichment until the author clears
-  it. Assigned references replace conflicting authored details within their
-  role rather than blending both versions. Require distinctive source-language
+  generation passes both authored and enriched text under the same authority
+  rule even when enrichment is out of date. Reject reference-derived reversals
+  of recognized authored object states after one constrained repair attempt.
+  Assigned references replace conflicting authored details within their role
+  rather than blending both versions. Require distinctive source-language
   overlap for every assigned role, including style-specific cues for Style,
   reject recognized conflicting authored styles that remain, and reject newly
   invented quoted visible text. Shape the result for FLUX.2 as one concise
