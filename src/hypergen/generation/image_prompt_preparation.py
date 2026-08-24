@@ -20,7 +20,7 @@ from hypergen.generation.ollama_client import (
 )
 from hypergen.generation.structured_output import structured_json_content
 
-IMAGE_PROMPT_PREPARATION_VERSION = "image-prompt-preparation-v5"
+IMAGE_PROMPT_PREPARATION_VERSION = "image-prompt-preparation-v6"
 
 
 class ImagePromptPreparationRequest(DomainModel):
@@ -143,9 +143,11 @@ AUTHORITY
 - Preserve the meaning of explicit visual properties without requiring the same wording.
   Do not omit, weaken, or reinterpret them as a merely similar treatment.
 - Preserve close-ups, limited fields of view, and statements that a subject fills the frame.
-- Preserve exact authored visible text in quotation marks and on its intended object.
-- When no quoted text is authored, introduce no visible words, lettering, signs, captions,
-  labels, or interface text.
+- Preserve exact affirmatively authored visible text in quotation marks and on its intended
+  object. Quoted words in an explicit exclusion such as `no "EXIT" text` are forbidden,
+  not requested; preserve the text-free result without rendering those words.
+- When no affirmative quoted text is authored, introduce no visible words, lettering, signs,
+  captions, labels, or interface text.
 - Any color explicitly assigned in the Description overrides the Reference palette for that
   subject, object, text, or region. Retain compatible treatment and make that color visible.
 
@@ -271,28 +273,139 @@ _CHROMATIC_COLOR = re.compile(
     r"pink|cyan|magenta|teal|turquoise)\b",
     flags=re.IGNORECASE,
 )
+_QUOTE_CLAUSE_BOUNDARY = re.compile(
+    r"[.!?;,]|\b(?:but|except|however)\b",
+    flags=re.IGNORECASE,
+)
+_FORBIDDEN_QUOTE_PREFIX = re.compile(
+    r"(?:"
+    r"\b(?:no|without)\s+"
+    r"(?:(?:using|showing|displaying|including|rendering)\s+)?"
+    r"(?:(?:the|any)\s+)?"
+    r"(?:(?:(?:visible|legible)\s+)?"
+    r"(?:text|words?|lettering|labels?|captions?)\s+)?"
+    r"|"
+    r"\bno\s+(?:(?:visible|legible)\s+)?"
+    r"(?:text|words?|lettering|labels?|captions?)\s+"
+    r"(?:reading|saying|spelling)\s*"
+    r"|"
+    r"\b(?:do not|don't|does not|doesn't|did not|didn't|must not|"
+    r"should not|never)\s+"
+    r"(?:show|display|include|contain|render|write|read|feature)"
+    r"(?:\s+(?:the\s+)?(?:text|words?|lettering|labels?|captions?))?\s*"
+    r"|"
+    r"\b(?:(?:must|should|does|do|did)\s+)?"
+    r"(?:omit|omits|omitted|exclude|excludes|excluded|"
+    r"avoid|avoids|avoided)\s+"
+    r"(?:(?:using|showing|displaying|including|rendering)\s+)?"
+    r"(?:the\s+)?(?:(?:text|word|words|lettering|label|labels|"
+    r"caption|captions)\s+)?"
+    r")$",
+    flags=re.IGNORECASE,
+)
+_FORBIDDEN_QUOTE_SUFFIX = re.compile(
+    r"^\s*(?:(?:text|words?|lettering|labels?|captions?)\s+)?(?:"
+    r"(?:(?:is|are|must be|should be)\s+)?(?:not|never)\s+"
+    r"(?:shown|displayed|included|rendered|written|visible)"
+    r"|"
+    r"(?:(?:is|are|was|were|must be|should be)\s+)"
+    r"(?:omitted|excluded|avoided)"
+    r")\b",
+    flags=re.IGNORECASE,
+)
+_QUOTED_LIST_CONNECTOR = re.compile(
+    r"\s*(?:,\s*(?:(?:and|or)\s*)?|(?:and|or)\s+)\s*",
+    flags=re.IGNORECASE,
+)
 
 
 def _words(value: str) -> tuple[str, ...]:
     return tuple(_WORD_PATTERN.findall(value.casefold()))
 
 
-def _quoted_text(value: str) -> tuple[set[str], bool]:
-    matches: set[str] = set()
+def _quoted_text_spans(
+    value: str,
+) -> tuple[tuple[tuple[str, int, int], ...], bool]:
+    matches: list[tuple[str, int, int]] = []
     closing: str | None = None
     is_balanced = True
     start = 0
+    opening = 0
     for index, character in enumerate(value):
         if closing is None:
             closing = _QUOTE_PAIRS.get(character)
             if closing is not None:
+                opening = index
                 start = index + 1
             elif character in {"”", "»"}:
                 is_balanced = False
         elif character == closing:
-            matches.add(value[start:index])
+            matches.append((value[start:index], opening, index + 1))
             closing = None
-    return matches, is_balanced and closing is None
+    return tuple(matches), is_balanced and closing is None
+
+
+def _quoted_text(value: str) -> tuple[set[str], bool]:
+    spans, is_balanced = _quoted_text_spans(value)
+    return {text for text, _start, _end in spans}, is_balanced
+
+
+def _authored_quoted_text(value: str) -> tuple[set[str], set[str]]:
+    spans, _is_balanced = _quoted_text_spans(value)
+    forbidden = [False] * len(spans)
+    for index, (_text, start, end) in enumerate(spans):
+        prefix_start = max(
+            (
+                boundary.end()
+                for boundary in _QUOTE_CLAUSE_BOUNDARY.finditer(
+                    value,
+                    0,
+                    start,
+                )
+            ),
+            default=0,
+        )
+        suffix_boundary = _QUOTE_CLAUSE_BOUNDARY.search(value, end)
+        suffix_end = (
+            suffix_boundary.start()
+            if suffix_boundary is not None
+            else len(value)
+        )
+        forbidden[index] = bool(
+            _FORBIDDEN_QUOTE_PREFIX.search(value[prefix_start:start])
+            or _FORBIDDEN_QUOTE_SUFFIX.search(value[end:suffix_end])
+        )
+    changed = True
+    while changed:
+        changed = False
+        for index in range(1, len(spans)):
+            connector = value[spans[index - 1][2] : spans[index][1]]
+            if (
+                _QUOTED_LIST_CONNECTOR.fullmatch(connector)
+                and forbidden[index - 1] != forbidden[index]
+            ):
+                forbidden[index - 1] = True
+                forbidden[index] = True
+                changed = True
+    required = {
+        text
+        for (text, _start, _end), is_forbidden in zip(
+            spans,
+            forbidden,
+            strict=True,
+        )
+        if not is_forbidden
+    }
+    prohibited = {
+        text
+        for (text, _start, _end), is_forbidden in zip(
+            spans,
+            forbidden,
+            strict=True,
+        )
+        if is_forbidden
+    }
+    return required, prohibited
 
 
 def _without_quoted_text(value: str) -> str:
@@ -357,15 +470,23 @@ def _validate_image_prompt(
                     f"authored {noun!r} is {state!r}, but the Image Prompt makes "
                     f"it {opposite!r}"
                 )
-    authored_quotes, _ = _quoted_text(authored)
+    required_quotes, forbidden_quotes = _authored_quoted_text(authored)
     output_quotes, output_quotes_are_balanced = _quoted_text(image_prompt)
     if not output_quotes_are_balanced:
         raise ValueError("Image Prompt contains unclosed visible text")
-    invented_quotes = output_quotes - authored_quotes
+    included_forbidden_quotes = output_quotes & (
+        forbidden_quotes - required_quotes
+    )
+    if included_forbidden_quotes:
+        values = ", ".join(
+            sorted(repr(value) for value in included_forbidden_quotes)
+        )
+        raise ValueError(f"Image Prompt included forbidden visible text: {values}")
+    invented_quotes = output_quotes - required_quotes
     if invented_quotes:
         values = ", ".join(sorted(repr(value) for value in invented_quotes))
         raise ValueError(f"Image Prompt invented visible text: {values}")
-    missing_quotes = authored_quotes - output_quotes
+    missing_quotes = required_quotes - output_quotes
     if missing_quotes:
         values = ", ".join(sorted(repr(value) for value in missing_quotes))
         raise ValueError(f"Image Prompt omitted or changed visible text: {values}")
@@ -407,8 +528,9 @@ Repair an Image Prompt that violated its final-state contract.
 
 Return exactly {{"image_prompt": "<corrected Image Prompt>"}} with no surrounding text.
 Change only what is necessary to resolve the detected conflict. Preserve all explicit
-authored subjects, actions, object states, colors, visible text, viewpoint, framing,
-composition, and requested medium. Describe only the desired final image.
+authored subjects, actions, object states, colors, affirmatively requested visible text,
+visible-text exclusions, viewpoint, framing, composition, and requested medium. Describe
+only the desired final image.
 
 Authored Description:
 {request.description}

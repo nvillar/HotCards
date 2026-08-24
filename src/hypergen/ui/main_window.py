@@ -465,8 +465,19 @@ class MainWindow(QMainWindow):
         self.generation_progress_bar.setAccessibleName("Generation progress")
         self.generation_progress_bar.setRange(0, 0)
         self.generation_progress_bar.setTextVisible(False)
-        self.generation_progress_bar.hide()
-        self.statusBar().addWidget(self.generation_progress_bar, 1)
+        self.generation_progress_container = QWidget()
+        self.generation_progress_container.setObjectName(
+            "generationProgressContainer"
+        )
+        self.generation_progress_layout = QHBoxLayout(
+            self.generation_progress_container
+        )
+        self.generation_progress_layout.setContentsMargins(8, 0, 8, 0)
+        self.generation_progress_layout.addWidget(
+            self.generation_progress_bar
+        )
+        self.generation_progress_container.hide()
+        self.statusBar().addWidget(self.generation_progress_container, 1)
         self.statusBar().addPermanentWidget(self.llm_model_label)
         self.statusBar().addPermanentWidget(self.llm_model_combo)
         self.statusBar().addPermanentWidget(self.image_model_label)
@@ -1256,7 +1267,7 @@ class MainWindow(QMainWindow):
             else False
         )
         if not (background_busy or self.image_prompt_workflow.busy):
-            self.generation_progress_bar.hide()
+            self.generation_progress_container.hide()
             return
         if background_busy and self._background_step_progress is not None:
             completed_steps, total_steps = self._background_step_progress
@@ -1264,7 +1275,7 @@ class MainWindow(QMainWindow):
             self.generation_progress_bar.setValue(completed_steps)
         else:
             self.generation_progress_bar.setRange(0, 0)
-        self.generation_progress_bar.show()
+        self.generation_progress_container.show()
 
     def _background_failed(self, failure: object) -> None:
         if isinstance(failure, WorkerFailure):

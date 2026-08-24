@@ -54,11 +54,12 @@ An Image Prompt is Current only while its source Description, exact Reference
 card/revision/background snapshot, selected Ollama model, and preparation
 contract still match. Out-of-date prompts remain visible and editable, but
 Generate requires a current prompt. Preparation validates structured output,
-preserves exact authored quoted text, rejects recognized object-state
-reversals and model-process language, and requires the meaning of every explicit
-authored visual property to survive without imposing special Description
-wording. It makes one constrained repair attempt for a valid but conflicting
-proposal. Private model deliberation is never persisted.
+preserves exact affirmatively authored quoted text, respects explicit quoted-text
+exclusions, rejects recognized object-state reversals and model-process
+language, and requires the meaning of every explicit authored visual property
+to survive without imposing special Description wording. It makes one
+constrained repair attempt for a valid but conflicting proposal. Private model
+deliberation is never persisted.
 
 MFLUX receives the reviewed Image Prompt unchanged and, when selected, the same
 Reference image exactly once. It receives no hidden role instructions or source

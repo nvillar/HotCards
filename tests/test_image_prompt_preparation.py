@@ -96,6 +96,7 @@ def test_prompt_defines_one_reviewable_result_without_clarification() -> None:
     assert "do not turn a monochrome Reference into a beige" in prompt
     assert "without requiring the same wording" in prompt
     assert "target_overrides detail" in prompt
+    assert 'no "EXIT" text' in prompt
     assert "private deliberation" in prompt
     assert "Image Prompt" in prompt
 
@@ -359,6 +360,88 @@ def test_preparer_requires_exact_authored_visible_text() -> None:
                 description='A CRT screen reads "ERROR".'
             )
         )
+
+
+def test_preparer_treats_negated_quoted_text_as_forbidden() -> None:
+    prompt = (
+        "A vintage computer screen displays a prominent emergency exit "
+        "pictogram with a running human figure and arrow, showing only "
+        "symbols with no text."
+    )
+    preparer, client = _preparer(_output(prompt))
+
+    result = preparer.prepare(
+        ImagePromptPreparationRequest(
+            description=(
+                'The computer shows an emergency exit pictogram. No "emergency '
+                'exit" or "exit" text is displayed - only the symbols.'
+            )
+        )
+    )
+
+    assert result.image_prompt == prompt
+    assert client.call_count == 1
+
+
+def test_preparer_repairs_forbidden_quoted_text() -> None:
+    repaired = "A computer screen shows only a running figure and arrow pictogram."
+    preparer, client = _preparer(
+        [
+            _output('A computer screen reads "EXIT".'),
+            json.dumps({"image_prompt": repaired}),
+        ]
+    )
+
+    result = preparer.prepare(
+        ImagePromptPreparationRequest(
+            description=(
+                'A computer screen that must omit the word "EXIT", showing '
+                "only symbols."
+            )
+        )
+    )
+
+    assert result.image_prompt == repaired
+    assert client.call_count == 2
+
+
+@pytest.mark.parametrize(
+    "description",
+    (
+        'A sign without the word "EXIT".',
+        'A sign that must avoid using the word "EXIT".',
+        'A sign that avoided the word "EXIT".',
+    ),
+)
+def test_preparer_accepts_common_quoted_text_exclusions(
+    description: str,
+) -> None:
+    prompt = "A blank sign with no lettering."
+    preparer, client = _preparer(_output(prompt))
+
+    result = preparer.prepare(
+        ImagePromptPreparationRequest(description=description)
+    )
+
+    assert result.image_prompt == prompt
+    assert client.call_count == 1
+
+
+def test_preparer_allows_same_text_required_and_forbidden_on_different_objects() -> None:
+    prompt = 'The main sign reads "EXIT" while the surrounding wall remains blank.'
+    preparer, client = _preparer(_output(prompt))
+
+    result = preparer.prepare(
+        ImagePromptPreparationRequest(
+            description=(
+                'The main sign reads "EXIT", but no "EXIT" text appears on '
+                "the surrounding wall."
+            )
+        )
+    )
+
+    assert result.image_prompt == prompt
+    assert client.call_count == 1
 
 
 def test_request_reference_state_must_match_attached_image(tmp_path: Path) -> None:
