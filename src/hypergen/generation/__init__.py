@@ -10,6 +10,7 @@ from hypergen.generation.errors import (
 )
 from hypergen.generation.scene_enrichment import (
     OllamaSceneEnricher,
+    SceneEnrichmentReference,
     SceneEnrichmentRequest,
     SceneEnrichmentResult,
 )
@@ -21,6 +22,7 @@ __all__ = [
     "ModelResponseError",
     "ModelUnavailableError",
     "OllamaSceneEnricher",
+    "SceneEnrichmentReference",
     "SceneEnrichmentRequest",
     "SceneEnrichmentResult",
     "ServiceUnavailableError",

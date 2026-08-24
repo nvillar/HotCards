@@ -376,8 +376,10 @@ def test_using_labels_name_assigned_reference_roles(
     inspector.render(controller.document, source.id)
 
     assert inspector.references_label.text() == "References (2)"
-    assert "Using: Description" in inspector.enrich_scene_button.toolTip()
-    assert "References" not in inspector.enrich_scene_button.toolTip()
+    assert (
+        "Using: Description + References (Subject, Style)"
+        in inspector.enrich_scene_button.toolTip()
+    )
     assert (
         "Using: Description + References (Subject, Style)"
         in inspector.generate_background_button.toolTip()

@@ -5,25 +5,41 @@ from __future__ import annotations
 import json
 import re
 
-from pydantic import ValidationError
+from pydantic import ValidationError, model_validator
 
 from hypergen.domain.models import (
     DomainModel,
     NonEmptyString,
     NonNegativeFiniteFloat,
+    ReferenceRole,
 )
 from hypergen.generation.errors import ModelResponseError
 from hypergen.generation.ollama_client import OllamaRuntime
 from hypergen.generation.structured_output import structured_json_content
 
-SCENE_ENRICHMENT_PROMPT_VERSION = "scene-enrichment-v8"
+SCENE_ENRICHMENT_PROMPT_VERSION = "scene-enrichment-v9"
+
+
+class SceneEnrichmentReference(DomainModel):
+    """One validated role capsule with no source-scene prose."""
+
+    role: ReferenceRole
+    capsule: NonEmptyString
 
 
 class SceneEnrichmentRequest(DomainModel):
     """One non-empty author-written Description to expand."""
 
     scene: NonEmptyString
+    references: tuple[SceneEnrichmentReference, ...] = ()
     prompt_version: NonEmptyString = SCENE_ENRICHMENT_PROMPT_VERSION
+
+    @model_validator(mode="after")
+    def require_unique_reference_roles(self) -> SceneEnrichmentRequest:
+        roles = [reference.role for reference in self.references]
+        if len(roles) != len(set(roles)):
+            raise ValueError("each enrichment reference role may appear only once")
+        return self
 
 
 class SceneEnrichmentModelOutput(DomainModel):
@@ -47,11 +63,38 @@ class SceneEnrichmentResult(DomainModel):
     done_reason: str | None = None
 
 
+def compose_profiled_scene(
+    scene: str,
+    references: tuple[SceneEnrichmentReference, ...],
+) -> str:
+    """Append validated capsules as natural-language generation constraints."""
+    sentences: list[str] = []
+    templates = {
+        ReferenceRole.SUBJECT: (
+            "The referenced subject's stable identity and appearance are {capsule}."
+        ),
+        ReferenceRole.STYLE: ("Render the entire image using {capsule}."),
+        ReferenceRole.SETTING: ("The stable environment is {capsule}."),
+    }
+    for reference in references:
+        sentences.append(
+            templates[reference.role].format(capsule=reference.capsule)
+        )
+    return " ".join((scene.strip(), *sentences))
+
+
 def build_scene_enrichment_prompt(request: SceneEnrichmentRequest) -> str:
     """Build a bounded FLUX-oriented rewrite prompt from authored text."""
     source = json.dumps(
         {
             "authored_description": request.scene,
+            "reference_profiles": [
+                {
+                    "role": reference.role.value,
+                    "reusable_traits": reference.capsule,
+                }
+                for reference in request.references
+            ],
         },
         ensure_ascii=False,
         indent=2,
@@ -79,6 +122,15 @@ AUTHORITY
 - Preserve close-ups, limited fields of view, and statements that the subject fills the
   frame. Convert exclusions into equivalent positive composition constraints without
   weakening them.
+- Reference profiles contain only validated reusable traits, never complete source scenes.
+  Apply every profile within its role and state its concrete traits in the final Description.
+- Subject profiles control only identity and appearance, never authored action or pose.
+  Style profiles control only medium, linework, texture, palette, shading, and rendering
+  treatment. Setting profiles control only environment, architecture, intrinsic materials,
+  terrain, and stable spatial character; authored time, weather, season, occupancy, action,
+  viewpoint, and composition remain authoritative.
+- Resolve role-scoped conflicts by replacing the losing authored trait rather than blending
+  or mentioning alternatives. Do not infer any source content beyond the supplied capsules.
 - Produce one synthesis without discussing instructions, constraints, or the rewrite
   process.
 
@@ -87,8 +139,8 @@ FLUX.2 DETAIL GUIDANCE
   spatial relationships, atmosphere, framing, and composition when they improve the image.
 - Associate each color, material, and spatial detail with its specific object. Preserve exact
   authored color names and hex codes on their intended objects.
-- Add camera bodies, lenses, film stocks, aperture, or depth of field only when the authored
-  Description is explicitly photographic.
+- Do not invent medium, linework, texture, palette, shading, rendering technology, or
+  photographic camera details unless supplied by the authored Description or a Style profile.
 - Preserve authored visible text exactly in quotation marks and on its intended object.
   Describe placement and typography only when authored. When no quoted text is authored,
   introduce no visible words, lettering, signs, captions, or labels.
@@ -353,7 +405,9 @@ def _model_response_error(
 __all__ = [
     "OllamaSceneEnricher",
     "SCENE_ENRICHMENT_PROMPT_VERSION",
+    "SceneEnrichmentReference",
     "SceneEnrichmentRequest",
     "SceneEnrichmentResult",
     "build_scene_enrichment_prompt",
+    "compose_profiled_scene",
 ]

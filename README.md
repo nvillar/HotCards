@@ -37,33 +37,44 @@ itself. Generate groups roles that use the same active source background, sends
 each unique image once in Subject, Style, Setting order, and combines its role
 instructions. Background prompts place Enriched Description when present,
 otherwise Description, before concise natural-language instructions that assign
-each numbered image its roles. Internal headings and source-card Descriptions
-are not injected into the MFLUX prompt. Generated images are the only supported
-background source.
+each numbered image its roles. Internal headings and complete source-card
+Descriptions are not injected into the MFLUX prompt. Generated images are the
+only supported background source.
 Generate, image removal, and Enrich Description apply directly to the active
 revision. Completed generations can be kept there with Keep, moved into a new
 complete revision, or undone.
 Existing images remain in place until replacement succeeds, and successful
 changes offer a dismissible, history-safe Undo action in the notification bar.
-Enrichment never reads an image and requires authored Description text. It
-always starts from that authored text, receives no reference-card Description,
-and stores the result separately. Subject, Style, and Setting are interpreted
-from their actual images by FLUX.2 during image generation, preventing a
-reference card's subjects, arrangement, or narrative from leaking through text
-enrichment. Reference changes therefore do not stale Enriched Description. An
-enrichment is Current while its authored Description, selected Ollama model,
-and prompt contract still match its inputs; otherwise it remains active but is
-marked Out of date. Enriched text may add visual detail but never overrides
-authored actions, poses, object states, time, weather, viewpoint, crop, framing,
-composition, or quoted visible text. Recognized object-state reversals receive
-one constrained repair attempt and are rejected if unresolved. Generate uses
-Enriched Description when present, including when it is out of date, and
-otherwise falls back to Description.
+Enrichment never reads an image and requires authored Description text. For
+each usable assigned reference, Ollama first extracts one strict role-specific
+profile from that background's immutable generation-time Description. Subject
+profiles retain only identity and appearance, Style profiles retain only
+rendering traits, and Setting profiles retain only stable place traits.
+Observed weather, time, and season remain excluded from the injected Setting.
+Profiles use fixed scalar schemas, are cached per background, role, Ollama
+model, and extraction contract for the application session, and never expose
+the complete source scene to the final enrichment call.
+
+The enrichment call receives the authored Description plus only those validated
+profiles. Their capsules are also appended as natural-language constraints so
+FLUX.2 receives the exact reusable traits alongside the actual reference
+images. An enrichment is Current while its authored Description, exact
+reference backgrounds, selected Ollama model, and combined extraction/enrichment
+prompt contract still match its inputs; otherwise it remains active but is
+marked Out of date. Editing a source card's text without regenerating its
+referenced background does not change that immutable provenance. Enriched text
+may add visual detail but never overrides authored actions, poses, object
+states, time, weather, viewpoint, crop, framing, composition, or quoted visible
+text. Recognized object-state reversals receive one constrained repair attempt
+and are rejected if unresolved. Generate uses Enriched Description when
+present, including when it is out of date, and otherwise falls back to
+Description.
 The Enrich action is disabled and shown as complete while enrichment is current,
-then becomes Re-enrich when its authored Description, selected Ollama model, or
-prompt contract is out of date. Clearing all Enriched text removes it. Image
-generation requires at least one non-empty Description source and uses only the
-effective source as scene content.
+then becomes Re-enrich when any tracked input is out of date. The first use of
+an uncached reference adds one extraction call per assigned role; later uses of
+the same profile reuse the session cache. Clearing all Enriched text removes it.
+Image generation requires at least one non-empty Description source and uses
+only the effective source as scene content.
 Enriched text follows FLUX.2 prompt guidance: one concise natural-language
 paragraph ordered by subject, action, style, context, then secondary details,
 using positive descriptions and object-specific colors and materials.
