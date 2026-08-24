@@ -94,6 +94,8 @@ def test_prompt_defines_one_reviewable_result_without_clarification() -> None:
     assert '"the monitor"' in prompt
     assert "Private deliberation is a checklist" in prompt
     assert "do not turn a monochrome Reference into a beige" in prompt
+    assert "without requiring the same wording" in prompt
+    assert "target_overrides detail" in prompt
     assert "private deliberation" in prompt
     assert "Image Prompt" in prompt
 
@@ -269,22 +271,12 @@ def test_preparer_repairs_invented_color_under_monochrome_treatment(
     assert client.call_count == 2
 
 
-def test_preparer_repairs_omitted_explicit_authored_style() -> None:
-    preparer, client = _preparer(
-        [
-            _output(
-                "A stark futuristic lab with an open hidden doorway."
-            ),
-            json.dumps(
-                {
-                    "image_prompt": (
-                        "A stark futuristic lab with an open hidden doorway, "
-                        "rendered in HyperCard, early-Mac black and white style."
-                    )
-                }
-            ),
-        ]
+def test_preparer_accepts_semantically_preserved_authored_style() -> None:
+    prompt = (
+        "A stark futuristic lab with an open hidden doorway, rendered as "
+        "black-and-white dithered early-Mac HyperCard graphics."
     )
+    preparer, client = _preparer(_output(prompt))
 
     result = preparer.prepare(
         ImagePromptPreparationRequest(
@@ -295,8 +287,8 @@ def test_preparer_repairs_omitted_explicit_authored_style() -> None:
         )
     )
 
-    assert "HyperCard, early-Mac black and white style" in result.image_prompt
-    assert client.call_count == 2
+    assert result.image_prompt == prompt
+    assert client.call_count == 1
 
 
 def test_preparer_does_not_require_generic_same_style_process_language() -> None:
