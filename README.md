@@ -24,8 +24,9 @@ Description, optional prepared Image Prompt, optional generated background,
 optional Reference card, and hotspot set. The compact header above the canvas
 edits the card name and selects, duplicates, or deletes revisions; the toolbar
 provides a single Author/Run mode toggle and manages hotspot visibility. An
-indeterminate progress bar to the left of the model selectors identifies active
-Image Prompt and background generation work.
+unlabeled progress bar to the left of the model selectors shows actual MFLUX
+inference-step completion during image generation and an indeterminate state
+during Image Prompt preparation.
 
 The Background inspector follows the authoring sequence Description, optional
 Reference, Prepare Image Prompt, then Generate Image. Description and Image Prompt share one

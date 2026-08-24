@@ -45,6 +45,7 @@ class FakeWorkers(QObject):
 class FakeBackgroundWorkflow(QObject):
     busy_changed = Signal(bool)
     progress_changed = Signal(str)
+    generation_progress_changed = Signal(int, int)
     failed = Signal(object)
     document_changed = Signal(object)
     change_applied = Signal(str, object)

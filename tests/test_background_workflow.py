@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -89,11 +90,32 @@ class FakeMfluxImage:
 
 
 class FakeMfluxModel:
+    def __init__(self) -> None:
+        self.callbacks = FakeCallbackRegistry()
+
     def generate_image(self, **kwargs: object) -> FakeMfluxImage:
+        config = SimpleNamespace(
+            num_inference_steps=kwargs["num_inference_steps"]
+        )
+        for callback in self.callbacks.registered:
+            callback.call_before_loop(config=config)
+        for _step in range(kwargs["num_inference_steps"]):  # type: ignore[arg-type]
+            for callback in self.callbacks.registered:
+                callback.call_in_loop()
+        for callback in self.callbacks.registered:
+            callback.call_after_loop()
         return FakeMfluxImage(
             width=kwargs["width"],  # type: ignore[arg-type]
             height=kwargs["height"],  # type: ignore[arg-type]
         )
+
+
+class FakeCallbackRegistry:
+    def __init__(self) -> None:
+        self.registered: list[object] = []
+
+    def register(self, callback: object) -> None:
+        self.registered.append(callback)
 
 
 def _settings() -> BackgroundGenerationSettings:
@@ -171,11 +193,23 @@ def test_generate_applies_to_active_revision_and_preserves_other_content(
 ) -> None:
     workflow, controller, session, workers, card = _bound_workflow(tmp_path)
     applied: list[GeneratedRevisionChange] = []
+    progress: list[tuple[int, int]] = []
     workflow.generation_applied.connect(applied.append)
+    workflow.generation_progress_changed.connect(
+        lambda completed, total: progress.append((completed, total))
+    )
 
     workflow.generate(card.id)
     _complete_generation(workers)
 
+    assert progress == [
+        (0, 4),
+        (1, 4),
+        (2, 4),
+        (3, 4),
+        (4, 4),
+        (0, 0),
+    ]
     revision = controller.document.cards[0].active_revision
     assert revision.background is not None
     assert revision.background.type == "generated"

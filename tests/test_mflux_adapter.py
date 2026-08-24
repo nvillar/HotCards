@@ -1,6 +1,7 @@
 """Tests for the in-process MFLUX adapter behind fakes."""
 
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -27,13 +28,32 @@ class FakeGeneratedImage:
 class FakeMfluxModel:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
+        self.callbacks = FakeCallbackRegistry()
 
     def generate_image(self, **kwargs: object) -> FakeGeneratedImage:
         self.calls.append(kwargs)
+        config = SimpleNamespace(
+            num_inference_steps=kwargs["num_inference_steps"]
+        )
+        for callback in self.callbacks.registered:
+            callback.call_before_loop(config=config)
+        for _step in range(kwargs["num_inference_steps"]):  # type: ignore[arg-type]
+            for callback in self.callbacks.registered:
+                callback.call_in_loop()
+        for callback in self.callbacks.registered:
+            callback.call_after_loop()
         return FakeGeneratedImage(
             width=kwargs["width"],  # type: ignore[arg-type]
             height=kwargs["height"],  # type: ignore[arg-type]
         )
+
+
+class FakeCallbackRegistry:
+    def __init__(self) -> None:
+        self.registered: list[object] = []
+
+    def register(self, callback: object) -> None:
+        self.registered.append(callback)
 
 
 class CorruptGeneratedImage:
@@ -78,6 +98,31 @@ def test_mflux_adapter_loads_once_and_records_effective_metadata(tmp_path: Path)
     assert first.load_duration_seconds >= 0
     assert first.generation_duration_seconds >= 0
     assert first.serialization_duration_seconds >= 0
+
+
+def test_mflux_adapter_reports_completed_inference_steps(
+    tmp_path: Path,
+) -> None:
+    model = FakeMfluxModel()
+    progress: list[tuple[int, int]] = []
+    generator = MfluxGenerator(model_factory=lambda *_args: model)
+
+    generator.generate(
+        request(tmp_path / "progress.png"),
+        progress=lambda completed, total: progress.append(
+            (completed, total)
+        ),
+    )
+
+    assert progress == [
+        (0, 4),
+        (1, 4),
+        (2, 4),
+        (3, 4),
+        (4, 4),
+        (0, 0),
+    ]
+    assert len(model.callbacks.registered) == 1
 
 
 def test_reference_generation_uses_edit_model_and_kv_cache(
