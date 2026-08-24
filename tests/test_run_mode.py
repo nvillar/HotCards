@@ -140,9 +140,11 @@ def test_run_session_navigates_uuid_links_with_back_and_restart() -> None:
     session = RunSession()
 
     state = session.start(document, document.cards[2].id)
-    assert state.current_card_id == document.start_card_id
+    assert state.current_card_id == document.cards[2].id
     assert state.warning is None
+    assert session.restart().current_card_id == document.start_card_id
 
+    session.start(document)
     state = session.navigate(document, to_second.id)
     assert state.current_card_id == document.cards[1].id
     assert state.history == (document.cards[0].id,)
@@ -371,6 +373,38 @@ def test_run_canvas_uses_topmost_hit_with_back_and_restart(
     assert window.canvas_card_name.text() == "First"
     assert not window.back_action.isEnabled()
     assert unresolved.id != to_third.id
+    window.close()
+
+
+def test_run_starts_from_current_card_and_offers_start_card_restart(
+    application: QApplication,
+    tmp_path: Path,
+) -> None:
+    window, _session, _to_incomplete, _to_third, _unresolved = (
+        build_run_window(tmp_path)
+    )
+    third = window.controller.document.cards[2]
+    start = window.controller.document.cards[0]
+    window.select_card(third.id)
+
+    window.mode_selector.setCurrentText("Run")
+    application.processEvents()
+
+    assert window.canvas_card_name.text() == "Third"
+    assert window.notification_bar.current_key == "run-entry"
+    assert window.notification_bar.message_label.text() == (
+        'Run started from current card "Third".'
+    )
+    assert window.notification_bar.primary_button.text() == (
+        "Restart from Start Card"
+    )
+    assert window.notification_bar.dismiss_button.text() == "Dismiss"
+
+    window.notification_bar.primary_button.click()
+
+    assert window.canvas_card_name.text() == "First"
+    assert window._run_session.state.current_card_id == start.id
+    assert window.notification_bar.current_key != "run-entry"
     window.close()
 
 

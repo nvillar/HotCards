@@ -268,6 +268,28 @@ def test_card_header_and_toolbar_match_revision_hierarchy(
     assert window.add_revision_button.text() == "+"
     assert window.delete_revision_button.text() == "−"
     assert window.overlay_label.text() == "Hotspots"
+    assert window.toolbar_leading_spacer.width() == 8
+    toolbar_actions = window.authoring_toolbar.actions()
+    assert toolbar_actions.index(window.back_action) < toolbar_actions.index(
+        window.restart_action
+    )
+    assert toolbar_actions.index(window.restart_action) < toolbar_actions.index(
+        window.overlay_label_action
+    )
+    assert toolbar_actions.index(window.overlay_label_action) < (
+        toolbar_actions.index(window.overlay_selector_action)
+    )
+    assert window.back_button is not None
+    assert window.restart_button is not None
+    assert window.back_button.font().pointSizeF() == (
+        window.overlay_label.font().pointSizeF()
+    )
+    assert window.restart_button.font().pointSizeF() == (
+        window.overlay_label.font().pointSizeF()
+    )
+    assert not window.run_controls_separator.isVisible()
+    assert not window.overlay_label_action.isVisible()
+    assert not window.overlay_selector_action.isVisible()
     assert not hasattr(window, "styles_button")
     assert not hasattr(window, "document_status_label")
     assert window.inspector.inspector_tabs.tabText(0) == "Background"
@@ -548,12 +570,22 @@ def test_author_and_run_modes_apply_consistent_read_only_chrome(
     assert window.delete_revision_button.isHidden()
     assert window.card_sidebar.isHidden()
     assert window.inspector.isHidden()
+    assert window.run_controls_separator.isVisible()
+    assert window.back_action.isVisible()
+    assert window.restart_action.isVisible()
+    assert window.overlay_label_action.isVisible()
+    assert window.overlay_selector_action.isVisible()
     assert not window.overlay_selector.isHidden()
 
     window.mode_selector.setCurrentText("Author")
     assert not window.canvas_card_name.isReadOnly()
     assert window.revision_combo.isEnabled()
     assert not window.add_revision_button.isHidden()
+    assert not window.run_controls_separator.isVisible()
+    assert not window.back_action.isVisible()
+    assert not window.restart_action.isVisible()
+    assert not window.overlay_label_action.isVisible()
+    assert not window.overlay_selector_action.isVisible()
 
 
 def test_status_bar_is_passive_and_ai_recovery_uses_notification_bar(
