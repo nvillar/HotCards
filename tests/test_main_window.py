@@ -28,6 +28,7 @@ from hypergen.application.workers import AdapterKind, AvailabilityDiagnostic
 from hypergen.domain.models import (
     Card,
     CardRevision,
+    EnrichedDescription,
     GeneratedBackground,
     HotspotSet,
     ImageGenerationInputs,
@@ -600,8 +601,41 @@ def test_generate_replacement_starts_without_a_second_confirmation(
         )
     )
     window.render_document()
+    assert window.inspector.generate_background_button.text() == (
+        "Re-generate Image"
+    )
+    assert window.clear_background_button.isEnabled()
+    assert window.clear_background_button.text() == ""
+    assert not window.clear_background_button.icon().isNull()
+    assert window.canvas_fit_controls.indexOf(window.clear_background_button) == (
+        window.canvas_fit_controls.indexOf(window.fit_canvas_button) + 1
+    )
+    window.clear_background_button.click()
+    assert background.clear_calls == [card_id]
+
     window._generate_background()
     assert background.generate_calls == [card_id, card_id]
+
+
+def test_generate_is_enabled_with_only_enriched_description(
+    application: QApplication,
+) -> None:
+    revision = CardRevision(
+        enriched_description=EnrichedDescription(
+            text="A richly detailed courtyard",
+            source_description="",
+        ),
+    )
+    card = Card(name="Card", revisions=(revision,))
+    window, _controller, _workers, background = _window(
+        Stack(name="Demo", cards=(card,))
+    )
+    window._availability[AdapterKind.MFLUX] = True
+    window._update_generation_actions()
+
+    assert window.inspector.generate_background_button.isEnabled()
+    window._generate_background()
+    assert background.generate_calls == [card.id]
 
 
 def test_notification_undo_expires_after_another_command(
@@ -635,7 +669,7 @@ def test_description_edits_and_notification_undo_cancel_enrichment(
         lambda: cancellations.append(True),
     )
 
-    window.inspector.scene_edit.setPlainText("Edited draft")
+    window.inspector.description_edit.setPlainText("Edited draft")
     assert cancellations == [True]
 
     card = controller.document.cards[0]

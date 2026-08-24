@@ -7,7 +7,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtWidgets import QApplication, QLabel
+from PySide6.QtWidgets import QApplication, QLabel, QRadioButton
 
 from hypergen.application.commands import DeleteCardCommand, RenameCardCommand
 from hypergen.application.document_controller import DocumentController
@@ -56,11 +56,34 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     assert inspector.inspector_tabs.count() == 2
     assert inspector.inspector_tabs.tabText(0) == "Background"
     assert inspector.inspector_tabs.tabText(1) == "Hotspots"
-    assert inspector.scene_edit.placeholderText() == "Description"
+    assert inspector.description_edit.placeholderText() == "Description"
+    assert inspector.description_edit.minimumHeight() == (
+        inspector.description_edit.maximumHeight()
+    )
+    assert inspector.description_edit.minimumHeight() >= (
+        inspector.description_edit.fontMetrics().lineSpacing() * 10
+    )
     assert inspector.enrich_scene_button.text() == "Enrich Description"
     assert inspector.generate_background_button.text() == "Generate Image"
+    assert inspector.description_toggle.isHidden()
+    assert isinstance(inspector.original_description_button, QRadioButton)
+    assert isinstance(inspector.enriched_description_button, QRadioButton)
+    content_layout = inspector.references_group.parentWidget().layout()
+    assert content_layout is not None
+    assert content_layout.indexOf(inspector.description_edit) < (
+        content_layout.indexOf(inspector.description_toggle)
+    )
+    assert content_layout.indexOf(inspector.description_toggle) < (
+        content_layout.indexOf(inspector.references_group)
+    )
+    assert content_layout.indexOf(inspector.references_group) < (
+        content_layout.indexOf(inspector.enrich_scene_button)
+    )
+    assert content_layout.indexOf(inspector.enrich_scene_button) < (
+        content_layout.indexOf(inspector.generate_background_button)
+    )
     assert not hasattr(inspector, "style_combo")
-    assert inspector.clear_background_button.text() == "Clear Image"
+    assert not hasattr(inspector, "clear_background_button")
 
     visible_copy = " ".join(label.text() for label in inspector.findChildren(QLabel))
     for obsolete in (
@@ -86,7 +109,7 @@ def test_description_edits_target_active_revision(
     inspector = Inspector(controller)
     inspector.render(controller.document, card.id)
 
-    inspector.scene_edit.setPlainText("New description")
+    inspector.description_edit.setPlainText("New description")
     assert inspector.commit_revision_metadata()
 
     revision = controller.document.cards[0].active_revision
@@ -173,12 +196,12 @@ def test_render_preserves_focused_description_draft(
     inspector.show()
     inspector.render(controller.document, card.id)
 
-    inspector.scene_edit.setFocus()
-    inspector.scene_edit.setPlainText("Uncommitted description")
+    inspector.description_edit.setFocus()
+    inspector.description_edit.setPlainText("Uncommitted description")
     application.processEvents()
     changed = controller.execute(RenameCardCommand(card_id=card.id, name="Renamed"))
     inspector.render(changed, card.id)
-    assert inspector.scene_edit.toPlainText() == "Uncommitted description"
+    assert inspector.description_edit.toPlainText() == "Uncommitted description"
 
     assert not hasattr(inspector, "hotspot_label_edit")
     inspector.close()
@@ -199,34 +222,49 @@ def test_enriched_description_status_and_generation_source(
     inspector = Inspector(controller)
     inspector.render(controller.document, card.id)
 
-    assert inspector.enriched_scene_edit.toPlainText() == (
+    assert not inspector.description_toggle.isHidden()
+    assert inspector.enriched_description_button.isChecked()
+    assert inspector.description_edit.toPlainText() == (
         "A richly detailed courtyard"
     )
-    assert inspector.enrichment_status_label.text() == "Current"
-    assert inspector.enrich_using_label.text() == "Using: Description"
-    assert inspector.generate_using_label.text() == (
-        "Using: Enriched Description"
+    assert "Using: Description" in inspector.enrich_scene_button.toolTip()
+    assert (
+        "Using: Description + Enriched Description"
+        in inspector.generate_background_button.toolTip()
     )
-    assert inspector.enrich_scene_button.text() == "Re-enrich Description"
+    assert inspector.enrich_scene_button.text() == "Description Enriched ✓"
+    assert not inspector.enrich_scene_button.isEnabled()
+    assert "Current" in inspector.enrich_scene_button.toolTip()
+    inspector.set_scene_enrichment_capabilities(
+        can_enrich=True,
+        reason="Ready to enrich Description",
+        busy=False,
+    )
 
-    inspector.scene_edit.setPlainText("A changed courtyard")
+    inspector.original_description_button.click()
+    assert inspector.description_edit.toPlainText() == "A courtyard"
+    inspector.description_edit.setPlainText("A changed courtyard")
+    assert inspector.enrich_scene_button.text() == "Re-enrich Description"
+    assert inspector.enrich_scene_button.isEnabled()
+    assert "Out of date" in inspector.enrich_scene_button.toolTip()
     assert inspector.commit_revision_metadata()
 
     current = controller.document.cards[0].active_revision
     assert current.enriched_description is not None
-    assert current.effective_description == "A richly detailed courtyard"
-    assert inspector.enrichment_status_label.text() == "Out of date"
-    assert inspector.generate_using_label.text() == (
-        "Using: Enriched Description (Out of date)"
-    )
+    assert current.enriched_description.text == "A richly detailed courtyard"
 
-    inspector.enriched_scene_edit.setPlainText("A manually revised courtyard")
+    inspector.enriched_description_button.click()
+    inspector.description_edit.setPlainText("A manually revised courtyard")
     assert inspector.commit_revision_metadata()
-    assert inspector.enrichment_status_label.text() == "Out of date"
 
-    inspector.clear_enriched_description_button.click()
+    inspector.description_edit.clear()
+    assert inspector.commit_revision_metadata()
     assert controller.document.cards[0].active_revision.enriched_description is None
-    assert inspector.generate_using_label.text() == "Using: Description"
+    assert inspector.description_toggle.isHidden()
+    assert inspector.description_edit.toPlainText() == "A changed courtyard"
+    assert "Using: Description" in inspector.generate_background_button.toolTip()
+    assert controller.undo()
+    assert controller.document.cards[0].active_revision.enriched_description is not None
 
 
 def test_using_labels_name_assigned_reference_roles(
@@ -251,8 +289,32 @@ def test_using_labels_name_assigned_reference_roles(
     inspector.render(controller.document, source.id)
 
     expected = "Using: Description + References (Subject, Style)"
-    assert inspector.enrich_using_label.text() == expected
-    assert inspector.generate_using_label.text() == expected
+    assert inspector.references_group.title() == "References (2)"
+    assert expected in inspector.enrich_scene_button.toolTip()
+    assert expected in inspector.generate_background_button.toolTip()
+
+
+def test_generate_accepts_either_description_source(
+    application: QApplication,
+) -> None:
+    revision = CardRevision(
+        enriched_description=EnrichedDescription(
+            text="A richly detailed courtyard",
+            source_description="",
+        ),
+    )
+    card = Card(name="Card", revisions=(revision,))
+    controller = DocumentController(Stack(name="Demo", cards=(card,)))
+    inspector = Inspector(controller)
+    inspector.render(controller.document, card.id)
+
+    assert inspector.has_render_prompt_input()
+    assert not inspector.has_description_input()
+
+    inspector.description_edit.clear()
+    assert not inspector.has_render_prompt_input()
+    assert inspector.commit_revision_metadata()
+    assert controller.document.cards[0].active_revision.enriched_description is None
 
 
 def test_add_hotspot_persists_and_selects_area_less_entry(
@@ -330,6 +392,7 @@ def test_ai_activity_is_reflected_on_the_initiating_buttons(
     inspector.set_background_capabilities(
         can_generate=False,
         generate_reason="Generating",
+        has_image=True,
         busy=True,
         generating=True,
     )

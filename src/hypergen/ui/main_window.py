@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSplitter,
     QStackedWidget,
+    QStyle,
     QToolBar,
     QToolButton,
     QVBoxLayout,
@@ -306,9 +307,18 @@ class MainWindow(QMainWindow):
         self.fit_canvas_button.setAccessibleName("Fit image to window")
         self.fit_canvas_button.setToolTip("Fit image to window")
         self.canvas_fit_controls.addWidget(self.fit_canvas_button)
+        self.clear_background_button = QToolButton()
+        self.clear_background_button.setObjectName("clearBackgroundButton")
+        self.clear_background_button.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_TrashIcon)
+        )
+        self.clear_background_button.setAccessibleName("Clear image")
+        self.clear_background_button.setToolTip("This revision has no image")
+        self.canvas_fit_controls.addWidget(self.clear_background_button)
         canvas_layout.addLayout(self.canvas_fit_controls)
         self.canvas_pages.addWidget(card_canvas)
         self.fit_canvas_button.clicked.connect(self.card_canvas.fit_to_window)
+        self.clear_background_button.clicked.connect(self._clear_background)
         self.canvas_card_name.editingFinished.connect(self._commit_canvas_card_name)
         self.canvas_card_name.textEdited.connect(self._card_name_edited)
         self.revision_combo.currentIndexChanged.connect(self._revision_selection_changed)
@@ -320,7 +330,6 @@ class MainWindow(QMainWindow):
         self.inspector.render_inputs_changed.connect(self._authoring_inputs_changed)
         self.inspector.enrich_scene_requested.connect(self._enrich_scene)
         self.inspector.generate_background_requested.connect(self._generate_background)
-        self.inspector.clear_background_requested.connect(self._clear_background)
         self.inspector.change_applied.connect(self._show_undo_notification)
         self.inspector.hotspot_selected.connect(self.card_canvas.select_interaction)
         self.card_canvas.interaction_selected.connect(self.inspector.select_interaction)
@@ -1196,16 +1205,25 @@ class MainWindow(QMainWindow):
                 )
             )
         elif not has_render_prompt:
-            generate_reason = "Enter a Description before generating"
+            generate_reason = (
+                "Enter a Description or Enriched Description before generating"
+            )
         elif not mflux_available:
             generate_reason = self._action_diagnostic(AdapterKind.MFLUX)
         self.inspector.set_background_capabilities(
             can_generate=(has_card and has_render_prompt and mflux_available),
             generate_reason=generate_reason,
-            can_clear=has_card and has_image,
-            clear_reason=("Clear the current image" if has_image else "This revision has no image"),
+            has_image=has_image,
             busy=workflow_busy,
             generating=workflow_busy,
+        )
+        self.clear_background_button.setEnabled(
+            has_card and has_image and not workflow_busy
+        )
+        self.clear_background_button.setToolTip(
+            "Clear the current image"
+            if has_image
+            else "This revision has no image"
         )
         enrichment_busy = self.scene_enrichment_workflow.busy
         has_enrichment_input = self.inspector.has_description_input()
@@ -1656,6 +1674,7 @@ class MainWindow(QMainWindow):
         self.card_sidebar.setVisible(authoring)
         self.inspector.setVisible(authoring)
         self.fit_canvas_button.setVisible(authoring)
+        self.clear_background_button.setVisible(authoring)
         self.create_first_card_button.setVisible(authoring)
         self.empty_canvas_title.setText(
             "Create your first card" if authoring else "No cards to run"

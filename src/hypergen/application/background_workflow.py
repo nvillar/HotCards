@@ -63,6 +63,7 @@ class _GenerationTarget:
     card_id: UUID
     revision_id: UUID
     description: str
+    enriched_description: str | None
     background_id: UUID | None
     bundle_path: Path
     references: tuple[_GenerationReferenceTarget, ...]
@@ -144,7 +145,12 @@ class BackgroundWorkflow(QObject):
             for reference in references
         }
         inputs = ImageGenerationInputs(
-            description=revision.effective_description,
+            description=revision.description,
+            enriched_description=(
+                revision.enriched_description.text
+                if revision.enriched_description is not None
+                else None
+            ),
             **snapshots,
         )
         try:
@@ -386,7 +392,12 @@ class BackgroundWorkflow(QObject):
             stack_id=document.id,
             card_id=card.id,
             revision_id=revision.id,
-            description=revision.effective_description,
+            description=revision.description,
+            enriched_description=(
+                revision.enriched_description.text
+                if revision.enriched_description is not None
+                else None
+            ),
             background_id=(
                 revision.background.id if revision.background is not None else None
             ),
@@ -409,7 +420,13 @@ class BackgroundWorkflow(QObject):
             return False
         revision = card.active_revision
         if not (
-            revision.effective_description == target.description
+            revision.description == target.description
+            and (
+                revision.enriched_description.text
+                if revision.enriched_description is not None
+                else None
+            )
+            == target.enriched_description
             and (
                 revision.background.id
                 if revision.background is not None

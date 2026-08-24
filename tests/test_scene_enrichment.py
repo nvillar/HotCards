@@ -20,14 +20,17 @@ from hypergen.generation.scene_enrichment import (
 
 
 class FakeOllamaClient:
-    def __init__(self, content: str) -> None:
-        self.content = content
+    def __init__(self, content: str | list[str]) -> None:
+        self.contents = [content] if isinstance(content, str) else content
         self.messages: list[dict[str, object]] = []
+        self.call_count = 0
 
     def chat(self, **kwargs: object) -> SimpleNamespace:
         self.messages.extend(kwargs["messages"])  # type: ignore[arg-type]
+        content = self.contents[min(self.call_count, len(self.contents) - 1)]
+        self.call_count += 1
         return SimpleNamespace(
-            message=SimpleNamespace(content=self.content),
+            message=SimpleNamespace(content=content),
             total_duration=2_000_000,
             load_duration=500_000,
         )
@@ -104,6 +107,8 @@ def test_scene_enrichment_prompt_scopes_grouped_reference_provenance() -> None:
     assert "remove the losing detail completely" in prompt
     assert "authored Description is the scene skeleton" in prompt
     assert "References never override authored actions, poses, or object states" in prompt
+    assert "Restate every explicit authored action, pose, and" in prompt
+    assert "final hatch must be open" in prompt
     assert "Discard conflicting" in prompt
     assert "replace conflicting authored subject identity and appearance" in prompt
     assert "replace conflicting authored style" in prompt
@@ -159,6 +164,80 @@ def test_ollama_scene_enricher_accepts_standalone_json_fence() -> None:
     result = OllamaSceneEnricher(runtime).enrich(SceneEnrichmentRequest(scene="A mysterious wood"))
 
     assert result.scene == "An ancient moonlit wood veiled in mist"
+
+
+def test_enrichment_repairs_reference_state_that_overrides_authored_intent() -> None:
+    client = FakeOllamaClient(
+        [
+            json.dumps(
+                {
+                    "scene": (
+                        "A closed circular space station hatch in a monochrome "
+                        "industrial corridor."
+                    )
+                }
+            ),
+            json.dumps(
+                {
+                    "scene": (
+                        "An open circular space station hatch reveals the passage "
+                        "beyond in a monochrome industrial corridor."
+                    )
+                }
+            ),
+        ]
+    )
+    runtime = OllamaRuntime(OllamaSettings(), client=client)  # type: ignore[arg-type]
+
+    result = OllamaSceneEnricher(runtime).enrich(
+        SceneEnrichmentRequest(scene="The hatch is open.")
+    )
+
+    assert "open circular space station hatch" in result.scene
+    assert client.call_count == 2
+    assert "Invalid candidate:" in client.messages[-1]["content"]
+    assert "authored 'hatch' is 'open'" in client.messages[-1]["content"]
+
+
+def test_enrichment_rejects_persistent_authored_state_conflict() -> None:
+    content = json.dumps({"scene": "A firmly closed circular hatch."})
+    client = FakeOllamaClient([content, content])
+    runtime = OllamaRuntime(OllamaSettings(), client=client)  # type: ignore[arg-type]
+
+    with pytest.raises(ModelResponseError, match="authored intent"):
+        OllamaSceneEnricher(runtime).enrich(
+            SceneEnrichmentRequest(scene="The hatch is open.")
+        )
+
+    assert client.call_count == 2
+
+
+def test_enrichment_allows_opposite_state_on_a_different_object() -> None:
+    scene = (
+        "The open circular hatch leads past a sealed bulkhead into the station."
+    )
+    client = FakeOllamaClient(json.dumps({"scene": scene}))
+    runtime = OllamaRuntime(OllamaSettings(), client=client)  # type: ignore[arg-type]
+
+    result = OllamaSceneEnricher(runtime).enrich(
+        SceneEnrichmentRequest(scene="The hatch is open.")
+    )
+
+    assert result.scene == scene
+    assert client.call_count == 1
+
+
+def test_enrichment_detects_attributive_object_state_conflict() -> None:
+    content = json.dumps(
+        {"scene": "A closed circular space station hatch fills the wall."}
+    )
+    client = FakeOllamaClient([content, content])
+    runtime = OllamaRuntime(OllamaSettings(), client=client)  # type: ignore[arg-type]
+
+    with pytest.raises(ModelResponseError, match="authored intent"):
+        OllamaSceneEnricher(runtime).enrich(
+            SceneEnrichmentRequest(scene="An open circular space station hatch.")
+        )
 
 
 def test_reference_enrichment_requires_verbatim_role_fidelity() -> None:

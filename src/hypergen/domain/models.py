@@ -159,9 +159,19 @@ class ImageGenerationInputs(DomainModel):
     """Author-controlled inputs captured for a generated image."""
 
     description: str
+    enriched_description: str | None = None
     subject_reference: ImageReferenceSnapshot | None = None
     style_reference: ImageReferenceSnapshot | None = None
     setting_reference: ImageReferenceSnapshot | None = None
+
+    @property
+    def enrichment_context(self) -> str:
+        """Return exact generation-time text context for later enrichment."""
+        if not self.enriched_description:
+            return self.description
+        if not self.description:
+            return self.enriched_description
+        return f"{self.description}\n{self.enriched_description}"
 
     def references_by_role(
         self,
@@ -299,15 +309,6 @@ class CardRevision(DomainModel):
     subject: CardReference | None = None
     style: CardReference | None = None
     setting: CardReference | None = None
-
-    @property
-    def effective_description(self) -> str:
-        """Return the text used for image generation."""
-        return (
-            self.enriched_description.text
-            if self.enriched_description is not None
-            else self.description
-        )
 
     @field_validator("hotspot_set")
     @classmethod

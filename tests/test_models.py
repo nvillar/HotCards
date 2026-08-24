@@ -72,7 +72,11 @@ def test_revision_uses_enriched_description_when_available() -> None:
         enriched_description=enrichment,
     )
 
-    assert revision.effective_description == "A richer courtyard"
+    inputs = ImageGenerationInputs(
+        description=revision.description,
+        enriched_description=enrichment.text,
+    )
+    assert inputs.enrichment_context == "A courtyard\nA richer courtyard"
     assert enrichment.is_current(
         source_description="A courtyard",
         references=(reference,),
@@ -81,7 +85,9 @@ def test_revision_uses_enriched_description_when_available() -> None:
         source_description="A changed courtyard",
         references=(reference,),
     )
-    assert CardRevision(description="A courtyard").effective_description == (
+    assert ImageGenerationInputs(
+        description="A courtyard"
+    ).enrichment_context == (
         "A courtyard"
     )
 

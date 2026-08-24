@@ -206,9 +206,43 @@ def test_generate_prefers_enriched_description(tmp_path: Path) -> None:
     assert revision.description == "A garden"
     assert revision.enriched_description is not None
     assert revision.generation_metadata is not None
-    assert revision.generation_metadata.inputs.description == (
+    assert revision.generation_metadata.inputs.description == "A garden"
+    assert revision.generation_metadata.inputs.enriched_description == (
         "A richly detailed garden"
     )
+
+
+def test_generate_accepts_enriched_description_without_authored_text(
+    tmp_path: Path,
+) -> None:
+    workflow, controller, _session, workers, card = _bound_workflow(tmp_path)
+    revision = controller.document.cards[0].active_revision
+    controller.execute(
+        EditRevisionDescriptionCommand(
+            card_id=card.id,
+            revision_id=revision.id,
+            value="",
+        )
+    )
+    controller.execute(
+        SetRevisionEnrichedDescriptionCommand(
+            card_id=card.id,
+            revision_id=revision.id,
+            value=EnrichedDescription(
+                text="A richly detailed garden",
+                source_description="A garden",
+            ),
+        )
+    )
+
+    workflow.generate(card.id)
+    _complete_generation(workers)
+
+    metadata = controller.document.cards[0].active_revision.generation_metadata
+    assert metadata is not None
+    assert metadata.inputs.description == ""
+    assert metadata.inputs.enriched_description == "A richly detailed garden"
+    assert metadata.render_prompt == "A richly detailed garden"
 
 
 def test_generation_failure_and_stale_result_preserve_current_revision(
