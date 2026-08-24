@@ -8,6 +8,7 @@ from pydantic import ValidationError
 from PySide6.QtCore import QSignalBlocker, Qt, QTimer, Signal
 from PySide6.QtGui import QFocusEvent
 from PySide6.QtWidgets import (
+    QApplication,
     QButtonGroup,
     QComboBox,
     QFrame,
@@ -57,11 +58,11 @@ from hypergen.domain.models import (
 
 
 class _CommitPlainTextEdit(QPlainTextEdit):
-    editing_finished = Signal()
+    editing_finished = Signal(object)
 
     def focusOutEvent(self, event: QFocusEvent) -> None:
         super().focusOutEvent(event)
-        self.editing_finished.emit()
+        self.editing_finished.emit(QApplication.focusWidget())
 
 
 def _compact_icon_button(
@@ -265,6 +266,12 @@ class Inspector(QWidget):
         self.generate_background_button = QPushButton("Generate Image")
         self.generate_background_button.setObjectName("generateBackgroundButton")
         layout.addWidget(self.generate_background_button)
+        self._focus_commit_targets = {
+            self.original_description_button,
+            self.enriched_description_button,
+            self.enrich_scene_button,
+            self.generate_background_button,
+        }
 
         layout.addStretch(1)
         scroll.setWidget(page)
@@ -362,7 +369,7 @@ class Inspector(QWidget):
 
     def _connect_signals(self) -> None:
         self.description_edit.editing_finished.connect(
-            self.commit_revision_metadata
+            self._description_editing_finished
         )
         self.description_edit.textChanged.connect(self._render_inputs_changed)
         self.original_description_button.clicked.connect(
@@ -391,6 +398,11 @@ class Inspector(QWidget):
         if not self._rendering:
             self._update_enrichment_freshness()
             self.render_inputs_changed.emit()
+
+    def _description_editing_finished(self, next_focus: object) -> None:
+        self.commit_revision_metadata(
+            render_change=next_focus not in self._focus_commit_targets
+        )
 
     def render(self, document: Stack, selected_card_id: UUID | None) -> None:
         previous_card_id = self.selected_card_id
@@ -454,7 +466,7 @@ class Inspector(QWidget):
         finally:
             self._rendering = False
 
-    def commit_revision_metadata(self) -> bool:
+    def commit_revision_metadata(self, *, render_change: bool = True) -> bool:
         if self._rendering or self.selected_card_id is None:
             return False
         card = self._selected_card()
@@ -471,6 +483,7 @@ class Inspector(QWidget):
                     value=value,
                 ),
                 error_label=self.description_error,
+                render_change=render_change,
             )
         existing = card.active_revision.enriched_description
         if existing is None or value.strip() == existing.text:
@@ -484,6 +497,7 @@ class Inspector(QWidget):
                 ),
                 error_label=self.description_error,
                 undo_message="Enrichment removed",
+                render_change=render_change,
             )
         return self._execute(
             SetRevisionEnrichedDescriptionCommand(
@@ -492,6 +506,7 @@ class Inspector(QWidget):
                 value=existing.model_copy(update={"text": value.strip()}),
             ),
             error_label=self.description_error,
+            render_change=render_change,
         )
 
     def commit_card_metadata(self) -> bool:
@@ -969,6 +984,7 @@ class Inspector(QWidget):
         *,
         error_label: QLabel | None = None,
         undo_message: str | None = None,
+        render_change: bool = True,
     ) -> bool:
         target_error = error_label if error_label is not None else self.hotspot_error
         previous_token = self.controller.current_undo_token
@@ -976,11 +992,13 @@ class Inspector(QWidget):
             changed = self.controller.execute(command)
         except (CommandError, ValidationError) as error:
             self._set_error(target_error, str(error))
-            self.render(self.controller.document, self.selected_card_id)
+            if render_change:
+                self.render(self.controller.document, self.selected_card_id)
             return False
         self._set_error(target_error, "")
-        self.render(changed, self.selected_card_id)
-        self.document_changed.emit(changed)
+        if render_change:
+            self.render(changed, self.selected_card_id)
+            self.document_changed.emit(changed)
         token = self.controller.current_undo_token
         if undo_message is not None and token is not None and token != previous_token:
             self.change_applied.emit(undo_message, token)

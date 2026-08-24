@@ -1079,6 +1079,7 @@ class MainWindow(QMainWindow):
                 "Could not generate image",
                 detail=str(error),
             )
+        self.render_document()
         self._update_generation_actions()
 
     def _enrich_scene(self) -> None:
@@ -1094,6 +1095,7 @@ class MainWindow(QMainWindow):
                 "Could not enrich Description",
                 detail=str(error),
             )
+        self.render_document()
         self._update_generation_actions()
 
     def _scene_enrichment_progress_changed(self, _message: str) -> None:
