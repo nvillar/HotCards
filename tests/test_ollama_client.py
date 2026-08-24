@@ -2,6 +2,8 @@
 
 from types import SimpleNamespace
 
+from ollama import ResponseError
+
 from hypergen.generation.ollama_client import OllamaRuntime, OllamaSettings
 
 
@@ -9,12 +11,15 @@ class FakeOllamaClient:
     def list(self) -> SimpleNamespace:
         return SimpleNamespace(
             models=(
+                SimpleNamespace(model="retired:cloud"),
                 SimpleNamespace(model="text-only:latest"),
                 SimpleNamespace(model="vision-model:latest"),
             )
         )
 
     def show(self, model: str) -> SimpleNamespace:
+        if model == "retired:cloud":
+            raise ResponseError("model retired", 410)
         capabilities = (
             ("completion", "vision")
             if model == "vision-model:latest"
@@ -30,6 +35,7 @@ def test_installed_models_can_be_filtered_by_capability() -> None:
     )
 
     assert runtime.installed_models() == (
+        "retired:cloud",
         "text-only:latest",
         "vision-model:latest",
     )

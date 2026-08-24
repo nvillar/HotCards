@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from math import isfinite
 from pathlib import Path
@@ -19,6 +20,7 @@ from hypergen.generation.errors import (
 
 DEFAULT_OLLAMA_MODEL = "qwen3.5:9b-mlx"
 VISION_CAPABILITY = "vision"
+logger = logging.getLogger(__name__)
 
 
 class OllamaClientProtocol(Protocol):
@@ -144,7 +146,16 @@ class OllamaRuntime:
             return models
         compatible: list[str] = []
         for model in models:
-            if capabilities <= self._model_capabilities(model):
+            try:
+                model_capabilities = self._model_capabilities(model)
+            except ModelUnavailableError as error:
+                logger.warning(
+                    "Skipping unavailable Ollama model %r during capability discovery: %s",
+                    model,
+                    error,
+                )
+                continue
+            if capabilities <= model_capabilities:
                 compatible.append(model)
         return tuple(compatible)
 
@@ -171,7 +182,11 @@ class OllamaRuntime:
         """Return one installed model's advertised Ollama capabilities."""
         try:
             details = self._client.show(model)
-        except (httpx.HTTPError, RequestError, ResponseError) as error:
+        except ResponseError as error:
+            raise ModelUnavailableError(
+                f"Ollama model {model!r} could not be inspected: {error}"
+            ) from error
+        except (httpx.HTTPError, RequestError) as error:
             raise ServiceUnavailableError(
                 f"Ollama could not inspect model {model!r}."
             ) from error
