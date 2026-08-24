@@ -353,6 +353,41 @@ class DuplicateRevisionCommand:
 
 
 @dataclass(frozen=True, slots=True)
+class CreateGeneratedRevisionCommand:
+    """Move a directly applied result into a new complete revision."""
+
+    card_id: UUID
+    revision_id: UUID
+    previous_revision: CardRevision
+    new_revision_id: UUID = field(default_factory=uuid4)
+
+    def apply(self, document: Stack) -> Stack:
+        card_index = _card_index(document, self.card_id)
+        card = document.cards[card_index]
+        source_index = _revision_index(card, self.revision_id)
+        if self.previous_revision.id != self.revision_id:
+            raise CommandError("the previous revision does not match the generated result")
+        if any(revision.id == self.new_revision_id for revision in card.revisions):
+            raise CommandError(
+                f"revision {self.new_revision_id} already exists on card {card.id}"
+            )
+        generated_revision = card.revisions[source_index].model_copy(
+            deep=True,
+            update={"id": self.new_revision_id},
+        )
+        revisions = list(card.revisions)
+        revisions[source_index] = self.previous_revision.model_copy(deep=True)
+        revisions.append(generated_revision)
+        card = card.model_copy(
+            update={
+                "revisions": tuple(revisions),
+                "active_revision_id": generated_revision.id,
+            }
+        )
+        return validated_copy(_replace_card(document, card_index, card))
+
+
+@dataclass(frozen=True, slots=True)
 class DeleteRevisionCommand:
     """Remove one revision and activate the nearest remaining revision."""
 
@@ -687,6 +722,7 @@ __all__ = [
     "CommandError",
     "CreateCardAndResolveCommand",
     "CreateCardCommand",
+    "CreateGeneratedRevisionCommand",
     "DeleteCardCommand",
     "DeleteInteractionCommand",
     "DeleteRevisionCommand",

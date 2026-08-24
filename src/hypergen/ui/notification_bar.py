@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -37,6 +38,7 @@ class Notification:
     primary_action: NotificationAction | None = None
     secondary_action: NotificationAction | None = None
     dismissible: bool = True
+    dismiss_label: str = ""
     priority: int | None = None
 
 
@@ -189,6 +191,26 @@ class NotificationBar(QFrame):
             self.secondary_button,
             notification.secondary_action,
         )
+        if notification.dismiss_label:
+            self.dismiss_button.setIcon(QIcon())
+            self.dismiss_button.setText(notification.dismiss_label)
+            self.dismiss_button.setToolButtonStyle(
+                Qt.ToolButtonStyle.ToolButtonTextOnly
+            )
+            self.dismiss_button.setAccessibleName(notification.dismiss_label)
+            self.dismiss_button.setToolTip(notification.dismiss_label)
+        else:
+            self.dismiss_button.setIcon(
+                self.style().standardIcon(
+                    QStyle.StandardPixmap.SP_DialogCloseButton
+                )
+            )
+            self.dismiss_button.setText("")
+            self.dismiss_button.setToolButtonStyle(
+                Qt.ToolButtonStyle.ToolButtonIconOnly
+            )
+            self.dismiss_button.setAccessibleName("Dismiss notification")
+            self.dismiss_button.setToolTip("Dismiss notification")
         self.dismiss_button.setVisible(notification.dismissible)
         self.setVisible(True)
 

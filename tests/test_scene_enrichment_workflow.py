@@ -17,6 +17,7 @@ from hypergen.application.commands import (
     SetRevisionReferenceCommand,
 )
 from hypergen.application.document_controller import DocumentController, UndoToken
+from hypergen.application.generated_revision_change import GeneratedRevisionChange
 from hypergen.application.scene_enrichment_workflow import (
     SceneEnrichmentWorkflow,
     SceneEnrichmentWorkflowError,
@@ -140,8 +141,8 @@ def test_enrichment_applies_immediately_with_one_undo_boundary() -> None:
         revisions=(CardRevision(description="A courtyard"),),
     )
     workflow, controller, workers, enricher = _workflow(card)
-    applied: list[object] = []
-    workflow.change_applied.connect(lambda _message, token: applied.append(token))
+    applied: list[GeneratedRevisionChange] = []
+    workflow.generation_applied.connect(applied.append)
 
     workflow.start(card.id)
     assert workers.stages == ["enriching Description"]
@@ -154,8 +155,12 @@ def test_enrichment_applies_immediately_with_one_undo_boundary() -> None:
     assert revision.description == "A courtyard"
     assert revision.enriched_description is not None
     assert revision.enriched_description.text == "A richer courtyard"
-    assert isinstance(applied[0], UndoToken)
-    assert controller.undo_if_current(applied[0])  # type: ignore[arg-type]
+    assert applied[0].message == "Description enriched"
+    assert applied[0].card_id == card.id
+    assert applied[0].revision_id == card.active_revision.id
+    assert applied[0].previous_revision.enriched_description is None
+    assert isinstance(applied[0].token, UndoToken)
+    assert controller.undo_if_current(applied[0].token)
     assert controller.document.cards[0].active_revision.enriched_description is None
 
 

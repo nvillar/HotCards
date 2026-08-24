@@ -23,9 +23,11 @@ from hypergen.application.commands import (
     DuplicateRevisionCommand,
     RenameCardCommand,
     ReplaceRevisionBackgroundCommand,
+    SetRevisionEnrichedDescriptionCommand,
 )
 from hypergen.application.document_controller import DocumentController
 from hypergen.application.document_session import DocumentSession, DocumentSessionState
+from hypergen.application.generated_revision_change import GeneratedRevisionChange
 from hypergen.application.workers import AdapterKind, AvailabilityDiagnostic
 from hypergen.domain.models import (
     Card,
@@ -124,6 +126,7 @@ class FakeBackgroundWorkflow(QObject):
     failed = Signal(object)
     document_changed = Signal(object)
     change_applied = Signal(str, object)
+    generation_applied = Signal(object)
 
     def __init__(self, controller: DocumentController) -> None:
         super().__init__()
@@ -723,6 +726,123 @@ def test_notification_undo_expires_after_another_command(
     assert window.notification_bar.isHidden()
     window._undo_notification()
     assert controller.document.cards[0].name == "Second"
+
+
+def test_generated_result_can_move_to_a_new_complete_version(
+    application: QApplication,
+) -> None:
+    hotspot_set = HotspotSet(
+        interactions=(
+            Interaction(
+                label="Door",
+                action=NavigateAction(target=UnresolvedCardReference()),
+            ),
+        )
+    )
+    original = CardRevision(
+        description="A courtyard",
+        hotspot_set=hotspot_set,
+    )
+    card = Card(name="Card", revisions=(original,))
+    window, controller, _workers, _background = _window(
+        Stack(name="Demo", cards=(card,))
+    )
+    changed = controller.execute(
+        SetRevisionEnrichedDescriptionCommand(
+            card_id=card.id,
+            revision_id=original.id,
+            value=EnrichedDescription(
+                text="A richly detailed courtyard",
+                source_description=original.description,
+            ),
+        )
+    )
+    window.render_document(changed)
+    token = controller.current_undo_token
+    assert token is not None
+    window._show_generated_revision_notification(
+        GeneratedRevisionChange(
+            message="Description enriched",
+            token=token,
+            card_id=card.id,
+            revision_id=original.id,
+            previous_revision=original,
+        )
+    )
+
+    assert window.notification_bar.message_label.text() == (
+        "Description enriched on the current version"
+    )
+    assert window.notification_bar.primary_button.text() == "Create New Version"
+    assert window.notification_bar.secondary_button.text() == "Undo"
+    assert window.notification_bar.dismiss_button.text() == "Keep"
+    window.notification_bar.primary_button.click()
+
+    changed_card = controller.document.cards[0]
+    assert len(changed_card.revisions) == 2
+    assert changed_card.revisions[0].id == original.id
+    assert changed_card.revisions[0].enriched_description is None
+    assert changed_card.revisions[0].hotspot_set == original.hotspot_set
+    assert changed_card.active_revision.id != original.id
+    assert changed_card.active_revision.description == original.description
+    assert changed_card.active_revision.hotspot_set == original.hotspot_set
+    assert changed_card.active_revision.enriched_description is not None
+    assert changed_card.active_revision.enriched_description.text == (
+        "A richly detailed courtyard"
+    )
+    assert window.notification_bar.message_label.text() == "New version created"
+    assert window.notification_bar.primary_button.text() == "Undo"
+    assert window.notification_bar.secondary_button.isHidden()
+
+    window.notification_bar.primary_button.click()
+    restored_card = controller.document.cards[0]
+    assert len(restored_card.revisions) == 1
+    assert restored_card.active_revision.id == original.id
+    assert restored_card.active_revision.enriched_description is not None
+    assert restored_card.active_revision.enriched_description.text == (
+        "A richly detailed courtyard"
+    )
+
+
+def test_dismissing_generated_result_keeps_it_on_current_version(
+    application: QApplication,
+) -> None:
+    original = CardRevision(description="A courtyard")
+    card = Card(name="Card", revisions=(original,))
+    window, controller, _workers, _background = _window(
+        Stack(name="Demo", cards=(card,))
+    )
+    changed = controller.execute(
+        SetRevisionEnrichedDescriptionCommand(
+            card_id=card.id,
+            revision_id=original.id,
+            value=EnrichedDescription(
+                text="A richly detailed courtyard",
+                source_description=original.description,
+            ),
+        )
+    )
+    window.render_document(changed)
+    token = controller.current_undo_token
+    assert token is not None
+    window._show_generated_revision_notification(
+        GeneratedRevisionChange(
+            message="Description enriched",
+            token=token,
+            card_id=card.id,
+            revision_id=original.id,
+            previous_revision=original,
+        )
+    )
+
+    window.notification_bar.dismiss_button.click()
+
+    revision = controller.document.cards[0].active_revision
+    assert revision.id == original.id
+    assert revision.enriched_description is not None
+    assert revision.enriched_description.text == "A richly detailed courtyard"
+    assert controller.current_undo_token == token
+    assert window._generated_revision_change is None
 
 
 def test_description_edits_and_notification_undo_cancel_enrichment(

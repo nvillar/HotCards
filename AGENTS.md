@@ -75,8 +75,11 @@ for live Ollama and MFLUX runs.
   image generation when either Description source is non-empty.
 - Support generated backgrounds only; do not add image import. Apply Generate
   and Clear directly through document commands. Keep an existing image visible
-  until replacement succeeds, then expose a dismissible Undo bound to the exact
-  current history token.
+  until replacement succeeds. After Description or image generation succeeds,
+  expose Create New Version and Undo bound to the exact current history token;
+  an explicit Keep action retains the result on the current revision. Creating
+  a version must restore the prior revision and append one complete generated
+  revision.
 - Apply reversible deletions and replacements without confirmation. Report
   outcomes, failures, Run warnings, and Undo actions in the global notification
   bar; keep field validation beside its input and the status bar passive. Use a

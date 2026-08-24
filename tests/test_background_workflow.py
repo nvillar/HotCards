@@ -26,6 +26,7 @@ from hypergen.application.commands import (
 )
 from hypergen.application.document_controller import DocumentController, UndoToken
 from hypergen.application.document_session import DocumentSession
+from hypergen.application.generated_revision_change import GeneratedRevisionChange
 from hypergen.domain.models import (
     Card,
     CardRevision,
@@ -159,10 +160,8 @@ def test_generate_applies_to_active_revision_and_preserves_other_content(
     tmp_path: Path,
 ) -> None:
     workflow, controller, session, workers, card = _bound_workflow(tmp_path)
-    applied: list[tuple[str, object]] = []
-    workflow.change_applied.connect(
-        lambda message, token: applied.append((message, token))
-    )
+    applied: list[GeneratedRevisionChange] = []
+    workflow.generation_applied.connect(applied.append)
 
     workflow.generate(card.id)
     _complete_generation(workers)
@@ -179,10 +178,13 @@ def test_generate_applies_to_active_revision_and_preserves_other_content(
     assert metadata.inputs.subject_reference is None
     assert session.flush()
     assert StackStore(session.state.bundle_path).load() == controller.document
-    assert applied[0][0] == "Image generated"
-    assert isinstance(applied[0][1], UndoToken)
+    assert applied[0].message == "Image generated"
+    assert applied[0].card_id == card.id
+    assert applied[0].revision_id == card.active_revision.id
+    assert applied[0].previous_revision.background is None
+    assert isinstance(applied[0].token, UndoToken)
 
-    assert controller.undo_if_current(applied[0][1])  # type: ignore[arg-type]
+    assert controller.undo_if_current(applied[0].token)
     assert controller.document.cards[0].active_revision.background is None
 
 

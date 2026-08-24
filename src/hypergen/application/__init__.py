@@ -12,6 +12,7 @@ from hypergen.application.commands import (
     CommandError,
     CreateCardAndResolveCommand,
     CreateCardCommand,
+    CreateGeneratedRevisionCommand,
     DeleteCardCommand,
     DeleteRevisionCommand,
     DocumentCommand,
@@ -39,6 +40,7 @@ from hypergen.application.document_session import (
     DocumentSessionError,
     DocumentSessionState,
 )
+from hypergen.application.generated_revision_change import GeneratedRevisionChange
 from hypergen.application.scene_enrichment_workflow import (
     SceneEnrichmentWorkflow,
     SceneEnrichmentWorkflowError,
@@ -67,6 +69,7 @@ __all__ = [
     "CommandError",
     "CreateCardAndResolveCommand",
     "CreateCardCommand",
+    "CreateGeneratedRevisionCommand",
     "DeleteCardCommand",
     "DeleteRevisionCommand",
     "DocumentCommand",
@@ -76,6 +79,7 @@ __all__ = [
     "DocumentSessionState",
     "DuplicateRevisionCommand",
     "EditRevisionDescriptionCommand",
+    "GeneratedRevisionChange",
     "SetRevisionEnrichedDescriptionCommand",
     "OperationStatus",
     "RenameCardCommand",

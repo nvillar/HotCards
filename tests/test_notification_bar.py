@@ -99,3 +99,24 @@ def test_explicit_priority_keeps_time_sensitive_action_visible(
         ),
     )
     assert bar.current_key == "error"
+
+
+def test_notification_can_label_its_dismiss_action(
+    application: QApplication,
+) -> None:
+    bar = NotificationBar()
+    dismissed: list[str] = []
+    bar.notification_dismissed.connect(dismissed.append)
+    bar.show_notification(
+        "generation",
+        Notification(
+            "Image generated on the current version",
+            dismiss_label="Keep",
+        ),
+    )
+
+    assert bar.dismiss_button.text() == "Keep"
+    assert bar.dismiss_button.icon().isNull()
+    assert bar.dismiss_button.accessibleName() == "Keep"
+    bar.dismiss_button.click()
+    assert dismissed == ["generation"]
