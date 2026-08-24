@@ -232,7 +232,10 @@ class MainWindow(QMainWindow):
             toolbar.addAction(action)
 
     def _build_panes(self) -> None:
-        self.card_sidebar = CardSidebar(self.controller)
+        self.card_sidebar = CardSidebar(
+            self.controller,
+            image_path_resolver=self._resolve_revision_image_path,
+        )
         self.card_sidebar.card_selected.connect(self.select_card)
         self.card_sidebar.document_changed.connect(self.render_document)
         self.card_sidebar.delete_requested.connect(self._delete_card)
@@ -274,10 +277,19 @@ class MainWindow(QMainWindow):
         self.canvas_card_name.setPlaceholderText("Card name")
         self.canvas_card_name.setAccessibleName("Card name")
         self.card_header.addWidget(self.canvas_card_name, 1)
+        self.revision_label = QLabel("Version:")
+        self.revision_label.setObjectName("cardRevisionLabel")
+        self.card_header.addWidget(self.revision_label)
         self.revision_combo = QComboBox()
         self.revision_combo.setObjectName("cardRevisionCombo")
         self.revision_combo.setAccessibleName("Active revision")
         self.revision_combo.setToolTip("Select the active card revision")
+        revision_width = (
+            self.revision_combo.fontMetrics().horizontalAdvance("0000")
+            + self.style().pixelMetric(QStyle.PixelMetric.PM_ScrollBarExtent)
+            + 24
+        )
+        self.revision_combo.setFixedWidth(revision_width)
         self.card_header.addWidget(self.revision_combo)
         self.add_revision_button = QToolButton()
         self.add_revision_button.setObjectName("addRevisionButton")
@@ -315,6 +327,20 @@ class MainWindow(QMainWindow):
         self.clear_background_button.setAccessibleName("Clear image")
         self.clear_background_button.setToolTip("This revision has no image")
         self.canvas_fit_controls.addWidget(self.clear_background_button)
+        canvas_action_extent = max(
+            self.fit_canvas_button.sizeHint().width(),
+            self.fit_canvas_button.sizeHint().height(),
+            self.clear_background_button.sizeHint().width(),
+            self.clear_background_button.sizeHint().height(),
+        )
+        self.fit_canvas_button.setFixedSize(
+            canvas_action_extent,
+            canvas_action_extent,
+        )
+        self.clear_background_button.setFixedSize(
+            canvas_action_extent,
+            canvas_action_extent,
+        )
         canvas_layout.addLayout(self.canvas_fit_controls)
         self.canvas_pages.addWidget(card_canvas)
         self.fit_canvas_button.clicked.connect(self.card_canvas.fit_to_window)

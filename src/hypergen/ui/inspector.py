@@ -132,7 +132,10 @@ class Inspector(QWidget):
         self.setMinimumWidth(300)
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(0, 10, 0, 0)
+        horizontal_margin = self.style().pixelMetric(
+            QStyle.PixelMetric.PM_LayoutLeftMargin
+        )
+        root.setContentsMargins(horizontal_margin, 16, horizontal_margin, 0)
 
         self.pages = QStackedWidget()
         empty_page = QWidget()
@@ -167,7 +170,9 @@ class Inspector(QWidget):
         self.description_edit.setObjectName("descriptionEdit")
         self.description_edit.setPlaceholderText("Description")
         self.description_edit.setAccessibleName("Description")
-        editor_height = self.description_edit.fontMetrics().lineSpacing() * 10 + 20
+        editor_height = round(
+            (self.description_edit.fontMetrics().lineSpacing() * 10 + 20) * 1.25
+        )
         self.description_edit.setFixedHeight(editor_height)
         layout.addWidget(self.description_edit)
         self.description_error = QLabel()
