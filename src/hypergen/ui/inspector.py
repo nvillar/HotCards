@@ -565,11 +565,7 @@ class Inspector(QWidget):
                 source_description=authored_description,
                 references=enrichment_reference_snapshots(document, card),
             )
-            generation_sources = (
-                "Description + Enriched Description"
-                if revision.description.strip()
-                else "Enriched Description"
-            )
+            generation_sources = "Enriched Description"
         self.description_toggle.setVisible(enrichment is not None)
         self.original_description_button.setChecked(
             self._description_mode == "original"

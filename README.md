@@ -36,11 +36,10 @@ Each reference role can select one other card; the same card cannot reference
 itself. Generate groups roles that use the same active source background, sends
 each unique image once in Subject, Style, Setting order, and combines its role
 instructions. Source Descriptions are not injected into the MFLUX prompt.
-Background prompts pass the authored Description as authoritative intent and
-the optional Enriched Description as visual detail. Generated images are the
-only supported background source. Generate, image removal, and Enrich
-Description apply directly to the active revision and expose a history-safe
-Undo action.
+Background prompts use Enriched Description when present and otherwise use
+Description. Generated images are the only supported background source.
+Generate, image removal, and Enrich Description apply directly to the active
+revision and expose a history-safe Undo action.
 Existing images remain in place until replacement succeeds, and successful
 changes offer a dismissible, history-safe Undo action in the notification bar.
 Enrichment never reads an image and requires authored Description text. It
@@ -56,12 +55,12 @@ otherwise it remains active but is marked Out of date. References and enriched
 text may add visual detail but never override authored actions, poses, object
 states, time, weather, camera, mood, composition, or quoted visible text.
 Recognized object-state reversals receive one constrained repair attempt and
-are rejected if unresolved. Generate passes both texts with the same authority
-rule, including when enrichment is out of date.
+are rejected if unresolved. Generate uses Enriched Description when present,
+including when it is out of date, and otherwise falls back to Description.
 The Enrich action is disabled and shown as complete while enrichment is current,
 then becomes Re-enrich when its inputs are out of date. Clearing all Enriched
 text removes it. Image generation requires at least one non-empty Description
-source and uses whichever source is available.
+source and sends only the effective source to FLUX.
 Enriched text follows FLUX.2 prompt guidance: one concise natural-language
 paragraph ordered by subject, action, style, context, then secondary details,
 using positive descriptions and object-specific colors and materials.
