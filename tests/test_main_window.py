@@ -265,6 +265,7 @@ def test_card_header_and_toolbar_match_revision_hierarchy(
     assert window.delete_revision_button.text() == "−"
     assert window.overlay_label.text() == "Hotspots"
     assert not hasattr(window, "styles_button")
+    assert not hasattr(window, "document_status_label")
     assert window.inspector.inspector_tabs.tabText(0) == "Background"
     assert window.fit_canvas_button.size() == window.clear_background_button.size()
 
