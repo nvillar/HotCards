@@ -238,6 +238,8 @@ class MainWindow(QMainWindow):
         self.restart_button.setEnabled(False)
         self.restart_button_action = toolbar.addWidget(self.restart_button)
         self.restart_button_action.setVisible(False)
+        self.run_overlay_separator = toolbar.addSeparator()
+        self.run_overlay_separator.setVisible(False)
 
         self.overlay_label = QLabel("Hotspots")
         self.overlay_label_action = toolbar.addWidget(self.overlay_label)
@@ -1862,6 +1864,7 @@ class MainWindow(QMainWindow):
             else "Switch to Author mode to create the first card."
         )
         self.run_controls_separator.setVisible(self._is_running)
+        self.run_overlay_separator.setVisible(self._is_running)
         self.overlay_label_action.setVisible(self._is_running)
         self.overlay_selector_action.setVisible(self._is_running)
         self.overlay_label.setVisible(self._is_running)
