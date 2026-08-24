@@ -56,6 +56,7 @@ from hypergen.application.document_session import (
 from hypergen.application.generated_revision_change import GeneratedRevisionChange
 from hypergen.application.run_session import RunSession, RunSessionState
 from hypergen.application.scene_enrichment_workflow import (
+    ENRICHMENT_WORKFLOW_PROMPT_VERSION,
     SceneEnrichmentWorkflow,
     SceneEnrichmentWorkflowError,
 )
@@ -78,7 +79,6 @@ from hypergen.domain.models import (
     UnresolvedCardReference,
 )
 from hypergen.generation.ollama_client import OllamaSettings
-from hypergen.generation.scene_enrichment import SCENE_ENRICHMENT_PROMPT_VERSION
 from hypergen.storage.stack_store import StackStoreError
 from hypergen.ui.card_canvas import CardCanvas
 from hypergen.ui.card_sidebar import CardSidebar
@@ -1368,7 +1368,7 @@ class MainWindow(QMainWindow):
             reason=enrich_reason,
             busy=enrichment_busy,
             model_identifier=load_machine_settings(self.settings).ollama_model,
-            prompt_version=SCENE_ENRICHMENT_PROMPT_VERSION,
+            prompt_version=ENRICHMENT_WORKFLOW_PROMPT_VERSION,
         )
         authoring = not self._is_running
         self.llm_model_combo.setEnabled(authoring and not enrichment_busy)

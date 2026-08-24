@@ -8,12 +8,15 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
+from hypergen.domain.models import ReferenceRole
 from hypergen.generation.errors import ModelResponseError
 from hypergen.generation.ollama_client import OllamaRuntime, OllamaSettings
 from hypergen.generation.scene_enrichment import (
     OllamaSceneEnricher,
+    SceneEnrichmentReference,
     SceneEnrichmentRequest,
     build_scene_enrichment_prompt,
+    compose_profiled_scene,
 )
 
 
@@ -87,6 +90,69 @@ def test_scene_enrichment_prompt_expands_only_authored_visual_details() -> None:
 def test_scene_enrichment_rejects_empty_authored_description() -> None:
     with pytest.raises(ValidationError):
         SceneEnrichmentRequest(scene="")
+
+
+def test_scene_enrichment_injects_only_validated_role_capsules() -> None:
+    prompt = build_scene_enrichment_prompt(
+        SceneEnrichmentRequest(
+            scene="A computer fills the frame",
+            references=(
+                SceneEnrichmentReference(
+                    role=ReferenceRole.STYLE,
+                    capsule=(
+                        "dithered graphics; pixelated; black-and-white; "
+                        "high-contrast"
+                    ),
+                ),
+            ),
+        )
+    )
+
+    assert '"role": "style"' in prompt
+    assert "dithered graphics; pixelated" in prompt
+    assert "Apply every profile within its role" in prompt
+    assert "Do not infer any source content beyond the supplied capsules" in prompt
+    assert "complete source scene Description" not in prompt
+
+
+def test_scene_enrichment_rejects_duplicate_reference_roles() -> None:
+    with pytest.raises(ValidationError, match="each enrichment reference role"):
+        SceneEnrichmentRequest(
+            scene="A computer",
+            references=(
+                SceneEnrichmentReference(
+                    role=ReferenceRole.STYLE,
+                    capsule="dithered graphics",
+                ),
+                SceneEnrichmentReference(
+                    role=ReferenceRole.STYLE,
+                    capsule="oil painting",
+                ),
+            ),
+        )
+
+
+def test_profile_capsules_are_deterministically_preserved_for_generation() -> None:
+    scene = compose_profiled_scene(
+        "A computer fills the frame.",
+        (
+            SceneEnrichmentReference(
+                role=ReferenceRole.STYLE,
+                capsule="dithered graphics; pixelated; black-and-white",
+            ),
+            SceneEnrichmentReference(
+                role=ReferenceRole.SETTING,
+                capsule="windowless basalt laboratory; enclosed",
+            ),
+        ),
+    )
+
+    assert scene == (
+        "A computer fills the frame. "
+        "Render the entire image using dithered graphics; pixelated; "
+        "black-and-white. "
+        "The stable environment is windowless basalt laboratory; enclosed."
+    )
 
 
 def test_ollama_scene_enricher_parses_structured_output() -> None:

@@ -55,28 +55,34 @@ for live Ollama and MFLUX runs.
   Setting. Each accepts at most one other card and rejects self-references, but
   one source card may fill multiple roles. Group roles by active source
   background, feed each unique image to MFLUX once in first-role order, combine
-  its role instructions, and do not inject source Descriptions into either the
-  enrichment or image prompt. Put the effective Description first in the FLUX
-  prompt, then use natural-language sentences to state which attributes come
-  from each numbered image. Do not expose internal headings, role labels, or
-  authority metadata to the image model.
+  its role instructions, and never inject complete source Descriptions into the
+  final enrichment or image prompt. Put the effective Description first in the
+  FLUX prompt, then use natural-language sentences to state which attributes
+  come from each numbered image. Do not expose internal headings, role labels,
+  or authority metadata to the image model.
 - Compose background prompts deterministically from the active revision's
   Enriched Description when present, otherwise its authored Description, plus
-  fixed natural-language instructions for assigned reference roles. Enrich
-  only the authored Description; let FLUX.2 interpret Subject, Style, and
-  Setting from the actual reference images without giving Ollama source-card
-  prose. Enrichment validation keeps authored actions, poses, object states,
-  time, weather, viewpoint, crop, framing, composition, and quoted visible text
-  authoritative. Hotspots must not alter image prompts.
+  fixed natural-language instructions for assigned reference roles. Extract one
+  strict, flat, scalar profile per image/role from immutable generation-time
+  source text, cache it by background, role, Ollama model, extraction prompt,
+  and source text, then give the enrichment model only validated capsules.
+  Keep Subject to identity/appearance, Style to reusable rendering treatment,
+  and Setting to stable place traits. Record observed weather/time/season in
+  Setting extraction output but never inject them as Setting traits. Append
+  capsules deterministically to the Enriched Description so FLUX.2 receives
+  their exact traits alongside the actual reference images. Enrichment
+  validation keeps authored actions, poses, object states, time, weather,
+  viewpoint, crop, framing, composition, and quoted visible text authoritative.
+  Hotspots must not alter image prompts.
 - Keep one Description editor in the Background inspector. Show conditional
   native Original/Enriched radio controls below it, default to Enriched when it
   exists, place compact reference rows in a References group before Enrich and
   Generate, and keep generation provenance in button tooltips. Encode enrichment
-  freshness in the Enrich action from the authored Description, selected Ollama
-  model, and prompt-version provenance: current is a disabled completed state,
-  stale is Re-enrich. Reference changes do not stale text-only enrichment.
-  Clearing the Enriched editor removes that derived value. Enable image
-  generation when either Description source is non-empty.
+  freshness in the Enrich action from the authored Description, exact usable
+  reference backgrounds, selected Ollama model, and combined extraction and
+  enrichment prompt-version provenance: current is a disabled completed state,
+  stale is Re-enrich. Clearing the Enriched editor removes that derived value.
+  Enable image generation when either Description source is non-empty.
 - Support generated backgrounds only; do not add image import. Apply Generate
   and Clear directly through document commands. Keep an existing image visible
   until replacement succeeds. After Description or image generation succeeds,
@@ -89,14 +95,15 @@ for live Ollama and MFLUX runs.
   bar; keep field validation beside its input and the status bar passive. Use a
   blocking decision dialog only when proceeding could lose persisted work and
   Undo cannot recover it.
-- Enrich Description is text-only and requires authored Description text. It
-  must not send current or referenced images to Ollama. Always derive it from
-  the authored Description, never from an existing enrichment or any
-  reference-card Description, then store the result separately through one
-  undoable command. Track source Description, Ollama model, and prompt version
-  so enrichment can be marked Current or Out of date without being cleared;
-  reference changes do not affect text-enrichment freshness. Image generation
-  continues using an out-of-date enrichment until it is cleared or replaced.
+- Enrich Description requires authored Description text and must not send
+  current or referenced images to Ollama. Profile only immutable
+  generation-time source Descriptions through strict role schemas, never expose
+  complete source prose to the final enrichment call, and never derive from an
+  existing enrichment. Store the result separately through one undoable
+  command. Track source Description, exact reference provenance, Ollama model,
+  and both prompt versions so enrichment can be marked Current or Out of date
+  without being cleared. Image generation continues using an out-of-date
+  enrichment until it is cleared or replaced.
   Reject recognized authored object-state reversals after one constrained
   repair attempt and reject newly invented quoted visible text. Shape the
   result for FLUX.2 as one concise natural-language paragraph ordered by

@@ -17,13 +17,29 @@ from hypergen.application.workers import AdapterWorkers, WorkerOperation
 from hypergen.domain.models import (
     Card,
     EnrichedDescription,
+    EnrichmentReferenceSnapshot,
+    ReferenceRole,
+    ResolvedCardReference,
     Stack,
 )
 from hypergen.generation.ollama_client import OllamaRuntime, OllamaSettings
+from hypergen.generation.reference_profiles import (
+    REFERENCE_PROFILE_PROMPT_VERSION,
+    OllamaReferenceProfiler,
+    ReferenceProfileRequest,
+    ReferenceProfileResult,
+)
 from hypergen.generation.scene_enrichment import (
+    SCENE_ENRICHMENT_PROMPT_VERSION,
     OllamaSceneEnricher,
+    SceneEnrichmentReference,
     SceneEnrichmentRequest,
     SceneEnrichmentResult,
+    compose_profiled_scene,
+)
+
+ENRICHMENT_WORKFLOW_PROMPT_VERSION = (
+    f"{SCENE_ENRICHMENT_PROMPT_VERSION}+{REFERENCE_PROFILE_PROMPT_VERSION}"
 )
 
 
@@ -35,7 +51,18 @@ class SceneEnricherProtocol(Protocol):
     def enrich(self, request: SceneEnrichmentRequest) -> SceneEnrichmentResult: ...
 
 
+class ReferenceProfilerProtocol(Protocol):
+    def extract(
+        self,
+        request: ReferenceProfileRequest,
+    ) -> ReferenceProfileResult: ...
+
+
 SceneEnricherFactory = Callable[[OllamaSettings], SceneEnricherProtocol]
+ReferenceProfilerFactory = Callable[
+    [OllamaSettings],
+    ReferenceProfilerProtocol,
+]
 OllamaSettingsProvider = Callable[[], OllamaSettings]
 
 
@@ -43,11 +70,27 @@ def _default_enricher_factory(settings: OllamaSettings) -> SceneEnricherProtocol
     return OllamaSceneEnricher(OllamaRuntime(settings))
 
 
+def _default_profiler_factory(
+    settings: OllamaSettings,
+) -> ReferenceProfilerProtocol:
+    return OllamaReferenceProfiler(OllamaRuntime(settings))
+
+
 @dataclass(frozen=True, slots=True)
 class _EnrichmentTarget:
     stack_id: UUID
     card_id: UUID
     revision_id: UUID
+    source_description: str
+    references: tuple[_EnrichmentReferenceTarget, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _EnrichmentReferenceTarget:
+    role: ReferenceRole
+    card_id: UUID
+    revision_id: UUID
+    background_id: UUID
     source_description: str
 
 
@@ -68,6 +111,7 @@ class SceneEnrichmentWorkflow(QObject):
         settings_provider: OllamaSettingsProvider,
         *,
         enricher_factory: SceneEnricherFactory = _default_enricher_factory,
+        profiler_factory: ReferenceProfilerFactory = _default_profiler_factory,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -75,6 +119,11 @@ class SceneEnrichmentWorkflow(QObject):
         self.workers = workers
         self._settings_provider = settings_provider
         self._enricher_factory = enricher_factory
+        self._profiler_factory = profiler_factory
+        self._profile_cache: dict[
+            tuple[str, str, UUID, ReferenceRole, str],
+            ReferenceProfileResult,
+        ] = {}
         self._operation: WorkerOperation | None = None
         self._request_id: UUID | None = None
         self._target: _EnrichmentTarget | None = None
@@ -101,18 +150,20 @@ class SceneEnrichmentWorkflow(QObject):
             card_id=card.id,
             revision_id=revision.id,
             source_description=revision.description,
+            references=self._reference_targets(document, card),
         )
         settings = self._settings_provider()
         request_id = uuid4()
         self._request_id = request_id
         self._target = target
-        self._set_busy(True, "Enriching Description...")
+        progress = (
+            "Preparing references and enriching Description..."
+            if target.references
+            else "Enriching Description..."
+        )
+        self._set_busy(True, progress)
         operation = self.workers.run_ollama(
-            lambda: self._enricher_factory(settings).enrich(
-                SceneEnrichmentRequest(
-                    scene=target.source_description,
-                )
-            ),
+            lambda: self._run_enrichment(settings, target),
             stage="enriching Description",
         )
         self._operation = operation
@@ -189,6 +240,7 @@ class SceneEnrichmentWorkflow(QObject):
                 value=EnrichedDescription(
                     text=result.scene,
                     source_description=target.source_description,
+                    references=_reference_snapshots(target.references),
                     model_identifier=result.model_identifier,
                     prompt_version=result.prompt_version,
                 ),
@@ -244,7 +296,96 @@ class SceneEnrichmentWorkflow(QObject):
             card is not None
             and card.active_revision_id == target.revision_id
             and card.active_revision.description == target.source_description
+            and self._reference_targets(document, card) == target.references
         )
+
+    def _run_enrichment(
+        self,
+        settings: OllamaSettings,
+        target: _EnrichmentTarget,
+    ) -> SceneEnrichmentResult:
+        profiles = tuple(
+            self._profile_reference(settings, reference)
+            for reference in target.references
+        )
+        references = tuple(
+            SceneEnrichmentReference(
+                role=profile.role,
+                capsule=profile.capsule,
+            )
+            for profile in profiles
+        )
+        result = self._enricher_factory(settings).enrich(
+            SceneEnrichmentRequest(
+                scene=target.source_description,
+                references=references,
+            )
+        )
+        return result.model_copy(
+            update={
+                "scene": compose_profiled_scene(result.scene, references),
+                "prompt_version": ENRICHMENT_WORKFLOW_PROMPT_VERSION,
+            }
+        )
+
+    def _profile_reference(
+        self,
+        settings: OllamaSettings,
+        target: _EnrichmentReferenceTarget,
+    ) -> ReferenceProfileResult:
+        key = (
+            settings.model,
+            REFERENCE_PROFILE_PROMPT_VERSION,
+            target.background_id,
+            target.role,
+            target.source_description,
+        )
+        cached = self._profile_cache.get(key)
+        if cached is not None:
+            return cached
+        result = self._profiler_factory(settings).extract(
+            ReferenceProfileRequest(
+                role=target.role,
+                source_description=target.source_description,
+            )
+        )
+        self._profile_cache[key] = result
+        return result
+
+    @staticmethod
+    def _reference_targets(
+        document: Stack,
+        card: Card,
+    ) -> tuple[_EnrichmentReferenceTarget, ...]:
+        targets: list[_EnrichmentReferenceTarget] = []
+        for role in ReferenceRole:
+            assignment = getattr(card.active_revision, role.value)
+            if not isinstance(assignment, ResolvedCardReference):
+                continue
+            source = next(
+                candidate
+                for candidate in document.cards
+                if candidate.id == assignment.target_card_id
+            )
+            revision = source.active_revision
+            background = revision.background
+            if background is None:
+                continue
+            source_description = (
+                background.generation_metadata.inputs.effective_description
+            )
+            if not source_description.strip():
+                continue
+            targets.append(
+                _EnrichmentReferenceTarget(
+                    role=role,
+                    card_id=source.id,
+                    revision_id=revision.id,
+                    background_id=background.id,
+                    source_description=source_description,
+                )
+            )
+        return tuple(targets)
 
     @staticmethod
     def _card(document: Stack, card_id: UUID) -> Card:
@@ -258,9 +399,37 @@ class SceneEnrichmentWorkflow(QObject):
 
 
 __all__ = [
+    "ENRICHMENT_WORKFLOW_PROMPT_VERSION",
     "OllamaSettingsProvider",
+    "ReferenceProfilerFactory",
+    "ReferenceProfilerProtocol",
     "SceneEnricherFactory",
     "SceneEnricherProtocol",
     "SceneEnrichmentWorkflow",
     "SceneEnrichmentWorkflowError",
+    "enrichment_reference_snapshots",
 ]
+
+
+def _reference_snapshots(
+    targets: tuple[_EnrichmentReferenceTarget, ...],
+) -> tuple[EnrichmentReferenceSnapshot, ...]:
+    return tuple(
+        EnrichmentReferenceSnapshot(
+            role=target.role,
+            card_id=target.card_id,
+            revision_id=target.revision_id,
+            background_id=target.background_id,
+        )
+        for target in targets
+    )
+
+
+def enrichment_reference_snapshots(
+    document: Stack,
+    card: Card,
+) -> tuple[EnrichmentReferenceSnapshot, ...]:
+    """Return exact usable reference provenance for enrichment freshness."""
+    return _reference_snapshots(
+        SceneEnrichmentWorkflow._reference_targets(document, card)
+    )

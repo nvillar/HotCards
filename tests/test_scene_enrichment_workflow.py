@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -33,6 +34,14 @@ from hypergen.domain.models import (
     Stack,
 )
 from hypergen.generation.ollama_client import OllamaSettings
+from hypergen.generation.reference_profiles import (
+    REFERENCE_PROFILE_PROMPT_VERSION,
+    ReferenceProfileRequest,
+    ReferenceProfileResult,
+    SettingReferenceProfile,
+    StyleReferenceProfile,
+    SubjectReferenceProfile,
+)
 from hypergen.generation.scene_enrichment import (
     SCENE_ENRICHMENT_PROMPT_VERSION,
     SceneEnrichmentRequest,
@@ -81,6 +90,39 @@ class RecordingEnricher:
         return _result()
 
 
+class RecordingProfiler:
+    def __init__(self) -> None:
+        self.requests: list[ReferenceProfileRequest] = []
+
+    def extract(
+        self,
+        request: ReferenceProfileRequest,
+    ) -> ReferenceProfileResult:
+        self.requests.append(request)
+        profiles = {
+            ReferenceRole.SUBJECT: (
+                SubjectReferenceProfile(identity="black basalt castle"),
+                "black basalt castle",
+            ),
+            ReferenceRole.STYLE: (
+                StyleReferenceProfile(medium="dithered graphics"),
+                "dithered graphics",
+            ),
+            ReferenceRole.SETTING: (
+                SettingReferenceProfile(environment="mountain castle"),
+                "mountain castle",
+            ),
+        }
+        profile, capsule = profiles[request.role]
+        return ReferenceProfileResult(
+            role=request.role,
+            profile=profile,
+            capsule=capsule,
+            model_identifier="test",
+            prompt_version=REFERENCE_PROFILE_PROMPT_VERSION,
+        )
+
+
 def _result(scene: str = "A richer courtyard") -> SceneEnrichmentResult:
     return SceneEnrichmentResult(
         scene=scene,
@@ -94,24 +136,28 @@ def _result(scene: str = "A richer courtyard") -> SceneEnrichmentResult:
 def _workflow(
     card: Card,
     *other_cards: Card,
+    settings_provider: Callable[[], OllamaSettings] | None = None,
 ) -> tuple[
     SceneEnrichmentWorkflow,
     DocumentController,
     FakeWorkers,
     RecordingEnricher,
+    RecordingProfiler,
 ]:
     controller = DocumentController(
         Stack(name="Stack", cards=(card, *other_cards))
     )
     workers = FakeWorkers()
     enricher = RecordingEnricher()
+    profiler = RecordingProfiler()
     workflow = SceneEnrichmentWorkflow(
         controller,
         workers,  # type: ignore[arg-type]
-        lambda: OllamaSettings(model="test"),
+        settings_provider or (lambda: OllamaSettings(model="test")),
         enricher_factory=lambda _settings: enricher,
+        profiler_factory=lambda _settings: profiler,
     )
-    return workflow, controller, workers, enricher
+    return workflow, controller, workers, enricher, profiler
 
 
 def _background(description: str) -> GeneratedBackground:
@@ -140,7 +186,7 @@ def test_enrichment_applies_immediately_with_one_undo_boundary() -> None:
         name="Card",
         revisions=(CardRevision(description="A courtyard"),),
     )
-    workflow, controller, workers, enricher = _workflow(card)
+    workflow, controller, workers, enricher, _profiler = _workflow(card)
     applied: list[GeneratedRevisionChange] = []
     workflow.generation_applied.connect(applied.append)
 
@@ -166,7 +212,7 @@ def test_enrichment_applies_immediately_with_one_undo_boundary() -> None:
 
 def test_empty_description_is_rejected_even_with_an_image() -> None:
     card = Card(name="Card")
-    workflow, _controller, _workers, _enricher = _workflow(card)
+    workflow, _controller, _workers, _enricher, _profiler = _workflow(card)
 
     with pytest.raises(SceneEnrichmentWorkflowError, match="Description"):
         workflow.start(card.id)
@@ -177,7 +223,7 @@ def test_stale_or_cancelled_results_do_not_apply() -> None:
         name="Card",
         revisions=(CardRevision(description="Original"),),
     )
-    workflow, controller, workers, _enricher = _workflow(card)
+    workflow, controller, workers, _enricher, _profiler = _workflow(card)
     failures: list[object] = []
     workflow.failed.connect(failures.append)
 
@@ -209,7 +255,7 @@ def test_result_does_not_apply_after_revision_switch() -> None:
         revisions=(first, second),
         active_revision_id=first.id,
     )
-    workflow, controller, workers, _enricher = _workflow(card)
+    workflow, controller, workers, _enricher, _profiler = _workflow(card)
     failures: list[object] = []
     workflow.failed.connect(failures.append)
 
@@ -223,7 +269,7 @@ def test_result_does_not_apply_after_revision_switch() -> None:
     assert "changed before enrichment completed" in str(failures[-1])
 
 
-def test_enrichment_does_not_send_reference_descriptions_to_ollama() -> None:
+def test_enrichment_sends_only_role_safe_reference_capsules() -> None:
     source = Card(
         name="Castle",
         revisions=(
@@ -247,7 +293,10 @@ def test_enrichment_does_not_send_reference_descriptions_to_ollama() -> None:
             ),
         ),
     )
-    workflow, controller, workers, enricher = _workflow(target, source)
+    workflow, controller, workers, enricher, profiler = _workflow(
+        target,
+        source,
+    )
 
     workflow.start(target.id)
     work = workers.calls[0]
@@ -256,14 +305,41 @@ def test_enrichment_does_not_send_reference_descriptions_to_ollama() -> None:
 
     request = enricher.requests[0]
     assert request.scene == "A guard approaches the same castle"
-    assert not hasattr(request, "references")
+    assert [(item.role, item.capsule) for item in request.references] == [
+        (ReferenceRole.SUBJECT, "black basalt castle"),
+        (ReferenceRole.SETTING, "mountain castle"),
+    ]
+    assert [item.role for item in profiler.requests] == [
+        ReferenceRole.SUBJECT,
+        ReferenceRole.SETTING,
+    ]
+    assert all(
+        item.source_description
+        == (
+            "A black basalt castle with copper roofs, viewed from "
+            "the drawbridge"
+        )
+        for item in profiler.requests
+    )
     enriched = controller.document.cards[0].active_revision.enriched_description
     assert enriched is not None
-    assert enriched.text == "A richer courtyard"
-    assert enriched.references == ()
+    assert enriched.text == (
+        "A richer courtyard "
+        "The referenced subject's stable identity and appearance are "
+        "black basalt castle. "
+        "The stable environment is mountain castle."
+    )
+    assert [item.role for item in enriched.references] == [
+        ReferenceRole.SUBJECT,
+        ReferenceRole.SETTING,
+    ]
+    assert all(
+        item.background_id == source.active_revision.background.id
+        for item in enriched.references
+    )
 
 
-def test_reference_changes_do_not_invalidate_text_only_enrichment() -> None:
+def test_reference_changes_invalidate_in_flight_enrichment() -> None:
     source = Card(
         name="Castle",
         revisions=(
@@ -281,7 +357,10 @@ def test_reference_changes_do_not_invalidate_text_only_enrichment() -> None:
             ),
         ),
     )
-    workflow, controller, workers, _enricher = _workflow(target, source)
+    workflow, controller, workers, _enricher, _profiler = _workflow(
+        target,
+        source,
+    )
     failures: list[object] = []
     workflow.failed.connect(failures.append)
 
@@ -299,9 +378,8 @@ def test_reference_changes_do_not_invalidate_text_only_enrichment() -> None:
     workers.operations[0].succeeded.emit(work())
 
     enriched = controller.document.cards[0].active_revision.enriched_description
-    assert enriched is not None
-    assert enriched.text == "A richer courtyard"
-    assert failures == []
+    assert enriched is None
+    assert "changed before enrichment completed" in str(failures[-1])
 
 
 def test_editing_current_source_text_does_not_stale_reference_provenance() -> None:
@@ -323,9 +401,14 @@ def test_editing_current_source_text_does_not_stale_reference_provenance() -> No
             ),
         ),
     )
-    workflow, controller, workers, _enricher = _workflow(target, source)
+    workflow, controller, workers, _enricher, profiler = _workflow(
+        target,
+        source,
+    )
 
     workflow.start(target.id)
+    work = workers.calls[0]
+    assert callable(work)
     controller.execute(
         EditRevisionDescriptionCommand(
             card_id=source.id,
@@ -333,8 +416,53 @@ def test_editing_current_source_text_does_not_stale_reference_provenance() -> No
             value="New source text without regeneration",
         )
     )
-    workers.operations[0].succeeded.emit(_result("Enriched gate"))
+    workers.operations[0].succeeded.emit(work())
 
     enriched = controller.document.cards[0].active_revision.enriched_description
     assert enriched is not None
-    assert enriched.text == "Enriched gate"
+    assert enriched.text.endswith("The stable environment is mountain castle.")
+    assert profiler.requests[0].source_description == "Generation-time castle text"
+
+
+def test_reference_profiles_are_cached_per_background_role_and_model() -> None:
+    source = Card(
+        name="Style source",
+        revisions=(
+            CardRevision(background=_background("Dithered monochrome pixels")),
+        ),
+    )
+    target = Card(
+        name="Computer",
+        revisions=(
+            CardRevision(
+                description="A computer",
+                style=ResolvedCardReference(target_card_id=source.id),
+            ),
+        ),
+    )
+    selected_model = ["test"]
+    workflow, _controller, workers, _enricher, profiler = _workflow(
+        target,
+        source,
+        settings_provider=lambda: OllamaSettings(model=selected_model[0]),
+    )
+
+    workflow.start(target.id)
+    first = workers.calls[0]
+    assert callable(first)
+    workers.operations[0].succeeded.emit(first())
+    workflow.start(target.id)
+    second = workers.calls[1]
+    assert callable(second)
+    workers.operations[1].succeeded.emit(second())
+    selected_model[0] = "other-model"
+    workflow.start(target.id)
+    third = workers.calls[2]
+    assert callable(third)
+    workers.operations[2].succeeded.emit(third())
+
+    assert len(profiler.requests) == 2
+    assert all(
+        request.role is ReferenceRole.STYLE
+        for request in profiler.requests
+    )

@@ -42,6 +42,9 @@ from hypergen.application.commands import (
     SetRevisionReferenceCommand,
 )
 from hypergen.application.document_controller import DocumentController
+from hypergen.application.scene_enrichment_workflow import (
+    enrichment_reference_snapshots,
+)
 from hypergen.domain.models import (
     Card,
     CardRevision,
@@ -598,7 +601,7 @@ class Inspector(QWidget):
         self.references_label.setText(
             f"References ({len(roles)})" if roles else "References"
         )
-        self._enrich_using_text = "Using: Description"
+        self._enrich_using_text = f"Using: Description{reference_suffix}"
         enrichment = revision.enriched_description
         if enrichment is None:
             generation_sources = "Description"
@@ -611,6 +614,7 @@ class Inspector(QWidget):
             )
             self._enrichment_current = enrichment.is_current(
                 source_description=authored_description,
+                references=enrichment_reference_snapshots(document, card),
                 model_identifier=self._enrichment_model_identifier,
                 prompt_version=self._enrichment_prompt_version,
             )
@@ -685,6 +689,10 @@ class Inspector(QWidget):
             self._enrichment_current = (
                 card.active_revision.enriched_description.is_current(
                     source_description=source_description,
+                    references=enrichment_reference_snapshots(
+                        self.controller.document,
+                        card,
+                    ),
                     model_identifier=self._enrichment_model_identifier,
                     prompt_version=self._enrichment_prompt_version,
                 )
