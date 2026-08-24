@@ -10,6 +10,7 @@ import shutil
 import sys
 import tempfile
 from collections.abc import Callable
+from copy import deepcopy
 from pathlib import Path, PurePosixPath
 from uuid import UUID
 
@@ -21,6 +22,7 @@ from hypergen.domain.models import CURRENT_SCHEMA_VERSION, Stack
 STACK_FILENAME = "stack.json"
 ASSET_ROOT = PurePosixPath("assets/cards")
 logger = logging.getLogger(__name__)
+LEGACY_SCHEMA_VERSION = 5
 
 
 class StackStoreError(ValueError):
@@ -40,6 +42,65 @@ def _relative_asset_path(value: str) -> PurePosixPath:
 
 def _image_asset_path(card_id: UUID, asset_id: UUID) -> PurePosixPath:
     return ASSET_ROOT / str(card_id) / f"image-{asset_id}.png"
+
+
+def _migrate_v5_payload(payload: dict[str, object]) -> dict[str, object]:
+    """Convert role-based references and Enriched text to schema v6."""
+    migrated = deepcopy(payload)
+    cards = migrated.get("cards")
+    if isinstance(cards, list):
+        for card in cards:
+            if not isinstance(card, dict):
+                continue
+            revisions = card.get("revisions")
+            if not isinstance(revisions, list):
+                continue
+            for revision in revisions:
+                if not isinstance(revision, dict):
+                    continue
+                assignments = [
+                    (role, revision.pop(role, None))
+                    for role in ("subject", "style", "setting")
+                ]
+                selected_role, selected_reference = next(
+                    (
+                        (role, reference)
+                        for role, reference in assignments
+                        if reference is not None
+                    ),
+                    (None, None),
+                )
+                revision["reference"] = selected_reference
+
+                enriched = revision.pop("enriched_description", None)
+                if not isinstance(enriched, dict):
+                    revision["image_prompt"] = None
+                    continue
+                selected_snapshot = None
+                references = enriched.get("references")
+                if isinstance(references, list):
+                    selected_snapshot = next(
+                        (
+                            {
+                                "card_id": snapshot.get("card_id"),
+                                "revision_id": snapshot.get("revision_id"),
+                                "background_id": snapshot.get("background_id"),
+                            }
+                            for snapshot in references
+                            if isinstance(snapshot, dict)
+                            and snapshot.get("role") == selected_role
+                        ),
+                        None,
+                    )
+                revision["image_prompt"] = {
+                    "text": enriched.get("text"),
+                    "source_description": enriched.get("source_description", ""),
+                    "reference": selected_snapshot,
+                    "model_identifier": enriched.get("model_identifier"),
+                    "prompt_version": enriched.get("prompt_version"),
+                }
+    migrated["schema_version"] = CURRENT_SCHEMA_VERSION
+    return migrated
 
 
 def _fsync_directory(path: Path) -> None:
@@ -120,7 +181,7 @@ class StackStore:
                     )
 
     def load(self) -> Stack:
-        """Load and validate an exact-current-schema bundle document."""
+        """Load, migrate when supported, and validate one bundle document."""
         try:
             payload = json.loads(self.stack_path.read_text(encoding="utf-8"))
         except FileNotFoundError as error:
@@ -132,11 +193,16 @@ class StackStore:
         if not isinstance(payload, dict):
             raise StackStoreError("stack document root must be a JSON object")
         version = payload.get("schema_version")
-        if type(version) is not int or version != CURRENT_SCHEMA_VERSION:
+        if type(version) is not int or version not in {
+            LEGACY_SCHEMA_VERSION,
+            CURRENT_SCHEMA_VERSION,
+        }:
             raise StackStoreError(
                 "invalid stack document: schema_version must be "
-                f"{CURRENT_SCHEMA_VERSION}"
+                f"{LEGACY_SCHEMA_VERSION} or {CURRENT_SCHEMA_VERSION}"
             )
+        if version == LEGACY_SCHEMA_VERSION:
+            payload = _migrate_v5_payload(payload)
         try:
             stack = Stack.model_validate_json(json.dumps(payload))
         except ValidationError as error:

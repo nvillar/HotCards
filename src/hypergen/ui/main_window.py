@@ -54,12 +54,12 @@ from hypergen.application.document_session import (
     DocumentSessionState,
 )
 from hypergen.application.generated_revision_change import GeneratedRevisionChange
-from hypergen.application.run_session import RunSession, RunSessionState
-from hypergen.application.scene_enrichment_workflow import (
-    ENRICHMENT_WORKFLOW_PROMPT_VERSION,
-    SceneEnrichmentWorkflow,
-    SceneEnrichmentWorkflowError,
+from hypergen.application.image_prompt_workflow import (
+    IMAGE_PROMPT_PREPARATION_VERSION,
+    ImagePromptWorkflow,
+    ImagePromptWorkflowError,
 )
+from hypergen.application.run_session import RunSession, RunSessionState
 from hypergen.application.workers import (
     AdapterKind,
     AdapterWorkers,
@@ -119,7 +119,7 @@ class MainWindow(QMainWindow):
         settings_dialog_factory: SettingsDialogFactory = SettingsDialog,
         document_session: DocumentSession | None = None,
         background_workflow: BackgroundWorkflow | None = None,
-        scene_enrichment_workflow: SceneEnrichmentWorkflow | None = None,
+        image_prompt_workflow: ImagePromptWorkflow | None = None,
         project_directory: Path | None = None,
         start_diagnostics: bool = True,
         owns_workers: bool = False,
@@ -130,7 +130,7 @@ class MainWindow(QMainWindow):
         self.settings = settings if settings is not None else QSettings()
         self.document_session = document_session
         self.background_workflow = background_workflow
-        self.scene_enrichment_workflow = scene_enrichment_workflow
+        self.image_prompt_workflow = image_prompt_workflow
         self.project_directory = project_directory or default_project_directory()
         self._availability_checks = dict(availability_checks or {})
         self._availability_checks_factory = availability_checks_factory
@@ -162,11 +162,12 @@ class MainWindow(QMainWindow):
                 self._background_generation_settings,
                 parent=self,
             )
-        if self.scene_enrichment_workflow is None:
-            self.scene_enrichment_workflow = SceneEnrichmentWorkflow(
+        if self.image_prompt_workflow is None:
+            self.image_prompt_workflow = ImagePromptWorkflow(
                 controller,
                 workers,
                 self._ollama_settings,
+                reference_image_resolver=self._reference_image_path,
                 parent=self,
             )
         self.setWindowTitle(f"HyperGen — {controller.document.name}")
@@ -383,7 +384,9 @@ class MainWindow(QMainWindow):
         self.inspector.inspector_tabs.currentChanged.connect(
             self._inspector_tab_changed
         )
-        self.inspector.enrich_scene_requested.connect(self._enrich_scene)
+        self.inspector.prepare_image_prompt_requested.connect(
+            self._prepare_image_prompt
+        )
         self.inspector.generate_background_requested.connect(self._generate_background)
         self.inspector.change_applied.connect(self._show_undo_notification)
         self.inspector.hotspot_selected.connect(self.card_canvas.select_interaction)
@@ -406,17 +409,17 @@ class MainWindow(QMainWindow):
             self.background_workflow.generation_applied.connect(
                 self._show_generated_revision_notification
             )
-        self.scene_enrichment_workflow.busy_changed.connect(
+        self.image_prompt_workflow.busy_changed.connect(
             lambda _busy: self._update_generation_actions()
         )
-        self.scene_enrichment_workflow.progress_changed.connect(
-            self._scene_enrichment_progress_changed
+        self.image_prompt_workflow.progress_changed.connect(
+            self._image_prompt_progress_changed
         )
-        self.scene_enrichment_workflow.failed.connect(self._scene_enrichment_failed)
-        self.scene_enrichment_workflow.document_changed.connect(self.render_document)
-        self.scene_enrichment_workflow.change_applied.connect(self._show_undo_notification)
-        self.scene_enrichment_workflow.generation_applied.connect(
-            self._scene_enrichment_applied
+        self.image_prompt_workflow.failed.connect(self._image_prompt_failed)
+        self.image_prompt_workflow.document_changed.connect(self.render_document)
+        self.image_prompt_workflow.change_applied.connect(self._show_undo_notification)
+        self.image_prompt_workflow.generation_applied.connect(
+            self._image_prompt_applied
         )
         self.pane_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.pane_splitter.setObjectName("threePaneSplitter")
@@ -589,7 +592,7 @@ class MainWindow(QMainWindow):
             return
         selected_card_id = card_id if isinstance(card_id, UUID) else None
         if selected_card_id != self._selected_card_id:
-            self.scene_enrichment_workflow.cancel()
+            self.image_prompt_workflow.cancel()
         self._selected_card_id = selected_card_id
         if self.card_sidebar.selected_card_id != self._selected_card_id:
             self.card_sidebar.select_card(self._selected_card_id)
@@ -661,7 +664,7 @@ class MainWindow(QMainWindow):
         ):
             return
         self.notification_bar.clear_notification("background-error")
-        self.scene_enrichment_workflow.cancel()
+        self.image_prompt_workflow.cancel()
         try:
             workflow.duplicate_revision(card_id, revision_id)
         except (BackgroundWorkflowError, CommandError, ValidationError) as error:
@@ -711,11 +714,11 @@ class MainWindow(QMainWindow):
             ),
         )
 
-    def _scene_enrichment_applied(self, change: object) -> None:
+    def _image_prompt_applied(self, change: object) -> None:
         if self._is_running:
             return
         if isinstance(change, GeneratedRevisionChange):
-            self.inspector.show_enriched_description(
+            self.inspector.show_image_prompt(
                 change.card_id,
                 change.revision_id,
             )
@@ -724,7 +727,7 @@ class MainWindow(QMainWindow):
     def _undo_notification(self) -> None:
         if self._is_running:
             return
-        self.scene_enrichment_workflow.cancel()
+        self.image_prompt_workflow.cancel()
         token = self._undo_notification_token
         self._clear_undo_notification()
         if token is not None and self.controller.undo_if_current(token):
@@ -763,7 +766,7 @@ class MainWindow(QMainWindow):
         if revision is None:
             self._clear_undo_notification()
             return
-        self.scene_enrichment_workflow.cancel()
+        self.image_prompt_workflow.cancel()
         self._clear_undo_notification()
         command = CreateGeneratedRevisionCommand(
             card_id=change.card_id,
@@ -923,24 +926,24 @@ class MainWindow(QMainWindow):
             self._show_document_error("Could Not Save Stack As", str(error))
             return
         self._cancel_background_generation()
-        self.scene_enrichment_workflow.cancel()
+        self.image_prompt_workflow.cancel()
         self._clear_undo_notification()
         self._update_document_actions()
 
     def undo(self) -> None:
-        self.scene_enrichment_workflow.cancel()
+        self.image_prompt_workflow.cancel()
         self._clear_undo_notification()
         if self.controller.undo():
             self.render_document()
 
     def redo(self) -> None:
-        self.scene_enrichment_workflow.cancel()
+        self.image_prompt_workflow.cancel()
         self._clear_undo_notification()
         if self.controller.redo():
             self.render_document()
 
     def _authoring_inputs_changed(self) -> None:
-        self.scene_enrichment_workflow.cancel()
+        self.image_prompt_workflow.cancel()
         self._update_generation_actions()
 
     def _primary_empty_action(self) -> None:
@@ -976,7 +979,7 @@ class MainWindow(QMainWindow):
         ):
             self._cancel_background_generation()
         previous_token = self.controller.current_undo_token
-        self.scene_enrichment_workflow.cancel()
+        self.image_prompt_workflow.cancel()
         self.card_sidebar.delete_card(card.id)
         consequences: list[str] = []
         if inbound_link_count:
@@ -997,7 +1000,7 @@ class MainWindow(QMainWindow):
 
     def _document_replaced(self, _document: object) -> None:
         self._cancel_background_generation()
-        self.scene_enrichment_workflow.cancel()
+        self.image_prompt_workflow.cancel()
         self._clear_undo_notification()
         self._rendered_card_id = None
         self._card_name_commit_failed = False
@@ -1117,31 +1120,31 @@ class MainWindow(QMainWindow):
         self.render_document()
         self._update_generation_actions()
 
-    def _enrich_scene(self) -> None:
+    def _prepare_image_prompt(self) -> None:
         card_id = self._selected_card_id
         if card_id is None or not self._commit_authoring_metadata():
             return
-        self.notification_bar.clear_notification("enrichment-error")
+        self.notification_bar.clear_notification("image-prompt-error")
         try:
-            self.scene_enrichment_workflow.start(card_id)
-        except SceneEnrichmentWorkflowError as error:
+            self.image_prompt_workflow.start(card_id)
+        except ImagePromptWorkflowError as error:
             self._show_error(
-                "enrichment-error",
-                "Could not enrich Description",
+                "image-prompt-error",
+                "Could not prepare Image Prompt",
                 detail=str(error),
             )
         self.render_document()
         self._update_generation_actions()
 
-    def _scene_enrichment_progress_changed(self, _message: str) -> None:
-        self.notification_bar.clear_notification("enrichment-error")
+    def _image_prompt_progress_changed(self, _message: str) -> None:
+        self.notification_bar.clear_notification("image-prompt-error")
         self._update_generation_actions()
 
-    def _scene_enrichment_failed(self, failure: object) -> None:
+    def _image_prompt_failed(self, failure: object) -> None:
         detail = failure.message if isinstance(failure, WorkerFailure) else str(failure)
         self._show_error(
-            "enrichment-error",
-            "Description enrichment failed",
+            "image-prompt-error",
+            "Image Prompt preparation failed",
             detail=detail,
         )
         self._update_generation_actions()
@@ -1152,7 +1155,7 @@ class MainWindow(QMainWindow):
         if workflow is None or card_id is None:
             return
         self.notification_bar.clear_notification("background-error")
-        self.scene_enrichment_workflow.cancel()
+        self.image_prompt_workflow.cancel()
         try:
             workflow.clear_background(card_id)
         except (
@@ -1174,7 +1177,7 @@ class MainWindow(QMainWindow):
         ):
             return
         self.notification_bar.clear_notification("background-error")
-        self.scene_enrichment_workflow.cancel()
+        self.image_prompt_workflow.cancel()
         try:
             self.background_workflow.activate_revision(
                 self._selected_card_id,
@@ -1196,7 +1199,7 @@ class MainWindow(QMainWindow):
             return
         was_generating = self.background_workflow.is_generating_for(self._selected_card_id)
         self.notification_bar.clear_notification("background-error")
-        self.scene_enrichment_workflow.cancel()
+        self.image_prompt_workflow.cancel()
         try:
             self.background_workflow.delete_revision(
                 self._selected_card_id,
@@ -1249,15 +1252,14 @@ class MainWindow(QMainWindow):
                 model for model in result if isinstance(model, str) and model
             )
             self._set_installed_ollama_models(models)
-            selected = load_machine_settings(self.settings).ollama_model
-            if selected not in models:
+            if not models:
                 self.apply_availability_diagnostic(
                     AvailabilityDiagnostic(
                         adapter=adapter,
                         available=False,
                         message=(
-                            f"Ollama model {selected!r} is not installed. "
-                            f"Run `ollama pull {selected}` or select an installed model."
+                            "No installed Ollama model advertises vision support. "
+                            "Install a vision-capable model, then check services again."
                         ),
                     )
                 )
@@ -1314,9 +1316,33 @@ class MainWindow(QMainWindow):
             and self._selected_card_id is not None
             and not self._is_running
         )
-        has_render_prompt = self.inspector.has_render_prompt_input()
         mflux_available = self._availability[AdapterKind.MFLUX] is True
         ollama_available = self._availability[AdapterKind.OLLAMA] is True
+        image_prompt_busy = self.image_prompt_workflow.busy
+        has_description_input = self.inspector.has_description_input()
+        can_enrich = (
+            has_card
+            and has_description_input
+            and ollama_available
+            and not image_prompt_busy
+        )
+        enrich_reason = "Ready to prepare Image Prompt"
+        if not has_card:
+            enrich_reason = "Select a card in a saved stack"
+        elif not has_description_input:
+            enrich_reason = "Enter a Description before preparing an Image Prompt"
+        elif image_prompt_busy:
+            enrich_reason = "Image Prompt preparation is running"
+        elif not ollama_available:
+            enrich_reason = self._action_diagnostic(AdapterKind.OLLAMA)
+        self.inspector.set_image_prompt_capabilities(
+            can_enrich=can_enrich,
+            reason=enrich_reason,
+            busy=image_prompt_busy,
+            model_identifier=load_machine_settings(self.settings).ollama_model,
+            prompt_version=IMAGE_PROMPT_PREPARATION_VERSION,
+        )
+        has_render_prompt = self.inspector.has_current_image_prompt()
         workflow_busy = (
             self.background_workflow.busy if self.background_workflow is not None else False
         )
@@ -1341,9 +1367,7 @@ class MainWindow(QMainWindow):
                 )
             )
         elif not has_render_prompt:
-            generate_reason = (
-                "Enter a Description or Enriched Description before generating"
-            )
+            generate_reason = "Prepare a current Image Prompt before generating"
         elif not mflux_available:
             generate_reason = self._action_diagnostic(AdapterKind.MFLUX)
         self.inspector.set_background_capabilities(
@@ -1361,27 +1385,15 @@ class MainWindow(QMainWindow):
             if has_image
             else "This revision has no image"
         )
-        enrichment_busy = self.scene_enrichment_workflow.busy
-        has_enrichment_input = self.inspector.has_description_input()
-        can_enrich = has_card and has_enrichment_input and ollama_available and not enrichment_busy
-        enrich_reason = "Ready to enrich Description"
-        if not has_card:
-            enrich_reason = "Select a card in a saved stack"
-        elif not has_enrichment_input:
-            enrich_reason = "Enter a Description before enriching"
-        elif enrichment_busy:
-            enrich_reason = "Description enrichment is running"
-        elif not ollama_available:
-            enrich_reason = self._action_diagnostic(AdapterKind.OLLAMA)
-        self.inspector.set_scene_enrichment_capabilities(
-            can_enrich=can_enrich,
-            reason=enrich_reason,
-            busy=enrichment_busy,
-            model_identifier=load_machine_settings(self.settings).ollama_model,
-            prompt_version=ENRICHMENT_WORKFLOW_PROMPT_VERSION,
-        )
         authoring = not self._is_running
-        self.llm_model_combo.setEnabled(authoring and not enrichment_busy)
+        has_ollama_model = any(
+            isinstance(self.llm_model_combo.itemData(index), str)
+            and bool(self.llm_model_combo.itemData(index))
+            for index in range(self.llm_model_combo.count())
+        )
+        self.llm_model_combo.setEnabled(
+            authoring and not image_prompt_busy and has_ollama_model
+        )
         self.image_model_combo.setEnabled(authoring and not workflow_busy)
         pending = [
             adapter for adapter, available in self._availability.items() if available is None
@@ -1446,14 +1458,18 @@ class MainWindow(QMainWindow):
             self.llm_model_combo.clear()
             for model in models:
                 self.llm_model_combo.addItem(model, model)
-            if selected not in models:
+            if not models:
                 self.llm_model_combo.addItem(
-                    f"{selected} (not installed)",
-                    selected,
+                    "No vision-capable models installed",
+                    None,
                 )
-            self.llm_model_combo.setCurrentIndex(
-                self.llm_model_combo.findData(selected)
-            )
+                return
+            if selected not in models:
+                selected = models[0]
+                self.image_prompt_workflow.cancel()
+                self.settings.setValue(OLLAMA_MODEL_KEY, selected)
+                self.settings.sync()
+            self.llm_model_combo.setCurrentIndex(self.llm_model_combo.findData(selected))
 
     def _llm_model_changed(self, index: int) -> None:
         model = self.llm_model_combo.itemData(index)
@@ -1461,7 +1477,7 @@ class MainWindow(QMainWindow):
             return
         if model == load_machine_settings(self.settings).ollama_model:
             return
-        self.scene_enrichment_workflow.cancel()
+        self.image_prompt_workflow.cancel()
         self.settings.setValue(OLLAMA_MODEL_KEY, model)
         self.settings.sync()
         self._restart_availability_checks()
@@ -1526,6 +1542,13 @@ class MainWindow(QMainWindow):
             return self.document_session.store.asset_path(image_path)
         except StackStoreError:
             return None
+
+    def _reference_image_path(self, image_path: str) -> Path:
+        if self.document_session is None or self.document_session.store is None:
+            raise ImagePromptWorkflowError(
+                "save the stack before using a Reference image"
+            )
+        return self.document_session.store.asset_path(image_path)
 
     def _create_hotspot_polygon(
         self,
@@ -1722,6 +1745,7 @@ class MainWindow(QMainWindow):
             quantization=values.quantization,
             random_seed=values.random_seed,
             fixed_seed=values.fixed_seed,
+            ollama_model=values.ollama_model,
         )
 
     def _ollama_settings(self) -> OllamaSettings:
@@ -1891,7 +1915,7 @@ class MainWindow(QMainWindow):
 
     def _cancel_ai_activity_for_run(self) -> None:
         self._cancel_diagnostics()
-        self.scene_enrichment_workflow.cancel()
+        self.image_prompt_workflow.cancel()
         if self.background_workflow is not None and self.background_workflow.busy:
             self.background_workflow.cancel()
 
@@ -1945,7 +1969,7 @@ class MainWindow(QMainWindow):
         self._cancel_background_generation()
         if self.background_workflow is not None:
             self.background_workflow.close()
-        self.scene_enrichment_workflow.close()
+        self.image_prompt_workflow.close()
         if self._owns_workers:
             self.workers.shutdown(wait_milliseconds=100)
         super().closeEvent(event)

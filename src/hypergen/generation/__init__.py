@@ -8,11 +8,10 @@ from hypergen.generation.errors import (
     ModelUnavailableError,
     ServiceUnavailableError,
 )
-from hypergen.generation.scene_enrichment import (
-    OllamaSceneEnricher,
-    SceneEnrichmentReference,
-    SceneEnrichmentRequest,
-    SceneEnrichmentResult,
+from hypergen.generation.image_prompt_preparation import (
+    ImagePromptPreparationRequest,
+    ImagePromptPreparationResult,
+    OllamaImagePromptPreparer,
 )
 
 __all__ = [
@@ -21,9 +20,8 @@ __all__ = [
     "ModelLoadError",
     "ModelResponseError",
     "ModelUnavailableError",
-    "OllamaSceneEnricher",
-    "SceneEnrichmentReference",
-    "SceneEnrichmentRequest",
-    "SceneEnrichmentResult",
+    "ImagePromptPreparationRequest",
+    "ImagePromptPreparationResult",
+    "OllamaImagePromptPreparer",
     "ServiceUnavailableError",
 ]

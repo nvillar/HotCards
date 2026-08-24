@@ -78,7 +78,10 @@ def _card_with_image(
             id=background_id,
             image_path=image_path,
             generation_metadata=ImageGenerationMetadata(
-                inputs=ImageGenerationInputs(description=description),
+                inputs=ImageGenerationInputs(
+                    description=description,
+                    image_prompt=description,
+                ),
                 render_prompt=description,
                 model_identifier="test",
                 mflux_version="test",

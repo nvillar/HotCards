@@ -44,7 +44,8 @@ class CorruptGeneratedImage:
 def request(output_path: Path) -> MfluxGenerationRequest:
     return MfluxGenerationRequest(
         inputs=ImageGenerationInputs(
-            description="A storybook watercolor courtyard"
+            description="A storybook watercolor courtyard",
+            image_prompt="A storybook watercolor courtyard",
         ),
         render_prompt="A storybook watercolor courtyard",
         output_path=output_path,
@@ -95,7 +96,8 @@ def test_reference_generation_uses_edit_model_and_kv_cache(
         update={
             "inputs": ImageGenerationInputs(
                 description="A referenced portrait",
-                subject_reference=snapshot,
+                image_prompt="A referenced portrait",
+                reference=snapshot,
             ),
             "render_prompt": "REFERENCE IMAGE 1\nIDENTITY\nPreserve identity",
             "model_identifier": "flux2-klein-9b-kv",
@@ -117,7 +119,7 @@ def test_reference_generation_uses_edit_model_and_kv_cache(
     assert edit_calls == [("flux2-klein-9b-kv", None)]
     assert edit_model.calls[0]["image_paths"] == [tmp_path / "identity.png"]
     assert edit_model.calls[0]["use_kv_cache"] is True
-    assert result.metadata.inputs.subject_reference == snapshot
+    assert result.metadata.inputs.reference == snapshot
     assert result.metadata.effective_settings["reference_count"] == 1
     assert result.metadata.effective_settings["use_kv_cache"] is True
 
@@ -125,7 +127,10 @@ def test_reference_generation_uses_edit_model_and_kv_cache(
 def test_reference_paths_must_match_snapshot_count(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="must match"):
         MfluxGenerationRequest(
-            inputs=ImageGenerationInputs(description="Missing snapshot"),
+            inputs=ImageGenerationInputs(
+                description="Missing snapshot",
+                image_prompt="Missing snapshot",
+            ),
             render_prompt="Missing snapshot",
             output_path=tmp_path / "invalid.png",
             reference_image_paths=(tmp_path / "reference.png",),
@@ -133,7 +138,7 @@ def test_reference_paths_must_match_snapshot_count(tmp_path: Path) -> None:
         )
 
 
-def test_multi_role_snapshot_requires_one_unique_image_path(
+def test_one_reference_snapshot_requires_one_image_path(
     tmp_path: Path,
 ) -> None:
     snapshot = ImageReferenceSnapshot(
@@ -145,8 +150,8 @@ def test_multi_role_snapshot_requires_one_unique_image_path(
     generation_request = MfluxGenerationRequest(
         inputs=ImageGenerationInputs(
             description="Same castle",
-            subject_reference=snapshot,
-            setting_reference=snapshot,
+            image_prompt="Same castle",
+            reference=snapshot,
         ),
         render_prompt="Same castle",
         output_path=tmp_path / "multi-role.png",
@@ -195,7 +200,8 @@ def test_switching_generation_modes_evicts_the_previous_model(
         MfluxGenerationRequest(
             inputs=ImageGenerationInputs(
                 description="Referenced scene",
-                subject_reference=snapshot,
+                image_prompt="Referenced scene",
+                reference=snapshot,
             ),
             render_prompt="Referenced scene",
             output_path=tmp_path / "edit.png",

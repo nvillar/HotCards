@@ -37,7 +37,10 @@ def _generated_background(asset_id: UUID, image_path: str) -> GeneratedBackgroun
         id=asset_id,
         image_path=image_path,
         generation_metadata=ImageGenerationMetadata(
-            inputs=ImageGenerationInputs(description="A courtyard"),
+            inputs=ImageGenerationInputs(
+                description="A courtyard",
+                image_prompt="A courtyard",
+            ),
             render_prompt="A courtyard",
             model_identifier="test",
             mflux_version="test",
@@ -105,7 +108,7 @@ def test_bundle_round_trip_preserves_document_and_relative_asset(tmp_path: Path)
     assert image_path is not None
     assert image_path.startswith("assets/cards/")
     assert not Path(image_path).is_absolute()
-    assert json.loads(store.stack_path.read_text())["schema_version"] == 5
+    assert json.loads(store.stack_path.read_text())["schema_version"] == 6
 
 
 def test_failed_replace_preserves_active_stack_and_removes_temporary_file(
@@ -250,7 +253,9 @@ def test_store_image_asset_refuses_overwrite_and_invalid_content(
         store.store_image_asset(invalid, card_id=card_id, revision_id=uuid4())
 
 
-def test_load_rejects_missing_legacy_and_future_versions(tmp_path: Path) -> None:
+def test_load_rejects_missing_unsupported_and_future_versions(
+    tmp_path: Path,
+) -> None:
     store = StackStore(tmp_path / "Castle.hypergen")
     store.bundle_path.mkdir()
 
@@ -258,11 +263,72 @@ def test_load_rejects_missing_legacy_and_future_versions(tmp_path: Path) -> None
         ({"name": "Missing"}, "schema_version"),
         ({"schema_version": 3, "name": "Legacy"}, "schema_version"),
         ({"schema_version": 4, "name": "Legacy"}, "schema_version"),
-        ({"schema_version": 6, "name": "Future"}, "schema_version"),
+        ({"schema_version": 7, "name": "Future"}, "schema_version"),
     ]:
         store.stack_path.write_text(json.dumps(payload))
         with pytest.raises(StackStoreError, match=message):
             store.load()
+
+
+def test_load_migrates_v5_roles_and_enrichment_to_one_reference_and_prompt(
+    tmp_path: Path,
+) -> None:
+    store = StackStore(tmp_path / "Legacy.hypergen")
+    store.bundle_path.mkdir()
+    subject = Card(name="Subject")
+    style = Card(name="Style")
+    target = Card(name="Target")
+    payload = Stack(
+        name="Legacy",
+        cards=(target, subject, style),
+    ).model_dump(mode="json")
+    revision = payload["cards"][0]["revisions"][0]
+    revision.pop("reference")
+    revision.pop("image_prompt")
+    revision["subject"] = {
+        "type": "resolved",
+        "target_card_id": str(subject.id),
+    }
+    revision["style"] = {
+        "type": "resolved",
+        "target_card_id": str(style.id),
+    }
+    revision["setting"] = None
+    subject_snapshot = {
+        "role": "subject",
+        "card_id": str(subject.id),
+        "revision_id": str(subject.active_revision.id),
+        "background_id": str(uuid4()),
+    }
+    revision["enriched_description"] = {
+        "text": "A prepared legacy prompt",
+        "source_description": "",
+        "references": [
+            subject_snapshot,
+            {
+                "role": "style",
+                "card_id": str(style.id),
+                "revision_id": str(style.active_revision.id),
+                "background_id": str(uuid4()),
+            },
+        ],
+        "model_identifier": "legacy-model",
+        "prompt_version": "scene-enrichment-v9",
+    }
+    payload["schema_version"] = 5
+    store.stack_path.write_text(json.dumps(payload))
+
+    migrated = store.load()
+
+    migrated_revision = migrated.cards[0].active_revision
+    assert migrated.schema_version == 6
+    assert migrated_revision.reference == ResolvedCardReference(
+        target_card_id=subject.id
+    )
+    assert migrated_revision.image_prompt is not None
+    assert migrated_revision.image_prompt.text == "A prepared legacy prompt"
+    assert migrated_revision.image_prompt.reference is not None
+    assert migrated_revision.image_prompt.reference.card_id == subject.id
 
 
 def test_symlinked_asset_directory_cannot_escape_bundle(tmp_path: Path) -> None:

@@ -21,7 +21,7 @@ from hypergen.application.commands import (
     CreateCardCommand,
     DuplicateRevisionCommand,
     EditRevisionDescriptionCommand,
-    SetRevisionEnrichedDescriptionCommand,
+    SetRevisionImagePromptCommand,
     SetRevisionReferenceCommand,
 )
 from hypergen.application.document_controller import DocumentController, UndoToken
@@ -30,14 +30,17 @@ from hypergen.application.generated_revision_change import GeneratedRevisionChan
 from hypergen.domain.models import (
     Card,
     CardRevision,
-    EnrichedDescription,
     HotspotSet,
+    ImagePrompt,
+    ImageReferenceSnapshot,
     Interaction,
     NavigateAction,
-    ReferenceRole,
     ResolvedCardReference,
     Stack,
     UnresolvedCardReference,
+)
+from hypergen.generation.image_prompt_preparation import (
+    IMAGE_PROMPT_PREPARATION_VERSION,
 )
 from hypergen.generation.mflux_generator import MfluxGenerator
 from hypergen.storage.stack_store import StackStore
@@ -100,6 +103,7 @@ def _settings() -> BackgroundGenerationSettings:
         quantization=None,
         random_seed=False,
         fixed_seed=42,
+        ollama_model="test",
     )
 
 
@@ -118,6 +122,12 @@ def _bound_workflow(
     )
     revision = CardRevision(
         description="A garden",
+        image_prompt=ImagePrompt(
+            text="A richly detailed garden",
+            source_description="A garden",
+            model_identifier="test",
+            prompt_version=IMAGE_PROMPT_PREPARATION_VERSION,
+        ),
         hotspot_set=HotspotSet(interactions=(hotspot,)),
     )
     card = Card(
@@ -175,7 +185,8 @@ def test_generate_applies_to_active_revision_and_preserves_other_content(
     metadata = revision.generation_metadata
     assert metadata is not None
     assert metadata.inputs.description == "A garden"
-    assert metadata.inputs.subject_reference is None
+    assert metadata.inputs.image_prompt == "A richly detailed garden"
+    assert metadata.inputs.reference is None
     assert session.flush()
     assert StackStore(session.state.bundle_path).load() == controller.document
     assert applied[0].message == "Image generated"
@@ -188,15 +199,17 @@ def test_generate_applies_to_active_revision_and_preserves_other_content(
     assert controller.document.cards[0].active_revision.background is None
 
 
-def test_generate_prefers_enriched_description(tmp_path: Path) -> None:
+def test_generate_uses_current_image_prompt(tmp_path: Path) -> None:
     workflow, controller, _session, workers, card = _bound_workflow(tmp_path)
     controller.execute(
-        SetRevisionEnrichedDescriptionCommand(
+        SetRevisionImagePromptCommand(
             card_id=card.id,
             revision_id=card.active_revision.id,
-            value=EnrichedDescription(
+            value=ImagePrompt(
                 text="A richly detailed garden",
                 source_description="A garden",
+                model_identifier="test",
+                prompt_version=IMAGE_PROMPT_PREPARATION_VERSION,
             ),
         )
     )
@@ -206,10 +219,10 @@ def test_generate_prefers_enriched_description(tmp_path: Path) -> None:
 
     revision = controller.document.cards[0].active_revision
     assert revision.description == "A garden"
-    assert revision.enriched_description is not None
+    assert revision.image_prompt is not None
     assert revision.generation_metadata is not None
     assert revision.generation_metadata.inputs.description == "A garden"
-    assert revision.generation_metadata.inputs.enriched_description == (
+    assert revision.generation_metadata.inputs.image_prompt == (
         "A richly detailed garden"
     )
     assert revision.generation_metadata.render_prompt == (
@@ -217,7 +230,7 @@ def test_generate_prefers_enriched_description(tmp_path: Path) -> None:
     )
 
 
-def test_generate_accepts_enriched_description_without_authored_text(
+def test_generate_rejects_image_prompt_after_authored_text_changes(
     tmp_path: Path,
 ) -> None:
     workflow, controller, _session, workers, card = _bound_workflow(tmp_path)
@@ -229,44 +242,29 @@ def test_generate_accepts_enriched_description_without_authored_text(
             value="",
         )
     )
-    controller.execute(
-        SetRevisionEnrichedDescriptionCommand(
-            card_id=card.id,
-            revision_id=revision.id,
-            value=EnrichedDescription(
-                text="A richly detailed garden",
-                source_description="A garden",
-            ),
-        )
-    )
-
-    workflow.generate(card.id)
-    _complete_generation(workers)
-
-    metadata = controller.document.cards[0].active_revision.generation_metadata
-    assert metadata is not None
-    assert metadata.inputs.description == ""
-    assert metadata.inputs.enriched_description == "A richly detailed garden"
-    assert metadata.render_prompt == "A richly detailed garden"
+    with pytest.raises(BackgroundWorkflowError, match="Description"):
+        workflow.generate(card.id)
+    assert workers.calls == []
 
 
-def test_authored_edit_does_not_stale_enriched_generation(
+def test_authored_edit_stales_image_prompt_generation(
     tmp_path: Path,
 ) -> None:
     workflow, controller, _session, workers, card = _bound_workflow(tmp_path)
     revision = card.active_revision
     controller.execute(
-        SetRevisionEnrichedDescriptionCommand(
+        SetRevisionImagePromptCommand(
             card_id=card.id,
             revision_id=revision.id,
-            value=EnrichedDescription(
+            value=ImagePrompt(
                 text="A richly detailed garden",
                 source_description="A garden",
+                model_identifier="test",
+                prompt_version=IMAGE_PROMPT_PREPARATION_VERSION,
             ),
         )
     )
 
-    workflow.generate(card.id)
     controller.execute(
         EditRevisionDescriptionCommand(
             card_id=card.id,
@@ -274,12 +272,8 @@ def test_authored_edit_does_not_stale_enriched_generation(
             value="A changed authored garden",
         )
     )
-    _complete_generation(workers)
-
-    current = controller.document.cards[0].active_revision
-    assert current.background is not None
-    assert current.generation_metadata is not None
-    assert current.generation_metadata.render_prompt == "A richly detailed garden"
+    with pytest.raises(BackgroundWorkflowError, match="current Image Prompt"):
+        workflow.generate(card.id)
 
 
 def test_generation_failure_and_stale_result_preserve_current_revision(
@@ -324,6 +318,18 @@ def test_references_capture_exact_source_and_suppress_stale_results(
             value="A distinctive knight portrait",
         )
     )
+    controller.execute(
+        SetRevisionImagePromptCommand(
+            card_id=source.id,
+            revision_id=source.active_revision.id,
+            value=ImagePrompt(
+                text="A distinctive knight portrait",
+                source_description="A distinctive knight portrait",
+                model_identifier="test",
+                prompt_version=IMAGE_PROMPT_PREPARATION_VERSION,
+            ),
+        )
+    )
     workflow.generate(source.id)
     _complete_generation(workers)
     source = next(card for card in controller.document.cards if card.id == source_id)
@@ -334,16 +340,25 @@ def test_references_capture_exact_source_and_suppress_stale_results(
         SetRevisionReferenceCommand(
             card_id=target.id,
             revision_id=target.active_revision.id,
-            role=ReferenceRole.SUBJECT,
             reference=ResolvedCardReference(target_card_id=source.id),
         )
     )
+    snapshot = ImageReferenceSnapshot(
+        card_id=source.id,
+        revision_id=source_revision.id,
+        background_id=source_revision.background.id,
+    )
     controller.execute(
-        SetRevisionReferenceCommand(
+        SetRevisionImagePromptCommand(
             card_id=target.id,
             revision_id=target.active_revision.id,
-            role=ReferenceRole.SETTING,
-            reference=ResolvedCardReference(target_card_id=source.id),
+            value=ImagePrompt(
+                text="A richly detailed garden with the referenced visual treatment",
+                source_description="A garden",
+                reference=snapshot,
+                model_identifier="test",
+                prompt_version=IMAGE_PROMPT_PREPARATION_VERSION,
+            ),
         )
     )
     workflow.generate(target.id)
@@ -352,21 +367,16 @@ def test_references_capture_exact_source_and_suppress_stale_results(
     target_revision = controller.document.cards[0].active_revision
     metadata = target_revision.generation_metadata
     assert metadata is not None
-    assert metadata.inputs.subject_reference is not None
-    assert metadata.inputs.subject_reference.card_id == source.id
-    assert metadata.inputs.subject_reference.revision_id == source_revision.id
-    assert metadata.inputs.subject_reference.background_id == (
+    assert metadata.inputs.reference is not None
+    assert metadata.inputs.reference.card_id == source.id
+    assert metadata.inputs.reference.revision_id == source_revision.id
+    assert metadata.inputs.reference.background_id == (
         source_revision.background.id
     )
-    assert metadata.inputs.setting_reference == (
-        metadata.inputs.subject_reference
+    assert metadata.render_prompt == (
+        "A richly detailed garden with the referenced visual treatment"
     )
-    assert metadata.render_prompt.startswith("A garden")
-    assert "Use image 1 for the subject's recognizable identity" in (
-        metadata.render_prompt
-    )
-    assert "and the environment, architecture" in metadata.render_prompt
-    assert "SCENE AUTHORITY" not in metadata.render_prompt
+    assert "Use image" not in metadata.render_prompt
     assert metadata.effective_settings["reference_count"] == 1
 
     failures: list[object] = []
@@ -393,7 +403,6 @@ def test_reference_card_requires_an_active_image(tmp_path: Path) -> None:
         SetRevisionReferenceCommand(
             card_id=target.id,
             revision_id=target.active_revision.id,
-            role=ReferenceRole.SETTING,
             reference=ResolvedCardReference(target_card_id=source_id),
         )
     )

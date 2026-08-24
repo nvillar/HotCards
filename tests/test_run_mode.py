@@ -260,7 +260,10 @@ def build_run_window(
                 id=asset_id,
                 image_path=image_path,
                 generation_metadata=ImageGenerationMetadata(
-                    inputs=ImageGenerationInputs(description=name),
+                    inputs=ImageGenerationInputs(
+                        description=name,
+                        image_prompt=name,
+                    ),
                     render_prompt=name,
                     model_identifier="test",
                     mflux_version="test",

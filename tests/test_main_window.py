@@ -24,7 +24,7 @@ from hypergen.application.commands import (
     DuplicateRevisionCommand,
     RenameCardCommand,
     ReplaceRevisionBackgroundCommand,
-    SetRevisionEnrichedDescriptionCommand,
+    SetRevisionImagePromptCommand,
 )
 from hypergen.application.document_controller import DocumentController
 from hypergen.application.document_session import DocumentSession, DocumentSessionState
@@ -33,11 +33,11 @@ from hypergen.application.workers import AdapterKind, AvailabilityDiagnostic
 from hypergen.domain.models import (
     Card,
     CardRevision,
-    EnrichedDescription,
     GeneratedBackground,
     HotspotSet,
     ImageGenerationInputs,
     ImageGenerationMetadata,
+    ImagePrompt,
     Interaction,
     NavigateAction,
     Point,
@@ -114,7 +114,7 @@ class FakeWorkers(QObject):
         return operation
 
     def run_ollama(self, _work: object, *, stage: str) -> FakeOperation:
-        assert stage == "enriching Description"
+        assert stage == "preparing Image Prompt"
         return FakeOperation()
 
     def shutdown(self, *, wait_milliseconds: int = 0) -> None:
@@ -193,8 +193,14 @@ def application() -> QApplication:
 
 
 def _stack() -> Stack:
-    first = CardRevision(description="First")
-    second = CardRevision(description="Second")
+    first = CardRevision(
+        description="First",
+        image_prompt=ImagePrompt(text="First prompt", source_description="First"),
+    )
+    second = CardRevision(
+        description="Second",
+        image_prompt=ImagePrompt(text="Second prompt", source_description="Second"),
+    )
     card = Card(
         name="Foyer",
         revisions=(first, second),
@@ -214,7 +220,10 @@ def _generated_background(
         id=asset_id,
         image_path=image_path,
         generation_metadata=ImageGenerationMetadata(
-            inputs=ImageGenerationInputs(description=description),
+            inputs=ImageGenerationInputs(
+                description=description,
+                image_prompt=description,
+            ),
             render_prompt=description,
             model_identifier="test",
             mflux_version="test",
@@ -551,17 +560,17 @@ def test_successful_save_as_cancels_generation_and_expires_undo(
             "HyperGen Stack (*.hypergen)",
         ),
     )
-    enrichment_cancellations: list[bool] = []
+    prompt_cancellations: list[bool] = []
     monkeypatch.setattr(
-        window.scene_enrichment_workflow,
+        window.image_prompt_workflow,
         "cancel",
-        lambda: enrichment_cancellations.append(True),
+        lambda: prompt_cancellations.append(True),
     )
 
     window.save_as()
 
     assert background.cancel_calls == 1
-    assert enrichment_cancellations == [True]
+    assert prompt_cancellations == [True]
     assert window.notification_bar.current_key != "undo"
     assert not controller.can_undo
 
@@ -701,27 +710,48 @@ def test_bottom_model_selectors_persist_and_follow_operation_state(
     assert window.image_model_combo.toolTip() == window.llm_model_combo.toolTip()
 
     background.busy = True
-    window.scene_enrichment_workflow._busy = True
+    window.image_prompt_workflow._busy = True
     window._update_generation_actions()
     assert not window.llm_model_combo.isEnabled()
     assert not window.image_model_combo.isEnabled()
 
     background.busy = False
-    window.scene_enrichment_workflow._busy = False
+    window.image_prompt_workflow._busy = False
     window.mode_selector.setCurrentText("Run")
     assert not window.llm_model_combo.isEnabled()
     assert not window.image_model_combo.isEnabled()
 
 
-def test_changing_llm_model_re_enables_enrichment_after_availability(
+def test_ollama_selector_disables_when_no_vision_model_is_installed(
+    application: QApplication,
+) -> None:
+    window, _controller, _workers, _background = _window()
+
+    window._availability_check_succeeded(
+        AdapterKind.OLLAMA,
+        window._diagnostic_generation,
+        (),
+    )
+
+    assert window.llm_model_combo.count() == 1
+    assert window.llm_model_combo.currentData() is None
+    assert window.llm_model_combo.currentText() == (
+        "No vision-capable models installed"
+    )
+    assert not window.llm_model_combo.isEnabled()
+    assert not window.inspector.enrich_button.isEnabled()
+
+
+def test_changing_llm_model_re_enables_image_prompt_preparation(
     application: QApplication,
 ) -> None:
     revision = CardRevision(
         description="A courtyard",
-        enriched_description=EnrichedDescription(
+        image_prompt=ImagePrompt(
             text="A richly detailed courtyard",
             source_description="A courtyard",
             model_identifier="qwen3.5:9b-mlx",
+            prompt_version="image-prompt-preparation-v3",
         ),
     )
     card = Card(name="Card", revisions=(revision,))
@@ -734,18 +764,18 @@ def test_changing_llm_model_re_enables_enrichment_after_availability(
         window._diagnostic_generation,
         models,
     )
-    assert window.inspector.enrich_scene_button.text() == (
-        "Description Enriched ✓"
+    assert window.inspector.enrich_button.text() == (
+        "Image Prompt Current ✓"
     )
-    assert not window.inspector.enrich_scene_button.isEnabled()
+    assert not window.inspector.enrich_button.isEnabled()
 
     window.llm_model_combo.setCurrentIndex(
         window.llm_model_combo.findData("llama3.2:latest")
     )
-    assert window.inspector.enrich_scene_button.text() == (
-        "Re-enrich Description"
+    assert window.inspector.enrich_button.text() == (
+        "Update Image Prompt"
     )
-    assert not window.inspector.enrich_scene_button.isEnabled()
+    assert not window.inspector.enrich_button.isEnabled()
 
     window._availability_check_succeeded(
         AdapterKind.OLLAMA,
@@ -753,10 +783,10 @@ def test_changing_llm_model_re_enables_enrichment_after_availability(
         models,
     )
 
-    assert window.inspector.enrich_scene_button.text() == (
-        "Re-enrich Description"
+    assert window.inspector.enrich_button.text() == (
+        "Update Image Prompt"
     )
-    assert window.inspector.enrich_scene_button.isEnabled()
+    assert window.inspector.enrich_button.isEnabled()
 
 
 def test_generate_replacement_starts_without_a_second_confirmation(
@@ -798,11 +828,11 @@ def test_generate_replacement_starts_without_a_second_confirmation(
     assert background.generate_calls == [card_id, card_id]
 
 
-def test_generate_is_enabled_with_only_enriched_description(
+def test_generate_is_disabled_without_description_even_with_image_prompt(
     application: QApplication,
 ) -> None:
     revision = CardRevision(
-        enriched_description=EnrichedDescription(
+        image_prompt=ImagePrompt(
             text="A richly detailed courtyard",
             source_description="",
         ),
@@ -814,9 +844,7 @@ def test_generate_is_enabled_with_only_enriched_description(
     window._availability[AdapterKind.MFLUX] = True
     window._update_generation_actions()
 
-    assert window.inspector.generate_background_button.isEnabled()
-    window._generate_background()
-    assert background.generate_calls == [card.id]
+    assert not window.inspector.generate_background_button.isEnabled()
 
 
 def test_notification_undo_expires_after_another_command(
@@ -844,7 +872,7 @@ def test_re_enrich_click_is_not_consumed_by_description_commit(
 ) -> None:
     revision = CardRevision(
         description="A courtyard",
-        enriched_description=EnrichedDescription(
+        image_prompt=ImagePrompt(
             text="A richly detailed courtyard",
             source_description="A courtyard",
         ),
@@ -856,19 +884,19 @@ def test_re_enrich_click_is_not_consumed_by_description_commit(
     window.show()
     window._availability[AdapterKind.OLLAMA] = True
     window._update_generation_actions()
-    window.inspector.original_description_button.click()
+    window.inspector.description_button.click()
     window.inspector.description_edit.setPlainText("A changed courtyard")
     window.inspector.description_edit.setFocus()
     application.processEvents()
     starts: list[object] = []
     monkeypatch.setattr(
-        window.scene_enrichment_workflow,
+        window.image_prompt_workflow,
         "start",
         starts.append,
     )
 
     QTest.mousePress(
-        window.inspector.enrich_scene_button,
+        window.inspector.enrich_button,
         Qt.MouseButton.LeftButton,
     )
     application.processEvents()
@@ -877,7 +905,7 @@ def test_re_enrich_click_is_not_consumed_by_description_commit(
         "A changed courtyard"
     )
     QTest.mouseRelease(
-        window.inspector.enrich_scene_button,
+        window.inspector.enrich_button,
         Qt.MouseButton.LeftButton,
     )
 
@@ -905,10 +933,10 @@ def test_generated_result_can_move_to_a_new_complete_version(
         Stack(name="Demo", cards=(card,))
     )
     changed = controller.execute(
-        SetRevisionEnrichedDescriptionCommand(
+        SetRevisionImagePromptCommand(
             card_id=card.id,
             revision_id=original.id,
-            value=EnrichedDescription(
+            value=ImagePrompt(
                 text="A richly detailed courtyard",
                 source_description=original.description,
             ),
@@ -919,7 +947,7 @@ def test_generated_result_can_move_to_a_new_complete_version(
     assert token is not None
     window._show_generated_revision_notification(
         GeneratedRevisionChange(
-            message="Description enriched",
+            message="Image Prompt prepared",
             token=token,
             card_id=card.id,
             revision_id=original.id,
@@ -928,7 +956,7 @@ def test_generated_result_can_move_to_a_new_complete_version(
     )
 
     assert window.notification_bar.message_label.text() == (
-        "Description enriched on the current version"
+        "Image Prompt prepared on the current version"
     )
     assert window.notification_bar.primary_button.text() == "Create New Version"
     assert window.notification_bar.secondary_button.text() == "Undo"
@@ -938,13 +966,13 @@ def test_generated_result_can_move_to_a_new_complete_version(
     changed_card = controller.document.cards[0]
     assert len(changed_card.revisions) == 2
     assert changed_card.revisions[0].id == original.id
-    assert changed_card.revisions[0].enriched_description is None
+    assert changed_card.revisions[0].image_prompt is None
     assert changed_card.revisions[0].hotspot_set == original.hotspot_set
     assert changed_card.active_revision.id != original.id
     assert changed_card.active_revision.description == original.description
     assert changed_card.active_revision.hotspot_set == original.hotspot_set
-    assert changed_card.active_revision.enriched_description is not None
-    assert changed_card.active_revision.enriched_description.text == (
+    assert changed_card.active_revision.image_prompt is not None
+    assert changed_card.active_revision.image_prompt.text == (
         "A richly detailed courtyard"
     )
     assert window.notification_bar.message_label.text() == "New version created"
@@ -955,19 +983,19 @@ def test_generated_result_can_move_to_a_new_complete_version(
     restored_card = controller.document.cards[0]
     assert len(restored_card.revisions) == 1
     assert restored_card.active_revision.id == original.id
-    assert restored_card.active_revision.enriched_description is not None
-    assert restored_card.active_revision.enriched_description.text == (
+    assert restored_card.active_revision.image_prompt is not None
+    assert restored_card.active_revision.image_prompt.text == (
         "A richly detailed courtyard"
     )
 
 
-def test_re_enrichment_completion_selects_enriched_description(
+def test_preparation_completion_selects_image_prompt(
     application: QApplication,
 ) -> None:
     previous = CardRevision(
         description="A changed courtyard",
-        enriched_description=EnrichedDescription(
-            text="An older enriched courtyard",
+        image_prompt=ImagePrompt(
+            text="An older Image Prompt",
             source_description="A courtyard",
         ),
     )
@@ -975,28 +1003,28 @@ def test_re_enrichment_completion_selects_enriched_description(
     window, controller, _workers, _background = _window(
         Stack(name="Demo", cards=(card,))
     )
-    window.inspector.original_description_button.click()
-    assert window.inspector.original_description_button.isChecked()
+    window.inspector.description_button.click()
+    assert window.inspector.description_button.isChecked()
     changed = controller.execute(
-        SetRevisionEnrichedDescriptionCommand(
+        SetRevisionImagePromptCommand(
             card_id=card.id,
             revision_id=previous.id,
-            value=EnrichedDescription(
-                text="A newly enriched courtyard",
+            value=ImagePrompt(
+                text="A newly prepared courtyard",
                 source_description=previous.description,
             ),
         )
     )
     window.render_document(changed)
-    assert window.inspector.original_description_button.isChecked()
+    assert window.inspector.description_button.isChecked()
     window.inspector.description_edit.setFocus()
     application.processEvents()
     token = controller.current_undo_token
     assert token is not None
 
-    window.scene_enrichment_workflow.generation_applied.emit(
+    window.image_prompt_workflow.generation_applied.emit(
         GeneratedRevisionChange(
-            message="Description enriched",
+            message="Image Prompt prepared",
             token=token,
             card_id=card.id,
             revision_id=previous.id,
@@ -1004,12 +1032,12 @@ def test_re_enrichment_completion_selects_enriched_description(
         )
     )
 
-    assert window.inspector.enriched_description_button.isChecked()
+    assert window.inspector.image_prompt_button.isChecked()
     assert window.inspector.description_edit.toPlainText() == (
-        "A newly enriched courtyard"
+        "A newly prepared courtyard"
     )
     assert window.notification_bar.message_label.text() == (
-        "Description enriched on the current version"
+        "Image Prompt prepared on the current version"
     )
     window.close()
 
@@ -1023,10 +1051,10 @@ def test_dismissing_generated_result_keeps_it_on_current_version(
         Stack(name="Demo", cards=(card,))
     )
     changed = controller.execute(
-        SetRevisionEnrichedDescriptionCommand(
+        SetRevisionImagePromptCommand(
             card_id=card.id,
             revision_id=original.id,
-            value=EnrichedDescription(
+            value=ImagePrompt(
                 text="A richly detailed courtyard",
                 source_description=original.description,
             ),
@@ -1037,7 +1065,7 @@ def test_dismissing_generated_result_keeps_it_on_current_version(
     assert token is not None
     window._show_generated_revision_notification(
         GeneratedRevisionChange(
-            message="Description enriched",
+            message="Image Prompt prepared",
             token=token,
             card_id=card.id,
             revision_id=original.id,
@@ -1049,20 +1077,20 @@ def test_dismissing_generated_result_keeps_it_on_current_version(
 
     revision = controller.document.cards[0].active_revision
     assert revision.id == original.id
-    assert revision.enriched_description is not None
-    assert revision.enriched_description.text == "A richly detailed courtyard"
+    assert revision.image_prompt is not None
+    assert revision.image_prompt.text == "A richly detailed courtyard"
     assert controller.current_undo_token == token
     assert window._generated_revision_change is None
 
 
-def test_description_edits_and_notification_undo_cancel_enrichment(
+def test_description_edits_and_notification_undo_cancel_preparation(
     application: QApplication,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     window, controller, _workers, _background = _window()
     cancellations: list[bool] = []
     monkeypatch.setattr(
-        window.scene_enrichment_workflow,
+        window.image_prompt_workflow,
         "cancel",
         lambda: cancellations.append(True),
     )
@@ -1104,11 +1132,11 @@ def test_new_workflow_progress_clears_stale_failure_notification(
 ) -> None:
     window, controller, _workers, _background = _window()
     window._show_error(
-        "enrichment-error",
-        "Description enrichment failed",
+        "image-prompt-error",
+        "Image Prompt preparation failed",
         detail="Old failure",
     )
-    window._scene_enrichment_progress_changed("Enriching Description…")
+    window._image_prompt_progress_changed("Preparing Image Prompt…")
 
     card = controller.document.cards[0]
     controller.execute(RenameCardCommand(card_id=card.id, name="Renamed"))
@@ -1135,8 +1163,8 @@ def test_document_replacement_clears_document_specific_notifications(
     window, _controller, _workers, background = _window()
     background.busy = True
     window._show_error(
-        "enrichment-error",
-        "Description enrichment failed",
+        "image-prompt-error",
+        "Image Prompt preparation failed",
     )
     window._set_canvas_card_name_error("Invalid card name")
     window.inspector.set_hotspot_error("Invalid hotspot")
