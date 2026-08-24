@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -881,6 +882,65 @@ def test_empty_canvas_request_creates_and_selects_blank_hotspot(
     assert len(hotspot_set.interactions) == 1
     assert hotspot_set.interactions[0].polygons == ()
     assert window.inspector.selected_interaction_id == hotspot_set.interactions[0].id
+
+
+def test_hotspot_editing_is_scoped_to_hotspots_tab(
+    application: QApplication,
+    tmp_path: Path,
+) -> None:
+    image_path = tmp_path / "background.png"
+    image = QPixmap(1024, 768)
+    image.fill(QColor("navy"))
+    assert image.save(str(image_path))
+    interaction = Interaction(
+        label="Door",
+        action=NavigateAction(target=UnresolvedCardReference()),
+        polygons=(
+            Polygon(
+                points=(
+                    Point(x=0.1, y=0.1),
+                    Point(x=0.4, y=0.1),
+                    Point(x=0.2, y=0.4),
+                )
+            ),
+        ),
+    )
+    asset_id = uuid4()
+    revision = CardRevision(
+        background=_generated_background(
+            asset_id=asset_id,
+            image_path=f"assets/cards/card/image-{asset_id}.png",
+        ),
+        hotspot_set=HotspotSet(interactions=(interaction,)),
+    )
+    card = Card(name="Card", revisions=(revision,))
+    window, _controller, _workers, _background = _window(
+        Stack(name="Demo", cards=(card,))
+    )
+    window.document_session = SimpleNamespace(
+        store=SimpleNamespace(asset_path=lambda _path: image_path),
+        state=DocumentSessionState(bundle_path=None, dirty=False, error=None),
+    )
+    window.render_document()
+
+    assert not window.inspector.hotspots_active
+    assert not window.card_canvas._editable
+    assert window.card_canvas._overlay_items == []
+
+    window.inspector.inspector_tabs.setCurrentIndex(1)
+    assert window.inspector.hotspots_active
+    assert window.card_canvas._editable
+    assert window.card_canvas._overlay_items
+    window.card_canvas.begin_polygon(
+        interaction.id,
+        initial_point=Point(x=0.6, y=0.6),
+    )
+    assert window.card_canvas.drawing
+
+    window.inspector.inspector_tabs.setCurrentIndex(0)
+    assert not window.card_canvas.drawing
+    assert not window.card_canvas._editable
+    assert window.card_canvas._overlay_items == []
 
 
 def test_new_stack_dialog_creates_one_blank_revision(

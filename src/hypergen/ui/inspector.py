@@ -354,7 +354,11 @@ class Inspector(QWidget):
         self.hotspot_error.setWordWrap(True)
         self.hotspot_error.setVisible(False)
         layout.addWidget(self.hotspot_error)
-        self.inspector_tabs.addTab(page, "Hotspots")
+        self._hotspots_tab_index = self.inspector_tabs.addTab(page, "Hotspots")
+
+    @property
+    def hotspots_active(self) -> bool:
+        return self.inspector_tabs.currentIndex() == self._hotspots_tab_index
 
     def _connect_signals(self) -> None:
         self.description_edit.editing_finished.connect(
