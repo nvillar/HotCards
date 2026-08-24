@@ -407,9 +407,6 @@ class MainWindow(QMainWindow):
         central_layout.addWidget(self.pane_splitter, 1)
         self.setCentralWidget(central_widget)
 
-        self.document_status_label = QLabel()
-        self.document_status_label.setObjectName("documentStatusLabel")
-        self.statusBar().addWidget(self.document_status_label, 1)
         values = load_machine_settings(self.settings)
         self.llm_model_label = QLabel("LLM")
         self.llm_model_combo = QComboBox()
@@ -900,30 +897,15 @@ class MainWindow(QMainWindow):
         self.card_sidebar.set_document_editable(self.document_session is None or bound)
         if self.document_session is not None and not bound:
             self.create_first_card_button.setText("Create New Stack")
-            self.document_status_label.setText("Create or open a stack")
-            self.document_status_label.setToolTip("")
         elif state.error is not None:
             self.create_first_card_button.setText("Create Your First Card")
-            self.document_status_label.setText("Save failed")
-            self.document_status_label.setToolTip(state.error)
             self._show_error(
                 "document-error",
                 "Stack could not be saved",
                 detail=state.error,
             )
-        elif state.dirty:
-            self.create_first_card_button.setText("Create Your First Card")
-            self.document_status_label.setText("Unsaved changes")
-            self.document_status_label.setToolTip("Autosave is pending")
         else:
             self.create_first_card_button.setText("Create Your First Card")
-            label = (
-                state.bundle_path.name if state.bundle_path is not None else "In-memory document"
-            )
-            self.document_status_label.setText(label)
-            self.document_status_label.setToolTip(
-                str(state.bundle_path) if state.bundle_path is not None else ""
-            )
         self._update_document_actions()
         self._update_window_title()
         self._update_generation_actions()
