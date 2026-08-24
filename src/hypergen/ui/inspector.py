@@ -119,7 +119,6 @@ class Inspector(QWidget):
         self.selected_card_id: UUID | None = None
         self._rendered_revision_id: UUID | None = None
         self._description_mode = "description"
-        self._had_image_prompt = False
         self._enrich_using_text = ""
         self._generate_using_text = ""
         self._enrich_reason = ""
@@ -137,7 +136,7 @@ class Inspector(QWidget):
         horizontal_margin = self.style().pixelMetric(
             QStyle.PixelMetric.PM_LayoutLeftMargin
         )
-        root.setContentsMargins(horizontal_margin, 16, horizontal_margin, 0)
+        root.setContentsMargins(horizontal_margin, 16, horizontal_margin, 16)
 
         self.pages = QStackedWidget()
         empty_page = QWidget()
@@ -379,7 +378,6 @@ class Inspector(QWidget):
     def render(self, document: Stack, selected_card_id: UUID | None) -> None:
         previous_card_id = self.selected_card_id
         previous_revision_id = self._rendered_revision_id
-        previous_had_image_prompt = self._had_image_prompt
         preserve_description = self.description_edit.hasFocus()
         description_draft = self.description_edit.toPlainText()
         previous_mode = self._description_mode
@@ -392,7 +390,6 @@ class Inspector(QWidget):
             self.selected_card_id = card.id if card is not None else None
             if card is None:
                 self._rendered_revision_id = None
-                self._had_image_prompt = False
                 self.pages.setCurrentIndex(0)
                 self._set_error(self.description_error, "")
                 self._set_error(self.reference_error, "")
@@ -412,13 +409,10 @@ class Inspector(QWidget):
                 self._set_error(self.reference_error, "")
                 self.set_hotspot_error("")
             self._rendered_revision_id = revision.id
-            if revision.image_prompt is None:
+            if revision.image_prompt is None or not same_revision:
                 self._description_mode = "description"
-            elif not same_revision or not previous_had_image_prompt:
-                self._description_mode = "image_prompt"
             else:
                 self._description_mode = previous_mode
-            self._had_image_prompt = revision.image_prompt is not None
             displayed_value = (
                 revision.image_prompt.text
                 if (

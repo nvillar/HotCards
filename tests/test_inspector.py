@@ -65,6 +65,7 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     root_layout = inspector.layout()
     assert root_layout is not None
     assert root_layout.contentsMargins().top() == 16
+    assert root_layout.contentsMargins().bottom() == 16
     assert root_layout.contentsMargins().left() == inspector.style().pixelMetric(
         QStyle.PixelMetric.PM_LayoutLeftMargin
     )
@@ -267,9 +268,9 @@ def test_image_prompt_status_and_generation_source(
     inspector.render(controller.document, card.id)
 
     assert not inspector.description_toggle.isHidden()
-    assert inspector.image_prompt_button.isChecked()
+    assert inspector.description_button.isChecked()
     assert inspector.description_edit.toPlainText() == (
-        "A richly detailed courtyard"
+        "A courtyard"
     )
     assert "Using: Description" in inspector.enrich_button.toolTip()
     assert (
@@ -285,8 +286,6 @@ def test_image_prompt_status_and_generation_source(
         busy=False,
     )
 
-    inspector.description_button.click()
-    assert inspector.description_edit.toPlainText() == "A courtyard"
     inspector.description_edit.setPlainText("A changed courtyard")
     assert inspector.enrich_button.text() == "Update Image Prompt"
     assert inspector.enrich_button.isEnabled()
@@ -309,6 +308,47 @@ def test_image_prompt_status_and_generation_source(
     assert "Using: Image Prompt" in inspector.generate_background_button.toolTip()
     assert controller.undo()
     assert controller.document.cards[0].active_revision.image_prompt is not None
+
+
+def test_switching_cards_defaults_to_description(
+    application: QApplication,
+) -> None:
+    first = Card(
+        name="First",
+        revisions=(
+            CardRevision(
+                description="First description",
+                image_prompt=ImagePrompt(
+                    text="First prompt",
+                    source_description="First description",
+                ),
+            ),
+        ),
+    )
+    second = Card(
+        name="Second",
+        revisions=(
+            CardRevision(
+                description="Second description",
+                image_prompt=ImagePrompt(
+                    text="Second prompt",
+                    source_description="Second description",
+                ),
+            ),
+        ),
+    )
+    controller = DocumentController(
+        Stack(name="Demo", cards=(first, second))
+    )
+    inspector = Inspector(controller)
+    inspector.render(controller.document, first.id)
+    inspector.image_prompt_button.click()
+    assert inspector.image_prompt_button.isChecked()
+
+    inspector.render(controller.document, second.id)
+
+    assert inspector.description_button.isChecked()
+    assert inspector.description_edit.toPlainText() == "Second description"
 
 
 def test_changing_model_marks_image_prompt_out_of_date(
@@ -402,6 +442,7 @@ def test_generate_requires_a_current_non_empty_image_prompt(
     assert inspector.has_current_image_prompt()
     assert inspector.has_description_input()
 
+    inspector.image_prompt_button.click()
     inspector.description_edit.clear()
     assert not inspector.has_current_image_prompt()
     assert inspector.commit_revision_metadata()
