@@ -311,6 +311,7 @@ def test_card_header_and_toolbar_match_revision_hierarchy(
     assert not window.overlay_selector_action.isVisible()
     assert not hasattr(window, "styles_button")
     assert not hasattr(window, "document_status_label")
+    assert window.generation_progress_widget.isHidden()
     assert window.inspector.inspector_tabs.tabText(0) == "Background"
     assert window.fit_canvas_button.size() == window.clear_background_button.size()
 
@@ -1158,6 +1159,53 @@ def test_new_workflow_progress_clears_stale_failure_notification(
     assert token is not None
     window._show_undo_notification("Renamed", token)
     assert window.notification_bar.current_key == "undo"
+
+
+def test_generation_progress_bar_shows_text_and_image_activity(
+    application: QApplication,
+) -> None:
+    window, _controller, _workers, background = _window()
+    progress_widget = window.generation_progress_widget
+    progress = window.generation_progress_bar
+
+    window.image_prompt_workflow._busy = True
+    window.image_prompt_workflow.progress_changed.emit(
+        "Preparing Image Prompt..."
+    )
+    assert not progress_widget.isHidden()
+    assert progress.minimum() == 0
+    assert progress.maximum() == 0
+    assert window.generation_progress_label.text() == (
+        "Preparing Image Prompt..."
+    )
+
+    window.image_prompt_workflow._busy = False
+    window.image_prompt_workflow.progress_changed.emit("Image Prompt prepared")
+    assert progress_widget.isHidden()
+    assert window.generation_progress_label.text() == ""
+
+    background.busy = True
+    background.progress_changed.emit("Generating image...")
+    assert not progress_widget.isHidden()
+    assert window.generation_progress_label.text() == "Generating image..."
+
+    window.image_prompt_workflow._busy = True
+    window.image_prompt_workflow.progress_changed.emit(
+        "Preparing Image Prompt..."
+    )
+    assert window.generation_progress_label.text() == (
+        "Preparing Image Prompt... · Generating image..."
+    )
+
+    window.image_prompt_workflow._busy = False
+    window.image_prompt_workflow.progress_changed.emit("Image Prompt prepared")
+    assert not progress_widget.isHidden()
+    assert window.generation_progress_label.text() == "Generating image..."
+
+    background.busy = False
+    background.progress_changed.emit("Image generated")
+    assert progress_widget.isHidden()
+    assert window.generation_progress_label.text() == ""
 
 
 def test_background_success_clears_previous_cancellation_notice(

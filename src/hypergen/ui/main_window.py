@@ -20,8 +20,10 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QSplitter,
+    QStackedLayout,
     QStackedWidget,
     QStyle,
     QToolBar,
@@ -153,6 +155,8 @@ class MainWindow(QMainWindow):
         self._card_name_commit_failed = False
         self._rendering = False
         self._is_running = False
+        self._image_prompt_progress_message = ""
+        self._background_progress_message = ""
         self._run_session = RunSession()
         if self.background_workflow is None and self.document_session is not None:
             self.background_workflow = BackgroundWorkflow(
@@ -455,6 +459,32 @@ class MainWindow(QMainWindow):
         self.image_model_combo.setCurrentIndex(
             max(0, self.image_model_combo.findData(values.mflux_model))
         )
+        self.generation_progress_widget = QWidget()
+        self.generation_progress_widget.setObjectName("generationProgressWidget")
+        generation_progress_layout = QStackedLayout(
+            self.generation_progress_widget
+        )
+        generation_progress_layout.setContentsMargins(0, 0, 0, 0)
+        generation_progress_layout.setStackingMode(
+            QStackedLayout.StackingMode.StackAll
+        )
+        self.generation_progress_bar = QProgressBar()
+        self.generation_progress_bar.setObjectName("generationProgressBar")
+        self.generation_progress_bar.setRange(0, 0)
+        self.generation_progress_bar.setTextVisible(False)
+        generation_progress_layout.addWidget(self.generation_progress_bar)
+        self.generation_progress_label = QLabel()
+        self.generation_progress_label.setObjectName("generationProgressLabel")
+        self.generation_progress_label.setAccessibleName("Generation progress")
+        self.generation_progress_label.setAlignment(
+            Qt.AlignmentFlag.AlignCenter
+        )
+        generation_progress_layout.addWidget(self.generation_progress_label)
+        generation_progress_layout.setCurrentWidget(
+            self.generation_progress_label
+        )
+        self.generation_progress_widget.hide()
+        self.statusBar().addWidget(self.generation_progress_widget, 1)
         self.statusBar().addPermanentWidget(self.llm_model_label)
         self.statusBar().addPermanentWidget(self.llm_model_combo)
         self.statusBar().addPermanentWidget(self.image_model_label)
@@ -1132,8 +1162,10 @@ class MainWindow(QMainWindow):
         self.render_document()
         self._update_generation_actions()
 
-    def _image_prompt_progress_changed(self, _message: str) -> None:
+    def _image_prompt_progress_changed(self, message: str) -> None:
         self.notification_bar.clear_notification("image-prompt-error")
+        self._image_prompt_progress_message = message
+        self._update_generation_progress()
         self._update_generation_actions()
 
     def _image_prompt_failed(self, failure: object) -> None:
@@ -1218,7 +1250,33 @@ class MainWindow(QMainWindow):
             self._show_info("background-cancelled", message)
         else:
             self.notification_bar.clear_notification("background-cancelled")
+        self._background_progress_message = message
+        self._update_generation_progress()
         self._update_generation_actions()
+
+    def _update_generation_progress(self) -> None:
+        background_busy = (
+            self.background_workflow.busy
+            if self.background_workflow is not None
+            else False
+        )
+        messages = tuple(
+            message
+            for busy, message in (
+                (
+                    self.image_prompt_workflow.busy,
+                    self._image_prompt_progress_message,
+                ),
+                (background_busy, self._background_progress_message),
+            )
+            if busy and message
+        )
+        if not messages:
+            self.generation_progress_widget.hide()
+            self.generation_progress_label.clear()
+            return
+        self.generation_progress_label.setText(" · ".join(messages))
+        self.generation_progress_widget.show()
 
     def _background_failed(self, failure: object) -> None:
         if isinstance(failure, WorkerFailure):
