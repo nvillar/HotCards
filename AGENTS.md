@@ -60,11 +60,12 @@ for live Ollama and MFLUX runs.
   attributes come from each image and which come from the scene or other
   assigned references.
 - Compose background prompts deterministically from the active revision's
-  authored Description, optional Enriched Description, and fixed instructions
-  for assigned reference roles. The authored Description remains authoritative
-  for actions, poses, object states, time, weather, camera, mood, composition,
-  and quoted visible text; enrichment and references add visual detail within
-  their scopes. Hotspots must not alter image prompts.
+  Enriched Description when present, otherwise its authored Description, plus
+  fixed instructions for assigned reference roles. Send only that effective
+  Description to MFLUX. Enrichment validation keeps authored actions, poses,
+  object states, time, weather, camera, mood, composition, and quoted visible
+  text authoritative while deriving Enriched Description. Hotspots must not
+  alter image prompts.
 - Keep one Description editor in the Background inspector. Show conditional
   native Original/Enriched radio controls below it, default to Enriched when it
   exists, place compact reference rows in a References group before Enrich and
@@ -84,14 +85,14 @@ for live Ollama and MFLUX runs.
 - Enrich Description is text-only and requires authored Description text. It
   must not send current or referenced images to Ollama. Always derive it from
   the authored Description, never from an existing enrichment. Give it
-  role-scoped generation-time authored and enriched Description provenance for
-  referenced backgrounds, then store the result separately through one
-  undoable command.
+  each referenced background's exact generation-time effective Description as
+  role-scoped provenance, then store the result separately through one undoable
+  command.
   Track source Description and exact usable reference-image provenance so an
   enrichment can be marked Current or Out of date without being cleared; image
-  generation passes both authored and enriched text under the same authority
-  rule even when enrichment is out of date. Reject reference-derived reversals
-  of recognized authored object states after one constrained repair attempt.
+  generation continues using an out-of-date enrichment until it is cleared or
+  replaced. Reject reference-derived reversals of recognized authored object
+  states after one constrained repair attempt.
   Assigned references replace conflicting authored details within their role
   rather than blending both versions. Require distinctive source-language
   overlap for every assigned role, including style-specific cues for Style,

@@ -165,13 +165,9 @@ class ImageGenerationInputs(DomainModel):
     setting_reference: ImageReferenceSnapshot | None = None
 
     @property
-    def enrichment_context(self) -> str:
-        """Return exact generation-time text context for later enrichment."""
-        if not self.enriched_description:
-            return self.description
-        if not self.description:
-            return self.enriched_description
-        return f"{self.description}\n{self.enriched_description}"
+    def effective_description(self) -> str:
+        """Return the one Description sent to image generation."""
+        return self.enriched_description or self.description
 
     def references_by_role(
         self,

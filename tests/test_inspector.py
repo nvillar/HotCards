@@ -248,7 +248,7 @@ def test_enriched_description_status_and_generation_source(
     )
     assert "Using: Description" in inspector.enrich_scene_button.toolTip()
     assert (
-        "Using: Description + Enriched Description"
+        "Using: Enriched Description"
         in inspector.generate_background_button.toolTip()
     )
     assert inspector.enrich_scene_button.text() == "Description Enriched ✓"

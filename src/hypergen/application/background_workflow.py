@@ -63,7 +63,6 @@ class _GenerationTarget:
     card_id: UUID
     revision_id: UUID
     description: str
-    enriched_description: str | None
     background_id: UUID | None
     bundle_path: Path
     references: tuple[_GenerationReferenceTarget, ...]
@@ -392,11 +391,10 @@ class BackgroundWorkflow(QObject):
             stack_id=document.id,
             card_id=card.id,
             revision_id=revision.id,
-            description=revision.description,
-            enriched_description=(
+            description=(
                 revision.enriched_description.text
                 if revision.enriched_description is not None
-                else None
+                else revision.description
             ),
             background_id=(
                 revision.background.id if revision.background is not None else None
@@ -420,13 +418,12 @@ class BackgroundWorkflow(QObject):
             return False
         revision = card.active_revision
         if not (
-            revision.description == target.description
-            and (
+            (
                 revision.enriched_description.text
                 if revision.enriched_description is not None
-                else None
+                else revision.description
             )
-            == target.enriched_description
+            == target.description
             and (
                 revision.background.id
                 if revision.background is not None
