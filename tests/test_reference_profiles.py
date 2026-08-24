@@ -41,7 +41,7 @@ class FakeOllamaClient:
         (
             ReferenceRole.SUBJECT,
             "identity, appearance, body, clothing, materials",
-            "seated, standing, kneeling",
+            "person, creature, machine, vehicle, prop",
         ),
         (
             ReferenceRole.STYLE,
@@ -78,6 +78,29 @@ def test_profile_prompt_repeats_exact_scalar_contract_and_role_rules(
     assert "Synthetic adversarial source scene" in prompt
 
 
+def test_subject_prompt_covers_discrete_objects_without_leaking_scene_state() -> None:
+    prompt = build_reference_profile_prompt(
+        ReferenceProfileRequest(
+            role=ReferenceRole.SUBJECT,
+            source_description=(
+                "A tall wedge-shaped computer console viewed head-on has a "
+                "recessed CRT displaying a robot diagram."
+            ),
+        )
+    )
+
+    assert "object class, or model family" in prompt
+    assert "chassis, component layout" in prompt
+    assert "do not return all null" in prompt
+    assert "displayed screen content" in prompt
+    assert "not how the\nimage depicts or renders it" in prompt
+    assert "image texture, palette, lighting, shading" in prompt
+    assert "front-facing, side-on" in prompt
+    assert prompt.index("FINAL SUBJECT FILTER") > prompt.index(
+        "A tall wedge-shaped computer console"
+    )
+
+
 @pytest.mark.parametrize(
     ("role", "content", "expected_capsule"),
     (
@@ -93,6 +116,28 @@ def test_profile_prompt_repeats_exact_scalar_contract_and_role_rules(
             (
                 "ceramic service robot; round faceplate, blue eyes; "
                 "short articulated limbs; white ceramic, gold-repaired cracks"
+            ),
+        ),
+        (
+            ReferenceRole.SUBJECT,
+            {
+                "identity": "retrofuturistic computer console",
+                "appearance": (
+                    "dark angular side housing, recessed square CRT, "
+                    "slanted control deck with rectangular switches"
+                ),
+                "body": (
+                    "tall freestanding wedge-shaped chassis, bulky "
+                    "pedestal cabinet"
+                ),
+                "clothing": None,
+                "materials": None,
+            },
+            (
+                "retrofuturistic computer console; dark angular side housing, "
+                "recessed square CRT, slanted control deck with rectangular "
+                "switches; tall freestanding wedge-shaped chassis, bulky "
+                "pedestal cabinet"
             ),
         ),
         (
