@@ -316,6 +316,11 @@ def test_card_header_and_toolbar_match_revision_hierarchy(
     margins = window.generation_progress_layout.contentsMargins()
     assert margins.left() == 8
     assert margins.right() == 8
+    central_layout = window.centralWidget().layout()
+    assert central_layout is not None
+    assert central_layout.indexOf(window.pane_splitter) < (
+        central_layout.indexOf(window.notification_bar)
+    )
     assert window.inspector.inspector_tabs.tabText(0) == "Background"
     assert window.fit_canvas_button.size() == window.clear_background_button.size()
 
@@ -1180,6 +1185,9 @@ def test_generation_progress_bar_is_indeterminate_for_text_and_uses_image_steps(
     assert progress.minimum() == 0
     assert progress.maximum() == 0
     assert not progress.isTextVisible()
+    assert window.generation_step_label.text() == (
+        "Preparing Image Prompt..."
+    )
 
     window.image_prompt_workflow._busy = False
     window.image_prompt_workflow.progress_changed.emit("Image Prompt prepared")
@@ -1188,6 +1196,7 @@ def test_generation_progress_bar_is_indeterminate_for_text_and_uses_image_steps(
     background.busy = True
     background.progress_changed.emit("Generating image...")
     assert not progress_container.isHidden()
+    assert window.generation_step_label.text() == "Generating image..."
     assert progress.minimum() == 0
     assert progress.maximum() == 0
 
@@ -1200,6 +1209,7 @@ def test_generation_progress_bar_is_indeterminate_for_text_and_uses_image_steps(
     window.image_prompt_workflow.progress_changed.emit(
         "Preparing Image Prompt..."
     )
+    assert window.generation_step_label.text() == "Generating image..."
     assert progress.maximum() == 4
     assert progress.value() == 1
 
@@ -1222,6 +1232,7 @@ def test_generation_progress_bar_is_indeterminate_for_text_and_uses_image_steps(
     window.image_prompt_workflow._busy = False
     window.image_prompt_workflow.progress_changed.emit("Image Prompt prepared")
     assert progress_container.isHidden()
+    assert window.generation_step_label.text() == ""
 
 
 def test_background_success_clears_previous_cancellation_notice(
