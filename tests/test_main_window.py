@@ -852,6 +852,59 @@ def test_generated_result_can_move_to_a_new_complete_version(
     )
 
 
+def test_re_enrichment_completion_selects_enriched_description(
+    application: QApplication,
+) -> None:
+    previous = CardRevision(
+        description="A changed courtyard",
+        enriched_description=EnrichedDescription(
+            text="An older enriched courtyard",
+            source_description="A courtyard",
+        ),
+    )
+    card = Card(name="Card", revisions=(previous,))
+    window, controller, _workers, _background = _window(
+        Stack(name="Demo", cards=(card,))
+    )
+    window.inspector.original_description_button.click()
+    assert window.inspector.original_description_button.isChecked()
+    changed = controller.execute(
+        SetRevisionEnrichedDescriptionCommand(
+            card_id=card.id,
+            revision_id=previous.id,
+            value=EnrichedDescription(
+                text="A newly enriched courtyard",
+                source_description=previous.description,
+            ),
+        )
+    )
+    window.render_document(changed)
+    assert window.inspector.original_description_button.isChecked()
+    window.inspector.description_edit.setFocus()
+    application.processEvents()
+    token = controller.current_undo_token
+    assert token is not None
+
+    window.scene_enrichment_workflow.generation_applied.emit(
+        GeneratedRevisionChange(
+            message="Description enriched",
+            token=token,
+            card_id=card.id,
+            revision_id=previous.id,
+            previous_revision=previous,
+        )
+    )
+
+    assert window.inspector.enriched_description_button.isChecked()
+    assert window.inspector.description_edit.toPlainText() == (
+        "A newly enriched courtyard"
+    )
+    assert window.notification_bar.message_label.text() == (
+        "Description enriched on the current version"
+    )
+    window.close()
+
+
 def test_dismissing_generated_result_keeps_it_on_current_version(
     application: QApplication,
 ) -> None:

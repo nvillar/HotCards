@@ -538,6 +538,27 @@ class Inspector(QWidget):
             return bool(self.description_edit.toPlainText().strip())
         return bool(card.active_revision.description.strip())
 
+    def show_enriched_description(
+        self,
+        card_id: UUID,
+        revision_id: UUID,
+    ) -> None:
+        """Display a newly applied enrichment when its revision is still active."""
+        card = self._selected_card()
+        if (
+            card is None
+            or card.id != card_id
+            or card.active_revision.id != revision_id
+            or card.active_revision.enriched_description is None
+        ):
+            return
+        self._description_mode = "enriched"
+        self.render(self.controller.document, self.selected_card_id)
+        enrichment = card.active_revision.enriched_description
+        assert enrichment is not None
+        with QSignalBlocker(self.description_edit):
+            self.description_edit.setPlainText(enrichment.text)
+
     def _switch_description_mode(self, mode: str) -> None:
         if self._rendering or mode == self._description_mode:
             return

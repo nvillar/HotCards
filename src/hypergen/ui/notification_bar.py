@@ -5,15 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QIcon
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
     QPushButton,
-    QStyle,
-    QToolButton,
 )
 
 
@@ -54,13 +51,6 @@ class NotificationBar(QFrame):
         NotificationKind.WARNING: 2,
         NotificationKind.ERROR: 4,
     }
-    _ICONS = {
-        NotificationKind.INFO: QStyle.StandardPixmap.SP_MessageBoxInformation,
-        NotificationKind.SUCCESS: QStyle.StandardPixmap.SP_DialogApplyButton,
-        NotificationKind.WARNING: QStyle.StandardPixmap.SP_MessageBoxWarning,
-        NotificationKind.ERROR: QStyle.StandardPixmap.SP_MessageBoxCritical,
-    }
-
     def __init__(self) -> None:
         super().__init__()
         self.setObjectName("notificationBar")
@@ -81,9 +71,6 @@ class NotificationBar(QFrame):
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(8, 6, 6, 6)
-        self.icon_label = QLabel()
-        self.icon_label.setObjectName("notificationIcon")
-        layout.addWidget(self.icon_label, 0, Qt.AlignmentFlag.AlignTop)
         self.message_label = QLabel()
         self.message_label.setObjectName("notificationMessage")
         self.message_label.setWordWrap(True)
@@ -100,22 +87,12 @@ class NotificationBar(QFrame):
             lambda: self._request_action(primary=False)
         )
         layout.addWidget(self.secondary_button)
-        self.dismiss_button = QToolButton()
+        self.dismiss_button = QPushButton("Dismiss")
         self.dismiss_button.setObjectName("dismissNotificationButton")
-        self.dismiss_button.setIcon(
-            self.style().standardIcon(
-                QStyle.StandardPixmap.SP_DialogCloseButton
-            )
-        )
         self.dismiss_button.setAccessibleName("Dismiss notification")
         self.dismiss_button.setToolTip("Dismiss notification")
-        self.dismiss_button.setAutoRaise(True)
         self.dismiss_button.clicked.connect(self.dismiss_current)
-        layout.addWidget(
-            self.dismiss_button,
-            0,
-            Qt.AlignmentFlag.AlignTop,
-        )
+        layout.addWidget(self.dismiss_button)
         self.setVisible(False)
 
     @property
@@ -181,8 +158,7 @@ class NotificationBar(QFrame):
             ),
         )
         self._current_key = key
-        icon = self.style().standardIcon(self._ICONS[notification.kind])
-        self.icon_label.setPixmap(icon.pixmap(16, 16))
+        self.setAccessibleDescription(notification.kind.value.title())
         self.message_label.setText(notification.message)
         self.message_label.setToolTip(notification.detail)
         self.setToolTip(notification.detail)
@@ -191,26 +167,10 @@ class NotificationBar(QFrame):
             self.secondary_button,
             notification.secondary_action,
         )
-        if notification.dismiss_label:
-            self.dismiss_button.setIcon(QIcon())
-            self.dismiss_button.setText(notification.dismiss_label)
-            self.dismiss_button.setToolButtonStyle(
-                Qt.ToolButtonStyle.ToolButtonTextOnly
-            )
-            self.dismiss_button.setAccessibleName(notification.dismiss_label)
-            self.dismiss_button.setToolTip(notification.dismiss_label)
-        else:
-            self.dismiss_button.setIcon(
-                self.style().standardIcon(
-                    QStyle.StandardPixmap.SP_DialogCloseButton
-                )
-            )
-            self.dismiss_button.setText("")
-            self.dismiss_button.setToolButtonStyle(
-                Qt.ToolButtonStyle.ToolButtonIconOnly
-            )
-            self.dismiss_button.setAccessibleName("Dismiss notification")
-            self.dismiss_button.setToolTip("Dismiss notification")
+        dismiss_label = notification.dismiss_label or "Dismiss"
+        self.dismiss_button.setText(dismiss_label)
+        self.dismiss_button.setAccessibleName(dismiss_label)
+        self.dismiss_button.setToolTip(dismiss_label)
         self.dismiss_button.setVisible(notification.dismissible)
         self.setVisible(True)
 

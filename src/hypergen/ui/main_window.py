@@ -393,7 +393,7 @@ class MainWindow(QMainWindow):
         self.scene_enrichment_workflow.document_changed.connect(self.render_document)
         self.scene_enrichment_workflow.change_applied.connect(self._show_undo_notification)
         self.scene_enrichment_workflow.generation_applied.connect(
-            self._show_generated_revision_notification
+            self._scene_enrichment_applied
         )
         self.pane_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.pane_splitter.setObjectName("threePaneSplitter")
@@ -687,6 +687,16 @@ class MainWindow(QMainWindow):
                 priority=3,
             ),
         )
+
+    def _scene_enrichment_applied(self, change: object) -> None:
+        if self._is_running:
+            return
+        if isinstance(change, GeneratedRevisionChange):
+            self.inspector.show_enriched_description(
+                change.card_id,
+                change.revision_id,
+            )
+        self._show_generated_revision_notification(change)
 
     def _undo_notification(self) -> None:
         if self._is_running:
