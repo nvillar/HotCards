@@ -134,6 +134,13 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     assert inspector.add_hotspot_button.font().pointSizeF() > (
         inspector.move_hotspot_up_button.font().pointSizeF()
     )
+    hotspot_controls = hotspot_layout.itemAt(
+        hotspot_layout.indexOf(inspector.hotspot_list) + 1
+    ).layout()
+    assert hotspot_controls is not None
+    assert hotspot_controls.indexOf(
+        inspector.delete_hotspot_button
+    ) < hotspot_controls.indexOf(inspector.add_hotspot_button)
 
     visible_copy = " ".join(label.text() for label in inspector.findChildren(QLabel))
     for obsolete in (

@@ -319,8 +319,8 @@ class Inspector(QWidget):
         controls.addWidget(self.move_hotspot_up_button)
         controls.addWidget(self.move_hotspot_down_button)
         controls.addStretch(1)
-        controls.addWidget(self.add_hotspot_button)
         controls.addWidget(self.delete_hotspot_button)
+        controls.addWidget(self.add_hotspot_button)
         layout.addLayout(controls)
 
         self.hotspot_target_label = QLabel("Hotspot Target")
