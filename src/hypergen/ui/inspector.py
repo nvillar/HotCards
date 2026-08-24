@@ -11,7 +11,6 @@ from PySide6.QtWidgets import (
     QButtonGroup,
     QComboBox,
     QFrame,
-    QGroupBox,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -197,9 +196,13 @@ class Inspector(QWidget):
         layout.addWidget(self.description_toggle)
 
         layout.addSpacing(8)
-        self.references_group = QGroupBox("References")
-        self.references_group.setObjectName("referencesGroup")
-        references_layout = QVBoxLayout(self.references_group)
+        self.references_label = QLabel("References")
+        self.references_label.setObjectName("referencesLabel")
+        layout.addWidget(self.references_label)
+        self.references_panel = QFrame()
+        self.references_panel.setObjectName("referencesPanel")
+        self.references_panel.setFrameShape(QFrame.Shape.StyledPanel)
+        references_layout = QVBoxLayout(self.references_panel)
         self.subject_reference_combo = QComboBox()
         self.style_reference_combo = QComboBox()
         self.setting_reference_combo = QComboBox()
@@ -242,7 +245,7 @@ class Inspector(QWidget):
         self.reference_error.setWordWrap(True)
         self.reference_error.setVisible(False)
         references_layout.addWidget(self.reference_error)
-        layout.addWidget(self.references_group)
+        layout.addWidget(self.references_panel)
 
         layout.addSpacing(8)
         self.enrich_scene_button = QPushButton("Enrich Description")
@@ -512,7 +515,7 @@ class Inspector(QWidget):
             if roles
             else ""
         )
-        self.references_group.setTitle(
+        self.references_label.setText(
             f"References ({len(roles)})" if roles else "References"
         )
         self._enrich_using_text = f"Using: Description{reference_suffix}"

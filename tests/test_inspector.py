@@ -68,15 +68,18 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     assert inspector.description_toggle.isHidden()
     assert isinstance(inspector.original_description_button, QRadioButton)
     assert isinstance(inspector.enriched_description_button, QRadioButton)
-    content_layout = inspector.references_group.parentWidget().layout()
+    content_layout = inspector.references_panel.parentWidget().layout()
     assert content_layout is not None
     assert content_layout.indexOf(inspector.description_edit) < (
         content_layout.indexOf(inspector.description_toggle)
     )
     assert content_layout.indexOf(inspector.description_toggle) < (
-        content_layout.indexOf(inspector.references_group)
+        content_layout.indexOf(inspector.references_label)
     )
-    assert content_layout.indexOf(inspector.references_group) < (
+    assert content_layout.indexOf(inspector.references_label) < (
+        content_layout.indexOf(inspector.references_panel)
+    )
+    assert content_layout.indexOf(inspector.references_panel) < (
         content_layout.indexOf(inspector.enrich_scene_button)
     )
     assert content_layout.indexOf(inspector.enrich_scene_button) < (
@@ -289,7 +292,7 @@ def test_using_labels_name_assigned_reference_roles(
     inspector.render(controller.document, source.id)
 
     expected = "Using: Description + References (Subject, Style)"
-    assert inspector.references_group.title() == "References (2)"
+    assert inspector.references_label.text() == "References (2)"
     assert expected in inspector.enrich_scene_button.toolTip()
     assert expected in inspector.generate_background_button.toolTip()
 
