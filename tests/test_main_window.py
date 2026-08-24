@@ -274,6 +274,9 @@ def test_card_header_and_toolbar_match_revision_hierarchy(
         window.restart_button_action
     )
     assert toolbar_actions.index(window.restart_button_action) < toolbar_actions.index(
+        window.run_overlay_separator
+    )
+    assert toolbar_actions.index(window.run_overlay_separator) < toolbar_actions.index(
         window.overlay_label_action
     )
     assert toolbar_actions.index(window.overlay_label_action) < (
@@ -292,6 +295,7 @@ def test_card_header_and_toolbar_match_revision_hierarchy(
         window.mode_selector.sizeHint().height()
     )
     assert not window.run_controls_separator.isVisible()
+    assert not window.run_overlay_separator.isVisible()
     assert not window.overlay_label_action.isVisible()
     assert not window.overlay_selector_action.isVisible()
     assert not hasattr(window, "styles_button")
@@ -582,6 +586,7 @@ def test_author_and_run_modes_apply_consistent_read_only_chrome(
     assert window.card_sidebar.isHidden()
     assert window.inspector.isHidden()
     assert window.run_controls_separator.isVisible()
+    assert window.run_overlay_separator.isVisible()
     assert window.back_action.isVisible()
     assert window.restart_action.isVisible()
     assert window.back_button_action.isVisible()
@@ -601,6 +606,7 @@ def test_author_and_run_modes_apply_consistent_read_only_chrome(
     assert window.revision_combo.isEnabled()
     assert not window.add_revision_button.isHidden()
     assert not window.run_controls_separator.isVisible()
+    assert not window.run_overlay_separator.isVisible()
     assert not window.back_action.isVisible()
     assert not window.restart_action.isVisible()
     assert not window.back_button_action.isVisible()
