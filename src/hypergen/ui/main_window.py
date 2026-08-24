@@ -224,9 +224,20 @@ class MainWindow(QMainWindow):
         for action in self.player_navigation_actions:
             action.setEnabled(False)
             action.setVisible(False)
-            toolbar.addAction(action)
-        self.back_button = toolbar.widgetForAction(self.back_action)
-        self.restart_button = toolbar.widgetForAction(self.restart_action)
+        self.back_button = QPushButton("Back")
+        self.back_button.setObjectName("runBackButton")
+        self.back_button.setToolTip(self.back_action.toolTip())
+        self.back_button.clicked.connect(self.back_action.trigger)
+        self.back_button.setEnabled(False)
+        self.back_button.setVisible(False)
+        self.back_button_action = toolbar.addWidget(self.back_button)
+        self.restart_button = QPushButton("Restart")
+        self.restart_button.setObjectName("runRestartButton")
+        self.restart_button.setToolTip(self.restart_action.toolTip())
+        self.restart_button.clicked.connect(self.restart_action.trigger)
+        self.restart_button.setEnabled(False)
+        self.restart_button.setVisible(False)
+        self.restart_button_action = toolbar.addWidget(self.restart_button)
 
         self.overlay_label = QLabel("Hotspots")
         self.overlay_label_action = toolbar.addWidget(self.overlay_label)
@@ -240,9 +251,6 @@ class MainWindow(QMainWindow):
             self.overlay_selector.addItem(label, mode)
         self.overlay_selector.currentIndexChanged.connect(self._overlay_changed)
         self.overlay_selector_action = toolbar.addWidget(self.overlay_selector)
-        for button in (self.back_button, self.restart_button):
-            if button is not None:
-                button.setFont(self.overlay_label.font())
         self.run_controls_separator.setVisible(False)
         self.overlay_label_action.setVisible(False)
         self.overlay_selector_action.setVisible(False)
@@ -1831,6 +1839,12 @@ class MainWindow(QMainWindow):
     def _apply_mode_chrome(self) -> None:
         authoring = not self._is_running
         self.canvas_card_name.setReadOnly(not authoring)
+        self.canvas_card_name.setVisible(authoring)
+        self.canvas_card_name_error.setVisible(
+            authoring and bool(self.canvas_card_name_error.text())
+        )
+        self.revision_label.setVisible(authoring)
+        self.revision_combo.setVisible(authoring)
         self.revision_combo.setEnabled(authoring)
         self.add_revision_button.setVisible(authoring)
         self.delete_revision_button.setVisible(authoring)
@@ -1854,11 +1868,17 @@ class MainWindow(QMainWindow):
         self.overlay_selector.setVisible(self._is_running)
         for action in self.player_navigation_actions:
             action.setVisible(self._is_running)
+        self.back_button.setVisible(self._is_running)
+        self.restart_button.setVisible(self._is_running)
 
     def _update_run_actions(self) -> None:
         state = self._run_session.state
-        self.back_action.setEnabled(self._is_running and bool(state.history))
-        self.restart_action.setEnabled(self._is_running and state.current_card_id is not None)
+        can_go_back = self._is_running and bool(state.history)
+        can_restart = self._is_running and state.current_card_id is not None
+        self.back_action.setEnabled(can_go_back)
+        self.restart_action.setEnabled(can_restart)
+        self.back_button.setEnabled(can_go_back)
+        self.restart_button.setEnabled(can_restart)
 
     def _set_run_warning(self, message: str) -> None:
         if message:

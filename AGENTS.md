@@ -133,7 +133,8 @@ for live Ollama and MFLUX runs.
   deduplicated. Entering Run mode must not start AI work and must suppress
   pending AI results. Enter Run on the current Author card, keep the configured
   start card as Restart's target, and offer Restart in a dismissible banner when
-  those cards differ. Show Back, Restart, and overlay controls only in Run mode.
+  those cards differ. Show standard-size Back, Restart, and overlay controls
+  only in Run mode; hide the card name and version authoring header there.
 - Keep LLM and image-model selectors in the status bar and persist them through
   Qt settings. List installed Ollama models; offer FLUX.2 Klein 4B and FLUX.2
   Klein 9B KV. Keep model fields out of Advanced Settings.

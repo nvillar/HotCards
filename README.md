@@ -99,7 +99,9 @@ a background preserves its hotspots so the author can review and adjust them
 manually. Run mode supports deterministic hotspot navigation, Back/Restart
 history, and configurable overlays. It opens on the current Author card and,
 when that differs from the configured start card, offers a dismissible restart
-action. Run-only navigation and overlay controls stay hidden in Author mode.
+action. Run presents Back and Restart as standard-size controls and hides the
+authoring-only card name and version header. Run-only navigation and overlay
+controls stay hidden in Author mode.
 Local AI services are checked automatically when Author mode is entered; Run
 mode starts no AI work. The status bar selects
 an installed Ollama LLM and either FLUX.2 Klein 4B or FLUX.2 Klein 9B KV.
