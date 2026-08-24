@@ -192,30 +192,21 @@ class MainWindow(QMainWindow):
         toolbar = QToolBar("Authoring")
         toolbar.setObjectName("mainToolbar")
         toolbar.setMovable(False)
+        self.authoring_toolbar = toolbar
         self.addToolBar(toolbar)
 
-        toolbar.addWidget(QLabel("Mode"))
+        self.toolbar_leading_spacer = QWidget()
+        self.toolbar_leading_spacer.setFixedWidth(8)
+        toolbar.addWidget(self.toolbar_leading_spacer)
+        self.mode_label = QLabel("Mode")
+        toolbar.addWidget(self.mode_label)
         self.mode_selector = QComboBox()
         self.mode_selector.setObjectName("modeSelector")
         self.mode_selector.addItems(["Author", "Run"])
         self.mode_selector.setToolTip("Switch between authoring and interactive preview")
         self.mode_selector.currentIndexChanged.connect(self._mode_changed)
         toolbar.addWidget(self.mode_selector)
-        toolbar.addSeparator()
-
-        self.overlay_label = QLabel("Hotspots")
-        toolbar.addWidget(self.overlay_label)
-        self.overlay_selector = QComboBox()
-        self.overlay_selector.setObjectName("overlaySelector")
-        for mode, label in (
-            (RunOverlayMode.HIDDEN, "Hidden"),
-            (RunOverlayMode.HOVER, "On hover"),
-            (RunOverlayMode.VISIBLE, "Visible"),
-        ):
-            self.overlay_selector.addItem(label, mode)
-        self.overlay_selector.currentIndexChanged.connect(self._overlay_changed)
-        toolbar.addWidget(self.overlay_selector)
-        toolbar.addSeparator()
+        self.run_controls_separator = toolbar.addSeparator()
 
         self.back_action = QAction("Back", self)
         self.back_action.setObjectName("runBackAction")
@@ -233,6 +224,27 @@ class MainWindow(QMainWindow):
             action.setEnabled(False)
             action.setVisible(False)
             toolbar.addAction(action)
+        self.back_button = toolbar.widgetForAction(self.back_action)
+        self.restart_button = toolbar.widgetForAction(self.restart_action)
+
+        self.overlay_label = QLabel("Hotspots")
+        self.overlay_label_action = toolbar.addWidget(self.overlay_label)
+        self.overlay_selector = QComboBox()
+        self.overlay_selector.setObjectName("overlaySelector")
+        for mode, label in (
+            (RunOverlayMode.HIDDEN, "Hidden"),
+            (RunOverlayMode.HOVER, "On hover"),
+            (RunOverlayMode.VISIBLE, "Visible"),
+        ):
+            self.overlay_selector.addItem(label, mode)
+        self.overlay_selector.currentIndexChanged.connect(self._overlay_changed)
+        self.overlay_selector_action = toolbar.addWidget(self.overlay_selector)
+        for button in (self.back_button, self.restart_button):
+            if button is not None:
+                button.setFont(self.overlay_label.font())
+        self.run_controls_separator.setVisible(False)
+        self.overlay_label_action.setVisible(False)
+        self.overlay_selector_action.setVisible(False)
 
     def _build_panes(self) -> None:
         self.card_sidebar = CardSidebar(
@@ -772,6 +784,8 @@ class MainWindow(QMainWindow):
             self._undo_notification()
         elif action_id == "create-generated-revision" and not self._is_running:
             self._create_generated_revision()
+        elif action_id == "restart-run-from-start" and self._is_running:
+            self._run_restart()
         elif action_id == "open-settings" and not self._is_running:
             self.open_advanced_settings()
         elif action_id == "check-services" and not self._is_running:
@@ -1754,7 +1768,36 @@ class MainWindow(QMainWindow):
         self.render_document()
         if state is not None and state.warning is not None:
             self._set_run_warning(state.warning)
+        elif (
+            state is not None
+            and self.controller.document.start_card_id is not None
+            and state.current_card_id != self.controller.document.start_card_id
+        ):
+            card = next(
+                (
+                    candidate
+                    for candidate in self.controller.document.cards
+                    if candidate.id == state.current_card_id
+                ),
+                None,
+            )
+            self.notification_bar.show_notification(
+                "run-entry",
+                Notification(
+                    message=(
+                        f'Run started from current card "{card.name}".'
+                        if card is not None
+                        else "Run started from the current card."
+                    ),
+                    kind=NotificationKind.INFO,
+                    primary_action=NotificationAction(
+                        "restart-run-from-start",
+                        "Restart from Start Card",
+                    ),
+                ),
+            )
         if not should_run:
+            self.notification_bar.clear_notification("run-entry")
             self.run_availability_checks()
 
     def _run_interaction_activated(self, interaction_id: object) -> None:
@@ -1772,6 +1815,7 @@ class MainWindow(QMainWindow):
 
     def _run_restart(self) -> None:
         if self._is_running:
+            self.notification_bar.clear_notification("run-entry")
             self._apply_run_state(self._run_session.restart())
 
     def _apply_run_state(self, state: RunSessionState) -> None:
@@ -1800,8 +1844,11 @@ class MainWindow(QMainWindow):
             if authoring
             else "Switch to Author mode to create the first card."
         )
-        self.overlay_label.setVisible(True)
-        self.overlay_selector.setVisible(True)
+        self.run_controls_separator.setVisible(self._is_running)
+        self.overlay_label_action.setVisible(self._is_running)
+        self.overlay_selector_action.setVisible(self._is_running)
+        self.overlay_label.setVisible(self._is_running)
+        self.overlay_selector.setVisible(self._is_running)
         for action in self.player_navigation_actions:
             action.setVisible(self._is_running)
 

@@ -40,27 +40,37 @@ class RunSession:
         document: Stack,
         preferred_card_id: UUID | None = None,
     ) -> RunSessionState:
-        """Start at the configured card, then a valid preferred/first fallback."""
+        """Start at the preferred card while retaining the configured restart target."""
         card_ids = {card.id for card in document.cards}
-        if document.start_card_id in card_ids:
-            entry_card_id = document.start_card_id
+        if preferred_card_id in card_ids:
+            current_card_id = preferred_card_id
             warning = None
-        elif preferred_card_id in card_ids:
-            entry_card_id = preferred_card_id
-            card = next(card for card in document.cards if card.id == entry_card_id)
-            warning = (
-                f'No start card is configured; previewing "{card.name}".'
-            )
+        elif document.start_card_id in card_ids:
+            current_card_id = document.start_card_id
+            warning = None
         elif document.cards:
-            entry_card_id = document.cards[0].id
+            current_card_id = document.cards[0].id
             warning = (
                 f'No start card is configured; previewing "{document.cards[0].name}".'
             )
         else:
-            entry_card_id = None
+            current_card_id = None
             warning = "This stack has no cards to run."
-        self._entry_card_id = entry_card_id
-        self._current_card_id = entry_card_id
+        if document.start_card_id not in card_ids and preferred_card_id in card_ids:
+            card = next(
+                card
+                for card in document.cards
+                if card.id == preferred_card_id
+            )
+            warning = (
+                f'No start card is configured; previewing "{card.name}".'
+            )
+        self._entry_card_id = (
+            document.start_card_id
+            if document.start_card_id in card_ids
+            else current_card_id
+        )
+        self._current_card_id = current_card_id
         self._history.clear()
         self._start_warning = warning
         self._warning = warning

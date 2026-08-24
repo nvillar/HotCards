@@ -166,7 +166,9 @@ class Inspector(QWidget):
         page.setObjectName("backgroundInspectorContent")
         layout = QVBoxLayout(page)
 
-        layout.addWidget(QLabel("Description"))
+        self.description_label = QLabel("Description")
+        self.description_label.setObjectName("descriptionLabel")
+        layout.addWidget(self.description_label)
         self.description_edit = _CommitPlainTextEdit()
         self.description_edit.setObjectName("descriptionEdit")
         self.description_edit.setPlaceholderText("Description")
@@ -174,8 +176,8 @@ class Inspector(QWidget):
         editor_height = round(
             (self.description_edit.fontMetrics().lineSpacing() * 10 + 20) * 1.25
         )
-        self.description_edit.setFixedHeight(editor_height)
-        layout.addWidget(self.description_edit)
+        self.description_edit.setMinimumHeight(editor_height)
+        layout.addWidget(self.description_edit, 1)
         self.description_error = QLabel()
         self.description_error.setObjectName("descriptionValidationError")
         self.description_error.setWordWrap(True)
@@ -273,7 +275,6 @@ class Inspector(QWidget):
             self.generate_background_button,
         }
 
-        layout.addStretch(1)
         scroll.setWidget(page)
         self.inspector_tabs.addTab(scroll, "Background")
 
@@ -287,7 +288,7 @@ class Inspector(QWidget):
         layout.addWidget(self.hotspots_placeholder)
         self.hotspot_list = QListWidget()
         self.hotspot_list.setObjectName("hotspotList")
-        layout.addWidget(self.hotspot_list)
+        layout.addWidget(self.hotspot_list, 1)
 
         controls = QHBoxLayout()
         self.move_hotspot_up_button = _compact_icon_button(
@@ -351,6 +352,9 @@ class Inspector(QWidget):
         controls.addWidget(self.delete_hotspot_button)
         layout.addLayout(controls)
 
+        self.hotspot_target_label = QLabel("Hotspot Target")
+        self.hotspot_target_label.setObjectName("hotspotTargetLabel")
+        layout.addWidget(self.hotspot_target_label)
         self.hotspot_destination_combo = QComboBox()
         self.hotspot_destination_combo.setObjectName("hotspotDestinationCombo")
         self.hotspot_destination_combo.setAccessibleName("Hotspot destination")

@@ -63,15 +63,15 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
         QStyle.PixelMetric.PM_LayoutLeftMargin
     )
     assert inspector.description_edit.placeholderText() == "Description"
-    assert inspector.description_edit.minimumHeight() == (
-        inspector.description_edit.maximumHeight()
-    )
     assert inspector.description_edit.minimumHeight() == round(
         (
             inspector.description_edit.fontMetrics().lineSpacing() * 10
             + 20
         )
         * 1.25
+    )
+    assert inspector.description_edit.maximumHeight() > (
+        inspector.description_edit.minimumHeight()
     )
     assert inspector.enrich_scene_button.text() == "Enrich Description"
     assert inspector.generate_background_button.text() == "Generate Image"
@@ -80,6 +80,9 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     assert isinstance(inspector.enriched_description_button, QRadioButton)
     content_layout = inspector.references_panel.parentWidget().layout()
     assert content_layout is not None
+    assert content_layout.stretch(
+        content_layout.indexOf(inspector.description_edit)
+    ) == 1
     assert content_layout.indexOf(inspector.description_edit) < (
         content_layout.indexOf(inspector.description_toggle)
     )
@@ -97,6 +100,18 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     )
     assert not hasattr(inspector, "style_combo")
     assert not hasattr(inspector, "clear_background_button")
+    assert inspector.hotspot_target_label.text() == "Hotspot Target"
+    assert inspector.hotspot_target_label.font().pointSizeF() == (
+        inspector.description_label.font().pointSizeF()
+    )
+    hotspot_layout = inspector.hotspot_list.parentWidget().layout()
+    assert hotspot_layout is not None
+    assert hotspot_layout.indexOf(inspector.hotspot_target_label) < (
+        hotspot_layout.indexOf(inspector.hotspot_destination_combo)
+    )
+    assert hotspot_layout.stretch(
+        hotspot_layout.indexOf(inspector.hotspot_list)
+    ) == 1
     hotspot_control_sizes = {
         button.size()
         for button in (
