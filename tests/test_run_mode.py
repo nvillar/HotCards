@@ -333,7 +333,7 @@ def test_run_canvas_uses_topmost_hit_with_back_and_restart(
     )
     window.resize(1000, 700)
     window.show()
-    window.mode_selector.setCurrentText("Run")
+    window.mode_button.click()
     application.processEvents()
 
     assert window.canvas_card_name.text() == "First"
@@ -379,7 +379,7 @@ def test_run_canvas_uses_topmost_hit_with_back_and_restart(
     window.close()
 
 
-def test_run_starts_from_current_card_and_offers_start_card_restart(
+def test_run_starts_from_current_card_and_toolbar_can_restart(
     application: QApplication,
     tmp_path: Path,
 ) -> None:
@@ -390,24 +390,16 @@ def test_run_starts_from_current_card_and_offers_start_card_restart(
     start = window.controller.document.cards[0]
     window.select_card(third.id)
 
-    window.mode_selector.setCurrentText("Run")
+    window.mode_button.click()
     application.processEvents()
 
     assert window.canvas_card_name.text() == "Third"
-    assert window.notification_bar.current_key == "run-entry"
-    assert window.notification_bar.message_label.text() == (
-        'Run started from current card "Third".'
-    )
-    assert window.notification_bar.primary_button.text() == (
-        "Restart from Start Card"
-    )
-    assert window.notification_bar.dismiss_button.text() == "Dismiss"
+    assert window.notification_bar.current_key != "run-entry"
 
-    window.notification_bar.primary_button.click()
+    window.restart_button.click()
 
     assert window.canvas_card_name.text() == "First"
     assert window._run_session.state.current_card_id == start.id
-    assert window.notification_bar.current_key != "run-entry"
     window.close()
 
 
@@ -420,7 +412,7 @@ def test_run_overlays_persist_and_incomplete_cards_warn(
     )
     window.resize(1000, 700)
     window.show()
-    window.mode_selector.setCurrentText("Run")
+    window.mode_button.click()
     application.processEvents()
 
     window.overlay_selector.setCurrentText("Visible")

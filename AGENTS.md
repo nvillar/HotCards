@@ -112,9 +112,11 @@ for live Ollama and MFLUX runs.
 - Check local AI services on entry to Author mode, with concurrent checks
   deduplicated. Entering Run mode must not start AI work and must suppress
   pending AI results. Enter Run on the current Author card, keep the configured
-  start card as Restart's target, and offer Restart in a dismissible banner when
-  those cards differ. Show standard-size Back, Restart, and overlay controls
-  only in Run mode; hide the card name and version authoring header there.
+  start card as Restart's target, and do not show a redundant Run-entry
+  notification. Use one action-oriented mode button labeled Run in Author mode
+  and Author in Run mode. Show standard-size Back, Restart, and overlay controls
+  only in Run mode; hide the card name, version authoring header, and bottom
+  model selectors there.
 - Keep LLM and image-model selectors in the status bar and persist them through
   Qt settings. List only installed Ollama models that advertise vision support;
   offer FLUX.2 Klein 4B and FLUX.2 Klein 9B KV. Keep model fields out of

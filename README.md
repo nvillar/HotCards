@@ -23,7 +23,7 @@ Each card owns one or more numbered revisions. A revision contains its authored
 Description, optional prepared Image Prompt, optional generated background,
 optional Reference card, and hotspot set. The compact header above the canvas
 edits the card name and selects, duplicates, or deletes revisions; the toolbar
-manages Mode and hotspot visibility.
+provides a single Author/Run mode toggle and manages hotspot visibility.
 
 The Background inspector follows the authoring sequence Description, optional
 Reference, Prepare Image Prompt, then Generate Image. Description and Image Prompt share one
@@ -92,7 +92,7 @@ action. Run presents Back and Restart as standard-size controls and hides the
 authoring-only card name and version header. Run-only navigation and overlay
 controls stay hidden in Author mode.
 Local AI services are checked automatically when Author mode is entered; Run
-mode starts no AI work. The status bar selects
+mode starts no AI work and hides model selection. In Author mode, the status bar selects
 an installed vision-capable Ollama model and either FLUX.2 Klein 4B or FLUX.2
 Klein 9B KV.
 
