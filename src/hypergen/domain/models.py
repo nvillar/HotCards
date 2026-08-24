@@ -264,7 +264,7 @@ Background = GeneratedBackground
 
 
 class EnrichmentReferenceSnapshot(DomainModel):
-    """Exact reference image used to produce an Enriched Description."""
+    """Legacy reference provenance retained for schema-v5 compatibility."""
 
     role: ReferenceRole
     card_id: UUID
@@ -285,17 +285,21 @@ class EnrichedDescription(DomainModel):
         self,
         *,
         source_description: str,
-        references: tuple[EnrichmentReferenceSnapshot, ...],
         model_identifier: str | None = None,
+        prompt_version: str | None = None,
     ) -> bool:
         """Return whether the derived text still matches its upstream inputs."""
         return (
             self.source_description == source_description
-            and self.references == references
             and (
                 self.model_identifier is None
                 or model_identifier is None
                 or self.model_identifier == model_identifier
+            )
+            and (
+                self.prompt_version is None
+                or prompt_version is None
+                or self.prompt_version == prompt_version
             )
         )
 

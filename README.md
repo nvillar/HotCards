@@ -35,39 +35,40 @@ to Enrich Description and Generate Image.
 Each reference role can select one other card; the same card cannot reference
 itself. Generate groups roles that use the same active source background, sends
 each unique image once in Subject, Style, Setting order, and combines its role
-instructions. Source Descriptions are not injected into the MFLUX prompt.
-Background prompts use Enriched Description when present and otherwise use
-Description. Generated images are the only supported background source.
+instructions. Background prompts place Enriched Description when present,
+otherwise Description, before concise natural-language instructions that assign
+each numbered image its roles. Internal headings and source-card Descriptions
+are not injected into the MFLUX prompt. Generated images are the only supported
+background source.
 Generate, image removal, and Enrich Description apply directly to the active
 revision. Completed generations can be kept there with Keep, moved into a new
 complete revision, or undone.
 Existing images remain in place until replacement succeeds, and successful
 changes offer a dismissible, history-safe Undo action in the notification bar.
 Enrichment never reads an image and requires authored Description text. It
-always starts from that authored text and stores the result separately. It uses
-the exact effective Descriptions recorded when referenced backgrounds were
-generated as role-scoped text provenance so the enriched target stays
-compatible with their Subject, Style, and Setting contributions. Assigned
-references replace conflicting authored details within their roles; for
-example, an assigned photorealistic Style replaces an authored sketch style
-rather than blending with it. An enrichment is Current while its authored
-Description and usable reference-image provenance still match its inputs;
-otherwise it remains active but is marked Out of date. References and enriched
-text may add visual detail but never override authored actions, poses, object
-states, time, weather, camera, mood, composition, or quoted visible text.
-Recognized object-state reversals receive one constrained repair attempt and
-are rejected if unresolved. Generate uses Enriched Description when present,
-including when it is out of date, and otherwise falls back to Description.
+always starts from that authored text, receives no reference-card Description,
+and stores the result separately. Subject, Style, and Setting are interpreted
+from their actual images by FLUX.2 during image generation, preventing a
+reference card's subjects, arrangement, or narrative from leaking through text
+enrichment. Reference changes therefore do not stale Enriched Description. An
+enrichment is Current while its authored Description, selected Ollama model,
+and prompt contract still match its inputs; otherwise it remains active but is
+marked Out of date. Enriched text may add visual detail but never overrides
+authored actions, poses, object states, time, weather, viewpoint, crop, framing,
+composition, or quoted visible text. Recognized object-state reversals receive
+one constrained repair attempt and are rejected if unresolved. Generate uses
+Enriched Description when present, including when it is out of date, and
+otherwise falls back to Description.
 The Enrich action is disabled and shown as complete while enrichment is current,
-then becomes Re-enrich when its inputs or selected Ollama model are out of date.
-Clearing all Enriched text removes it. Image generation requires at least one
-non-empty Description source and sends only the effective source to FLUX.
+then becomes Re-enrich when its authored Description, selected Ollama model, or
+prompt contract is out of date. Clearing all Enriched text removes it. Image
+generation requires at least one non-empty Description source and uses only the
+effective source as scene content.
 Enriched text follows FLUX.2 prompt guidance: one concise natural-language
 paragraph ordered by subject, action, style, context, then secondary details,
 using positive descriptions and object-specific colors and materials.
-A rewrite that omits its assigned reference traits, retains a recognized
-conflicting authored style, or invents quoted visible text is rejected without
-changing either Description field.
+A rewrite that invents quoted visible text or reverses a recognized authored
+object state is rejected without changing either Description field.
 
 The Hotspots inspector is the sole source of interaction semantics. A new
 hotspot is persisted and selected immediately, even before it has an area;

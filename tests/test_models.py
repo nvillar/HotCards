@@ -67,6 +67,7 @@ def test_revision_uses_enriched_description_when_available() -> None:
         source_description="A courtyard",
         references=(reference,),
         model_identifier="qwen3.5:9b-mlx",
+        prompt_version="scene-enrichment-v8",
     )
     revision = CardRevision(
         description="A courtyard",
@@ -80,17 +81,22 @@ def test_revision_uses_enriched_description_when_available() -> None:
     assert inputs.effective_description == "A richer courtyard"
     assert enrichment.is_current(
         source_description="A courtyard",
-        references=(reference,),
         model_identifier="qwen3.5:9b-mlx",
+        prompt_version="scene-enrichment-v8",
     )
     assert not enrichment.is_current(
         source_description="A courtyard",
-        references=(reference,),
         model_identifier="llama3.2:latest",
+        prompt_version="scene-enrichment-v8",
     )
     assert not enrichment.is_current(
         source_description="A changed courtyard",
-        references=(reference,),
+        prompt_version="scene-enrichment-v8",
+    )
+    assert not enrichment.is_current(
+        source_description="A courtyard",
+        model_identifier="qwen3.5:9b-mlx",
+        prompt_version="scene-enrichment-v7",
     )
     assert ImageGenerationInputs(
         description="A courtyard"

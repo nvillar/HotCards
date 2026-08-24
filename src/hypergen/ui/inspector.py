@@ -42,9 +42,6 @@ from hypergen.application.commands import (
     SetRevisionReferenceCommand,
 )
 from hypergen.application.document_controller import DocumentController
-from hypergen.application.scene_enrichment_workflow import (
-    enrichment_reference_snapshots,
-)
 from hypergen.domain.models import (
     Card,
     CardRevision,
@@ -129,6 +126,7 @@ class Inspector(QWidget):
         self._enrichment_busy = False
         self._enrichment_current: bool | None = None
         self._enrichment_model_identifier: str | None = None
+        self._enrichment_prompt_version: str | None = None
         self._rendering = False
         self.setObjectName("inspector")
         self.setMinimumWidth(300)
@@ -600,7 +598,7 @@ class Inspector(QWidget):
         self.references_label.setText(
             f"References ({len(roles)})" if roles else "References"
         )
-        self._enrich_using_text = f"Using: Description{reference_suffix}"
+        self._enrich_using_text = "Using: Description"
         enrichment = revision.enriched_description
         if enrichment is None:
             generation_sources = "Description"
@@ -613,8 +611,8 @@ class Inspector(QWidget):
             )
             self._enrichment_current = enrichment.is_current(
                 source_description=authored_description,
-                references=enrichment_reference_snapshots(document, card),
                 model_identifier=self._enrichment_model_identifier,
+                prompt_version=self._enrichment_prompt_version,
             )
             generation_sources = "Enriched Description"
         self.description_toggle.setVisible(enrichment is not None)
@@ -665,11 +663,13 @@ class Inspector(QWidget):
         reason: str,
         busy: bool,
         model_identifier: str | None = None,
+        prompt_version: str | None = None,
     ) -> None:
         self._enrich_reason = reason
         self._can_enrich = can_enrich
         self._enrichment_busy = busy
         self._enrichment_model_identifier = model_identifier
+        self._enrichment_prompt_version = prompt_version
         self._update_enrichment_freshness()
 
     def _update_enrichment_freshness(self) -> None:
@@ -685,11 +685,8 @@ class Inspector(QWidget):
             self._enrichment_current = (
                 card.active_revision.enriched_description.is_current(
                     source_description=source_description,
-                    references=enrichment_reference_snapshots(
-                        self.controller.document,
-                        card,
-                    ),
                     model_identifier=self._enrichment_model_identifier,
+                    prompt_version=self._enrichment_prompt_version,
                 )
             )
         self._update_enrich_button()

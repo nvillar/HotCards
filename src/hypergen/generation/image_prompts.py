@@ -4,32 +4,69 @@ from __future__ import annotations
 
 from hypergen.domain.models import ImageGenerationInputs, ReferenceRole
 
-IMAGE_PROMPT_VERSION = "image-prompt-v8"
+IMAGE_PROMPT_VERSION = "image-prompt-v9"
 
-_SCENE_AUTHORITY = (
-    "SCENE AUTHORITY\n"
-    "SCENE supplies actions, poses, object states, time, weather, camera, mood, "
-    "composition, quoted visible text, and every property not assigned to a "
-    "labeled reference role."
-)
-
-_REFERENCE_INSTRUCTIONS = {
+_REFERENCE_ATTRIBUTES = {
     ReferenceRole.SUBJECT: (
-        "SUBJECT",
-        "Derive the recognizable appearance and identity of the subject, "
-        "object, person, or place from this image.",
+        "the subject's recognizable identity and appearance, including its "
+        "defining features, body, and clothing"
     ),
     ReferenceRole.STYLE: (
-        "STYLE",
-        "Derive medium, linework, texture, palette, lighting, and rendering "
-        "treatment from this image.",
+        "the medium, linework, texture, palette, lighting, and rendering treatment"
     ),
     ReferenceRole.SETTING: (
-        "SETTING",
-        "Derive environment, architecture, materials, terrain, and location "
-        "character from this image.",
+        "the environment, architecture, intrinsic materials, terrain, and "
+        "spatial character"
     ),
 }
+
+_SCENE_PRESERVATION = (
+    "Preserve the described subjects, actions, poses, object states, time, "
+    "weather, viewpoint, framing, and composition."
+)
+
+
+def _join_attributes(attributes: tuple[str, ...]) -> str:
+    if len(attributes) == 1:
+        return attributes[0]
+    if len(attributes) == 2:
+        return " and ".join(attributes)
+    return f"{', '.join(attributes[:-1])}, and {attributes[-1]}"
+
+
+def _with_sentence_boundary(value: str) -> str:
+    sentence_endings = (".", "!", "?", "。", "！", "？")
+    if value.endswith(sentence_endings):
+        return value
+    if (
+        len(value) >= 2
+        and value[-1] in {'"', "”", "’", "»"}
+        and value[-2] in sentence_endings
+    ):
+        return value
+    return f"{value}."
+
+
+def compose_reference_prompt(
+    description: str,
+    reference_instructions: tuple[str, ...],
+) -> str:
+    """Place scene content before natural-language reference instructions."""
+    scene = description.strip()
+    if not scene:
+        raise ValueError(
+            "enter a Description or Enriched Description before generating"
+        )
+    instructions = tuple(
+        instruction.strip()
+        for instruction in reference_instructions
+        if instruction.strip()
+    )
+    if not instructions:
+        return scene
+    return " ".join(
+        (_with_sentence_boundary(scene), *instructions, _SCENE_PRESERVATION)
+    )
 
 
 def compose_image_prompt(inputs: ImageGenerationInputs) -> str:
@@ -39,19 +76,20 @@ def compose_image_prompt(inputs: ImageGenerationInputs) -> str:
         raise ValueError(
             "enter a Description or Enriched Description before generating"
         )
-    reference_sections = []
+    reference_instructions = []
     for index, (_reference, roles) in enumerate(
         inputs.grouped_references(),
         start=1,
     ):
-        labels = " + ".join(_REFERENCE_INSTRUCTIONS[role][0] for role in roles)
-        instructions = "\n".join(_REFERENCE_INSTRUCTIONS[role][1] for role in roles)
-        reference_sections.append(f"REFERENCE IMAGE {index}\n{labels}\n{instructions}")
-    if not reference_sections:
-        return description
-    return "\n\n".join(
-        (_SCENE_AUTHORITY, *reference_sections, f"SCENE\n{description}")
-    )
+        attributes = tuple(_REFERENCE_ATTRIBUTES[role] for role in roles)
+        reference_instructions.append(
+            f"Use image {index} for {_join_attributes(attributes)}."
+        )
+    return compose_reference_prompt(description, tuple(reference_instructions))
 
 
-__all__ = ["IMAGE_PROMPT_VERSION", "compose_image_prompt"]
+__all__ = [
+    "IMAGE_PROMPT_VERSION",
+    "compose_image_prompt",
+    "compose_reference_prompt",
+]

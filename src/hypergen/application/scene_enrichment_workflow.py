@@ -16,18 +16,12 @@ from hypergen.application.generated_revision_change import GeneratedRevisionChan
 from hypergen.application.workers import AdapterWorkers, WorkerOperation
 from hypergen.domain.models import (
     Card,
-    CardReference,
     EnrichedDescription,
-    EnrichmentReferenceSnapshot,
-    ReferenceRole,
-    ResolvedCardReference,
     Stack,
-    UnresolvedCardReference,
 )
 from hypergen.generation.ollama_client import OllamaRuntime, OllamaSettings
 from hypergen.generation.scene_enrichment import (
     OllamaSceneEnricher,
-    SceneEnrichmentReference,
     SceneEnrichmentRequest,
     SceneEnrichmentResult,
 )
@@ -55,16 +49,6 @@ class _EnrichmentTarget:
     card_id: UUID
     revision_id: UUID
     source_description: str
-    references: tuple[_EnrichmentReferenceTarget, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class _EnrichmentReferenceTarget:
-    role: ReferenceRole
-    assignment: CardReference
-    source_revision_id: UUID | None
-    source_background_id: UUID | None
-    source_generation_description: str | None
 
 
 class SceneEnrichmentWorkflow(QObject):
@@ -112,13 +96,11 @@ class SceneEnrichmentWorkflow(QObject):
             raise SceneEnrichmentWorkflowError(
                 "enter a Description before enriching it"
             )
-        references = self._reference_targets(document, card)
         target = _EnrichmentTarget(
             stack_id=document.id,
             card_id=card.id,
             revision_id=revision.id,
             source_description=revision.description,
-            references=references,
         )
         settings = self._settings_provider()
         request_id = uuid4()
@@ -129,9 +111,6 @@ class SceneEnrichmentWorkflow(QObject):
             lambda: self._enricher_factory(settings).enrich(
                 SceneEnrichmentRequest(
                     scene=target.source_description,
-                    references=self._reference_contexts(
-                        target.references
-                    ),
                 )
             ),
             stage="enriching Description",
@@ -210,7 +189,6 @@ class SceneEnrichmentWorkflow(QObject):
                 value=EnrichedDescription(
                     text=result.scene,
                     source_description=target.source_description,
-                    references=_reference_snapshots(target.references),
                     model_identifier=result.model_identifier,
                     prompt_version=result.prompt_version,
                 ),
@@ -266,89 +244,6 @@ class SceneEnrichmentWorkflow(QObject):
             card is not None
             and card.active_revision_id == target.revision_id
             and card.active_revision.description == target.source_description
-            and self._reference_targets(document, card) == target.references
-        )
-
-    @staticmethod
-    def _reference_targets(
-        document: Stack,
-        card: Card,
-    ) -> tuple[_EnrichmentReferenceTarget, ...]:
-        targets: list[_EnrichmentReferenceTarget] = []
-        for role in ReferenceRole:
-            assignment = getattr(card.active_revision, role.value)
-            if assignment is None:
-                continue
-            if isinstance(assignment, UnresolvedCardReference):
-                targets.append(
-                    _EnrichmentReferenceTarget(
-                        role=role,
-                        assignment=assignment,
-                        source_revision_id=None,
-                        source_background_id=None,
-                        source_generation_description=None,
-                    )
-                )
-                continue
-            source = next(
-                candidate
-                for candidate in document.cards
-                if candidate.id == assignment.target_card_id
-            )
-            source_revision = source.active_revision
-            background = source_revision.background
-            targets.append(
-                _EnrichmentReferenceTarget(
-                    role=role,
-                    assignment=assignment,
-                    source_revision_id=source_revision.id,
-                    source_background_id=(
-                        background.id if background is not None else None
-                    ),
-                    source_generation_description=(
-                        background.generation_metadata.inputs.effective_description
-                        if background is not None
-                        else None
-                    ),
-                )
-            )
-        return tuple(targets)
-
-    @staticmethod
-    def _reference_contexts(
-        targets: tuple[_EnrichmentReferenceTarget, ...],
-    ) -> tuple[SceneEnrichmentReference, ...]:
-        groups: list[tuple[tuple[UUID, UUID], list[ReferenceRole], str]] = []
-        indexes: dict[tuple[UUID, UUID], int] = {}
-        for target in targets:
-            if (
-                not isinstance(target.assignment, ResolvedCardReference)
-                or target.source_background_id is None
-                or not target.source_generation_description
-            ):
-                continue
-            key = (
-                target.assignment.target_card_id,
-                target.source_background_id,
-            )
-            index = indexes.get(key)
-            if index is None:
-                indexes[key] = len(groups)
-                groups.append(
-                    (
-                        key,
-                        [target.role],
-                        target.source_generation_description,
-                    )
-                )
-            else:
-                groups[index][1].append(target.role)
-        return tuple(
-            SceneEnrichmentReference(
-                roles=tuple(roles),
-                source_description=description,
-            )
-            for _key, roles, description in groups
         )
 
     @staticmethod
@@ -368,35 +263,4 @@ __all__ = [
     "SceneEnricherProtocol",
     "SceneEnrichmentWorkflow",
     "SceneEnrichmentWorkflowError",
-    "enrichment_reference_snapshots",
 ]
-
-
-def _reference_snapshots(
-    targets: tuple[_EnrichmentReferenceTarget, ...],
-) -> tuple[EnrichmentReferenceSnapshot, ...]:
-    return tuple(
-        EnrichmentReferenceSnapshot(
-            role=target.role,
-            card_id=target.assignment.target_card_id,
-            revision_id=target.source_revision_id,
-            background_id=target.source_background_id,
-        )
-        for target in targets
-        if (
-            isinstance(target.assignment, ResolvedCardReference)
-            and target.source_revision_id is not None
-            and target.source_background_id is not None
-            and target.source_generation_description
-        )
-    )
-
-
-def enrichment_reference_snapshots(
-    document: Stack,
-    card: Card,
-) -> tuple[EnrichmentReferenceSnapshot, ...]:
-    """Return the usable reference-image inputs for enrichment freshness."""
-    return _reference_snapshots(
-        SceneEnrichmentWorkflow._reference_targets(document, card)
-    )
