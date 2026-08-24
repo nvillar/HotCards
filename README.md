@@ -26,17 +26,20 @@ edits the card name and selects, duplicates, or deletes revisions; the toolbar
 manages Mode and hotspot visibility.
 
 The Background inspector follows the authoring sequence Description, optional
-Reference, Enrich, then Generate Image. Description and Image Prompt share one
+Reference, Prepare Image Prompt, then Generate Image. Description and Image Prompt share one
 editor with native radio controls that appear after a prompt has been prepared.
-Description is always the authoritative author input. Enrich creates one
+Description is always the authoritative author input. Prepare Image Prompt creates one
 editable Image Prompt proposal from the current Description; it never uses the
 previous Image Prompt as input or inserts a separate clarification step. With a
 Reference, the selected vision-capable Ollama model also inspects that card's
-active generated image in the same preparation request. Without a Reference,
-the request is text-only.
+active generated image in the same preparation request. The exact authored
+Description captured when that Reference image was generated provides the
+primary semantics for its identity and visual style, while the pixels provide
+visible evidence and missing detail. Without a Reference, the request is
+text-only.
 
 The optional Reference has no fixed Subject, Style, or Setting role. The
-Description states what should carry over or change, while Enrich interprets
+Description states what should carry over or change, while preparation interprets
 the image and produces a concrete final-image proposal for review. Definite
 continuity can retain stable visible identity, construction, and rendering
 treatment; an explicit target subject, state, style, palette, setting,
@@ -56,7 +59,7 @@ persisted.
 MFLUX receives the reviewed Image Prompt unchanged and, when selected, the same
 Reference image exactly once. It receives no hidden role instructions or source
 card prose. Generated images are the only supported background source.
-Generate, image removal, Enrich, and direct Image Prompt edits apply to the
+Generate, image removal, Image Prompt preparation, and direct Image Prompt edits apply to the
 active revision through document commands. Completed generation can be kept
 there, moved into a new complete revision, or undone. Existing images remain
 visible until replacement succeeds, and successful changes offer a

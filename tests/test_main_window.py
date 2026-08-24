@@ -751,7 +751,7 @@ def test_changing_llm_model_re_enables_image_prompt_preparation(
             text="A richly detailed courtyard",
             source_description="A courtyard",
             model_identifier="qwen3.5:9b-mlx",
-            prompt_version="image-prompt-preparation-v2",
+            prompt_version="image-prompt-preparation-v3",
         ),
     )
     card = Card(name="Card", revisions=(revision,))
@@ -773,7 +773,7 @@ def test_changing_llm_model_re_enables_image_prompt_preparation(
         window.llm_model_combo.findData("llama3.2:latest")
     )
     assert window.inspector.enrich_button.text() == (
-        "Re-enrich"
+        "Update Image Prompt"
     )
     assert not window.inspector.enrich_button.isEnabled()
 
@@ -784,7 +784,7 @@ def test_changing_llm_model_re_enables_image_prompt_preparation(
     )
 
     assert window.inspector.enrich_button.text() == (
-        "Re-enrich"
+        "Update Image Prompt"
     )
     assert window.inspector.enrich_button.isEnabled()
 

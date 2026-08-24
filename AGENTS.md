@@ -60,11 +60,11 @@ for live Ollama and MFLUX runs.
   image prompts.
 - Keep one Description editor in the Background inspector. Show conditional
   native Description/Image Prompt radio controls below it, default to Image
-  Prompt when it exists, place the Reference selector before Enrich and
+  Prompt when it exists, place the Reference selector before Prepare Image Prompt and
   Generate, and keep generation provenance in button tooltips. Encode Image
-  Prompt freshness in the Enrich action from the Description, exact usable
+  Prompt freshness in the preparation action from the Description, exact usable
   Reference background, selected Ollama model, and preparation prompt version:
-  current is a disabled completed state and stale is Re-enrich. Clearing the
+  current is a disabled completed state and stale is Update Image Prompt. Clearing the
   Image Prompt editor removes that derived value. Require a current Image Prompt
   for image generation.
 - Support generated backgrounds only; do not add image import. Apply Generate
@@ -79,10 +79,14 @@ for live Ollama and MFLUX runs.
   bar; keep field validation beside its input and the status bar passive. Use a
   blocking decision dialog only when proceeding could lose persisted work and
   Undo cannot recover it.
-- Enrich requires authored Description text. Without a Reference it is
+- Image Prompt preparation requires authored Description text. Without a Reference it is
   text-only; with a readable active Reference background it is one multimodal
-  Ollama request. The Description is authoritative and the existing Image
-  Prompt is never preparation input. Allow a plausible concrete proposal for
+  Ollama request. The target Description is authoritative and the existing
+  Image Prompt is never preparation input. Use the immutable authored
+  Description captured in the exact Reference background's generation metadata
+  as the primary semantic source for applicable identity and style language;
+  use the image as visual evidence and to fill gaps rather than relabeling
+  explicit authored treatment. Allow a plausible concrete proposal for
   ambiguity rather than adding clarification state. Store only the final Image
   Prompt through one undoable command; private deliberation must not enter the
   stack. Track source Description, exact Reference provenance, Ollama model,

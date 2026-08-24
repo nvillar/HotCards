@@ -232,7 +232,7 @@ class Inspector(QWidget):
         layout.addWidget(self.reference_panel)
 
         layout.addSpacing(8)
-        self.enrich_button = QPushButton("Enrich")
+        self.enrich_button = QPushButton("Prepare Image Prompt")
         self.enrich_button.setObjectName("enrichButton")
         layout.addWidget(self.enrich_button)
 
@@ -674,13 +674,17 @@ class Inspector(QWidget):
             and card.active_revision.image_prompt is not None
         )
         if self._image_prompt_busy:
-            text = "Enriching…"
+            text = "Preparing Image Prompt…"
             enabled = False
         elif self._image_prompt_current is True:
             text = "Image Prompt Current ✓"
             enabled = False
         else:
-            text = "Re-enrich" if has_image_prompt else "Enrich"
+            text = (
+                "Update Image Prompt"
+                if has_image_prompt
+                else "Prepare Image Prompt"
+            )
             enabled = self._can_enrich
         self.enrich_button.setText(text)
         self.enrich_button.setEnabled(enabled)

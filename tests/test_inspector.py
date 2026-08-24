@@ -73,7 +73,7 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     assert inspector.description_edit.maximumHeight() > (
         inspector.description_edit.minimumHeight()
     )
-    assert inspector.enrich_button.text() == "Enrich"
+    assert inspector.enrich_button.text() == "Prepare Image Prompt"
     assert inspector.generate_background_button.text() == "Generate Image"
     assert inspector.description_toggle.isHidden()
     assert isinstance(inspector.description_button, QRadioButton)
@@ -273,14 +273,14 @@ def test_image_prompt_status_and_generation_source(
     assert "Current" in inspector.enrich_button.toolTip()
     inspector.set_image_prompt_capabilities(
         can_enrich=True,
-        reason="Ready to enrich Description",
+        reason="Ready to prepare Image Prompt",
         busy=False,
     )
 
     inspector.description_button.click()
     assert inspector.description_edit.toPlainText() == "A courtyard"
     inspector.description_edit.setPlainText("A changed courtyard")
-    assert inspector.enrich_button.text() == "Re-enrich"
+    assert inspector.enrich_button.text() == "Update Image Prompt"
     assert inspector.enrich_button.isEnabled()
     assert "Out of date" in inspector.enrich_button.toolTip()
     assert inspector.commit_revision_metadata()
@@ -335,7 +335,7 @@ def test_changing_model_marks_image_prompt_out_of_date(
         model_identifier="llama3.2:latest",
     )
 
-    assert inspector.enrich_button.text() == "Re-enrich"
+    assert inspector.enrich_button.text() == "Update Image Prompt"
     assert inspector.enrich_button.isEnabled()
     assert "Out of date" in inspector.enrich_button.toolTip()
 
@@ -481,12 +481,12 @@ def test_ai_activity_is_reflected_on_the_initiating_buttons(
     )
     inspector.set_image_prompt_capabilities(
         can_enrich=False,
-        reason="Enriching",
+        reason="Preparing Image Prompt",
         busy=True,
     )
 
     assert inspector.generate_background_button.text() == "Generating…"
-    assert inspector.enrich_button.text() == "Enriching…"
+    assert inspector.enrich_button.text() == "Preparing Image Prompt…"
 
 
 def test_image_prompt_has_no_separate_proposal_editor(

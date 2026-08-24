@@ -1330,7 +1330,7 @@ class MainWindow(QMainWindow):
         if not has_card:
             enrich_reason = "Select a card in a saved stack"
         elif not has_description_input:
-            enrich_reason = "Enter a Description before enriching"
+            enrich_reason = "Enter a Description before preparing an Image Prompt"
         elif image_prompt_busy:
             enrich_reason = "Image Prompt preparation is running"
         elif not ollama_available:

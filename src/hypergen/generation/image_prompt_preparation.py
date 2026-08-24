@@ -20,7 +20,7 @@ from hypergen.generation.ollama_client import (
 )
 from hypergen.generation.structured_output import structured_json_content
 
-IMAGE_PROMPT_PREPARATION_VERSION = "image-prompt-preparation-v2"
+IMAGE_PROMPT_PREPARATION_VERSION = "image-prompt-preparation-v3"
 
 
 class ImagePromptPreparationRequest(DomainModel):
@@ -28,6 +28,7 @@ class ImagePromptPreparationRequest(DomainModel):
 
     description: NonEmptyString
     has_reference: bool = False
+    reference_description: str | None = None
     prompt_version: NonEmptyString = IMAGE_PROMPT_PREPARATION_VERSION
 
 
@@ -68,6 +69,11 @@ def build_image_prompt_preparation_prompt(
         {
             "authored_description": request.description,
             "reference_attached": request.has_reference,
+            "reference_generation_description": (
+                request.reference_description
+                if request.has_reference
+                else None
+            ),
         },
         ensure_ascii=False,
         indent=2,
@@ -76,6 +82,18 @@ def build_image_prompt_preparation_prompt(
         """\
 REFERENCE INTERPRETATION
 - Inspect the attached Reference image directly. The authored Description is authoritative.
+- reference_generation_description is the authored Description captured when this exact
+  Reference background was generated. Treat its explicit identity and visual-style language
+  as the primary semantic interpretation of the image whenever it applies to the requested
+  continuity or transfer.
+- Preserve applicable explicit treatment terms from reference_generation_description. Do not
+  relabel "early Mac and HyperCard", pixel art, watercolor, engraving, collage, or another
+  authored treatment as a merely similar-looking medium such as newspaper print or comic art.
+- Use the pixels to confirm visible appearance, supply concrete visible details, and resolve
+  omissions. Do not let a new visual guess override compatible authored Reference semantics.
+- reference_generation_description is context, not a second target prompt. Do not copy its
+  transient action, object state, screen or sign contents, viewpoint, framing, composition,
+  weather, time, or setting unless the target Description requests that continuity.
 - The Reference was selected because the author intends some visible continuity or transfer.
 - A definite phrase identifying a visible entity, such as "the computer", "the monitor",
   "the person", or "the room", means that entity continues from the Reference even without

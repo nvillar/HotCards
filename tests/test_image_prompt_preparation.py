@@ -76,6 +76,10 @@ def test_prompt_defines_one_reviewable_result_without_clarification() -> None:
         ImagePromptPreparationRequest(
             description="The screen of the computer has changed.",
             has_reference=True,
+            reference_description=(
+                "Black-and-white dithered graphics reminiscent of early Mac "
+                "and HyperCard."
+            ),
         )
     )
 
@@ -84,6 +88,9 @@ def test_prompt_defines_one_reviewable_result_without_clarification() -> None:
     assert "question or discuss ambiguity" in prompt
     assert "Inspect the attached Reference image directly" in prompt
     assert "same visual style" in prompt
+    assert "reference_generation_description" in prompt
+    assert "primary semantic interpretation" in prompt
+    assert "newspaper print" in prompt
     assert '"the monitor"' in prompt
     assert "Private deliberation is a checklist" in prompt
     assert "do not turn a monochrome Reference into a beige" in prompt
@@ -120,6 +127,7 @@ def test_preparer_attaches_reference_and_parses_one_image_prompt(
         ImagePromptPreparationRequest(
             description="The screen now shows dense static.",
             has_reference=True,
+            reference_description="Early Mac and HyperCard dithered graphics.",
         ),
         reference_image_path=image_path,
     )
@@ -251,6 +259,7 @@ def test_preparer_repairs_invented_color_under_monochrome_treatment(
         ImagePromptPreparationRequest(
             description="A close-up view of the computer monitor.",
             has_reference=True,
+            reference_description="Black-and-white dithered graphics.",
         ),
         reference_image_path=image_path,
     )

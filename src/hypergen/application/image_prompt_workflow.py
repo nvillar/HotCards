@@ -66,6 +66,7 @@ class _ReferenceTarget:
     background_id: UUID
     image_path: str
     asset_path: Path
+    generation_description: str
 
     @property
     def snapshot(self) -> ImageReferenceSnapshot:
@@ -271,6 +272,11 @@ class ImagePromptWorkflow(QObject):
             ImagePromptPreparationRequest(
                 description=target.source_description,
                 has_reference=target.reference is not None,
+                reference_description=(
+                    target.reference.generation_description
+                    if target.reference is not None
+                    else None
+                ),
             ),
             reference_image_path=(
                 target.reference.asset_path
@@ -350,6 +356,9 @@ class ImagePromptWorkflow(QObject):
             background_id=background.id,
             image_path=background.image_path,
             asset_path=asset_path,
+            generation_description=(
+                background.generation_metadata.inputs.description
+            ),
         )
 
     @staticmethod

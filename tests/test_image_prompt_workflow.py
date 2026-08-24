@@ -245,6 +245,7 @@ def test_reference_image_is_attached_once_and_captured_in_provenance(
 
     request, reference_path = preparer.requests[0]
     assert request.has_reference
+    assert request.reference_description == "Generated prompt"
     assert reference_path == tmp_path / "computer.png"
     prompt = controller.document.cards[0].active_revision.image_prompt
     assert prompt is not None
@@ -252,6 +253,56 @@ def test_reference_image_is_attached_once_and_captured_in_provenance(
     assert prompt.reference.card_id == source.id
     assert prompt.reference.revision_id == source.active_revision.id
     assert prompt.reference.background_id == source.active_revision.background.id
+
+
+def test_current_reference_card_text_does_not_replace_generation_provenance(
+    tmp_path: Path,
+) -> None:
+    source = Card(
+        name="Computer",
+        revisions=(
+            CardRevision(
+                description="Current card text",
+                background=_background(
+                    "Early Mac and HyperCard dithered graphics",
+                    "computer.png",
+                ),
+            ),
+        ),
+    )
+    target = Card(
+        name="Error",
+        revisions=(
+            CardRevision(
+                description="A close-up of the computer monitor.",
+                reference=ResolvedCardReference(target_card_id=source.id),
+            ),
+        ),
+    )
+    workflow, controller, workers, preparer = _workflow(
+        tmp_path,
+        target,
+        source,
+    )
+
+    workflow.start(target.id)
+    controller.execute(
+        EditRevisionDescriptionCommand(
+            card_id=source.id,
+            revision_id=source.active_revision.id,
+            value="Edited after the image was generated",
+        )
+    )
+    _complete(workers)
+
+    request, _reference_path = preparer.requests[0]
+    assert request.reference_description == (
+        "Early Mac and HyperCard dithered graphics"
+    )
+    assert (
+        controller.document.cards[0].active_revision.image_prompt
+        is not None
+    )
 
 
 def test_stale_description_or_reference_result_does_not_apply(
