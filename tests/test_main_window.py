@@ -566,8 +566,11 @@ def test_author_and_run_modes_apply_consistent_read_only_chrome(
     application: QApplication,
 ) -> None:
     window, _controller, _workers, _background = _window()
+    window.show()
+    application.processEvents()
 
     window.mode_selector.setCurrentText("Run")
+    application.processEvents()
     assert window.canvas_card_name.isReadOnly()
     assert window.canvas_card_name.isHidden()
     assert window.canvas_card_name_error.isHidden()
@@ -581,13 +584,16 @@ def test_author_and_run_modes_apply_consistent_read_only_chrome(
     assert window.run_controls_separator.isVisible()
     assert window.back_action.isVisible()
     assert window.restart_action.isVisible()
-    assert not window.back_button.isHidden()
-    assert not window.restart_button.isHidden()
+    assert window.back_button_action.isVisible()
+    assert window.restart_button_action.isVisible()
+    assert window.back_button.isVisible()
+    assert window.restart_button.isVisible()
     assert window.overlay_label_action.isVisible()
     assert window.overlay_selector_action.isVisible()
     assert not window.overlay_selector.isHidden()
 
     window.mode_selector.setCurrentText("Author")
+    application.processEvents()
     assert not window.canvas_card_name.isReadOnly()
     assert not window.canvas_card_name.isHidden()
     assert not window.revision_label.isHidden()
@@ -597,10 +603,14 @@ def test_author_and_run_modes_apply_consistent_read_only_chrome(
     assert not window.run_controls_separator.isVisible()
     assert not window.back_action.isVisible()
     assert not window.restart_action.isVisible()
+    assert not window.back_button_action.isVisible()
+    assert not window.restart_button_action.isVisible()
     assert window.back_button.isHidden()
     assert window.restart_button.isHidden()
     assert not window.overlay_label_action.isVisible()
     assert not window.overlay_selector_action.isVisible()
+    window.hide()
+    application.processEvents()
 
 
 def test_status_bar_is_passive_and_ai_recovery_uses_notification_bar(

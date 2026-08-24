@@ -229,15 +229,15 @@ class MainWindow(QMainWindow):
         self.back_button.setToolTip(self.back_action.toolTip())
         self.back_button.clicked.connect(self.back_action.trigger)
         self.back_button.setEnabled(False)
-        self.back_button.setVisible(False)
         self.back_button_action = toolbar.addWidget(self.back_button)
+        self.back_button_action.setVisible(False)
         self.restart_button = QPushButton("Restart")
         self.restart_button.setObjectName("runRestartButton")
         self.restart_button.setToolTip(self.restart_action.toolTip())
         self.restart_button.clicked.connect(self.restart_action.trigger)
         self.restart_button.setEnabled(False)
-        self.restart_button.setVisible(False)
         self.restart_button_action = toolbar.addWidget(self.restart_button)
+        self.restart_button_action.setVisible(False)
 
         self.overlay_label = QLabel("Hotspots")
         self.overlay_label_action = toolbar.addWidget(self.overlay_label)
@@ -1868,8 +1868,8 @@ class MainWindow(QMainWindow):
         self.overlay_selector.setVisible(self._is_running)
         for action in self.player_navigation_actions:
             action.setVisible(self._is_running)
-        self.back_button.setVisible(self._is_running)
-        self.restart_button.setVisible(self._is_running)
+        self.back_button_action.setVisible(self._is_running)
+        self.restart_button_action.setVisible(self._is_running)
 
     def _update_run_actions(self) -> None:
         state = self._run_session.state
