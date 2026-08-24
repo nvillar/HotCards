@@ -14,11 +14,11 @@ from hypergen.domain.models import (
 from hypergen.generation.errors import ModelResponseError
 from hypergen.generation.ollama_client import OllamaRuntime
 
-REFERENCE_PROFILE_PROMPT_VERSION = "reference-profile-v1"
+REFERENCE_PROFILE_PROMPT_VERSION = "reference-profile-v2"
 
 
 class SubjectReferenceProfile(DomainModel):
-    """Stable identity and appearance traits for one Subject reference."""
+    """Stable identity, appearance, and construction for one Subject."""
 
     identity: str | None = None
     appearance: str | None = None
@@ -73,16 +73,36 @@ class ReferenceProfileResult(DomainModel):
 
 
 _SUBJECT_RULES = """\
-Keep only stable identity and recognizable appearance.
-- identity is the subject's stable type, species, name, or role.
-- appearance is face, hair, markings, and distinctive features.
-- body is anatomy, build, proportions, and limb structure only. Never include posture or
-  pose words such as seated, standing, kneeling, running, dancing, facing, or profile.
-- clothing is worn garments and accessories.
+The Subject may be a person, creature, machine, vehicle, prop, or other discrete object.
+Keep only stable identity, recognizable appearance, and intrinsic construction.
+- identity is the subject's stable type, species, name, role, object class, or model family.
+- appearance is distinctive physical design: face, hair, markings, controls, openings,
+  housings, trim, and other identifying components. It must not include medium, linework,
+  image texture, palette, lighting, shading, rendering treatment, or content displayed on
+  screens, signs, labels, or other surfaces.
+- body is intrinsic anatomy or construction: build, silhouette, proportions, limb
+  structure, chassis, component layout, and permanent articulated parts. Never include
+  posture, pose, orientation, or camera-relative words such as seated, standing, kneeling,
+  running, dancing, facing, profile, front-facing, side-on, or viewed from above.
+- clothing is worn garments and accessories on living subjects; use null for machines,
+  vehicles, props, and other objects.
 - materials contains only explicitly stated physical materials. Never infer generic
   materials; colors such as copper hair belong in appearance, not materials.
-Exclude action, pose, expression, held objects, setting, background, camera, composition,
-lighting, time, weather, and rendering style.
+For a machine, vehicle, prop, or object, do not return all null when its stable object type,
+shape, components, construction, or materials are explicitly described.
+A phrase belongs to Subject only when it describes the physical subject itself, not how the
+image depicts or renders it. Exclude action, pose, orientation, expression, held objects,
+displayed screen content, setting, background, camera, composition, lighting, time, weather,
+medium, linework, image texture, palette, shading, and rendering style.
+For non-living objects, put silhouette, chassis, proportions, and component layout in body.
+Use appearance only for remaining intrinsic colors, markings, controls, openings, housings,
+and trim; use null when nothing remains. A screen or sign may be a component, but omit
+everything it displays. Ignore complete clauses about how the source image is rendered,
+including clauses using words such as rendered, graphics, pixelated, monochromatic, shading,
+aesthetic, lighting, shadows, linework, palette, or texture.
+Before returning, audit every value and remove any phrase about screen content, viewpoint,
+scene composition, or image rendering. Never preserve a forbidden phrase merely because it
+appears in the source Description.
 """
 
 _STYLE_RULES = """\
@@ -118,6 +138,19 @@ _PROFILE_RULES = {
     ReferenceRole.SUBJECT: _SUBJECT_RULES,
     ReferenceRole.STYLE: _STYLE_RULES,
     ReferenceRole.SETTING: _SETTING_RULES,
+}
+
+_FINAL_FILTERS = {
+    ReferenceRole.SUBJECT: """\
+FINAL SUBJECT FILTER
+Return the physical subject only. For an object, identity names its object class; body holds
+its silhouette, chassis, proportions, and component layout; appearance holds only remaining
+intrinsic colors, markings, controls, openings, housings, and trim. Remove displayed content
+and every rendering phrase, including graphics, pixelated, monochromatic, shading, aesthetic,
+lighting, shadows, linework, palette, and texture.
+""",
+    ReferenceRole.STYLE: "",
+    ReferenceRole.SETTING: "",
 }
 
 _CAPSULE_FIELDS = {
@@ -166,6 +199,8 @@ OUTPUT CONTRACT
 Prompt contract: {request.prompt_version}
 Source Description:
 {request.source_description}
+
+{_FINAL_FILTERS[request.role]}
 """
 
 

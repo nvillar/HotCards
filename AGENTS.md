@@ -66,9 +66,11 @@ for live Ollama and MFLUX runs.
   strict, flat, scalar profile per image/role from immutable generation-time
   source text, cache it by background, role, Ollama model, extraction prompt,
   and source text, then give the enrichment model only validated capsules.
-  Keep Subject to identity/appearance, Style to reusable rendering treatment,
-  and Setting to stable place traits. Record observed weather/time/season in
-  Setting extraction output but never inject them as Setting traits. Append
+  Keep Subject to identity, appearance, and intrinsic construction for living
+  subjects, machines, vehicles, props, and other discrete objects; keep Style
+  to reusable rendering treatment and Setting to stable place traits. Record
+  observed weather/time/season in Setting extraction output but never inject
+  them as Setting traits. Append
   capsules deterministically to the Enriched Description so FLUX.2 receives
   their exact traits alongside the actual reference images. Enrichment
   validation keeps authored actions, poses, object states, time, weather,

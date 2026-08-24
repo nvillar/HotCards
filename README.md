@@ -48,8 +48,10 @@ changes offer a dismissible, history-safe Undo action in the notification bar.
 Enrichment never reads an image and requires authored Description text. For
 each usable assigned reference, Ollama first extracts one strict role-specific
 profile from that background's immutable generation-time Description. Subject
-profiles retain only identity and appearance, Style profiles retain only
-rendering traits, and Setting profiles retain only stable place traits.
+profiles retain identity, appearance, and intrinsic construction for people,
+creatures, machines, vehicles, props, and other discrete objects. Style
+profiles retain only rendering traits, and Setting profiles retain only stable
+place traits.
 Observed weather, time, and season remain excluded from the injected Setting.
 Profiles use fixed scalar schemas, are cached per background, role, Ollama
 model, and extraction contract for the application session, and never expose
