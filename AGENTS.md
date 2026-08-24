@@ -82,14 +82,15 @@ for live Ollama and MFLUX runs.
 - Image Prompt preparation requires authored Description text. Without a Reference it is
   text-only; with a readable active Reference background it is one multimodal
   Ollama request. The target Description is authoritative and the existing
-  Image Prompt is never preparation input. Use the immutable authored
-  Description captured in the exact Reference background's generation metadata
-  as the primary semantic source for applicable identity and style language;
-  use the image as visual evidence and to fill gaps rather than relabeling
-  explicit authored treatment. Allow a plausible concrete proposal for
-  ambiguity rather than adding clarification state. Store only the final Image
-  Prompt through one undoable command; private deliberation must not enter the
-  stack. Track source Description, exact Reference provenance, Ollama model,
+  Image Prompt is never preparation input. Use the immutable effective prompt
+  captured in the exact Reference background's generation metadata, including a
+  reviewed Image Prompt or legacy enriched text, as the primary semantic source
+  for applicable identity and style language; use the image as visual evidence
+  and to fill gaps rather than relabeling explicit authored treatment. Preserve
+  explicit target style terminology verbatim. Allow a plausible concrete
+  proposal for ambiguity rather than adding clarification state. Store only the
+  final Image Prompt through one undoable command; private deliberation must not
+  enter the stack. Track source Description, exact Reference provenance, Ollama model,
   and prompt version so freshness is strict. Reject recognized authored
   object-state reversals and invented or altered quoted visible text after one
   constrained repair attempt.

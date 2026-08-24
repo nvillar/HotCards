@@ -33,10 +33,10 @@ editable Image Prompt proposal from the current Description; it never uses the
 previous Image Prompt as input or inserts a separate clarification step. With a
 Reference, the selected vision-capable Ollama model also inspects that card's
 active generated image in the same preparation request. The exact authored
-Description captured when that Reference image was generated provides the
-primary semantics for its identity and visual style, while the pixels provide
-visible evidence and missing detail. Without a Reference, the request is
-text-only.
+prompt used to generate that Reference image, including its reviewed Image
+Prompt or legacy enriched text, provides the primary semantics for its identity
+and visual style, while the pixels provide visible evidence and missing detail.
+Without a Reference, the request is text-only.
 
 The optional Reference has no fixed Subject, Style, or Setting role. The
 Description states what should carry over or change, while preparation interprets
@@ -52,9 +52,9 @@ card/revision/background snapshot, selected Ollama model, and preparation
 contract still match. Out-of-date prompts remain visible and editable, but
 Generate requires a current prompt. Preparation validates structured output,
 preserves exact authored quoted text, rejects recognized object-state
-reversals and model-process language, and makes one constrained repair attempt
-for a valid but conflicting proposal. Private model deliberation is never
-persisted.
+reversals and model-process language, requires explicit authored style
+terminology to survive verbatim, and makes one constrained repair attempt for a
+valid but conflicting proposal. Private model deliberation is never persisted.
 
 MFLUX receives the reviewed Image Prompt unchanged and, when selected, the same
 Reference image exactly once. It receives no hidden role instructions or source

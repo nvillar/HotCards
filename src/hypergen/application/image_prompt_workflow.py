@@ -357,7 +357,7 @@ class ImagePromptWorkflow(QObject):
             image_path=background.image_path,
             asset_path=asset_path,
             generation_description=(
-                background.generation_metadata.inputs.description
+                background.generation_metadata.inputs.effective_description
             ),
         )
 
