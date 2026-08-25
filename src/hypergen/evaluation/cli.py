@@ -36,6 +36,14 @@ from hypergen.evaluation.smoke import (
     default_smoke_output_dir,
     run_smoke,
 )
+from hypergen.evaluation.style_presets import (
+    DEFAULT_STYLE_PRESET_EXPERIMENT,
+    DEFAULT_STYLE_PRESET_SEEDS,
+    StylePresetSettings,
+    default_style_preset_output_dir,
+    load_style_preset_experiment,
+    run_style_preset_evaluation,
+)
 from hypergen.evaluation.two_stage_image_prompts import (
     EVIDENCE_GATE_IMAGE_PROMPT_CANDIDATE_ID,
     EVIDENCE_GATE_IMAGE_PROMPT_VERSION,
@@ -229,6 +237,36 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="validate experiment, benchmark, and frozen assets without model calls",
     )
+    style_presets = subparsers.add_parser(
+        "style-presets",
+        help="screen proposed deterministic Style suffixes through MFLUX",
+    )
+    style_presets.add_argument("--output-dir", type=Path)
+    style_presets.add_argument(
+        "--experiment",
+        type=Path,
+        default=DEFAULT_STYLE_PRESET_EXPERIMENT,
+    )
+    style_presets.add_argument(
+        "--mflux-model",
+        default="flux2-klein-9b",
+    )
+    style_presets.add_argument(
+        "--seed",
+        action="append",
+        type=int,
+        dest="seeds",
+        default=None,
+    )
+    style_presets.add_argument("--quantization", type=int)
+    style_presets.add_argument("--width", type=_positive_int, default=1024)
+    style_presets.add_argument("--height", type=_positive_int, default=768)
+    style_presets.add_argument("--steps", type=_positive_int, default=4)
+    style_presets.add_argument(
+        "--validate-only",
+        action="store_true",
+        help="validate the tracked Style matrix without model calls",
+    )
     return parser
 
 
@@ -262,14 +300,9 @@ def run_cli(arguments: Sequence[str] | None = None) -> int:
             else:
                 result_path = run_image_prompt_benchmark(
                     ImagePromptBenchmarkSettings(
-                        output_dir=(
-                            args.output_dir
-                            or default_image_prompt_benchmark_output_dir()
-                        ),
+                        output_dir=(args.output_dir or default_image_prompt_benchmark_output_dir()),
                         benchmark_path=args.benchmark,
-                        ollama_models=tuple(
-                            args.ollama_models or (DEFAULT_OLLAMA_MODEL,)
-                        ),
+                        ollama_models=tuple(args.ollama_models or (DEFAULT_OLLAMA_MODEL,)),
                         endpoint=args.endpoint,
                         repetitions=args.repetitions,
                     )
@@ -281,14 +314,9 @@ def run_cli(arguments: Sequence[str] | None = None) -> int:
             else:
                 result_path = run_two_stage_image_prompt_benchmark(
                     ImagePromptBenchmarkSettings(
-                        output_dir=(
-                            args.output_dir
-                            or default_image_prompt_benchmark_output_dir()
-                        ),
+                        output_dir=(args.output_dir or default_image_prompt_benchmark_output_dir()),
                         benchmark_path=args.benchmark,
-                        ollama_models=tuple(
-                            args.ollama_models or (DEFAULT_OLLAMA_MODEL,)
-                        ),
+                        ollama_models=tuple(args.ollama_models or (DEFAULT_OLLAMA_MODEL,)),
                         endpoint=args.endpoint,
                         repetitions=args.repetitions,
                         candidate_id=TWO_STAGE_IMAGE_PROMPT_CANDIDATE_ID,
@@ -302,14 +330,9 @@ def run_cli(arguments: Sequence[str] | None = None) -> int:
             else:
                 result_path = run_evidence_gate_image_prompt_benchmark(
                     ImagePromptBenchmarkSettings(
-                        output_dir=(
-                            args.output_dir
-                            or default_image_prompt_benchmark_output_dir()
-                        ),
+                        output_dir=(args.output_dir or default_image_prompt_benchmark_output_dir()),
                         benchmark_path=args.benchmark,
-                        ollama_models=tuple(
-                            args.ollama_models or (DEFAULT_OLLAMA_MODEL,)
-                        ),
+                        ollama_models=tuple(args.ollama_models or (DEFAULT_OLLAMA_MODEL,)),
                         endpoint=args.endpoint,
                         repetitions=args.repetitions,
                         candidate_id=EVIDENCE_GATE_IMAGE_PROMPT_CANDIDATE_ID,
@@ -339,10 +362,7 @@ def run_cli(arguments: Sequence[str] | None = None) -> int:
             else:
                 result_path = run_inline_reference_evaluation(
                     InlineReferenceSettings(
-                        output_dir=(
-                            args.output_dir
-                            or default_inline_reference_output_dir()
-                        ),
+                        output_dir=(args.output_dir or default_inline_reference_output_dir()),
                         experiment_path=args.experiment,
                         benchmark_path=args.benchmark,
                         model_identifier=args.mflux_model,
@@ -352,6 +372,23 @@ def run_cli(arguments: Sequence[str] | None = None) -> int:
                         step_count=args.steps,
                         quantization=args.quantization,
                         blinding_seed=args.blinding_seed,
+                    )
+                )
+        elif args.command == "style-presets":
+            if args.validate_only:
+                load_style_preset_experiment(args.experiment)
+                result_path = args.experiment
+            else:
+                result_path = run_style_preset_evaluation(
+                    StylePresetSettings(
+                        output_dir=(args.output_dir or default_style_preset_output_dir()),
+                        experiment_path=args.experiment,
+                        model_identifier=args.mflux_model,
+                        seeds=tuple(args.seeds or DEFAULT_STYLE_PRESET_SEEDS),
+                        width=args.width,
+                        height=args.height,
+                        step_count=args.steps,
+                        quantization=args.quantization,
                     )
                 )
         else:

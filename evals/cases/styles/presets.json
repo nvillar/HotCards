@@ -1,0 +1,160 @@
+{
+  "experiment_version": "style-preset-experiment-v1",
+  "experiment_id": "built-in-style-screen",
+  "title": "Proposed built-in Style screening",
+  "description": "A matched-seed screen of ten proposed deterministic Style suffixes plus an unstyled control across two style-neutral scenes.",
+  "styles": [
+    {
+      "style_id": "no-style",
+      "name": "No Style",
+      "prompt_text": null,
+      "expected_characteristics": []
+    },
+    {
+      "style_id": "hypercard",
+      "name": "HyperCard",
+      "prompt_text": "Rendered in an early Macintosh HyperCard visual style: pure black-and-white 1-bit bitmap artwork, hard pixel edges, dithered patterns for midtones, and sparse high-contrast linework.",
+      "expected_characteristics": [
+        "pure black-and-white 1-bit appearance",
+        "hard bitmap pixel edges",
+        "dithered midtones",
+        "sparse high-contrast linework"
+      ]
+    },
+    {
+      "style_id": "cinematic-film",
+      "name": "Cinematic Film",
+      "prompt_text": "Rendered as a cinematic live-action film still with naturalistic lens detail, nuanced color grading, rich shadow separation, motivated directional lighting, and subtle organic film grain.",
+      "expected_characteristics": [
+        "live-action film still appearance",
+        "naturalistic lens detail",
+        "nuanced cinematic color grading",
+        "subtle film grain"
+      ]
+    },
+    {
+      "style_id": "isometric-game",
+      "name": "Isometric Game",
+      "prompt_text": "Rendered as stylized isometric game art with a consistent top-down isometric projection, clean geometric forms, simplified surfaces, bright readable colors, soft ambient shadows, and even illumination.",
+      "expected_characteristics": [
+        "consistent top-down isometric projection",
+        "clean simplified geometry",
+        "bright readable colors",
+        "soft ambient shadows"
+      ]
+    },
+    {
+      "style_id": "pixel-art",
+      "name": "Pixel Art",
+      "prompt_text": "Rendered as crisp 16-bit pixel art with grid-aligned hard-edged pixels, a limited color palette, flat color clusters, deliberate dithering, and pixel-scale shading.",
+      "expected_characteristics": [
+        "recognizable 16-bit pixel art",
+        "grid-aligned hard-edged pixels",
+        "limited color palette",
+        "deliberate dithering"
+      ]
+    },
+    {
+      "style_id": "watercolor-painting",
+      "name": "Watercolor Painting",
+      "prompt_text": "Rendered as a watercolor painting with translucent layered washes, visible pigment blooms, softly bleeding edges, luminous white paper, natural fiber texture, and loose expressive brushwork.",
+      "expected_characteristics": [
+        "translucent watercolor washes",
+        "visible pigment blooms",
+        "luminous white paper",
+        "loose brushwork and softly bleeding edges"
+      ]
+    },
+    {
+      "style_id": "color-pencil",
+      "name": "Color Pencil",
+      "prompt_text": "Rendered as a colored-pencil drawing with visible layered strokes, waxy pigment texture, burnished highlights, fine hatching and crosshatching, vibrant color, and natural paper grain.",
+      "expected_characteristics": [
+        "visible layered colored-pencil strokes",
+        "waxy pigment texture",
+        "fine hatching and crosshatching",
+        "natural paper grain"
+      ]
+    },
+    {
+      "style_id": "pencil-sketch",
+      "name": "Pencil Sketch",
+      "prompt_text": "Rendered as a graphite pencil sketch with expressive line weight, crosshatched and softly smudged tonal shading, erased highlights, monochrome graphite, and textured white paper.",
+      "expected_characteristics": [
+        "monochrome graphite drawing",
+        "expressive pencil line weight",
+        "crosshatched and smudged shading",
+        "textured white paper"
+      ]
+    },
+    {
+      "style_id": "glazed-ceramic",
+      "name": "Glazed Ceramic",
+      "prompt_text": "Depicted as a hand-painted glazed ceramic diorama: smooth sculpted clay forms, saturated underglaze color, vitreous gloss, soft specular reflections, subtle glaze pooling, and handcrafted irregularities.",
+      "expected_characteristics": [
+        "scene transformed into sculpted ceramic forms",
+        "hand-painted underglaze color",
+        "vitreous glossy surfaces",
+        "subtle handcrafted irregularities"
+      ]
+    },
+    {
+      "style_id": "graphic-novel",
+      "name": "Graphic Novel",
+      "prompt_text": "Rendered as a graphic novel illustration with bold black ink contours, clean expressive linework, flat cel-shaded color, a controlled palette, hard-edged shadows, and dramatic tonal contrast.",
+      "expected_characteristics": [
+        "bold black ink contours",
+        "flat cel-shaded color",
+        "controlled palette",
+        "hard-edged shadows and dramatic contrast"
+      ]
+    },
+    {
+      "style_id": "miniature-toy",
+      "name": "Miniature Toy",
+      "prompt_text": "Depicted as a handcrafted miniature toy diorama with painted resin figures and scenery, simplified tactile forms, fine model-making detail, soft studio illumination, and shallow macro-lens depth of field.",
+      "expected_characteristics": [
+        "handcrafted miniature diorama appearance",
+        "painted resin figures and scenery",
+        "fine model-making detail",
+        "shallow macro-lens depth of field"
+      ]
+    }
+  ],
+  "scenes": [
+    {
+      "case_id": "island-lighthouse",
+      "title": "Island lighthouse",
+      "description": "At dusk, a red-coated lighthouse keeper stands on a rocky island path. A tall white lighthouse rises behind her, a small blue rowboat is tied to a wooden dock on the left, and three gulls circle above the sea. The keeper, lighthouse, rowboat, dock, and gulls are all clearly visible.",
+      "required_visual_elements": [
+        "red-coated lighthouse keeper",
+        "tall white lighthouse",
+        "small blue rowboat",
+        "wooden dock",
+        "three gulls"
+      ],
+      "composition_requirements": [
+        "lighthouse behind the keeper",
+        "rowboat tied to the dock on the left",
+        "gulls above the sea"
+      ]
+    },
+    {
+      "case_id": "clockmaker-workshop",
+      "title": "Clockmaker workshop",
+      "description": "Inside a clockmaker's workshop, a brass telescope stands in the center. A tall blue cabinet with two closed doors is on the left, and a round window showing rain is on the right. A small orange cat sits beneath the telescope. The telescope, cabinet, window, and cat are all clearly visible.",
+      "required_visual_elements": [
+        "central brass telescope",
+        "tall blue two-door cabinet",
+        "round rainy window",
+        "small orange cat"
+      ],
+      "composition_requirements": [
+        "telescope in the center",
+        "blue cabinet on the left",
+        "round window on the right",
+        "cat beneath the telescope"
+      ]
+    }
+  ]
+}

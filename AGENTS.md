@@ -26,6 +26,8 @@ uv run hypergen-eval image-prompts-evidence-gate --validate-only
 uv run hypergen-eval image-prompts-evidence-gate
 uv run hypergen-eval inline-references --validate-only
 uv run hypergen-eval inline-references
+uv run hypergen-eval style-presets --validate-only
+uv run hypergen-eval style-presets
 uv run hypergen-eval flux-references --stack /path/to/Stack.hypergen
 ```
 

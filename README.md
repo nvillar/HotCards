@@ -139,6 +139,8 @@ uv run hypergen-eval image-prompts-evidence-gate --validate-only
 uv run hypergen-eval image-prompts-evidence-gate
 uv run hypergen-eval inline-references --validate-only
 uv run hypergen-eval inline-references
+uv run hypergen-eval style-presets --validate-only
+uv run hypergen-eval style-presets
 uv run hypergen-eval flux-references --stack /path/to/Stack.hypergen
 ```
 
@@ -170,6 +172,10 @@ The paired `inline-references` suite uses four frozen benchmark References and
 matched seeds to compare complete standalone prompts with explicit inline
 Reference scope. It produces blinded A/B review sheets and keeps the condition
 key separate until scoring is complete.
+The `style-presets` suite renders two style-neutral scenes with matched seeds
+under ten proposed deterministic Style suffixes plus an unstyled control. It
+produces per-scene and cross-scene contact sheets for assessing Style fidelity,
+subject and composition preservation, consistency, and artifact leakage.
 
 ## Architecture at a glance
 
