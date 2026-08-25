@@ -20,6 +20,12 @@ uv run hypergen-eval smoke
 uv run hypergen-eval images
 uv run hypergen-eval image-prompts --validate-only
 uv run hypergen-eval image-prompts
+uv run hypergen-eval image-prompts-two-stage --validate-only
+uv run hypergen-eval image-prompts-two-stage
+uv run hypergen-eval image-prompts-evidence-gate --validate-only
+uv run hypergen-eval image-prompts-evidence-gate
+uv run hypergen-eval inline-references --validate-only
+uv run hypergen-eval inline-references
 uv run hypergen-eval flux-references --stack /path/to/Stack.hypergen
 ```
 

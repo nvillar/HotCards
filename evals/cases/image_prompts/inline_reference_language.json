@@ -1,0 +1,28 @@
+{
+  "experiment_version": "inline-reference-language-v1",
+  "experiment_id": "hypergen-inline-reference-language",
+  "title": "Inline Reference language for FLUX.2 Klein",
+  "description": "A paired image-level experiment comparing complete target prompts with and without explicit natural-language scope for one input Reference image.",
+  "cases": [
+    {
+      "case_id": "stairs-through-panel",
+      "standalone_prompt": "Directly in front of an open wall panel in a clean 1960s retrofuturistic laboratory, a dimly lit spiral staircase is visible through the opening, descending downward into shadow. A wall-to-wall window is immediately to the left of the panel. Frame the view tightly around the panel, staircase, and left-hand window in black-and-white dithered early-Mac and HyperCard graphics with crisp pixelated shading.",
+      "inline_prompt": "Inside the clean 1960s retrofuturistic laboratory shown in the input image, position the viewpoint directly in front of an open wall panel. Through the opening, show a dimly lit spiral staircase descending downward into shadow, with the wall-to-wall window immediately to the left. Keep the input image's black-and-white dithered early-Mac and HyperCard treatment, but frame the result tightly around the panel, staircase, and left-hand window."
+    },
+    {
+      "case_id": "computer-front-viewpoint",
+      "standalone_prompt": "A tall freestanding wedge-shaped retrofuturistic computer console fills the frame, viewed directly straight on rather than at an angle. Its dark angular side housing surrounds a recessed square CRT and a slanted integrated control deck with compact rectangular switches; the top row of keys is visible, and a flat wall stands directly behind it. Render the complete image in black-and-white dithered early-Mac and HyperCard graphics with pixelated textures and stark high-contrast shading.",
+      "inline_prompt": "Show the tall freestanding wedge-shaped computer console from the input image filling the frame, but view it directly straight on rather than at the input image's angle. Preserve only its stable dark angular construction, recessed square CRT, slanted control deck, compact rectangular switches, and black-and-white dithered early-Mac treatment; do not carry over its screen content. The top row of keys is visible, with a flat wall directly behind the console."
+    },
+    {
+      "case_id": "blue-cabinet-open",
+      "standalone_prompt": "A straight-on close-up of a tall blue cabinet rendered in flat layered cut-paper shapes. Both cabinet doors are open, revealing exactly twelve shallow wooden drawers arranged in four rows of three. The cabinet fills the complete frame in a restrained palette of deep indigo, muted blue, warm brown, amber, and cream, with no surrounding workshop objects visible.",
+      "inline_prompt": "Show the tall blue cabinet from the input image in a straight-on close-up, preserving its blue color, flat layered cut-paper construction, and restrained indigo, blue, brown, amber, and cream palette. Both cabinet doors are open, revealing exactly twelve shallow wooden drawers arranged in four rows of three. Use the input image only for the cabinet's identity and treatment; the cabinet fills the complete frame with no surrounding workshop objects visible."
+    },
+    {
+      "case_id": "cut-paper-city-style-only",
+      "standalone_prompt": "A bustling canal city at sunset rendered in flat layered cut-paper shapes with a restrained palette of deep indigo, muted blue, warm brown, amber, and cream. Narrow bridges cross the canal between clustered houses, while small boats and their reflections fill the water. The complete composition depicts only the canal city.",
+      "inline_prompt": "A bustling canal city at sunset with narrow bridges, clustered houses, small boats, and reflections in the water. Use the input image only for its flat layered cut-paper treatment and restrained palette of deep indigo, muted blue, warm brown, amber, and cream; do not carry over its workshop subjects or composition. The complete composition depicts only the canal city."
+    }
+  ]
+}

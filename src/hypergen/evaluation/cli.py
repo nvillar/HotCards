@@ -22,11 +22,27 @@ from hypergen.evaluation.images import (
     default_image_output_dir,
     run_image_evaluation,
 )
+from hypergen.evaluation.inline_references import (
+    DEFAULT_INLINE_REFERENCE_EXPERIMENT,
+    DEFAULT_INLINE_REFERENCE_SEEDS,
+    InlineReferenceSettings,
+    default_inline_reference_output_dir,
+    load_inline_reference_experiment,
+    run_inline_reference_evaluation,
+)
 from hypergen.evaluation.reports import ReportRenderingError
 from hypergen.evaluation.smoke import (
     SmokeSettings,
     default_smoke_output_dir,
     run_smoke,
+)
+from hypergen.evaluation.two_stage_image_prompts import (
+    EVIDENCE_GATE_IMAGE_PROMPT_CANDIDATE_ID,
+    EVIDENCE_GATE_IMAGE_PROMPT_VERSION,
+    TWO_STAGE_IMAGE_PROMPT_CANDIDATE_ID,
+    TWO_STAGE_IMAGE_PROMPT_VERSION,
+    run_evidence_gate_image_prompt_benchmark,
+    run_two_stage_image_prompt_benchmark,
 )
 from hypergen.generation.errors import GenerationError
 from hypergen.generation.ollama_client import DEFAULT_OLLAMA_MODEL
@@ -95,6 +111,66 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="validate benchmark structure, assets, and checksums without model calls",
     )
+    two_stage_prompts = subparsers.add_parser(
+        "image-prompts-two-stage",
+        help="run the evaluation-only two-stage Reference-account candidate",
+    )
+    two_stage_prompts.add_argument("--output-dir", type=Path)
+    two_stage_prompts.add_argument(
+        "--benchmark",
+        type=Path,
+        default=DEFAULT_IMAGE_PROMPT_BENCHMARK,
+    )
+    two_stage_prompts.add_argument(
+        "--ollama-model",
+        action="append",
+        dest="ollama_models",
+        default=None,
+    )
+    two_stage_prompts.add_argument(
+        "--endpoint",
+        default="http://localhost:11434",
+    )
+    two_stage_prompts.add_argument(
+        "--repetitions",
+        type=_positive_int,
+        default=1,
+    )
+    two_stage_prompts.add_argument(
+        "--validate-only",
+        action="store_true",
+        help="validate the frozen benchmark without model calls",
+    )
+    evidence_gate_prompts = subparsers.add_parser(
+        "image-prompts-evidence-gate",
+        help="run the target-conditioned Reference evidence-gate candidate",
+    )
+    evidence_gate_prompts.add_argument("--output-dir", type=Path)
+    evidence_gate_prompts.add_argument(
+        "--benchmark",
+        type=Path,
+        default=DEFAULT_IMAGE_PROMPT_BENCHMARK,
+    )
+    evidence_gate_prompts.add_argument(
+        "--ollama-model",
+        action="append",
+        dest="ollama_models",
+        default=None,
+    )
+    evidence_gate_prompts.add_argument(
+        "--endpoint",
+        default="http://localhost:11434",
+    )
+    evidence_gate_prompts.add_argument(
+        "--repetitions",
+        type=_positive_int,
+        default=1,
+    )
+    evidence_gate_prompts.add_argument(
+        "--validate-only",
+        action="store_true",
+        help="validate the frozen benchmark without model calls",
+    )
     references = subparsers.add_parser(
         "flux-references",
         help="measure FLUX.2 Klein multi-reference identity and style behavior",
@@ -116,6 +192,42 @@ def build_parser() -> argparse.ArgumentParser:
         "--kv-cache",
         action=argparse.BooleanOptionalAction,
         default=None,
+    )
+    inline_references = subparsers.add_parser(
+        "inline-references",
+        help="compare standalone and inline Reference language through MFLUX",
+    )
+    inline_references.add_argument("--output-dir", type=Path)
+    inline_references.add_argument(
+        "--experiment",
+        type=Path,
+        default=DEFAULT_INLINE_REFERENCE_EXPERIMENT,
+    )
+    inline_references.add_argument(
+        "--benchmark",
+        type=Path,
+        default=DEFAULT_IMAGE_PROMPT_BENCHMARK,
+    )
+    inline_references.add_argument(
+        "--mflux-model",
+        default="flux2-klein-9b-kv",
+    )
+    inline_references.add_argument(
+        "--seed",
+        action="append",
+        type=int,
+        dest="seeds",
+        default=None,
+    )
+    inline_references.add_argument("--quantization", type=int)
+    inline_references.add_argument("--width", type=_positive_int, default=1024)
+    inline_references.add_argument("--height", type=_positive_int, default=768)
+    inline_references.add_argument("--steps", type=_positive_int, default=4)
+    inline_references.add_argument("--blinding-seed", type=int)
+    inline_references.add_argument(
+        "--validate-only",
+        action="store_true",
+        help="validate experiment, benchmark, and frozen assets without model calls",
     )
     return parser
 
@@ -162,6 +274,48 @@ def run_cli(arguments: Sequence[str] | None = None) -> int:
                         repetitions=args.repetitions,
                     )
                 )
+        elif args.command == "image-prompts-two-stage":
+            if args.validate_only:
+                load_image_prompt_benchmark(args.benchmark)
+                result_path = args.benchmark
+            else:
+                result_path = run_two_stage_image_prompt_benchmark(
+                    ImagePromptBenchmarkSettings(
+                        output_dir=(
+                            args.output_dir
+                            or default_image_prompt_benchmark_output_dir()
+                        ),
+                        benchmark_path=args.benchmark,
+                        ollama_models=tuple(
+                            args.ollama_models or (DEFAULT_OLLAMA_MODEL,)
+                        ),
+                        endpoint=args.endpoint,
+                        repetitions=args.repetitions,
+                        candidate_id=TWO_STAGE_IMAGE_PROMPT_CANDIDATE_ID,
+                        candidate_prompt_version=TWO_STAGE_IMAGE_PROMPT_VERSION,
+                    )
+                )
+        elif args.command == "image-prompts-evidence-gate":
+            if args.validate_only:
+                load_image_prompt_benchmark(args.benchmark)
+                result_path = args.benchmark
+            else:
+                result_path = run_evidence_gate_image_prompt_benchmark(
+                    ImagePromptBenchmarkSettings(
+                        output_dir=(
+                            args.output_dir
+                            or default_image_prompt_benchmark_output_dir()
+                        ),
+                        benchmark_path=args.benchmark,
+                        ollama_models=tuple(
+                            args.ollama_models or (DEFAULT_OLLAMA_MODEL,)
+                        ),
+                        endpoint=args.endpoint,
+                        repetitions=args.repetitions,
+                        candidate_id=EVIDENCE_GATE_IMAGE_PROMPT_CANDIDATE_ID,
+                        candidate_prompt_version=EVIDENCE_GATE_IMAGE_PROMPT_VERSION,
+                    )
+                )
         elif args.command == "flux-references":
             result_path = run_flux_reference_evaluation(
                 output_dir=args.output_dir or default_reference_output_dir(),
@@ -175,6 +329,31 @@ def run_cli(arguments: Sequence[str] | None = None) -> int:
                 step_count=args.steps,
                 use_kv_cache=args.kv_cache,
             )
+        elif args.command == "inline-references":
+            if args.validate_only:
+                load_inline_reference_experiment(
+                    args.experiment,
+                    args.benchmark,
+                )
+                result_path = args.experiment
+            else:
+                result_path = run_inline_reference_evaluation(
+                    InlineReferenceSettings(
+                        output_dir=(
+                            args.output_dir
+                            or default_inline_reference_output_dir()
+                        ),
+                        experiment_path=args.experiment,
+                        benchmark_path=args.benchmark,
+                        model_identifier=args.mflux_model,
+                        seeds=tuple(args.seeds or DEFAULT_INLINE_REFERENCE_SEEDS),
+                        width=args.width,
+                        height=args.height,
+                        step_count=args.steps,
+                        quantization=args.quantization,
+                        blinding_seed=args.blinding_seed,
+                    )
+                )
         else:
             build_parser().error(f"unsupported command: {args.command}")
     except (GenerationError, OSError, ValueError) as error:

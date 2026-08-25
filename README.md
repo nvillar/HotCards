@@ -133,6 +133,12 @@ uv run hypergen-eval smoke
 uv run hypergen-eval images
 uv run hypergen-eval image-prompts --validate-only
 uv run hypergen-eval image-prompts
+uv run hypergen-eval image-prompts-two-stage --validate-only
+uv run hypergen-eval image-prompts-two-stage
+uv run hypergen-eval image-prompts-evidence-gate --validate-only
+uv run hypergen-eval image-prompts-evidence-gate
+uv run hypergen-eval inline-references --validate-only
+uv run hypergen-eval inline-references
 uv run hypergen-eval flux-references --stack /path/to/Stack.hypergen
 ```
 
@@ -152,6 +158,18 @@ criteria rather than exact expected prose. `--validate-only` checks the complete
 dataset without contacting a model; a live `image-prompts` run records the
 production contract, raw responses, final prompts, and blank scorecards for
 review.
+The evaluation-only `image-prompts-two-stage` condition separates a
+target-independent natural-language Reference account from text-only target
+synthesis while reusing production response validation.
+The `image-prompts-evidence-gate` condition instead gives final synthesis only
+target-authorized Reference evidence, creating a hard boundary around discarded
+visual context.
+Production Image Prompt preparation presents Reference context before the
+authoritative Description so the target remains the most recent input.
+The paired `inline-references` suite uses four frozen benchmark References and
+matched seeds to compare complete standalone prompts with explicit inline
+Reference scope. It produces blinded A/B review sheets and keeps the condition
+key separate until scoring is complete.
 
 ## Architecture at a glance
 

@@ -314,6 +314,51 @@ def test_image_prompt_runner_isolates_candidate_failure(
     assert manifest["status"] == "completed_with_failures"
 
 
+def test_runner_distinguishes_multistage_failure_from_repair(
+    tmp_path: Path,
+) -> None:
+    benchmark_path = _write_benchmark(tmp_path)
+    output_dir = tmp_path / "run"
+
+    class TwoStageFailingPreparer(FakePreparer):
+        def prepare(
+            self,
+            request: object,
+            *,
+            reference_image_path: Path | None = None,
+        ) -> ImagePromptPreparationResult:
+            raise ModelResponseError(
+                "synthesis failed",
+                raw_response='{"invalid": true}',
+                response_attempts=(
+                    {
+                        "phase": "reference_account",
+                        "raw_response": '{"reference_account": "fixture"}',
+                    },
+                    {
+                        "phase": "synthesis",
+                        "raw_response": '{"invalid": true}',
+                    },
+                ),
+            )
+
+    result_path = run_image_prompt_benchmark(
+        ImagePromptBenchmarkSettings(
+            output_dir=output_dir,
+            benchmark_path=benchmark_path,
+        ),
+        preparer_factory=lambda settings: TwoStageFailingPreparer(
+            settings,
+            [],
+        ),
+        environment_provider=lambda: {"git_sha": "test"},
+    )
+
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    assert result["results"][0]["attempt_count"] == 2
+    assert not result["results"][0]["repair_attempted"]
+
+
 def test_runner_retains_each_repair_attempt_with_safe_model_paths(
     tmp_path: Path,
 ) -> None:

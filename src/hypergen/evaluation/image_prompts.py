@@ -222,7 +222,8 @@ def default_image_prompt_benchmark_output_dir() -> Path:
     return Path("evals/runs") / f"image-prompts-{timestamp}"
 
 
-def _asset_path(benchmark_path: Path, asset: BenchmarkAsset) -> Path:
+def benchmark_asset_path(benchmark_path: Path, asset: BenchmarkAsset) -> Path:
+    """Resolve one validated benchmark asset within the benchmark directory."""
     root = benchmark_path.parent.resolve()
     path = (benchmark_path.parent / PurePosixPath(asset.path)).resolve()
     try:
@@ -240,7 +241,7 @@ def load_image_prompt_benchmark(path: Path) -> ImagePromptBenchmark:
         path.read_text(encoding="utf-8")
     )
     for asset in benchmark.assets:
-        asset_path = _asset_path(path, asset)
+        asset_path = benchmark_asset_path(path, asset)
         if not asset_path.is_file():
             raise ValueError(
                 f"benchmark asset {asset.asset_id!r} is missing: {asset.path}"
@@ -373,6 +374,7 @@ def _failure_record(
     *,
     raw_response_paths: tuple[str, ...],
     attempt_count: int,
+    repair_attempted: bool,
 ) -> dict[str, object]:
     metadata = (
         error.response_metadata
@@ -388,7 +390,7 @@ def _failure_record(
         },
         "raw_response_paths": raw_response_paths,
         "attempt_count": attempt_count,
-        "repair_attempted": attempt_count > 1,
+        "repair_attempted": repair_attempted,
         **metadata,
     }
 
@@ -428,7 +430,7 @@ def _execute_image_prompt_benchmark(
         )
         for case in benchmark.cases:
             reference_path = (
-                _asset_path(
+                benchmark_asset_path(
                     settings.benchmark_path,
                     asset_by_id[case.reference.asset_id],
                 )
@@ -494,6 +496,10 @@ def _execute_image_prompt_benchmark(
                         error,
                         raw_response_paths=raw_relatives,
                         attempt_count=attempt_count,
+                        repair_attempted=any(
+                            attempt.get("phase") == "repair"
+                            for attempt in error_attempts
+                        ),
                     )
                 else:
                     responses = (
@@ -643,6 +649,7 @@ __all__ = [
     "ImagePromptBenchmarkCase",
     "ImagePromptBenchmarkSettings",
     "RubricCriterion",
+    "benchmark_asset_path",
     "default_image_prompt_benchmark_output_dir",
     "load_image_prompt_benchmark",
     "run_image_prompt_benchmark",
