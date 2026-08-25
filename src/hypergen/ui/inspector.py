@@ -63,11 +63,11 @@ from hypergen.domain.models import (
 
 
 class _CommitPlainTextEdit(QPlainTextEdit):
-    editing_finished = Signal(object)
+    editing_finished = Signal(object, object)
 
     def focusOutEvent(self, event: QFocusEvent) -> None:
         super().focusOutEvent(event)
-        self.editing_finished.emit(QApplication.focusWidget())
+        self.editing_finished.emit(QApplication.focusWidget(), event.reason())
 
 
 def _compact_icon_button(
@@ -445,7 +445,9 @@ class Inspector(QWidget):
         self.add_style_button.clicked.connect(self._add_style)
         self.delete_style_button.clicked.connect(self._delete_style)
         self.style_name_edit.editingFinished.connect(self._commit_style)
-        self.style_prompt_edit.editing_finished.connect(lambda _next_focus: self._commit_style())
+        self.style_prompt_edit.editing_finished.connect(
+            lambda _next_focus, _reason: self._commit_style()
+        )
         self.hotspot_list.currentItemChanged.connect(self._hotspot_selection_changed)
         self.move_hotspot_up_button.clicked.connect(lambda: self._move_hotspot(-1))
         self.move_hotspot_down_button.clicked.connect(lambda: self._move_hotspot(1))
@@ -458,8 +460,15 @@ class Inspector(QWidget):
             self._update_image_prompt_freshness()
             self.render_inputs_changed.emit()
 
-    def _description_editing_finished(self, next_focus: object) -> None:
-        self.commit_revision_metadata(render_change=next_focus not in self._focus_commit_targets)
+    def _description_editing_finished(
+        self,
+        next_focus: object,
+        reason: object,
+    ) -> None:
+        mouse_focus = reason == Qt.FocusReason.MouseFocusReason
+        self.commit_revision_metadata(
+            render_change=not mouse_focus and next_focus not in self._focus_commit_targets
+        )
 
     def render(self, document: Stack, selected_card_id: UUID | None) -> None:
         previous_card_id = self.selected_card_id

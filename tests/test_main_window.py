@@ -941,6 +941,52 @@ def test_re_enrich_click_is_not_consumed_by_description_commit(
     window.close()
 
 
+@pytest.mark.parametrize("mode", ["description", "image_prompt"])
+def test_mouse_focus_commit_does_not_render_before_button_release(
+    application: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    revision = CardRevision(
+        description="A courtyard",
+        image_prompt=ImagePrompt(
+            text="A detailed courtyard",
+            source_description="A courtyard",
+        ),
+    )
+    card = Card(name="Card", revisions=(revision,))
+    window, controller, _workers, _background = _window(
+        Stack(name="Demo", cards=(card,))
+    )
+    window.show()
+    if mode == "image_prompt":
+        window.inspector.image_prompt_button.click()
+    draft = f"A changed {mode}"
+    window.inspector.description_edit.setPlainText(draft)
+    window.inspector.description_edit.setFocus()
+    application.processEvents()
+    renders: list[object] = []
+    monkeypatch.setattr(
+        window.inspector,
+        "render",
+        lambda *_args: renders.append(object()),
+    )
+
+    window.inspector.description_edit.editing_finished.emit(
+        None,
+        Qt.FocusReason.MouseFocusReason,
+    )
+
+    changed_revision = controller.document.cards[0].active_revision
+    if mode == "description":
+        assert changed_revision.description == draft
+    else:
+        assert changed_revision.image_prompt is not None
+        assert changed_revision.image_prompt.text == draft
+    assert renders == []
+    window.close()
+
+
 def test_generated_result_can_move_to_a_new_complete_version(
     application: QApplication,
 ) -> None:
