@@ -778,7 +778,7 @@ def test_changing_llm_model_re_enables_image_prompt_preparation(
             text="A richly detailed courtyard",
             source_description="A courtyard",
             model_identifier="qwen3.5:9b-mlx",
-            prompt_version="image-prompt-preparation-v6",
+            prompt_version=main_window_module.IMAGE_PROMPT_PREPARATION_VERSION,
         ),
     )
     card = Card(name="Card", revisions=(revision,))

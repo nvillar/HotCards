@@ -21,7 +21,7 @@ from hypergen.generation.ollama_client import (
 )
 from hypergen.generation.structured_output import structured_json_content
 
-IMAGE_PROMPT_PREPARATION_VERSION = "image-prompt-preparation-v6"
+IMAGE_PROMPT_PREPARATION_VERSION = "image-prompt-preparation-v7"
 
 
 class ImagePromptPreparationRequest(DomainModel):
@@ -43,14 +43,22 @@ class ImagePromptModelOutput(DomainModel):
     image_prompt: NonEmptyString
 
 
-class _ImagePromptRepairOutput(DomainModel):
+class ImagePromptRepairOutput(DomainModel):
+    """Minimal structured response used to repair one final Image Prompt."""
+
     image_prompt: NonEmptyString
 
 
 class ImagePromptPreparationAttempt(DomainModel):
     """One initial or repair model call retained for evaluation and diagnostics."""
 
-    phase: Literal["initial", "repair"]
+    phase: Literal[
+        "initial",
+        "reference_account",
+        "evidence_selection",
+        "synthesis",
+        "repair",
+    ]
     raw_response: NonEmptyString
     duration_seconds: NonNegativeFiniteFloat
     total_duration_ns: int | None = None
@@ -83,13 +91,13 @@ def build_image_prompt_preparation_prompt(
     """Build the bounded preparation prompt for text-only or image-aware use."""
     source = json.dumps(
         {
-            "authored_description": request.description,
             "reference_attached": request.has_reference,
             "reference_generation_description": (
                 request.reference_description
                 if request.has_reference
                 else None
             ),
+            "authored_description": request.description,
         },
         ensure_ascii=False,
         indent=2,
@@ -472,7 +480,7 @@ def _authored_state_assertions(value: str) -> set[tuple[str, str]]:
     return assertions
 
 
-def _validate_image_prompt(
+def validate_image_prompt(
     authored: str,
     image_prompt: str,
     *,
@@ -534,7 +542,7 @@ def _validate_image_prompt(
         )
 
 
-def _build_repair_prompt(
+def build_image_prompt_repair_prompt(
     request: ImagePromptPreparationRequest,
     image_prompt: str,
     conflict: str,
@@ -671,7 +679,7 @@ class OllamaImagePromptPreparer:
         except ValidationError as error:
             raise _model_response_error(request, tuple(attempts), error) from error
         try:
-            _validate_image_prompt(
+            validate_image_prompt(
                 request.description,
                 output.image_prompt,
                 visual_treatment=output.visual_treatment,
@@ -679,12 +687,12 @@ class OllamaImagePromptPreparer:
         except ValueError as error:
             try:
                 call = self._runtime.chat_structured(
-                    prompt=_build_repair_prompt(
+                    prompt=build_image_prompt_repair_prompt(
                         request,
                         output.image_prompt,
                         str(error),
                     ),
-                    schema=_ImagePromptRepairOutput.model_json_schema(),
+                    schema=ImagePromptRepairOutput.model_json_schema(),
                 )
             except GenerationError as repair_call_error:
                 prior_attempts = tuple(
@@ -707,10 +715,10 @@ class OllamaImagePromptPreparer:
                 raise
             attempts.append(_attempt("repair", call))
             try:
-                repaired = _ImagePromptRepairOutput.model_validate_json(
+                repaired = ImagePromptRepairOutput.model_validate_json(
                     structured_json_content(call.content)
                 )
-                _validate_image_prompt(
+                validate_image_prompt(
                     request.description,
                     repaired.image_prompt,
                     visual_treatment=output.visual_treatment,
@@ -793,6 +801,9 @@ __all__ = [
     "ImagePromptModelOutput",
     "ImagePromptPreparationRequest",
     "ImagePromptPreparationResult",
+    "ImagePromptRepairOutput",
     "OllamaImagePromptPreparer",
+    "build_image_prompt_repair_prompt",
     "build_image_prompt_preparation_prompt",
+    "validate_image_prompt",
 ]

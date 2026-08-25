@@ -26,6 +26,9 @@ from hypergen.domain.models import (
     Stack,
     UnresolvedCardReference,
 )
+from hypergen.generation.image_prompt_preparation import (
+    IMAGE_PROMPT_PREPARATION_VERSION,
+)
 
 
 def image_metadata() -> ImageGenerationMetadata:
@@ -67,7 +70,7 @@ def test_revision_uses_current_image_prompt_when_available() -> None:
         source_description="A courtyard",
         reference=reference,
         model_identifier="qwen3.5:9b-mlx",
-        prompt_version="image-prompt-preparation-v6",
+        prompt_version=IMAGE_PROMPT_PREPARATION_VERSION,
     )
     revision = CardRevision(
         description="A courtyard",
@@ -84,18 +87,18 @@ def test_revision_uses_current_image_prompt_when_available() -> None:
         source_description="A courtyard",
         reference=reference,
         model_identifier="qwen3.5:9b-mlx",
-        prompt_version="image-prompt-preparation-v6",
+        prompt_version=IMAGE_PROMPT_PREPARATION_VERSION,
     )
     assert not image_prompt.is_current(
         source_description="A courtyard",
         reference=reference,
         model_identifier="llama3.2:latest",
-        prompt_version="image-prompt-preparation-v6",
+        prompt_version=IMAGE_PROMPT_PREPARATION_VERSION,
     )
     assert not image_prompt.is_current(
         source_description="A changed courtyard",
         reference=reference,
-        prompt_version="image-prompt-preparation-v6",
+        prompt_version=IMAGE_PROMPT_PREPARATION_VERSION,
     )
     assert not image_prompt.is_current(
         source_description="A courtyard",
@@ -107,13 +110,19 @@ def test_revision_uses_current_image_prompt_when_available() -> None:
         source_description="A courtyard",
         reference=None,
         model_identifier="qwen3.5:9b-mlx",
-        prompt_version="image-prompt-preparation-v6",
+        prompt_version=IMAGE_PROMPT_PREPARATION_VERSION,
     )
     assert not ImagePrompt(
         text="A legacy prompt",
         source_description="A courtyard",
     ).is_current(
         source_description="A courtyard",
+        model_identifier="qwen3.5:9b-mlx",
+        prompt_version=IMAGE_PROMPT_PREPARATION_VERSION,
+    )
+    assert not image_prompt.is_current(
+        source_description="A courtyard",
+        reference=reference,
         model_identifier="qwen3.5:9b-mlx",
         prompt_version="image-prompt-preparation-v6",
     )

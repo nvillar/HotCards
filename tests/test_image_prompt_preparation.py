@@ -99,6 +99,12 @@ def test_prompt_defines_one_reviewable_result_without_clarification() -> None:
     assert 'no "EXIT" text' in prompt
     assert "private deliberation" in prompt
     assert "Image Prompt" in prompt
+    assert prompt.index(
+        '"reference_generation_description"'
+    ) < prompt.index('"authored_description"')
+    assert prompt.index(
+        "Black-and-white dithered graphics reminiscent of early Mac and HyperCard."
+    ) < prompt.index("The screen of the computer has changed.")
 
 
 def test_text_only_prompt_does_not_claim_an_attached_reference() -> None:

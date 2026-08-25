@@ -55,6 +55,58 @@ Experimental candidates should call `run_image_prompt_benchmark` with their own
 factory, candidate ID, prompt version, and contract digest rather than replacing
 production code merely to run a comparison.
 
+## Compare the two-stage Reference-account candidate
+
+The evaluation-only two-stage candidate first creates a target-independent
+natural-language account of each Reference, then performs target synthesis in a
+text-only call. It reuses the production output schema, final-state validation,
+and repair contract without changing production preparation:
+
+```sh
+uv run hypergen-eval image-prompts-two-stage --validate-only
+uv run hypergen-eval image-prompts-two-stage \
+  --ollama-model qwen3.5:9b-mlx
+```
+
+Compare its scored result with the production 9B baseline by hard failures
+first. Retain the candidate only if it improves the known semantic failures
+without regressing already-passing cases.
+
+The evidence-gate condition instead makes its multimodal first call select only
+target-applicable Reference evidence. Final synthesis cannot access discarded
+Reference details:
+
+```sh
+uv run hypergen-eval image-prompts-evidence-gate --validate-only
+uv run hypergen-eval image-prompts-evidence-gate \
+  --ollama-model qwen3.5:9b-mlx
+```
+
+Production preparation now presents Reference context before the authoritative
+Description. This ordering was adopted after the isolated 9B target-last
+ablation reached 14/16 cases without hard failure, versus 11/16 for the prior
+field order, without a hard regression among baseline passes.
+
+## Compare inline Reference language
+
+`inline_reference_language.json` defines an image-level paired experiment using
+four diagnostic benchmark cases. It compares a complete standalone prompt with
+the same target expressed using explicit natural-language scope for the input
+Reference image:
+
+```sh
+uv run hypergen-eval inline-references --validate-only
+uv run hypergen-eval inline-references
+```
+
+The live command uses three matched seeds by default and writes blinded A/B
+comparison sheets and a blank scorecard under `review/`. Reviewers score both
+candidates independently without inspecting `audit/condition-key.json`; reveal
+the condition key and exact prompts only after every pair is scored. Technical
+failures and failed critical criteria are hard failures. Prefer the inline
+condition only when it adds no critical regressions, lowers hard failures, and
+improves at least two of three seeds in at least three of the four cases.
+
 ## Maintain the dataset
 
 1. Write criteria before evaluating candidate output. Do not use an existing
