@@ -9,6 +9,13 @@ from hypergen.evaluation.flux_references import (
     default_reference_output_dir,
     run_flux_reference_evaluation,
 )
+from hypergen.evaluation.image_prompts import (
+    DEFAULT_IMAGE_PROMPT_BENCHMARK,
+    ImagePromptBenchmarkSettings,
+    default_image_prompt_benchmark_output_dir,
+    load_image_prompt_benchmark,
+    run_image_prompt_benchmark,
+)
 from hypergen.evaluation.images import (
     DEFAULT_MFLUX_MODELS,
     ImageEvaluationSettings,
@@ -22,6 +29,7 @@ from hypergen.evaluation.smoke import (
     run_smoke,
 )
 from hypergen.generation.errors import GenerationError
+from hypergen.generation.ollama_client import DEFAULT_OLLAMA_MODEL
 
 
 def _positive_int(value: str) -> int:
@@ -60,6 +68,33 @@ def build_parser() -> argparse.ArgumentParser:
     )
     images.add_argument("--seed", type=int, default=42)
     images.add_argument("--quantization", type=int)
+    image_prompts = subparsers.add_parser(
+        "image-prompts",
+        help="run the maintained Image Prompt benchmark through production preparation",
+    )
+    image_prompts.add_argument("--output-dir", type=Path)
+    image_prompts.add_argument(
+        "--benchmark",
+        type=Path,
+        default=DEFAULT_IMAGE_PROMPT_BENCHMARK,
+    )
+    image_prompts.add_argument(
+        "--ollama-model",
+        action="append",
+        dest="ollama_models",
+        default=None,
+    )
+    image_prompts.add_argument("--endpoint", default="http://localhost:11434")
+    image_prompts.add_argument(
+        "--repetitions",
+        type=_positive_int,
+        default=1,
+    )
+    image_prompts.add_argument(
+        "--validate-only",
+        action="store_true",
+        help="validate benchmark structure, assets, and checksums without model calls",
+    )
     references = subparsers.add_parser(
         "flux-references",
         help="measure FLUX.2 Klein multi-reference identity and style behavior",
@@ -108,6 +143,25 @@ def run_cli(arguments: Sequence[str] | None = None) -> int:
                     quantization=args.quantization,
                 )
             )
+        elif args.command == "image-prompts":
+            if args.validate_only:
+                load_image_prompt_benchmark(args.benchmark)
+                result_path = args.benchmark
+            else:
+                result_path = run_image_prompt_benchmark(
+                    ImagePromptBenchmarkSettings(
+                        output_dir=(
+                            args.output_dir
+                            or default_image_prompt_benchmark_output_dir()
+                        ),
+                        benchmark_path=args.benchmark,
+                        ollama_models=tuple(
+                            args.ollama_models or (DEFAULT_OLLAMA_MODEL,)
+                        ),
+                        endpoint=args.endpoint,
+                        repetitions=args.repetitions,
+                    )
+                )
         elif args.command == "flux-references":
             result_path = run_flux_reference_evaluation(
                 output_dir=args.output_dir or default_reference_output_dir(),

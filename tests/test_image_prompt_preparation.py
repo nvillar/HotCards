@@ -202,7 +202,60 @@ def test_preparer_repairs_comparison_language() -> None:
         'A boxy CRT computer displays a large red "ERROR" message.'
     )
     assert client.call_count == 2
+    assert result.repair_applied
+    assert [attempt.phase for attempt in result.attempts] == [
+        "initial",
+        "repair",
+    ]
+    assert result.duration_seconds >= sum(
+        attempt.duration_seconds for attempt in result.attempts
+    )
+    assert result.total_duration_ns == 4_000_000
     assert "Detected conflict:" in client.messages[-1]["content"]
+
+
+def test_preparer_retains_initial_attempt_when_repair_call_is_empty() -> None:
+    preparer, client = _preparer(
+        [
+            _output(
+                "The same computer now shows ERROR instead of the previous diagram."
+            ),
+            "",
+        ]
+    )
+
+    with pytest.raises(ModelResponseError) as caught:
+        preparer.prepare(
+            ImagePromptPreparationRequest(
+                description='The computer displays a large red "ERROR" message.'
+            )
+        )
+
+    error = caught.value
+    assert client.call_count == 2
+    assert [attempt["phase"] for attempt in error.response_attempts] == [
+        "initial",
+        "repair",
+    ]
+    assert error.response_attempts[0]["raw_response"]
+    assert error.response_attempts[1]["raw_response"] == ""
+    assert error.response_metadata["total_duration_ns"] == 4_000_000
+
+
+def test_preparer_counts_empty_initial_model_response_as_an_attempt() -> None:
+    preparer, client = _preparer("")
+
+    with pytest.raises(ModelResponseError) as caught:
+        preparer.prepare(
+            ImagePromptPreparationRequest(description="A moonlit courtyard.")
+        )
+
+    error = caught.value
+    assert client.call_count == 1
+    assert len(error.response_attempts) == 1
+    assert error.response_attempts[0]["phase"] == "initial"
+    assert error.response_attempts[0]["raw_response"] == ""
+    assert error.response_metadata["total_duration_ns"] == 2_000_000
 
 
 def test_preparer_allows_non_process_uses_of_source_and_original() -> None:

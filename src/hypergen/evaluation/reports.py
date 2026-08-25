@@ -256,6 +256,22 @@ def _summary_rows(result: Mapping[str, object]) -> list[dict[str, object]]:
                         },
                     )
                 )
+    elif version.startswith("image-prompt-benchmark-result"):
+        for item in result.get("results", []):  # type: ignore[union-attr]
+            rows.append(
+                _phase_row(
+                    suite="image_prompts",
+                    axis="image_prompt_preparation",
+                    case_id=item["case_id"],
+                    ollama_model=item["model"],
+                    phase=f"repetition-{item['repetition']}",
+                    record={
+                        **item,
+                        "render_prompt": item.get("image_prompt"),
+                        "rubric": item.get("rubric"),
+                    },
+                )
+            )
     elif version.startswith("smoke-result"):
         for stage_name, stage in result.get("stages", {}).items():  # type: ignore[union-attr]
             if isinstance(stage, Mapping) and ("cold" in stage or "warm" in stage):

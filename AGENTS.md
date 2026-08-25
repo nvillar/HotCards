@@ -18,6 +18,8 @@ uv run ruff check .
 uv run ruff format .
 uv run hypergen-eval smoke
 uv run hypergen-eval images
+uv run hypergen-eval image-prompts --validate-only
+uv run hypergen-eval image-prompts
 uv run hypergen-eval flux-references --stack /path/to/Stack.hypergen
 ```
 
@@ -45,6 +47,10 @@ for live Ollama and MFLUX runs.
 - Keep image actions, model actions, and storage out of widgets.
 - Reuse production prompt builders, schemas, adapters, and geometry validation
   in the evaluation harness. Do not fork generation behavior.
+- Keep the maintained Image Prompt benchmark self-contained under
+  `evals/cases/image_prompts/`: freeze permitted Reference assets with checksums
+  and provenance, score observable criteria rather than exact prose, and never
+  read a mutable authoring stack during benchmark runs.
 - Keep each card's complete authoring state in one of its numbered revisions:
   Description, prepared Image Prompt with input provenance, optional background,
   optional Reference card, and hotspot set. Visible revision numbers are

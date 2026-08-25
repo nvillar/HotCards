@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+from typing import Literal
 
 from pydantic import ValidationError
 
@@ -13,7 +14,7 @@ from hypergen.domain.models import (
     NonEmptyString,
     NonNegativeFiniteFloat,
 )
-from hypergen.generation.errors import ModelResponseError
+from hypergen.generation.errors import GenerationError, ModelResponseError
 from hypergen.generation.ollama_client import (
     VISION_CAPABILITY,
     OllamaRuntime,
@@ -46,6 +47,19 @@ class _ImagePromptRepairOutput(DomainModel):
     image_prompt: NonEmptyString
 
 
+class ImagePromptPreparationAttempt(DomainModel):
+    """One initial or repair model call retained for evaluation and diagnostics."""
+
+    phase: Literal["initial", "repair"]
+    raw_response: NonEmptyString
+    duration_seconds: NonNegativeFiniteFloat
+    total_duration_ns: int | None = None
+    load_duration_ns: int | None = None
+    prompt_eval_count: int | None = None
+    eval_count: int | None = None
+    done_reason: str | None = None
+
+
 class ImagePromptPreparationResult(DomainModel):
     """Reviewable Image Prompt with debugging metadata."""
 
@@ -59,6 +73,8 @@ class ImagePromptPreparationResult(DomainModel):
     prompt_eval_count: int | None = None
     eval_count: int | None = None
     done_reason: str | None = None
+    repair_applied: bool = False
+    attempts: tuple[ImagePromptPreparationAttempt, ...] = ()
 
 
 def build_image_prompt_preparation_prompt(
@@ -543,6 +559,80 @@ Detected conflict:
 """
 
 
+def _attempt(
+    phase: Literal["initial", "repair"],
+    call: object,
+) -> ImagePromptPreparationAttempt:
+    return ImagePromptPreparationAttempt(
+        phase=phase,
+        raw_response=call.content,
+        duration_seconds=call.elapsed_seconds,
+        total_duration_ns=call.total_duration_ns,
+        load_duration_ns=call.load_duration_ns,
+        prompt_eval_count=call.prompt_eval_count,
+        eval_count=call.eval_count,
+        done_reason=call.done_reason,
+    )
+
+
+def _sum_optional_int(
+    attempts: tuple[ImagePromptPreparationAttempt, ...],
+    field: Literal[
+        "total_duration_ns",
+        "load_duration_ns",
+        "prompt_eval_count",
+        "eval_count",
+    ],
+) -> int | None:
+    values = [getattr(attempt, field) for attempt in attempts]
+    if not values or any(value is None for value in values):
+        return None
+    return sum(value for value in values if value is not None)
+
+
+def _failed_call_attempt(
+    phase: Literal["initial", "repair"],
+    error: ModelResponseError,
+) -> dict[str, object]:
+    return {
+        "phase": phase,
+        "raw_response": error.raw_response,
+        "duration_seconds": error.response_metadata.get("elapsed_seconds"),
+        "total_duration_ns": error.response_metadata.get("total_duration_ns"),
+        "load_duration_ns": error.response_metadata.get("load_duration_ns"),
+        "prompt_eval_count": error.response_metadata.get("prompt_eval_count"),
+        "eval_count": error.response_metadata.get("eval_count"),
+        "done_reason": error.response_metadata.get("done_reason"),
+    }
+
+
+def _aggregate_attempt_metadata(
+    attempts: tuple[dict[str, object], ...],
+) -> dict[str, int | str | float | None]:
+    totals: dict[str, int | float | None] = {}
+    for field in (
+        "duration_seconds",
+        "total_duration_ns",
+        "load_duration_ns",
+        "prompt_eval_count",
+        "eval_count",
+    ):
+        values = [attempt.get(field) for attempt in attempts]
+        totals[field] = (
+            sum(value for value in values if isinstance(value, (int, float)))
+            if values and all(isinstance(value, (int, float)) for value in values)
+            else None
+        )
+    return {
+        "elapsed_seconds": totals["duration_seconds"],
+        "total_duration_ns": totals["total_duration_ns"],
+        "load_duration_ns": totals["load_duration_ns"],
+        "prompt_eval_count": totals["prompt_eval_count"],
+        "eval_count": totals["eval_count"],
+        "done_reason": attempts[-1].get("done_reason"),
+    }
+
+
 class OllamaImagePromptPreparer:
     """Prepare one Image Prompt through the shared structured Ollama runtime."""
 
@@ -562,17 +652,24 @@ class OllamaImagePromptPreparer:
         self._runtime.require_model(
             capabilities=frozenset({VISION_CAPABILITY})
         )
-        call = self._runtime.chat_structured(
-            prompt=build_image_prompt_preparation_prompt(request),
-            schema=ImagePromptModelOutput.model_json_schema(),
-            image_path=reference_image_path,
-        )
+        try:
+            call = self._runtime.chat_structured(
+                prompt=build_image_prompt_preparation_prompt(request),
+                schema=ImagePromptModelOutput.model_json_schema(),
+                image_path=reference_image_path,
+            )
+        except ModelResponseError as initial_call_error:
+            initial_call_error.response_attempts = (
+                _failed_call_attempt("initial", initial_call_error),
+            )
+            raise
+        attempts = [_attempt("initial", call)]
         try:
             output = ImagePromptModelOutput.model_validate_json(
                 structured_json_content(call.content)
             )
         except ValidationError as error:
-            raise _model_response_error(request, call, error) from error
+            raise _model_response_error(request, tuple(attempts), error) from error
         try:
             _validate_image_prompt(
                 request.description,
@@ -580,14 +677,35 @@ class OllamaImagePromptPreparer:
                 visual_treatment=output.visual_treatment,
             )
         except ValueError as error:
-            call = self._runtime.chat_structured(
-                prompt=_build_repair_prompt(
-                    request,
-                    output.image_prompt,
-                    str(error),
-                ),
-                schema=_ImagePromptRepairOutput.model_json_schema(),
-            )
+            try:
+                call = self._runtime.chat_structured(
+                    prompt=_build_repair_prompt(
+                        request,
+                        output.image_prompt,
+                        str(error),
+                    ),
+                    schema=_ImagePromptRepairOutput.model_json_schema(),
+                )
+            except GenerationError as repair_call_error:
+                prior_attempts = tuple(
+                    attempt.model_dump(mode="json") for attempt in attempts
+                )
+                failed_attempt = (
+                    (_failed_call_attempt("repair", repair_call_error),)
+                    if isinstance(repair_call_error, ModelResponseError)
+                    else ({"phase": "repair", "raw_response": None},)
+                )
+                response_attempts = (
+                    *prior_attempts,
+                    *failed_attempt,
+                )
+                repair_call_error.response_attempts = response_attempts
+                if isinstance(repair_call_error, ModelResponseError):
+                    repair_call_error.response_metadata = (
+                        _aggregate_attempt_metadata(response_attempts)
+                    )
+                raise
+            attempts.append(_attempt("repair", call))
             try:
                 repaired = _ImagePromptRepairOutput.model_validate_json(
                     structured_json_content(call.content)
@@ -603,45 +721,75 @@ class OllamaImagePromptPreparer:
             except (ValidationError, ValueError) as repair_error:
                 raise _model_response_error(
                     request,
-                    call,
+                    tuple(attempts),
                     repair_error,
                 ) from repair_error
+        retained_attempts = tuple(attempts)
         return ImagePromptPreparationResult(
             image_prompt=output.image_prompt,
             raw_response=call.content,
             model_identifier=self._runtime.settings.model,
             prompt_version=request.prompt_version,
-            duration_seconds=call.elapsed_seconds,
-            total_duration_ns=call.total_duration_ns,
-            load_duration_ns=call.load_duration_ns,
-            prompt_eval_count=call.prompt_eval_count,
-            eval_count=call.eval_count,
+            duration_seconds=sum(
+                attempt.duration_seconds for attempt in retained_attempts
+            ),
+            total_duration_ns=_sum_optional_int(
+                retained_attempts,
+                "total_duration_ns",
+            ),
+            load_duration_ns=_sum_optional_int(
+                retained_attempts,
+                "load_duration_ns",
+            ),
+            prompt_eval_count=_sum_optional_int(
+                retained_attempts,
+                "prompt_eval_count",
+            ),
+            eval_count=_sum_optional_int(retained_attempts, "eval_count"),
             done_reason=call.done_reason,
+            repair_applied=len(retained_attempts) > 1,
+            attempts=retained_attempts,
         )
 
 
 def _model_response_error(
     request: ImagePromptPreparationRequest,
-    call: object,
+    attempts: tuple[ImagePromptPreparationAttempt, ...],
     error: Exception,
 ) -> ModelResponseError:
+    last_attempt = attempts[-1]
     return ModelResponseError(
         "Ollama returned an invalid Image Prompt "
         f"for {request.prompt_version}: {error}",
-        raw_response=call.content,
+        raw_response=last_attempt.raw_response,
         response_metadata={
-            "elapsed_seconds": call.elapsed_seconds,
-            "total_duration_ns": call.total_duration_ns,
-            "load_duration_ns": call.load_duration_ns,
-            "prompt_eval_count": call.prompt_eval_count,
-            "eval_count": call.eval_count,
-            "done_reason": call.done_reason,
+            "elapsed_seconds": sum(
+                attempt.duration_seconds for attempt in attempts
+            ),
+            "total_duration_ns": _sum_optional_int(
+                attempts,
+                "total_duration_ns",
+            ),
+            "load_duration_ns": _sum_optional_int(
+                attempts,
+                "load_duration_ns",
+            ),
+            "prompt_eval_count": _sum_optional_int(
+                attempts,
+                "prompt_eval_count",
+            ),
+            "eval_count": _sum_optional_int(attempts, "eval_count"),
+            "done_reason": last_attempt.done_reason,
         },
+        response_attempts=tuple(
+            attempt.model_dump(mode="json") for attempt in attempts
+        ),
     )
 
 
 __all__ = [
     "IMAGE_PROMPT_PREPARATION_VERSION",
+    "ImagePromptPreparationAttempt",
     "ImagePromptModelOutput",
     "ImagePromptPreparationRequest",
     "ImagePromptPreparationResult",
