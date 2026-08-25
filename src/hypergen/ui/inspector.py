@@ -763,7 +763,7 @@ class Inspector(QWidget):
             text = "Preparing Image Prompt…"
             enabled = False
         elif self._image_prompt_current is True:
-            text = "Image Prompt Current ✓"
+            text = "Image Prompt Current"
             enabled = False
         else:
             text = "Update Image Prompt" if has_image_prompt else "Prepare Image Prompt"

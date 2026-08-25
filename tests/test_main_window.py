@@ -793,7 +793,7 @@ def test_changing_llm_model_re_enables_image_prompt_preparation(
         models,
     )
     assert window.inspector.enrich_button.text() == (
-        "Image Prompt Current ✓"
+        "Image Prompt Current"
     )
     assert not window.inspector.enrich_button.isEnabled()
 

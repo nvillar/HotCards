@@ -373,7 +373,7 @@ def test_image_prompt_status_and_generation_source(
     assert inspector.description_edit.toPlainText() == ("A courtyard")
     assert "Using: Description" in inspector.enrich_button.toolTip()
     assert "Using: Image Prompt" in inspector.generate_background_button.toolTip()
-    assert inspector.enrich_button.text() == "Image Prompt Current ✓"
+    assert inspector.enrich_button.text() == "Image Prompt Current"
     assert not inspector.enrich_button.isEnabled()
     assert "Current" in inspector.enrich_button.toolTip()
     inspector.set_image_prompt_capabilities(
@@ -467,7 +467,7 @@ def test_changing_model_marks_image_prompt_out_of_date(
         busy=False,
         model_identifier="qwen3.5:9b-mlx",
     )
-    assert inspector.enrich_button.text() == "Image Prompt Current ✓"
+    assert inspector.enrich_button.text() == "Image Prompt Current"
     assert not inspector.enrich_button.isEnabled()
 
     inspector.set_image_prompt_capabilities(
@@ -487,7 +487,7 @@ def test_changing_model_marks_image_prompt_out_of_date(
         busy=False,
         model_identifier="qwen3.5:9b-mlx",
     )
-    assert inspector.enrich_button.text() == "Image Prompt Current ✓"
+    assert inspector.enrich_button.text() == "Image Prompt Current"
     assert not inspector.enrich_button.isEnabled()
 
 
