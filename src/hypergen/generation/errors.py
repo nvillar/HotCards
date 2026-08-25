@@ -22,9 +22,11 @@ class ModelResponseError(GenerationError):
         *,
         raw_response: str | None = None,
         response_metadata: dict[str, int | str | float | None] | None = None,
+        response_attempts: tuple[dict[str, object], ...] = (),
     ) -> None:
         self.raw_response = raw_response
         self.response_metadata = response_metadata or {}
+        self.response_attempts = response_attempts
         super().__init__(message)
 
 

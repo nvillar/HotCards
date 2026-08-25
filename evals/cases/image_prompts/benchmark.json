@@ -1,0 +1,937 @@
+{
+  "benchmark_version": "image-prompt-benchmark-v1",
+  "benchmark_id": "hypergen-image-prompts",
+  "title": "HyperGen Image Prompt benchmark",
+  "description": "A maintained, self-contained benchmark for judging whether Image Prompt preparation preserves authored intent while applying only requested Reference continuity.",
+  "common_criteria": [
+    {
+      "criterion_id": "standalone-final-image",
+      "category": "prompt_quality",
+      "severity": "critical",
+      "description": "The result is one standalone description of the desired final image rather than a comparison, explanation, instruction, or discussion of alternatives."
+    },
+    {
+      "criterion_id": "description-authority",
+      "category": "target_fidelity",
+      "severity": "critical",
+      "description": "The authored Description remains the dominant scene authority; Reference content does not replace its subject, view, state, or composition."
+    },
+    {
+      "criterion_id": "no-process-or-machine-language",
+      "category": "prompt_quality",
+      "severity": "major",
+      "description": "The result does not mention a Reference, source image, previous version, prompt process, model, dimensions, steps, seeds, hotspots, or navigation."
+    },
+    {
+      "criterion_id": "no-unrequested-visible-text",
+      "category": "visible_text",
+      "severity": "critical",
+      "description": "The result introduces no visible words, labels, captions, signs, or interface text that the Description did not request."
+    },
+    {
+      "criterion_id": "positive-image-language",
+      "category": "prompt_quality",
+      "severity": "major",
+      "description": "The final image is described positively; exclusions are realized by omission or positive text-free wording rather than a negative-prompt checklist."
+    }
+  ],
+  "assets": [
+    {
+      "asset_id": "closed-hatch",
+      "path": "references/closed-hatch.png",
+      "sha256": "d0a803fd4d8a4d6f60d247cc0889b59218f37fae32a07d1a662a762653b1f017",
+      "provenance": {
+        "source_kind": "project-generated",
+        "description": "Frozen from an author-generated HyperGen space-station scene on 2026-08-24; the benchmark owns this copy and does not read the source stack.",
+        "reuse_terms": "Project-generated evaluation input; reusable and redistributable with HyperGen."
+      }
+    },
+    {
+      "asset_id": "laboratory",
+      "path": "references/laboratory.png",
+      "sha256": "dae309fdc9222d11894a3f7fdc8c3b2e6938de77e80b2f0f7f1ab514c28ecb84",
+      "provenance": {
+        "source_kind": "project-generated",
+        "description": "Frozen from an author-generated HyperGen retrofuturistic laboratory scene on 2026-08-24; the benchmark owns this copy and does not read the source stack.",
+        "reuse_terms": "Project-generated evaluation input; reusable and redistributable with HyperGen."
+      }
+    },
+    {
+      "asset_id": "computer-side",
+      "path": "references/computer-side.png",
+      "sha256": "ce2e510b0e4d1d1215d17497db03daa159068a9a032663c2ea5865483ad617cd",
+      "provenance": {
+        "source_kind": "project-generated",
+        "description": "Frozen from an author-generated HyperGen wedge-shaped computer scene on 2026-08-24; the benchmark owns this copy and does not read the source stack.",
+        "reuse_terms": "Project-generated evaluation input; reusable and redistributable with HyperGen."
+      }
+    },
+    {
+      "asset_id": "computer-front",
+      "path": "references/computer-front.png",
+      "sha256": "330f407023093b3a1176cc00323d34b61d7ef0c3d03df0a87031a0a189000be3",
+      "provenance": {
+        "source_kind": "project-generated",
+        "description": "Frozen from an author-generated HyperGen front-facing computer scene on 2026-08-24; the benchmark owns this copy and does not read the source stack.",
+        "reuse_terms": "Project-generated evaluation input; reusable and redistributable with HyperGen."
+      }
+    },
+    {
+      "asset_id": "computer-error",
+      "path": "references/computer-error.png",
+      "sha256": "52b8ffe184f09d07736659d07dec1caba7c7de3f909325329b21ad7b7d576c6e",
+      "provenance": {
+        "source_kind": "project-generated",
+        "description": "Frozen from an author-generated HyperGen computer error-screen scene on 2026-08-24; the benchmark owns this copy and does not read the source stack.",
+        "reuse_terms": "Project-generated evaluation input; reusable and redistributable with HyperGen."
+      }
+    },
+    {
+      "asset_id": "cut-paper-workshop",
+      "path": "references/cut-paper-workshop.png",
+      "sha256": "bcf9c548ca271b7e4d67175b4c4971c8157537912ab22b29762f15c00d1df29b",
+      "provenance": {
+        "source_kind": "project-generated",
+        "description": "Copied from HyperGen's project-authored synthetic workshop evaluation fixture to add a non-photorealistic color Reference independent of the seed deck.",
+        "reuse_terms": "Project-generated evaluation input; reusable and redistributable with HyperGen."
+      }
+    }
+  ],
+  "cases": [
+    {
+      "case_id": "closed-hatch-text-only",
+      "title": "Text-only closed hatch",
+      "cohort": "regression",
+      "tags": [
+        "no-reference",
+        "viewpoint",
+        "visible-text",
+        "style"
+      ],
+      "description": "Inside a space station, facing a closed circular hatch labelled with \"01\" along a long wall. First-person point of view, facing straight onto the hatch. A small access-control panel is mounted on the wall next to the hatch. No people are present. Camera faces the hatch directly, not at an angle. Style is black-and-white dithered graphics reminiscent of early Mac and HyperCard.",
+      "reference": null,
+      "criteria": [
+        {
+          "criterion_id": "closed-circular-hatch",
+          "category": "target_fidelity",
+          "severity": "critical",
+          "description": "A closed circular space-station hatch is the main subject."
+        },
+        {
+          "criterion_id": "direct-first-person-view",
+          "category": "target_fidelity",
+          "severity": "critical",
+          "description": "The camera is first-person and faces the hatch straight on rather than at an angle."
+        },
+        {
+          "criterion_id": "access-control-panel",
+          "category": "target_fidelity",
+          "severity": "major",
+          "description": "A small access-control panel is mounted beside the hatch."
+        },
+        {
+          "criterion_id": "exact-hatch-label",
+          "category": "visible_text",
+          "severity": "critical",
+          "description": "The hatch visibly carries the exact label \"01\"."
+        },
+        {
+          "criterion_id": "empty-scene",
+          "category": "target_fidelity",
+          "severity": "critical",
+          "description": "No person is introduced into the image."
+        },
+        {
+          "criterion_id": "early-mac-treatment",
+          "category": "override",
+          "severity": "critical",
+          "description": "The rendering remains explicitly black-and-white, dithered, and recognizable as early-Mac or HyperCard treatment."
+        }
+      ],
+      "provenance": {
+        "source_kind": "authored",
+        "description": "Canonicalized from an authored space-station card used to seed the benchmark.",
+        "reuse_terms": "Original HyperGen benchmark text; reusable and redistributable with HyperGen."
+      }
+    },
+    {
+      "case_id": "open-hatch-state-change",
+      "title": "Continuing hatch opened to the left",
+      "cohort": "regression",
+      "tags": [
+        "entity-continuity",
+        "state-change",
+        "lighting",
+        "viewpoint"
+      ],
+      "description": "The hatch is swung open to the left, and bright light pours through from the room it opens into.",
+      "reference": {
+        "asset_id": "closed-hatch",
+        "generation_description": "A first-person perspective captures a closed circular space-station hatch marked with the label \"01\" on a long wall. Beside the hatch sits a small access-control panel mounted flat against the surface. The scene is rendered in stark black-and-white dithered graphics reminiscent of early Mac and HyperCard, featuring high-contrast pixelated shading and a grainy texture without visible people."
+      },
+      "criteria": [
+        {
+          "criterion_id": "hatch-open-left",
+          "category": "override",
+          "severity": "critical",
+          "description": "The circular hatch is open and visibly swung to the left, not closed or swung in another direction."
+        },
+        {
+          "criterion_id": "bright-light-through-opening",
+          "category": "target_fidelity",
+          "severity": "critical",
+          "description": "Bright light pours through the open hatch from the room beyond."
+        },
+        {
+          "criterion_id": "hatch-identity-retained",
+          "category": "continuity",
+          "severity": "major",
+          "description": "Stable hatch identity, the straight-on first-person framing, and the adjacent access-control panel remain compatible with the Reference."
+        },
+        {
+          "criterion_id": "closed-state-rejected",
+          "category": "reference_restraint",
+          "severity": "critical",
+          "description": "The Reference's closed state is not retained or contradicted elsewhere in the prompt."
+        },
+        {
+          "criterion_id": "reference-treatment-retained",
+          "category": "continuity",
+          "severity": "major",
+          "description": "The black-and-white early-Mac dithered treatment remains recognizable."
+        }
+      ],
+      "provenance": {
+        "source_kind": "authored",
+        "description": "Adapted from an authored state-change card used to seed the benchmark.",
+        "reuse_terms": "Original HyperGen benchmark text; reusable and redistributable with HyperGen."
+      }
+    },
+    {
+      "case_id": "new-setting-style-transfer",
+      "title": "New laboratory with treatment-only transfer",
+      "cohort": "development",
+      "tags": [
+        "style-transfer",
+        "new-setting",
+        "reference-restraint"
+      ],
+      "description": "A stark lab with gleaming surfaces and a retrofuturistic computer on one wall. Clean 1960s futuristic aesthetic. Bright lights shine from ceiling panels. A wall-to-wall window fills the opposite wall, showing a barren alien planet with wild terrain, stars, and a distant sun over the horizon.",
+      "reference": {
+        "asset_id": "closed-hatch",
+        "generation_description": "A first-person perspective captures a closed circular space-station hatch marked with the label \"01\" on a long wall. Beside the hatch sits a small access-control panel. The scene uses stark black-and-white dithered graphics reminiscent of early Mac and HyperCard with high-contrast pixelated shading."
+      },
+      "criteria": [
+        {
+          "criterion_id": "laboratory-target",
+          "category": "target_fidelity",
+          "severity": "critical",
+          "description": "The image is a stark, gleaming, clean-1960s retrofuturistic laboratory rather than the Reference corridor."
+        },
+        {
+          "criterion_id": "computer-on-wall",
+          "category": "target_fidelity",
+          "severity": "critical",
+          "description": "A retrofuturistic computer is mounted on one wall."
+        },
+        {
+          "criterion_id": "bright-ceiling-panels",
+          "category": "target_fidelity",
+          "severity": "major",
+          "description": "Bright ceiling-panel lighting is present."
+        },
+        {
+          "criterion_id": "alien-window-view",
+          "category": "target_fidelity",
+          "severity": "critical",
+          "description": "A wall-to-wall window on the opposite wall reveals barren alien terrain, stars, and a distant sun."
+        },
+        {
+          "criterion_id": "treatment-only-continuity",
+          "category": "continuity",
+          "severity": "critical",
+          "description": "The Reference contributes reusable black-and-white early-Mac dithered treatment without controlling the new scene."
+        },
+        {
+          "criterion_id": "hatch-corridor-rejected",
+          "category": "reference_restraint",
+          "severity": "critical",
+          "description": "The hatch, access panel, and corridor composition are not copied into the laboratory target."
+        }
+      ],
+      "provenance": {
+        "source_kind": "authored",
+        "description": "Canonicalized from an authored new-setting card used to seed the benchmark.",
+        "reuse_terms": "Original HyperGen benchmark text; reusable and redistributable with HyperGen."
+      }
+    },
+    {
+      "case_id": "window-view-reframe",
+      "title": "Reference window view fills the frame",
+      "cohort": "development",
+      "tags": [
+        "reframe",
+        "setting-detail",
+        "exclusion",
+        "composition"
+      ],
+      "description": "The view outside the lab window fills the image. We do not see the lab, computer, walls, floor, or window frame; the image consists only of the view out the window.",
+      "reference": {
+        "asset_id": "laboratory",
+        "generation_description": "A stark laboratory gleams with clean 1960s retrofuturistic surfaces, rendered in black-and-white dithered graphics reminiscent of early Mac and HyperCard. Bright ceiling panels illuminate a retrofuturistic computer on one wall. Opposite, a wall-to-wall window reveals a barren alien planet with wild terrain, stars, and a distant sun over the horizon."
+      },
+      "criteria": [
+        {
+          "criterion_id": "outside-view-fills-frame",
+          "category": "target_fidelity",
+          "severity": "critical",
+          "description": "The alien landscape outside the window fills the complete image."
+        },
+        {
+          "criterion_id": "alien-view-continuity",
+          "category": "continuity",
+          "severity": "critical",
+          "description": "Barren wild terrain, stars, and a distant sun remain compatible with the Reference's exterior view."
+        },
+        {
+          "criterion_id": "room-crop-enforced",
+          "category": "reference_restraint",
+          "severity": "critical",
+          "description": "The lab, computer, walls, floor, and window frame are absent from the requested composition."
+        },
+        {
+          "criterion_id": "reference-treatment-retained",
+          "category": "continuity",
+          "severity": "major",
+          "description": "The high-contrast black-and-white dithered early-Mac treatment remains recognizable."
+        }
+      ],
+      "provenance": {
+        "source_kind": "authored",
+        "description": "Canonicalized from an authored extreme-reframing card used to seed the benchmark.",
+        "reuse_terms": "Original HyperGen benchmark text; reusable and redistributable with HyperGen."
+      }
+    },
+    {
+      "case_id": "computer-closeup",
+      "title": "Detailed computer extraction",
+      "cohort": "regression",
+      "tags": [
+        "object-extraction",
+        "closeup",
+        "viewpoint",
+        "screen-content"
+      ],
+      "description": "A close-up of a retrofuturistic computer console. It is a tall freestanding wedge-shaped terminal with a dark angular side housing, a recessed square CRT, a slanted integrated control deck with compact rectangular switches, and a bulky pedestal cabinet. The camera faces the console straight on. The CRT displays a technical diagram of a robot. The console fills the frame.",
+      "reference": {
+        "asset_id": "laboratory",
+        "generation_description": "A stark laboratory rendered in black-and-white dithered early-Mac and HyperCard graphics. A retrofuturistic computer stands on one wall opposite a wall-to-wall window showing an alien landscape."
+      },
+      "criteria": [
+        {
+          "criterion_id": "console-fills-frame",
+          "category": "target_fidelity",
+          "severity": "critical",
+          "description": "The computer console is a close-up main subject that fills the frame."
+        },
+        {
+          "criterion_id": "straight-on-camera",
+          "category": "target_fidelity",
+          "severity": "critical",
+          "description": "The camera faces the console straight on."
+        },
+        {
+          "criterion_id": "console-construction",
+          "category": "target_fidelity",
+          "severity": "critical",
+          "description": "The prompt retains the wedge shape, angular side housing, recessed square CRT, slanted switch deck, and bulky pedestal cabinet."
+        },
+        {
+          "criterion_id": "robot-diagram",
+          "category": "visible_text",
+          "severity": "critical",
+          "description": "The CRT displays a technical diagram of a robot without inventing readable labels."
+        },
+        {
+          "criterion_id": "room-does-not-dominate",
+          "category": "reference_restraint",
+          "severity": "critical",
+          "description": "The laboratory and alien window view do not displace or compete with the requested close-up."
+        },
+        {
+          "criterion_id": "reference-treatment-retained",
+          "category": "continuity",
+          "severity": "major",
+          "description": "The computer uses compatible black-and-white dithered early-Mac treatment."
+        }
+      ],
+      "provenance": {
+        "source_kind": "authored",
+        "description": "Canonicalized from an authored object-extraction card used to seed the benchmark.",
+        "reuse_terms": "Original HyperGen benchmark text; reusable and redistributable with HyperGen."
+      }
+    },
+    {
+      "case_id": "computer-front-viewpoint",
+      "title": "Continuing computer with a strict frontal view",
+      "cohort": "development",
+      "tags": [
+        "entity-continuity",
+        "viewpoint",
+        "transient-content"
+      ],
+      "description": "The computer viewed straight on, not at an angle; this is extremely important. The top row of keys is visible, and the wall is flat behind it. Rendered in black-and-white dithered graphics reminiscent of early Mac and HyperCard, with pixelated textures and stark high-contrast shading.",
+      "reference": {
+        "asset_id": "computer-side",
+        "generation_description": "A tall freestanding wedge-shaped retrofuturistic computer console fills the frame. It has a dark angular side housing, recessed square CRT displaying a technical robot diagram, slanted integrated control deck with compact rectangular switches, and a bulky pedestal cabinet. The scene is rendered in black-and-white dithered early-Mac and HyperCard graphics."
+      },
+      "criteria": [
+        {
+          "criterion_id": "strict-frontal-view",
+          "category": "override",
+          "severity": "critical",
+          "description": "The computer is viewed directly straight on, not obliquely or from the Reference angle."
+        },
+        {
+          "criterion_id": "top-row-visible",
+          "category": "target_fidelity",
+          "severity": "critical",
+          "description": "The top row of keys is visibly included."
+        },
+        {
+          "criterion_id": "flat-wall-background",
+          "category": "target_fidelity",
+          "severity": "major",
+          "description": "A flat wall is directly behind the computer."
+        },
+        {
+          "criterion_id": "computer-identity-retained",
+          "category": "continuity",
+          "severity": "critical",
+          "description": "Stable wedge-console construction and distinguishing components remain compatible with the Reference."
+        },
+        {
+          "criterion_id": "robot-screen-not-required",
+          "category": "reference_restraint",
+          "severity": "major",
+          "description": "The transient robot diagram from the Reference is not copied as required screen content because the Description does not retain it."
+        },
+        {
+          "criterion_id": "explicit-treatment",
+          "category": "override",
+          "severity": "critical",
+          "description": "Black-and-white dithered early-Mac treatment, pixelated texture, and stark high-contrast shading are preserved."
+        }
+      ],
+      "provenance": {
+        "source_kind": "authored",
+        "description": "Canonicalized from an authored viewpoint-change card used to seed the benchmark.",
+        "reuse_terms": "Original HyperGen benchmark text; reusable and redistributable with HyperGen."
+      }
+    },
+    {
+      "case_id": "computer-error-screen",
+      "title": "Same computer with replaced screen content",
+      "cohort": "regression",
+      "tags": [
+        "entity-continuity",
+        "screen-replacement",
+        "viewpoint"
+      ],
+      "description": "The same computer, from the identical point of view, shows an error message on the screen dominated by an exclamation mark inside a triangle at the center, surrounded by technical symbols and illegible text.",
+      "reference": {
+        "asset_id": "computer-front",
+        "generation_description": "A tall freestanding wedge-shaped retrofuturistic computer console fills the frame, viewed straight on with a flat wall behind it. Its recessed square CRT displays a technical diagram of a robot. A top row of rectangular keys is clearly visible. The scene uses black-and-white dithered early-Mac and HyperCard graphics."
+      },
+      "criteria": [
+        {
+          "criterion_id": "same-computer",
+          "category": "continuity",
+          "severity": "critical",
+          "description": "The same distinctive computer construction remains present."
+        },
+        {
+          "criterion_id": "identical-viewpoint",
+          "category": "continuity",
+          "severity": "critical",
+          "description": "The straight-on composition and viewpoint remain identical."
+        },
+        {
+          "criterion_id": "error-symbol",
+          "category": "override",
+          "severity": "critical",
+          "description": "The screen is dominated by a centered exclamation mark inside a triangle."
+        },
+        {
+          "criterion_id": "technical-surround",
+          "category": "target_fidelity",
+          "severity": "major",
+          "description": "Technical symbols and deliberately illegible supporting text surround the error symbol."
+        },
+        {
+          "criterion_id": "robot-diagram-replaced",
+          "category": "reference_restraint",
+          "severity": "critical",
+          "description": "The old robot diagram is not retained alongside or instead of the error screen."
+        },
+        {
+          "criterion_id": "reference-treatment-retained",
+          "category": "continuity",
+          "severity": "major",
+          "description": "The black-and-white dithered early-Mac treatment remains compatible."
+        }
+      ],
+      "provenance": {
+        "source_kind": "authored",
+        "description": "Canonicalized from an authored screen-replacement card used to seed the benchmark.",
+        "reuse_terms": "Original HyperGen benchmark text; reusable and redistributable with HyperGen."
+      }
+    },
+    {
+      "case_id": "computer-exit-symbol",
+      "title": "Symbol-only emergency exit screen",
+      "cohort": "development",
+      "tags": [
+        "screen-replacement",
+        "forbidden-text",
+        "entity-continuity"
+      ],
+      "description": "The same computer, from the identical point of view, shows a prominent emergency-exit symbol: a simple 2D running human figure and an arrow pointing toward an exit, drawn as a technical schematic line illustration. No \"emergency exit\" or \"exit\" text is displayed; only the symbols.",
+      "reference": {
+        "asset_id": "computer-error",
+        "generation_description": "The same retrofuturistic wedge-shaped computer, viewed straight on, displays an error screen dominated by a large exclamation mark inside a triangle, surrounded by technical symbols and illegible text. The device uses black-and-white dithered early-Mac and HyperCard graphics."
+      },
+      "criteria": [
+        {
+          "criterion_id": "same-computer-and-view",
+          "category": "continuity",
+          "severity": "critical",
+          "description": "The distinctive computer and identical straight-on viewpoint remain compatible with the Reference."
+        },
+        {
+          "criterion_id": "running-person-arrow",
+          "category": "override",
+          "severity": "critical",
+          "description": "The screen is dominated by a simple running-person symbol and directional arrow."
+        },
+        {
+          "criterion_id": "schematic-treatment",
+          "category": "target_fidelity",
+          "severity": "major",
+          "description": "The symbol is a simple 2D technical schematic line illustration."
+        },
+        {
+          "criterion_id": "forbidden-exit-words",
+          "category": "visible_text",
+          "severity": "critical",
+          "description": "Neither \"emergency exit\" nor \"exit\" is requested as visible screen text; the final prompt expresses a symbol-only display without carrying those words into the depicted image."
+        },
+        {
+          "criterion_id": "old-error-replaced",
+          "category": "reference_restraint",
+          "severity": "critical",
+          "description": "The old exclamation-triangle error screen is not retained."
+        },
+        {
+          "criterion_id": "reference-treatment-retained",
+          "category": "continuity",
+          "severity": "major",
+          "description": "The black-and-white dithered early-Mac treatment remains compatible."
+        }
+      ],
+      "provenance": {
+        "source_kind": "authored",
+        "description": "Canonicalized from an authored forbidden-text card used to seed the benchmark.",
+        "reuse_terms": "Original HyperGen benchmark text; reusable and redistributable with HyperGen."
+      }
+    },
+    {
+      "case_id": "laboratory-hidden-entry",
+      "title": "Stable setting with one structural change",
+      "cohort": "development",
+      "tags": [
+        "setting-continuity",
+        "local-change",
+        "object-state",
+        "exclusion"
+      ],
+      "description": "The lab remains the same, except a panel on the wall opposite the computer and to the right of the window is now absent, revealing a previously hidden open entryway. No door or panel is swung outward; the panel is simply missing. The rest of the image remains unchanged. HyperCard, early-Mac black-and-white style.",
+      "reference": {
+        "asset_id": "laboratory",
+        "generation_description": "A stark laboratory gleams with clean 1960s retrofuturistic surfaces rendered in black-and-white dithered graphics reminiscent of early Mac and HyperCard. Bright ceiling panels illuminate a retrofuturistic computer on one wall. Opposite, a wall-to-wall window reveals barren alien terrain, stars, and a distant sun."
+      },
+      "criteria": [
+        {
+          "criterion_id": "setting-remains-stable",
+          "category": "continuity",
+          "severity": "critical",
+          "description": "The laboratory architecture, computer, window, alien view, lighting, composition, and treatment remain otherwise stable."
+        },
+        {
+          "criterion_id": "entryway-location",
+          "category": "target_fidelity",
+          "severity": "critical",
+          "description": "The new entryway is on the wall opposite the computer and to the right of the window."
+        },
+        {
+          "criterion_id": "missing-panel-entry",
+          "category": "override",
+          "severity": "critical",
+          "description": "A missing wall panel reveals an open hidden entryway."
+        },
+        {
+          "criterion_id": "no-swung-door",
+          "category": "reference_restraint",
+          "severity": "critical",
+          "description": "No door, hatch, or panel is described as visibly swung outward."
+        },
+        {
+          "criterion_id": "explicit-treatment",
+          "category": "override",
+          "severity": "critical",
+          "description": "The image remains explicitly black-and-white early-Mac or HyperCard style."
+        }
+      ],
+      "provenance": {
+        "source_kind": "authored",
+        "description": "Canonicalized from an authored setting-continuity card used to seed the benchmark.",
+        "reuse_terms": "Original HyperGen benchmark text; reusable and redistributable with HyperGen."
+      }
+    },
+    {
+      "case_id": "stairs-through-panel",
+      "title": "New view through the laboratory panel",
+      "cohort": "development",
+      "tags": [
+        "new-view",
+        "spatial-attachment",
+        "reference-restraint",
+        "lighting"
+      ],
+      "description": "Viewpoint positioned directly in front of the open panel, with the window to the left. Through the open panel, a dimly lit spiral staircase is visible descending downward.",
+      "reference": {
+        "asset_id": "laboratory",
+        "generation_description": "A stark laboratory gleams with clean 1960s retrofuturistic surfaces, rendered in black-and-white dithered graphics reminiscent of early Mac and HyperCard. Bright ceiling panels illuminate a retrofuturistic computer on one wall. Opposite, a wall-to-wall window reveals a barren alien planet with wild terrain, stars, and a distant sun."
+      },
+      "criteria": [
+        {
+          "criterion_id": "viewpoint-at-panel",
+          "category": "target_fidelity",
+          "severity": "critical",
+          "description": "The viewpoint is positioned directly in front of the open panel rather than showing the whole laboratory from its old viewpoint."
+        },
+        {
+          "criterion_id": "window-on-left",
+          "category": "target_fidelity",
+          "severity": "critical",
+          "description": "The window is spatially located to the left of the viewpoint."
+        },
+        {
+          "criterion_id": "stairs-through-panel",
+          "category": "target_fidelity",
+          "severity": "critical",
+          "description": "The spiral staircase is visible through the open panel, not through the window or another surface."
+        },
+        {
+          "criterion_id": "stairs-descend-dimly",
+          "category": "target_fidelity",
+          "severity": "critical",
+          "description": "The staircase descends downward and is dimly lit."
+        },
+        {
+          "criterion_id": "reference-treatment-retained",
+          "category": "continuity",
+          "severity": "major",
+          "description": "The black-and-white dithered early-Mac treatment remains compatible with the Reference."
+        },
+        {
+          "criterion_id": "old-lab-composition-rejected",
+          "category": "reference_restraint",
+          "severity": "critical",
+          "description": "The full-room laboratory composition, wall computer, and alien panorama do not replace or dominate the panel-and-staircase target."
+        }
+      ],
+      "provenance": {
+        "source_kind": "authored",
+        "description": "Canonicalized from the authored new-view failure that motivated the benchmark.",
+        "reuse_terms": "Original HyperGen benchmark text; reusable and redistributable with HyperGen."
+      }
+    },
+    {
+      "case_id": "style-only-forest",
+      "title": "Unrelated subject with style-only transfer",
+      "cohort": "edge",
+      "tags": [
+        "style-only",
+        "new-subject",
+        "reference-restraint"
+      ],
+      "description": "A dense forest at night in the same visual style.",
+      "reference": {
+        "asset_id": "laboratory",
+        "generation_description": "A clean 1960s retrofuturistic laboratory rendered in black-and-white dithered graphics reminiscent of early Mac and HyperCard, with stark high-contrast shading and crisp pixelated textures. It contains a computer and a wall-to-wall window showing an alien planet."
+      },
+      "criteria": [
+        {
+          "criterion_id": "forest-at-night",
+          "category": "target_fidelity",
+          "severity": "critical",
+          "description": "A dense forest at night is the complete target scene."
+        },
+        {
+          "criterion_id": "style-only-transfer",
+          "category": "continuity",
+          "severity": "critical",
+          "description": "Only reusable black-and-white dithered early-Mac treatment transfers from the Reference."
+        },
+        {
+          "criterion_id": "laboratory-content-rejected",
+          "category": "reference_restraint",
+          "severity": "critical",
+          "description": "No laboratory, computer, window frame, alien planet, or industrial architecture enters the forest composition."
+        }
+      ],
+      "provenance": {
+        "source_kind": "authored",
+        "description": "Authored as a style-only transfer edge case after early benchmark experiments exposed Reference scene leakage.",
+        "reuse_terms": "Original HyperGen benchmark text; reusable and redistributable with HyperGen."
+      }
+    },
+    {
+      "case_id": "watercolor-style-override",
+      "title": "Explicit treatment overrides a monochrome Reference",
+      "cohort": "edge",
+      "tags": [
+        "style-override",
+        "new-view",
+        "reference-restraint"
+      ],
+      "description": "View through an open panel at a spiral staircase descending into darkness, rendered as a warm watercolor painting.",
+      "reference": {
+        "asset_id": "laboratory",
+        "generation_description": "A clean retrofuturistic laboratory rendered in black-and-white dithered early-Mac and HyperCard graphics with stark high-contrast shading and pixelated textures."
+      },
+      "criteria": [
+        {
+          "criterion_id": "stairs-through-opening",
+          "category": "target_fidelity",
+          "severity": "critical",
+          "description": "The view looks through an open panel at a spiral staircase descending into darkness."
+        },
+        {
+          "criterion_id": "warm-watercolor",
+          "category": "override",
+          "severity": "critical",
+          "description": "The final treatment is unambiguously a warm watercolor painting."
+        },
+        {
+          "criterion_id": "reference-treatment-overridden",
+          "category": "reference_restraint",
+          "severity": "critical",
+          "description": "Black-and-white dithering, pixel art, halftone, and early-Mac rendering are not blended back into the watercolor target."
+        },
+        {
+          "criterion_id": "laboratory-content-rejected",
+          "category": "reference_restraint",
+          "severity": "major",
+          "description": "The old whole-room laboratory composition and objects are not copied."
+        }
+      ],
+      "provenance": {
+        "source_kind": "authored",
+        "description": "Authored as an explicit treatment-override edge case after weak-model experiments.",
+        "reuse_terms": "Original HyperGen benchmark text; reusable and redistributable with HyperGen."
+      }
+    },
+    {
+      "case_id": "local-color-override",
+      "title": "Local color override within monochrome continuity",
+      "cohort": "edge",
+      "tags": [
+        "entity-continuity",
+        "local-color",
+        "screen-replacement"
+      ],
+      "description": "A close-up of the same computer monitor. Its screen is solid red with one centered white circle. Keep the surrounding computer monochrome and dithered.",
+      "reference": {
+        "asset_id": "computer-front",
+        "generation_description": "A tall wedge-shaped retrofuturistic computer console viewed straight on, with a recessed square CRT, top row of keys, and flat wall behind it. The CRT displays a technical robot diagram. The scene is rendered in black-and-white dithered early-Mac and HyperCard graphics."
+      },
+      "criteria": [
+        {
+          "criterion_id": "same-monitor-closeup",
+          "category": "continuity",
+          "severity": "critical",
+          "description": "The same distinctive recessed computer monitor is shown in close-up."
+        },
+        {
+          "criterion_id": "solid-red-screen",
+          "category": "override",
+          "severity": "critical",
+          "description": "The screen is visibly solid red despite the monochrome Reference."
+        },
+        {
+          "criterion_id": "centered-white-circle",
+          "category": "target_fidelity",
+          "severity": "critical",
+          "description": "Exactly one white circle is centered on the red screen."
+        },
+        {
+          "criterion_id": "surrounding-monochrome",
+          "category": "override",
+          "severity": "critical",
+          "description": "The surrounding computer remains monochrome and dithered, so the local color override does not recolor the whole scene."
+        },
+        {
+          "criterion_id": "robot-diagram-replaced",
+          "category": "reference_restraint",
+          "severity": "critical",
+          "description": "The old technical robot diagram is absent from the screen."
+        }
+      ],
+      "provenance": {
+        "source_kind": "authored",
+        "description": "Authored as a local palette-override edge case for the maintained benchmark.",
+        "reuse_terms": "Original HyperGen benchmark text; reusable and redistributable with HyperGen."
+      }
+    },
+    {
+      "case_id": "exact-visible-text",
+      "title": "Exact requested sign text without a Reference",
+      "cohort": "edge",
+      "tags": [
+        "no-reference",
+        "visible-text",
+        "closeup",
+        "style"
+      ],
+      "description": "A straight-on close-up of a brushed-metal airlock sign reading \"AIRLOCK 03\" in black block letters. No other writing is visible. Restrained ink-and-watercolor illustration.",
+      "reference": null,
+      "criteria": [
+        {
+          "criterion_id": "airlock-sign-closeup",
+          "category": "target_fidelity",
+          "severity": "critical",
+          "description": "A brushed-metal airlock sign fills a straight-on close-up."
+        },
+        {
+          "criterion_id": "exact-airlock-text",
+          "category": "visible_text",
+          "severity": "critical",
+          "description": "The only requested visible wording is exactly \"AIRLOCK 03\" in black block letters."
+        },
+        {
+          "criterion_id": "no-additional-writing",
+          "category": "visible_text",
+          "severity": "critical",
+          "description": "No additional labels, captions, numbers, or interface words are introduced."
+        },
+        {
+          "criterion_id": "ink-watercolor-treatment",
+          "category": "override",
+          "severity": "critical",
+          "description": "The result explicitly uses restrained ink-and-watercolor illustration."
+        }
+      ],
+      "provenance": {
+        "source_kind": "authored",
+        "description": "Authored as an exact-visible-text and no-Reference edge case for the maintained benchmark.",
+        "reuse_terms": "Original HyperGen benchmark text; reusable and redistributable with HyperGen."
+      }
+    },
+    {
+      "case_id": "cut-paper-city-style-only",
+      "title": "Colored cut-paper style without workshop leakage",
+      "cohort": "edge",
+      "tags": [
+        "style-only",
+        "new-setting",
+        "color",
+        "reference-restraint"
+      ],
+      "description": "A bustling canal city at sunset in the same visual style, with narrow bridges, clustered houses, and small boats reflected in the water.",
+      "reference": {
+        "asset_id": "cut-paper-workshop",
+        "generation_description": "A stylized cut-paper workshop composition with a tall blue cabinet, three brass gears, an amber hanging lamp, and a round window crossed by diagonal rain. Flat layered shapes use deep indigo, warm brown, muted blue, amber, and cream."
+      },
+      "criteria": [
+        {
+          "criterion_id": "canal-city-target",
+          "category": "target_fidelity",
+          "severity": "critical",
+          "description": "A bustling canal city at sunset contains narrow bridges, clustered houses, small boats, and water reflections."
+        },
+        {
+          "criterion_id": "colored-cut-paper-transfer",
+          "category": "continuity",
+          "severity": "critical",
+          "description": "Flat layered cut-paper shapes and the compatible indigo, blue, amber, brown, and cream palette transfer from the Reference."
+        },
+        {
+          "criterion_id": "workshop-content-rejected",
+          "category": "reference_restraint",
+          "severity": "critical",
+          "description": "The blue cabinet, gears, workshop arrangement, round window, lamp, and rain do not enter the canal-city composition."
+        }
+      ],
+      "provenance": {
+        "source_kind": "authored",
+        "description": "Authored to prevent benchmark overfitting to monochrome early-Mac References.",
+        "reuse_terms": "Original HyperGen benchmark text; reusable and redistributable with HyperGen."
+      }
+    },
+    {
+      "case_id": "blue-cabinet-open",
+      "title": "Colored object continuity with a changed state",
+      "cohort": "regression",
+      "tags": [
+        "entity-continuity",
+        "state-change",
+        "color",
+        "object-extraction"
+      ],
+      "description": "A straight-on close-up of the same tall blue cabinet with both doors open, revealing twelve shallow wooden drawers arranged in four rows. The cabinet fills the frame.",
+      "reference": {
+        "asset_id": "cut-paper-workshop",
+        "generation_description": "A stylized cut-paper workshop composition with a tall blue cabinet, three brass gears, an amber hanging lamp, and a round window crossed by diagonal rain. Flat layered shapes use deep indigo, warm brown, muted blue, amber, and cream."
+      },
+      "criteria": [
+        {
+          "criterion_id": "same-tall-blue-cabinet",
+          "category": "continuity",
+          "severity": "critical",
+          "description": "The tall cabinet retains its blue color and recognizable flat cut-paper construction."
+        },
+        {
+          "criterion_id": "doors-open",
+          "category": "override",
+          "severity": "critical",
+          "description": "Both cabinet doors are visibly open rather than closed."
+        },
+        {
+          "criterion_id": "twelve-drawers",
+          "category": "target_fidelity",
+          "severity": "critical",
+          "description": "Exactly twelve shallow wooden drawers are visible in four rows."
+        },
+        {
+          "criterion_id": "straight-on-frame-fill",
+          "category": "target_fidelity",
+          "severity": "critical",
+          "description": "The cabinet is viewed straight on in close-up and fills the frame."
+        },
+        {
+          "criterion_id": "workshop-surround-rejected",
+          "category": "reference_restraint",
+          "severity": "critical",
+          "description": "The gears, lamp, round rainy window, and wider workshop arrangement do not compete with the cabinet close-up."
+        }
+      ],
+      "provenance": {
+        "source_kind": "authored",
+        "description": "Authored as a colored identity-and-state continuity case beyond the seed deck.",
+        "reuse_terms": "Original HyperGen benchmark text; reusable and redistributable with HyperGen."
+      }
+    }
+  ]
+}

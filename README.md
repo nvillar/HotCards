@@ -131,15 +131,27 @@ uv run hypergen
 ```sh
 uv run hypergen-eval smoke
 uv run hypergen-eval images
+uv run hypergen-eval image-prompts --validate-only
+uv run hypergen-eval image-prompts
 uv run hypergen-eval flux-references --stack /path/to/Stack.hypergen
 ```
 
-Each command creates one immutable directory under `evals/runs/` with an
-immediate, failure-safe `manifest.json` and retained artifacts. Smoke and image
-runs add checksums, JSON/CSV summaries, and a static HTML report. Reference runs
-write detailed JSON results plus overall and per-case contact sheets. Report
-rendering is offline and never calls a model. The tracked default decision and
-evidence tradeoffs are in [`evals/DECISION.md`](evals/DECISION.md).
+Each live command creates one immutable directory under `evals/runs/` with an
+immediate, failure-safe `manifest.json` and retained artifacts; `--validate-only`
+checks the Image Prompt dataset in place without a model call or run directory.
+Smoke, image, and Image Prompt runs add checksums, JSON/CSV summaries, and a
+static HTML report. Reference runs write detailed JSON results plus overall and
+per-case contact sheets. Report rendering is offline and never calls a model.
+The tracked default decision and evidence tradeoffs are in
+[`evals/DECISION.md`](evals/DECISION.md).
+
+The maintained
+[Image Prompt benchmark](evals/cases/image_prompts/README.md) uses frozen
+Reference images, checked provenance and checksums, and atomic human-scored
+criteria rather than exact expected prose. `--validate-only` checks the complete
+dataset without contacting a model; a live `image-prompts` run records the
+production contract, raw responses, final prompts, and blank scorecards for
+review.
 
 ## Architecture at a glance
 
