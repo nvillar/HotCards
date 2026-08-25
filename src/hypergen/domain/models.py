@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from math import isfinite
 from typing import Annotated, Any, Literal
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from pydantic import (
     AwareDatetime,
@@ -21,7 +21,7 @@ from pydantic import (
     model_validator,
 )
 
-CURRENT_SCHEMA_VERSION = 6
+CURRENT_SCHEMA_VERSION = 7
 
 NonEmptyString = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 NormalizedCoordinate = Annotated[float, Field(ge=0.0, le=1.0)]
@@ -155,12 +155,136 @@ class ImageReferenceSnapshot(DomainModel):
     background_id: UUID
 
 
+class StyleDefinition(DomainModel):
+    """One stack-owned named rendering treatment."""
+
+    id: UUID = Field(default_factory=uuid4)
+    name: NonEmptyString
+    prompt_text: str = ""
+
+    @field_validator("prompt_text")
+    @classmethod
+    def trim_prompt_text(cls, value: str) -> str:
+        return value.strip()
+
+
+def _built_in_style_id(slug: str) -> UUID:
+    return uuid5(NAMESPACE_URL, f"https://hypergen.app/styles/{slug}")
+
+
+HYPERCARD_STYLE_ID = _built_in_style_id("hypercard")
+
+BUILT_IN_STYLES = (
+    StyleDefinition(
+        id=HYPERCARD_STYLE_ID,
+        name="HyperCard",
+        prompt_text=(
+            "Render the entire image using pure black and pure white pixels. "
+            "Translate every described color into a distinct 1-bit dither pattern. "
+            "Use early Macintosh HyperCard bitmap artwork with hard pixel edges, "
+            "sparse high-contrast linework, and ordered dithering for every midtone."
+        ),
+    ),
+    StyleDefinition(
+        id=_built_in_style_id("cinematic-film"),
+        name="Cinematic Film",
+        prompt_text=(
+            "Rendered as a cinematic live-action film still with naturalistic lens "
+            "detail, nuanced color grading, rich shadow separation, motivated "
+            "directional lighting, and subtle organic film grain."
+        ),
+    ),
+    StyleDefinition(
+        id=_built_in_style_id("isometric-game"),
+        name="Isometric Game",
+        prompt_text=(
+            "Rendered as stylized isometric game art with a consistent top-down "
+            "isometric projection, clean geometric forms, simplified surfaces, "
+            "bright readable colors, soft ambient shadows, and even illumination."
+        ),
+    ),
+    StyleDefinition(
+        id=_built_in_style_id("pixel-art"),
+        name="Pixel Art",
+        prompt_text=(
+            "Rendered as crisp 16-bit pixel art with grid-aligned hard-edged pixels, "
+            "a limited color palette, flat color clusters, deliberate dithering, "
+            "and pixel-scale shading."
+        ),
+    ),
+    StyleDefinition(
+        id=_built_in_style_id("watercolor-painting"),
+        name="Watercolor Painting",
+        prompt_text=(
+            "Rendered as a watercolor painting with translucent layered washes, "
+            "visible pigment blooms, softly bleeding edges, luminous white paper, "
+            "natural fiber texture, and loose expressive brushwork."
+        ),
+    ),
+    StyleDefinition(
+        id=_built_in_style_id("color-pencil"),
+        name="Color Pencil",
+        prompt_text=(
+            "Rendered as a colored-pencil drawing with visible layered strokes, "
+            "waxy pigment texture, burnished highlights, fine hatching and "
+            "crosshatching, vibrant color, and natural paper grain."
+        ),
+    ),
+    StyleDefinition(
+        id=_built_in_style_id("pencil-sketch"),
+        name="Pencil Sketch",
+        prompt_text=(
+            "Render the entire image as monochrome graphite on white paper. "
+            "Translate every described color into graphite value and texture. "
+            "Use expressive pencil linework, crosshatched and softly smudged tonal "
+            "shading, erased highlights, and visible paper grain."
+        ),
+    ),
+    StyleDefinition(
+        id=_built_in_style_id("glazed-ceramic"),
+        name="Glazed Ceramic",
+        prompt_text=(
+            "Depicted as a hand-painted glazed ceramic diorama: smooth sculpted clay "
+            "forms, saturated underglaze color, vitreous gloss, soft specular "
+            "reflections, subtle glaze pooling, and handcrafted irregularities."
+        ),
+    ),
+    StyleDefinition(
+        id=_built_in_style_id("graphic-novel"),
+        name="Graphic Novel",
+        prompt_text=(
+            "Rendered as a graphic novel illustration with bold black ink contours, "
+            "clean expressive linework, flat cel-shaded color, a controlled palette, "
+            "hard-edged shadows, and dramatic tonal contrast."
+        ),
+    ),
+    StyleDefinition(
+        id=_built_in_style_id("miniature-toy"),
+        name="Miniature Toy",
+        prompt_text=(
+            "Depicted as a handcrafted miniature toy diorama with painted resin "
+            "figures and scenery, simplified tactile forms, fine model-making "
+            "detail, soft studio illumination, and shallow macro-lens depth of field."
+        ),
+    ),
+)
+
+
+class StyleSnapshot(DomainModel):
+    """Exact selected Style state used for one image generation."""
+
+    style_id: UUID
+    name: NonEmptyString
+    prompt_text: str
+
+
 class ImageGenerationInputs(DomainModel):
     """Author-controlled inputs captured for a generated image."""
 
     description: str
     image_prompt: NonEmptyString
     reference: ImageReferenceSnapshot | None = None
+    style: StyleSnapshot | None = None
 
     @property
     def effective_description(self) -> str:
@@ -193,10 +317,7 @@ class LegacyImageGenerationInputs(DomainModel):
         return tuple(
             (role, reference)
             for role in ReferenceRole
-            if (
-                reference := getattr(self, f"{role.value}_reference")
-            )
-            is not None
+            if (reference := getattr(self, f"{role.value}_reference")) is not None
         )
 
     def grouped_references(
@@ -206,9 +327,7 @@ class LegacyImageGenerationInputs(DomainModel):
         ...,
     ]:
         """Group roles that use the same unique source background."""
-        groups: list[
-            tuple[ImageReferenceSnapshot, list[ReferenceRole]]
-        ] = []
+        groups: list[tuple[ImageReferenceSnapshot, list[ReferenceRole]]] = []
         group_indexes: dict[tuple[UUID, UUID, UUID], int] = {}
         for role, reference in self.references_by_role():
             key = (
@@ -222,10 +341,7 @@ class LegacyImageGenerationInputs(DomainModel):
                 groups.append((reference, [role]))
             else:
                 groups[index][1].append(role)
-        return tuple(
-            (reference, tuple(roles))
-            for reference, roles in groups
-        )
+        return tuple((reference, tuple(roles)) for reference, roles in groups)
 
 
 class ImageGenerationMetadata(DomainModel):
@@ -301,14 +417,8 @@ class ImagePrompt(DomainModel):
         return (
             self.source_description == source_description
             and self.reference == reference
-            and (
-                model_identifier is None
-                or self.model_identifier == model_identifier
-            )
-            and (
-                prompt_version is None
-                or self.prompt_version == prompt_version
-            )
+            and (model_identifier is None or self.model_identifier == model_identifier)
+            and (prompt_version is None or self.prompt_version == prompt_version)
         )
 
 
@@ -321,6 +431,7 @@ class CardRevision(DomainModel):
     background: Background | None = None
     hotspot_set: HotspotSet | None = None
     reference: CardReference | None = None
+    style_id: UUID | None = None
 
     @field_validator("hotspot_set")
     @classmethod
@@ -336,11 +447,7 @@ class CardRevision(DomainModel):
     @property
     def generation_metadata(self) -> ImageGenerationMetadata | None:
         """Return generated-image provenance when available."""
-        return (
-            self.background.generation_metadata
-            if self.background is not None
-            else None
-        )
+        return self.background.generation_metadata if self.background is not None else None
 
     @property
     def created_at(self) -> datetime:
@@ -379,10 +486,9 @@ class Card(DomainModel):
         """Return the card's validated active revision."""
         assert self.active_revision_id is not None
         return next(
-            revision
-            for revision in self.revisions
-            if revision.id == self.active_revision_id
+            revision for revision in self.revisions if revision.id == self.active_revision_id
         )
+
 
 class Stack(DomainModel):
     """The authoritative portable HyperGen stack document."""
@@ -393,6 +499,8 @@ class Stack(DomainModel):
     canvas: CanvasSize = Field(default_factory=CanvasSize)
     run_overlay_mode: RunOverlayMode = RunOverlayMode.HIDDEN
     start_card_id: UUID | None = None
+    styles: tuple[StyleDefinition, ...] = Field(default_factory=lambda: BUILT_IN_STYLES)
+    new_card_style_id: UUID | None = HYPERCARD_STYLE_ID
     cards: tuple[Card, ...] = Field(default_factory=tuple)
 
     @field_validator("schema_version")
@@ -419,8 +527,19 @@ class Stack(DomainModel):
         revision_ids = [revision.id for card in self.cards for revision in card.revisions]
         if len(revision_ids) != len(set(revision_ids)):
             raise ValueError("revision IDs must be unique within a stack")
+        style_ids = [style.id for style in self.styles]
+        known_style_ids = set(style_ids)
+        if len(style_ids) != len(known_style_ids):
+            raise ValueError("Style IDs must be unique within a stack")
+        style_names = [style.name.casefold() for style in self.styles]
+        if len(style_names) != len(set(style_names)):
+            raise ValueError("Style names must be unique within a stack")
+        if self.new_card_style_id is not None and self.new_card_style_id not in known_style_ids:
+            raise ValueError("new_card_style_id must identify a Style in this stack")
         for card in self.cards:
             for revision in card.revisions:
+                if revision.style_id is not None and revision.style_id not in known_style_ids:
+                    raise ValueError("revision style_id must identify a Style in this stack")
                 reference = revision.reference
                 if isinstance(reference, ResolvedCardReference):
                     if reference.target_card_id not in known_card_ids:
@@ -452,3 +571,9 @@ class Stack(DomainModel):
                             derived_label,
                         )
         return self
+
+    def style_by_id(self, style_id: UUID | None) -> StyleDefinition | None:
+        """Return a selected Style definition, or No Style."""
+        if style_id is None:
+            return None
+        return next(style for style in self.styles if style.id == style_id)

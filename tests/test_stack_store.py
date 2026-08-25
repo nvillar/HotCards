@@ -11,6 +11,8 @@ from PIL import Image
 
 import hypergen.storage.stack_store as stack_store_module
 from hypergen.domain.models import (
+    BUILT_IN_STYLES,
+    CURRENT_SCHEMA_VERSION,
     Card,
     CardRevision,
     GeneratedBackground,
@@ -108,7 +110,7 @@ def test_bundle_round_trip_preserves_document_and_relative_asset(tmp_path: Path)
     assert image_path is not None
     assert image_path.startswith("assets/cards/")
     assert not Path(image_path).is_absolute()
-    assert json.loads(store.stack_path.read_text())["schema_version"] == 6
+    assert json.loads(store.stack_path.read_text())["schema_version"] == CURRENT_SCHEMA_VERSION
 
 
 def test_failed_replace_preserves_active_stack_and_removes_temporary_file(
@@ -263,7 +265,7 @@ def test_load_rejects_missing_unsupported_and_future_versions(
         ({"name": "Missing"}, "schema_version"),
         ({"schema_version": 3, "name": "Legacy"}, "schema_version"),
         ({"schema_version": 4, "name": "Legacy"}, "schema_version"),
-        ({"schema_version": 7, "name": "Future"}, "schema_version"),
+        ({"schema_version": 8, "name": "Future"}, "schema_version"),
     ]:
         store.stack_path.write_text(json.dumps(payload))
         with pytest.raises(StackStoreError, match=message):
@@ -321,14 +323,45 @@ def test_load_migrates_v5_roles_and_enrichment_to_one_reference_and_prompt(
     migrated = store.load()
 
     migrated_revision = migrated.cards[0].active_revision
-    assert migrated.schema_version == 6
-    assert migrated_revision.reference == ResolvedCardReference(
-        target_card_id=subject.id
-    )
+    assert migrated.schema_version == CURRENT_SCHEMA_VERSION
+    assert migrated_revision.reference == ResolvedCardReference(target_card_id=subject.id)
     assert migrated_revision.image_prompt is not None
     assert migrated_revision.image_prompt.text == "A prepared legacy prompt"
     assert migrated_revision.image_prompt.reference is not None
     assert migrated_revision.image_prompt.reference.card_id == subject.id
+    assert migrated_revision.style_id is None
+    assert migrated.new_card_style_id is None
+    assert migrated.styles == BUILT_IN_STYLES
+
+
+def test_load_migrates_v6_to_stack_styles_without_changing_existing_cards(
+    tmp_path: Path,
+) -> None:
+    store = StackStore(tmp_path / "Version6.hypergen")
+    store.bundle_path.mkdir()
+    source = Card(name="Source")
+    payload = Stack(name="Legacy", cards=(source,)).model_dump(mode="json")
+    payload["schema_version"] = 6
+    payload.pop("styles")
+    payload.pop("new_card_style_id")
+    for card in payload["cards"]:
+        for revision in card["revisions"]:
+            revision.pop("style_id")
+            metadata = (
+                revision["background"]["generation_metadata"]
+                if revision["background"] is not None
+                else None
+            )
+            if metadata is not None:
+                metadata["inputs"].pop("style")
+    store.stack_path.write_text(json.dumps(payload))
+
+    migrated = store.load()
+
+    assert migrated.schema_version == CURRENT_SCHEMA_VERSION
+    assert migrated.styles == BUILT_IN_STYLES
+    assert migrated.new_card_style_id is None
+    assert migrated.cards[0].active_revision.style_id is None
 
 
 def test_symlinked_asset_directory_cannot_escape_bundle(tmp_path: Path) -> None:

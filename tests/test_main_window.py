@@ -31,6 +31,7 @@ from hypergen.application.document_session import DocumentSession, DocumentSessi
 from hypergen.application.generated_revision_change import GeneratedRevisionChange
 from hypergen.application.workers import AdapterKind, AvailabilityDiagnostic
 from hypergen.domain.models import (
+    HYPERCARD_STYLE_ID,
     Card,
     CardRevision,
     GeneratedBackground,
@@ -1378,7 +1379,9 @@ def test_hotspot_editing_is_scoped_to_hotspots_tab(
     assert not window.card_canvas._editable
     assert window.card_canvas._overlay_items == []
 
-    window.inspector.inspector_tabs.setCurrentIndex(1)
+    window.inspector.inspector_tabs.setCurrentIndex(
+        window.inspector._hotspots_tab_index
+    )
     assert window.inspector.hotspots_active
     assert window.card_canvas._editable
     assert window.card_canvas._overlay_items
@@ -1402,6 +1405,8 @@ def test_new_stack_dialog_creates_one_blank_revision(
     stack = dialog.stack()
     assert len(stack.cards) == 1
     assert len(stack.cards[0].revisions) == 1
+    assert stack.cards[0].active_revision.style_id == HYPERCARD_STYLE_ID
+    assert stack.new_card_style_id == HYPERCARD_STYLE_ID
 
 
 def test_empty_stack_has_clear_first_card_path(

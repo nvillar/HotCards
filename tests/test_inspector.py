@@ -26,6 +26,7 @@ from hypergen.domain.models import (
     NavigateAction,
     ResolvedCardReference,
     Stack,
+    StyleDefinition,
     UnresolvedCardReference,
 )
 from hypergen.ui.inspector import Inspector
@@ -59,9 +60,10 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     inspector = Inspector(controller)
     inspector.render(controller.document, card.id)
 
-    assert inspector.inspector_tabs.count() == 2
+    assert inspector.inspector_tabs.count() == 3
     assert inspector.inspector_tabs.tabText(0) == "Background"
-    assert inspector.inspector_tabs.tabText(1) == "Hotspots"
+    assert inspector.inspector_tabs.tabText(1) == "Styles"
+    assert inspector.inspector_tabs.tabText(2) == "Hotspots"
     root_layout = inspector.layout()
     assert root_layout is not None
     assert root_layout.contentsMargins().top() == 16
@@ -71,15 +73,9 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     )
     assert inspector.description_edit.placeholderText() == "Description"
     assert inspector.description_edit.minimumHeight() == round(
-        (
-            inspector.description_edit.fontMetrics().lineSpacing() * 10
-            + 20
-        )
-        * 1.25
+        (inspector.description_edit.fontMetrics().lineSpacing() * 10 + 20) * 1.25
     )
-    assert inspector.description_edit.maximumHeight() > (
-        inspector.description_edit.minimumHeight()
-    )
+    assert inspector.description_edit.maximumHeight() > (inspector.description_edit.minimumHeight())
     assert inspector.enrich_button.text() == "Prepare Image Prompt"
     assert inspector.generate_background_button.text() == "Generate Image"
     assert inspector.description_toggle.isHidden()
@@ -89,13 +85,17 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     assert inspector.reference_panel.layout().contentsMargins().isNull()
     content_layout = inspector.reference_panel.parentWidget().layout()
     assert content_layout is not None
-    assert content_layout.stretch(
-        content_layout.indexOf(inspector.description_edit)
-    ) == 1
+    assert content_layout.stretch(content_layout.indexOf(inspector.description_edit)) == 1
     assert content_layout.indexOf(inspector.description_edit) < (
         content_layout.indexOf(inspector.description_toggle)
     )
     assert content_layout.indexOf(inspector.description_toggle) < (
+        content_layout.indexOf(inspector.style_label)
+    )
+    assert content_layout.indexOf(inspector.style_label) < (
+        content_layout.indexOf(inspector.style_combo)
+    )
+    assert content_layout.indexOf(inspector.style_combo) < (
         content_layout.indexOf(inspector.reference_label)
     )
     assert content_layout.indexOf(inspector.reference_label) < (
@@ -107,8 +107,25 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     assert content_layout.indexOf(inspector.enrich_button) < (
         content_layout.indexOf(inspector.generate_background_button)
     )
-    assert not hasattr(inspector, "style_combo")
+    assert inspector.style_combo.currentText() == "No Style"
     assert not hasattr(inspector, "clear_background_button")
+    styles_layout = inspector.style_list.parentWidget().layout()
+    assert styles_layout is not None
+    assert styles_layout.stretch(styles_layout.indexOf(inspector.style_list)) == 1
+    style_controls = styles_layout.itemAt(styles_layout.indexOf(inspector.style_list) + 1).layout()
+    assert style_controls is not None
+    assert style_controls.indexOf(inspector.delete_style_button) < style_controls.indexOf(
+        inspector.add_style_button
+    )
+    assert styles_layout.indexOf(inspector.style_name_label) < (
+        styles_layout.indexOf(inspector.style_name_edit)
+    )
+    assert styles_layout.indexOf(inspector.style_name_edit) < (
+        styles_layout.indexOf(inspector.style_prompt_label)
+    )
+    assert styles_layout.indexOf(inspector.style_prompt_label) < (
+        styles_layout.indexOf(inspector.style_prompt_edit)
+    )
     assert inspector.hotspot_target_label.text() == "Hotspot Target"
     assert inspector.hotspot_target_label.font().pointSizeF() == (
         inspector.description_label.font().pointSizeF()
@@ -118,9 +135,7 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     assert hotspot_layout.indexOf(inspector.hotspot_target_label) < (
         hotspot_layout.indexOf(inspector.hotspot_destination_combo)
     )
-    assert hotspot_layout.stretch(
-        hotspot_layout.indexOf(inspector.hotspot_list)
-    ) == 1
+    assert hotspot_layout.stretch(hotspot_layout.indexOf(inspector.hotspot_list)) == 1
     hotspot_control_sizes = {
         button.size()
         for button in (
@@ -138,9 +153,9 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
         hotspot_layout.indexOf(inspector.hotspot_list) + 1
     ).layout()
     assert hotspot_controls is not None
-    assert hotspot_controls.indexOf(
-        inspector.delete_hotspot_button
-    ) < hotspot_controls.indexOf(inspector.add_hotspot_button)
+    assert hotspot_controls.indexOf(inspector.delete_hotspot_button) < hotspot_controls.indexOf(
+        inspector.add_hotspot_button
+    )
 
     visible_copy = " ".join(label.text() for label in inspector.findChildren(QLabel))
     for obsolete in (
@@ -180,20 +195,19 @@ def test_reference_selector_assigns_one_card_with_undo(
 ) -> None:
     source = Card(name="Source")
     portrait = Card(name="Portrait")
-    controller = DocumentController(
-        Stack(name="Demo", cards=(source, portrait))
-    )
+    controller = DocumentController(Stack(name="Demo", cards=(source, portrait)))
     inspector = Inspector(controller)
     inspector.render(controller.document, source.id)
     applied: list[tuple[str, object]] = []
-    inspector.change_applied.connect(
-        lambda message, token: applied.append((message, token))
-    )
+    inspector.change_applied.connect(lambda message, token: applied.append((message, token)))
 
-    assert inspector._combo_index_for_data(
-        inspector.reference_combo,
-        source.id,
-    ) == -1
+    assert (
+        inspector._combo_index_for_data(
+            inspector.reference_combo,
+            source.id,
+        )
+        == -1
+    )
     identity_index = inspector._combo_index_for_data(
         inspector.reference_combo,
         portrait.id,
@@ -209,26 +223,106 @@ def test_reference_selector_assigns_one_card_with_undo(
     assert controller.document.cards[0].active_revision.reference is None
 
 
+def test_style_selector_updates_revision_and_new_card_default_with_undo(
+    application: QApplication,
+) -> None:
+    ink = StyleDefinition(name="Ink", prompt_text="Rendered in ink.")
+    source = Card(name="Source")
+    controller = DocumentController(
+        Stack(
+            name="Demo",
+            styles=(ink,),
+            new_card_style_id=None,
+            cards=(source,),
+        )
+    )
+    inspector = Inspector(controller)
+    inspector.render(controller.document, source.id)
+    applied: list[tuple[str, object]] = []
+    inspector.change_applied.connect(lambda message, token: applied.append((message, token)))
+
+    ink_index = inspector._combo_index_for_data(inspector.style_combo, ink.id)
+    inspector.style_combo.setCurrentIndex(ink_index)
+
+    revision = controller.document.cards[0].active_revision
+    assert revision.style_id == ink.id
+    assert controller.document.new_card_style_id == ink.id
+    assert applied[-1][0] == "Style changed"
+    assert controller.undo_if_current(applied[-1][1])  # type: ignore[arg-type]
+    assert controller.document.cards[0].active_revision.style_id is None
+    assert controller.document.new_card_style_id is None
+
+
+def test_styles_tab_edits_global_definition_and_deletes_with_undo(
+    application: QApplication,
+) -> None:
+    ink = StyleDefinition(name="Ink", prompt_text="Rendered in ink.")
+    revision = CardRevision(style_id=ink.id)
+    source = Card(name="Source", revisions=(revision,))
+    other = Card(
+        name="Other",
+        revisions=(CardRevision(style_id=ink.id),),
+    )
+    controller = DocumentController(
+        Stack(
+            name="Demo",
+            styles=(ink,),
+            new_card_style_id=ink.id,
+            cards=(source, other),
+        )
+    )
+    inspector = Inspector(controller)
+    inspector.render(controller.document, source.id)
+    applied: list[tuple[str, object]] = []
+    inspector.change_applied.connect(lambda message, token: applied.append((message, token)))
+
+    assert inspector.style_list.currentItem().text() == "Ink"
+    assert inspector.style_name_edit.text() == "Ink"
+    assert inspector.style_prompt_edit.toPlainText() == "Rendered in ink."
+    inspector.style_name_edit.setText("Etching")
+    inspector.style_prompt_edit.setPlainText("Fine etched linework.")
+    assert inspector._commit_style()
+
+    changed_style = controller.document.styles[0]
+    assert changed_style.id == ink.id
+    assert changed_style.name == "Etching"
+    assert changed_style.prompt_text == "Fine etched linework."
+    assert all(card.active_revision.style_id == ink.id for card in controller.document.cards)
+
+    inspector.add_style_button.click()
+    assert len(controller.document.styles) == 2
+    assert inspector.style_name_edit.text() == "New Style"
+    assert inspector.style_name_edit.selectedText() == "New Style"
+
+    inspector.delete_style_button.click()
+    assert len(controller.document.styles) == 1
+    assert controller.document.styles[0].id == ink.id
+    assert applied[-1][0] == "Style deleted"
+    assert controller.undo_if_current(applied[-1][1])  # type: ignore[arg-type]
+    assert len(controller.document.styles) == 2
+
+    inspector.render(controller.document, source.id)
+    inspector.style_list.setCurrentRow(0)
+    inspector.delete_style_button.click()
+    assert controller.document.styles[0].name == "New Style"
+    assert controller.document.new_card_style_id is None
+    assert all(card.active_revision.style_id is None for card in controller.document.cards)
+
+
 def test_deleted_reference_is_shown_as_unresolved(
     application: QApplication,
 ) -> None:
     destination = Card(name="Former portrait")
-    revision = CardRevision(
-        reference=ResolvedCardReference(target_card_id=destination.id)
-    )
+    revision = CardRevision(reference=ResolvedCardReference(target_card_id=destination.id))
     source = Card(name="Source", revisions=(revision,))
-    controller = DocumentController(
-        Stack(name="Demo", cards=(source, destination))
-    )
+    controller = DocumentController(Stack(name="Demo", cards=(source, destination)))
     inspector = Inspector(controller)
     inspector.render(controller.document, source.id)
 
     changed = controller.execute(DeleteCardCommand(card_id=destination.id))
     inspector.render(changed, source.id)
 
-    assert inspector.reference_combo.currentText() == (
-        "Missing: Former portrait"
-    )
+    assert inspector.reference_combo.currentText() == ("Missing: Former portrait")
     assert controller.document.cards[0].active_revision.reference == (
         UnresolvedCardReference(target_name="Former portrait")
     )
@@ -276,14 +370,9 @@ def test_image_prompt_status_and_generation_source(
 
     assert not inspector.description_toggle.isHidden()
     assert inspector.description_button.isChecked()
-    assert inspector.description_edit.toPlainText() == (
-        "A courtyard"
-    )
+    assert inspector.description_edit.toPlainText() == ("A courtyard")
     assert "Using: Description" in inspector.enrich_button.toolTip()
-    assert (
-        "Using: Image Prompt"
-        in inspector.generate_background_button.toolTip()
-    )
+    assert "Using: Image Prompt" in inspector.generate_background_button.toolTip()
     assert inspector.enrich_button.text() == "Image Prompt Current ✓"
     assert not inspector.enrich_button.isEnabled()
     assert "Current" in inspector.enrich_button.toolTip()
@@ -344,9 +433,7 @@ def test_switching_cards_defaults_to_description(
             ),
         ),
     )
-    controller = DocumentController(
-        Stack(name="Demo", cards=(first, second))
-    )
+    controller = DocumentController(Stack(name="Demo", cards=(first, second)))
     inspector = Inspector(controller)
     inspector.render(controller.document, first.id)
     inspector.image_prompt_button.click()
@@ -417,18 +504,13 @@ def test_using_labels_name_single_reference(
             ),
         ),
     )
-    controller = DocumentController(
-        Stack(name="Demo", cards=(source, reference))
-    )
+    controller = DocumentController(Stack(name="Demo", cards=(source, reference)))
     inspector = Inspector(controller)
     inspector.render(controller.document, source.id)
 
     assert inspector.reference_label.text() == "Reference"
     assert "Using: Description + Reference" in inspector.enrich_button.toolTip()
-    assert (
-        "Using: Image Prompt + Reference"
-        in inspector.generate_background_button.toolTip()
-    )
+    assert "Using: Image Prompt + Reference" in inspector.generate_background_button.toolTip()
 
 
 def test_generate_requires_a_current_non_empty_image_prompt(

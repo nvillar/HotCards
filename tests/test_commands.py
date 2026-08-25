@@ -10,6 +10,7 @@ from hypergen.application.commands import (
     ActivateRevisionCommand,
     AddInteractionCommand,
     AddPolygonCommand,
+    AddStyleCommand,
     ChangeHotspotDestinationCommand,
     CommandError,
     CreateCardCommand,
@@ -17,6 +18,7 @@ from hypergen.application.commands import (
     DeleteInteractionCommand,
     DeletePolygonCommand,
     DeleteRevisionCommand,
+    DeleteStyleCommand,
     DuplicateRevisionCommand,
     EditRevisionDescriptionCommand,
     RenameCardCommand,
@@ -28,7 +30,9 @@ from hypergen.application.commands import (
     ReplaceRevisionBackgroundCommand,
     SetRevisionImagePromptCommand,
     SetRevisionReferenceCommand,
+    SetRevisionStyleCommand,
     SetStartCardCommand,
+    UpdateStyleCommand,
 )
 from hypergen.application.document_controller import DocumentController
 from hypergen.domain.models import (
@@ -45,6 +49,7 @@ from hypergen.domain.models import (
     Polygon,
     ResolvedCardReference,
     Stack,
+    StyleDefinition,
     UnresolvedCardReference,
 )
 
@@ -100,6 +105,64 @@ def test_card_create_rename_reorder_and_start_selection() -> None:
     assert [card.name for card in document.cards] == ["First", "Renamed"]
     assert document.start_card_id == created_id
     assert SetStartCardCommand(card_id=None).apply(document).start_card_id is None
+
+
+def test_style_lifecycle_and_new_card_default_are_typed_changes() -> None:
+    original = StyleDefinition(name="Original", prompt_text="Original treatment")
+    document = Stack(
+        name="Stack",
+        styles=(original,),
+        new_card_style_id=original.id,
+    )
+    created_style_id = uuid4()
+
+    document = AddStyleCommand(
+        name="Custom",
+        prompt_text="Custom treatment",
+        style_id=created_style_id,
+    ).apply(document)
+    document = UpdateStyleCommand(
+        style_id=created_style_id,
+        name="Edited",
+        prompt_text="Edited treatment",
+    ).apply(document)
+    document = CreateCardCommand(name="First").apply(document)
+    first = document.cards[0]
+    assert first.active_revision.style_id == original.id
+
+    document = SetRevisionStyleCommand(
+        card_id=first.id,
+        revision_id=first.active_revision.id,
+        style_id=created_style_id,
+    ).apply(document)
+    document = CreateCardCommand(name="Second").apply(document)
+    assert document.cards[0].active_revision.style_id == created_style_id
+    assert document.cards[1].active_revision.style_id == created_style_id
+    assert document.new_card_style_id == created_style_id
+
+    document = DeleteStyleCommand(style_id=created_style_id).apply(document)
+    assert [style.name for style in document.styles] == ["Original"]
+    assert document.new_card_style_id is None
+    assert all(card.active_revision.style_id is None for card in document.cards)
+
+
+def test_duplicate_revision_copies_style_selection() -> None:
+    style = StyleDefinition(name="Ink", prompt_text="Rendered in ink")
+    revision = CardRevision(style_id=style.id)
+    card = Card(name="Card", revisions=(revision,))
+    document = Stack(
+        name="Stack",
+        styles=(style,),
+        new_card_style_id=style.id,
+        cards=(card,),
+    )
+
+    changed = DuplicateRevisionCommand(
+        card_id=card.id,
+        source_revision_id=revision.id,
+    ).apply(document)
+
+    assert changed.cards[0].active_revision.style_id == style.id
 
 
 def test_revision_description_and_reference_edits_are_typed_changes() -> None:
@@ -176,13 +239,10 @@ def test_revision_activation_and_complete_hotspot_replacement() -> None:
     changed_revision = document.cards[0].revisions[1]
     assert document.cards[0].active_revision_id == second_revision.id
     assert changed_revision.hotspot_set is not None
-    assert [
-        item.id for item in changed_revision.hotspot_set.interactions
-    ] == [item.id for item in replacement.interactions]
-    assert all(
-        item.label == "Unresolved"
-        for item in changed_revision.hotspot_set.interactions
-    )
+    assert [item.id for item in changed_revision.hotspot_set.interactions] == [
+        item.id for item in replacement.interactions
+    ]
+    assert all(item.label == "Unresolved" for item in changed_revision.hotspot_set.interactions)
     assert (
         ReplaceHotspotSetCommand(
             card_id=source.id,
@@ -358,11 +418,7 @@ def test_delete_card_converts_all_inbound_references_and_clears_start() -> None:
         update={
             "revisions": (
                 source.active_revision.model_copy(
-                    update={
-                        "reference": ResolvedCardReference(
-                            target_card_id=destination.id
-                        )
-                    }
+                    update={"reference": ResolvedCardReference(target_card_id=destination.id)}
                 ),
             )
         }

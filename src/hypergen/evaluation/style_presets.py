@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, Protocol
 from urllib.parse import quote
+from uuid import NAMESPACE_URL, uuid5
 
 from pydantic import Field, model_validator
 
@@ -17,6 +18,7 @@ from hypergen.domain.models import (
     ImageGenerationInputs,
     NonEmptyString,
     PositiveInt,
+    StyleSnapshot,
 )
 from hypergen.evaluation.contracts import SafeCaseId
 from hypergen.evaluation.manifest import (
@@ -29,6 +31,7 @@ from hypergen.evaluation.manifest import (
 )
 from hypergen.evaluation.reports import create_contact_sheet
 from hypergen.generation.errors import ImageGenerationError, ModelLoadError
+from hypergen.generation.image_prompts import compose_image_prompt
 from hypergen.generation.mflux_generator import (
     MfluxGenerationRequest,
     MfluxGenerationResult,
@@ -141,10 +144,24 @@ def load_style_preset_experiment(
 
 def compose_style_preset_prompt(description: str, prompt_text: str | None) -> str:
     """Append one Style treatment without changing the accepted Image Prompt."""
-    if prompt_text is None:
-        return description
-    separator = "" if description.rstrip().endswith((".", "!", "?")) else "."
-    return f"{description.rstrip()}{separator}\n\n{prompt_text}"
+    return compose_image_prompt(
+        ImageGenerationInputs(
+            description=description,
+            image_prompt=description,
+            style=(
+                StyleSnapshot(
+                    style_id=uuid5(
+                        NAMESPACE_URL,
+                        "https://hypergen.app/evaluation/style-preset",
+                    ),
+                    name="Evaluation Style",
+                    prompt_text=prompt_text,
+                )
+                if prompt_text is not None
+                else None
+            ),
+        )
+    )
 
 
 def _generation_record(
@@ -327,6 +344,18 @@ def _execute_style_preset_evaluation(
                     scene.description,
                     style.prompt_text,
                 )
+                style_snapshot = (
+                    StyleSnapshot(
+                        style_id=uuid5(
+                            NAMESPACE_URL,
+                            f"https://hypergen.app/evaluation/styles/{style.style_id}",
+                        ),
+                        name=style.name,
+                        prompt_text=style.prompt_text,
+                    )
+                    if style.prompt_text is not None
+                    else None
+                )
                 stage = f"render:{scene.case_id}:seed-{seed}:{style.style_id}"
                 lifecycle.set_stage(stage)
                 output_path = outputs_dir / scene.case_id / f"seed-{seed}" / f"{style.style_id}.png"
@@ -334,6 +363,7 @@ def _execute_style_preset_evaluation(
                     inputs=ImageGenerationInputs(
                         description=scene.description,
                         image_prompt=scene.description,
+                        style=style_snapshot,
                     ),
                     render_prompt=render_prompt,
                     output_path=output_path,

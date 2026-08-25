@@ -19,6 +19,7 @@ from hypergen.domain.models import (
     ResolvedCardReference,
     RunOverlayMode,
     Stack,
+    StyleDefinition,
     UnresolvedCardReference,
 )
 
@@ -51,6 +52,13 @@ def _revision_index(card: Card, revision_id: UUID) -> int:
         if revision.id == revision_id:
             return index
     raise CommandError(f"revision {revision_id} does not exist on card {card.id}")
+
+
+def _style_index(document: Stack, style_id: UUID) -> int:
+    for index, style in enumerate(document.styles):
+        if style.id == style_id:
+            return index
+    raise CommandError(f"Style {style_id} does not exist")
 
 
 def _interaction_index(revision: CardRevision, interaction_id: UUID) -> int:
@@ -119,7 +127,13 @@ class CreateCardCommand:
     index: int | None = None
 
     def apply(self, document: Stack) -> Stack:
-        card = Card(id=self.card_id, name=self.name)
+        revision = CardRevision(style_id=document.new_card_style_id)
+        card = Card(
+            id=self.card_id,
+            name=self.name,
+            revisions=(revision,),
+            active_revision_id=revision.id,
+        )
         cards = list(document.cards)
         index = len(cards) if self.index is None else self.index
         if not 0 <= index <= len(cards):
@@ -185,9 +199,7 @@ def _unresolve_inbound_references(
             isinstance(reference, ResolvedCardReference)
             and reference.target_card_id == deleted_card_id
         ):
-            updates["reference"] = UnresolvedCardReference(
-                target_name=deleted_card_name
-            )
+            updates["reference"] = UnresolvedCardReference(target_name=deleted_card_name)
         if revision.hotspot_set is None:
             revisions.append(revision.model_copy(update=updates))
             continue
@@ -254,6 +266,79 @@ class SetRunOverlayModeCommand:
 
 
 @dataclass(frozen=True, slots=True)
+class AddStyleCommand:
+    """Append one stack-owned Style definition."""
+
+    name: str
+    prompt_text: str = ""
+    style_id: UUID = field(default_factory=uuid4)
+
+    def apply(self, document: Stack) -> Stack:
+        if any(style.id == self.style_id for style in document.styles):
+            raise CommandError(f"Style {self.style_id} already exists")
+        style = StyleDefinition(
+            id=self.style_id,
+            name=self.name,
+            prompt_text=self.prompt_text,
+        )
+        return validated_copy(document.model_copy(update={"styles": (*document.styles, style)}))
+
+
+@dataclass(frozen=True, slots=True)
+class UpdateStyleCommand:
+    """Update one Style's editable global name and prompt text."""
+
+    style_id: UUID
+    name: str
+    prompt_text: str
+
+    def apply(self, document: Stack) -> Stack:
+        index = _style_index(document, self.style_id)
+        styles = list(document.styles)
+        styles[index] = styles[index].model_copy(
+            update={"name": self.name, "prompt_text": self.prompt_text}
+        )
+        return validated_copy(document.model_copy(update={"styles": tuple(styles)}))
+
+
+@dataclass(frozen=True, slots=True)
+class DeleteStyleCommand:
+    """Delete one Style and clear every selection that used it."""
+
+    style_id: UUID
+
+    def apply(self, document: Stack) -> Stack:
+        index = _style_index(document, self.style_id)
+        styles = list(document.styles)
+        styles.pop(index)
+        cards = tuple(
+            card.model_copy(
+                update={
+                    "revisions": tuple(
+                        revision.model_copy(update={"style_id": None})
+                        if revision.style_id == self.style_id
+                        else revision
+                        for revision in card.revisions
+                    )
+                }
+            )
+            for card in document.cards
+        )
+        default_style_id = (
+            None if document.new_card_style_id == self.style_id else document.new_card_style_id
+        )
+        return validated_copy(
+            document.model_copy(
+                update={
+                    "styles": tuple(styles),
+                    "cards": cards,
+                    "new_card_style_id": default_style_id,
+                }
+            )
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class EditRevisionDescriptionCommand:
     """Commit one revision Description as one editing undo boundary."""
 
@@ -265,9 +350,7 @@ class EditRevisionDescriptionCommand:
         card_index = _card_index(document, self.card_id)
         card = document.cards[card_index]
         revision_index = _revision_index(card, self.revision_id)
-        revision = card.revisions[revision_index].model_copy(
-            update={"description": self.value}
-        )
+        revision = card.revisions[revision_index].model_copy(update={"description": self.value})
         card = _replace_revision(card, revision_index, revision)
         return validated_copy(_replace_card(document, card_index, card))
 
@@ -284,9 +367,7 @@ class SetRevisionImagePromptCommand:
         card_index = _card_index(document, self.card_id)
         card = document.cards[card_index]
         revision_index = _revision_index(card, self.revision_id)
-        revision = card.revisions[revision_index].model_copy(
-            update={"image_prompt": self.value}
-        )
+        revision = card.revisions[revision_index].model_copy(update={"image_prompt": self.value})
         card = _replace_revision(card, revision_index, revision)
         return validated_copy(_replace_card(document, card_index, card))
 
@@ -303,11 +384,29 @@ class SetRevisionReferenceCommand:
         card_index = _card_index(document, self.card_id)
         card = document.cards[card_index]
         revision_index = _revision_index(card, self.revision_id)
-        revision = card.revisions[revision_index].model_copy(
-            update={"reference": self.reference}
-        )
+        revision = card.revisions[revision_index].model_copy(update={"reference": self.reference})
         card = _replace_revision(card, revision_index, revision)
         return validated_copy(_replace_card(document, card_index, card))
+
+
+@dataclass(frozen=True, slots=True)
+class SetRevisionStyleCommand:
+    """Select a revision Style and make it the default for new cards."""
+
+    card_id: UUID
+    revision_id: UUID
+    style_id: UUID | None
+
+    def apply(self, document: Stack) -> Stack:
+        if self.style_id is not None:
+            _style_index(document, self.style_id)
+        card_index = _card_index(document, self.card_id)
+        card = document.cards[card_index]
+        revision_index = _revision_index(card, self.revision_id)
+        revision = card.revisions[revision_index].model_copy(update={"style_id": self.style_id})
+        card = _replace_revision(card, revision_index, revision)
+        changed = _replace_card(document, card_index, card)
+        return validated_copy(changed.model_copy(update={"new_card_style_id": self.style_id}))
 
 
 @dataclass(frozen=True, slots=True)
@@ -365,9 +464,7 @@ class CreateGeneratedRevisionCommand:
         if self.previous_revision.id != self.revision_id:
             raise CommandError("the previous revision does not match the generated result")
         if any(revision.id == self.new_revision_id for revision in card.revisions):
-            raise CommandError(
-                f"revision {self.new_revision_id} already exists on card {card.id}"
-            )
+            raise CommandError(f"revision {self.new_revision_id} already exists on card {card.id}")
         generated_revision = card.revisions[source_index].model_copy(
             deep=True,
             update={"id": self.new_revision_id},
@@ -427,9 +524,7 @@ class ReplaceRevisionBackgroundCommand:
         revision = card.revisions[revision_index].model_copy(
             update={
                 "background": (
-                    self.background.model_copy(deep=True)
-                    if self.background is not None
-                    else None
+                    self.background.model_copy(deep=True) if self.background is not None else None
                 )
             }
         )
@@ -498,9 +593,7 @@ class DeleteInteractionCommand:
         assert revision.hotspot_set is not None
         interactions = list(revision.hotspot_set.interactions)
         interactions.pop(interaction_index)
-        hotspot_set = revision.hotspot_set.model_copy(
-            update={"interactions": tuple(interactions)}
-        )
+        hotspot_set = revision.hotspot_set.model_copy(update={"interactions": tuple(interactions)})
         revision = revision.model_copy(update={"hotspot_set": hotspot_set})
         card = _replace_revision(card, revision_index, revision)
         return validated_copy(_replace_card(document, card_index, card))
@@ -713,6 +806,7 @@ class CreateCardAndResolveCommand:
 
 __all__ = [
     "ActivateRevisionCommand",
+    "AddStyleCommand",
     "AddInteractionCommand",
     "AddPolygonCommand",
     "ChangeHotspotDestinationCommand",
@@ -723,11 +817,13 @@ __all__ = [
     "DeleteCardCommand",
     "DeleteInteractionCommand",
     "DeleteRevisionCommand",
+    "DeleteStyleCommand",
     "DeletePolygonCommand",
     "DocumentCommand",
     "DuplicateRevisionCommand",
     "EditRevisionDescriptionCommand",
     "SetRevisionImagePromptCommand",
+    "SetRevisionStyleCommand",
     "RenameCardCommand",
     "ReorderCardCommand",
     "ReorderHotspotCommand",
@@ -738,4 +834,5 @@ __all__ = [
     "SetRunOverlayModeCommand",
     "SetRevisionReferenceCommand",
     "SetStartCardCommand",
+    "UpdateStyleCommand",
 ]

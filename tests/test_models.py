@@ -8,6 +8,9 @@ import pytest
 from pydantic import ValidationError
 
 from hypergen.domain.models import (
+    BUILT_IN_STYLES,
+    CURRENT_SCHEMA_VERSION,
+    HYPERCARD_STYLE_ID,
     CanvasSize,
     Card,
     CardRevision,
@@ -24,6 +27,8 @@ from hypergen.domain.models import (
     ResolvedCardReference,
     RunOverlayMode,
     Stack,
+    StyleDefinition,
+    StyleSnapshot,
     UnresolvedCardReference,
 )
 from hypergen.generation.image_prompt_preparation import (
@@ -53,10 +58,43 @@ def image_metadata() -> ImageGenerationMetadata:
 def test_stack_defaults_match_document_contract() -> None:
     stack = Stack(name="Castle")
 
-    assert stack.schema_version == 6
+    assert stack.schema_version == CURRENT_SCHEMA_VERSION
     assert (stack.canvas.width, stack.canvas.height) == (1024, 768)
     assert stack.run_overlay_mode is RunOverlayMode.HIDDEN
+    assert stack.styles == BUILT_IN_STYLES
+    assert stack.new_card_style_id == HYPERCARD_STYLE_ID
     assert stack.cards == ()
+
+
+def test_stack_style_references_use_stable_ids_and_unique_names() -> None:
+    custom = StyleDefinition(name="Custom", prompt_text="  Rendered in ink.  ")
+    revision = CardRevision(style_id=custom.id)
+    card = Card(name="Card", revisions=(revision,))
+    stack = Stack(
+        name="Castle",
+        styles=(custom,),
+        new_card_style_id=custom.id,
+        cards=(card,),
+    )
+
+    assert stack.styles[0].prompt_text == "Rendered in ink."
+    assert stack.style_by_id(custom.id) == custom
+    assert stack.style_by_id(None) is None
+
+    with pytest.raises(ValidationError, match="Style names"):
+        Stack(
+            name="Castle",
+            styles=(
+                custom,
+                StyleDefinition(name=" custom ", prompt_text="Other"),
+            ),
+            new_card_style_id=None,
+        )
+    with pytest.raises(ValidationError, match="revision style_id"):
+        Stack(
+            name="Castle",
+            cards=(Card(name="Card", revisions=(CardRevision(style_id=uuid4()),)),),
+        )
 
 
 def test_revision_uses_current_image_prompt_when_available() -> None:
@@ -130,9 +168,7 @@ def test_revision_uses_current_image_prompt_when_available() -> None:
 
 def test_stack_serializes_one_optional_reference() -> None:
     destination = Card(name="Portrait")
-    revision = CardRevision(
-        reference=ResolvedCardReference(target_card_id=destination.id)
-    )
+    revision = CardRevision(reference=ResolvedCardReference(target_card_id=destination.id))
     source = Card(name="Source", revisions=(revision,))
     stack = Stack(name="Castle", cards=(source, destination))
 
@@ -221,9 +257,7 @@ def test_stack_rejects_self_references_and_accepts_one_reference() -> None:
                         "revisions": (
                             source.active_revision.model_copy(
                                 update={
-                                    "reference": ResolvedCardReference(
-                                        target_card_id=source.id
-                                    )
+                                    "reference": ResolvedCardReference(target_card_id=source.id)
                                 }
                             ),
                         )
@@ -249,25 +283,15 @@ def test_hotspot_labels_are_derived_from_destinations() -> None:
     destination = Card(name="Castle Gate")
     resolved = Interaction(
         label="Author-entered value",
-        action=NavigateAction(
-            target=ResolvedCardReference(target_card_id=destination.id)
-        ),
+        action=NavigateAction(target=ResolvedCardReference(target_card_id=destination.id)),
     )
     unresolved = Interaction(
         label="Former label",
-        action=NavigateAction(
-            target=UnresolvedCardReference(target_name="Former room")
-        ),
+        action=NavigateAction(target=UnresolvedCardReference(target_name="Former room")),
     )
     source = Card(
         name="Source",
-        revisions=(
-            CardRevision(
-                hotspot_set=HotspotSet(
-                    interactions=(resolved, unresolved)
-                )
-            ),
-        ),
+        revisions=(CardRevision(hotspot_set=HotspotSet(interactions=(resolved, unresolved))),),
     )
 
     stack = Stack(name="Castle", cards=(source, destination))
@@ -293,6 +317,21 @@ def test_generation_inputs_capture_exact_reference_source_state() -> None:
     )
 
     assert inputs.reference == snapshot
+
+
+def test_generation_inputs_capture_exact_style_snapshot() -> None:
+    style = StyleSnapshot(
+        style_id=HYPERCARD_STYLE_ID,
+        name="HyperCard",
+        prompt_text="Pure black and white pixels.",
+    )
+    inputs = ImageGenerationInputs(
+        description="Portrait at dusk",
+        image_prompt="Portrait at dusk",
+        style=style,
+    )
+
+    assert inputs.style == style
 
 
 def test_hotspots_are_nested_in_their_image_revision() -> None:
@@ -332,9 +371,7 @@ def test_hotspots_are_nested_in_their_image_revision() -> None:
 
     assert loaded == stack
     assert loaded.cards[0].revisions[0].hotspot_set is not None
-    loaded_interaction = (
-        loaded.cards[0].revisions[0].hotspot_set.interactions[0]
-    )
+    loaded_interaction = loaded.cards[0].revisions[0].hotspot_set.interactions[0]
     assert loaded_interaction.id == interaction.id
     assert loaded_interaction.label == "Unresolved"
     assert loaded_interaction.action == interaction.action

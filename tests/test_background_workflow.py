@@ -24,6 +24,8 @@ from hypergen.application.commands import (
     EditRevisionDescriptionCommand,
     SetRevisionImagePromptCommand,
     SetRevisionReferenceCommand,
+    SetRevisionStyleCommand,
+    UpdateStyleCommand,
 )
 from hypergen.application.document_controller import DocumentController, UndoToken
 from hypergen.application.document_session import DocumentSession
@@ -94,9 +96,7 @@ class FakeMfluxModel:
         self.callbacks = FakeCallbackRegistry()
 
     def generate_image(self, **kwargs: object) -> FakeMfluxImage:
-        config = SimpleNamespace(
-            num_inference_steps=kwargs["num_inference_steps"]
-        )
+        config = SimpleNamespace(num_inference_steps=kwargs["num_inference_steps"])
         for callback in self.callbacks.registered:
             callback.call_before_loop(config=config)
         for _step in range(kwargs["num_inference_steps"]):  # type: ignore[arg-type]
@@ -256,12 +256,67 @@ def test_generate_uses_current_image_prompt(tmp_path: Path) -> None:
     assert revision.image_prompt is not None
     assert revision.generation_metadata is not None
     assert revision.generation_metadata.inputs.description == "A garden"
-    assert revision.generation_metadata.inputs.image_prompt == (
-        "A richly detailed garden"
+    assert revision.generation_metadata.inputs.image_prompt == ("A richly detailed garden")
+    assert revision.generation_metadata.render_prompt == ("A richly detailed garden")
+
+
+def test_generate_appends_and_captures_selected_style(tmp_path: Path) -> None:
+    workflow, controller, _session, workers, card = _bound_workflow(tmp_path)
+    style = controller.document.styles[0]
+    controller.execute(
+        SetRevisionStyleCommand(
+            card_id=card.id,
+            revision_id=card.active_revision.id,
+            style_id=style.id,
+        )
     )
-    assert revision.generation_metadata.render_prompt == (
-        "A richly detailed garden"
+
+    workflow.generate(card.id)
+    _complete_generation(workers)
+
+    metadata = controller.document.cards[0].active_revision.generation_metadata
+    assert metadata is not None
+    assert metadata.inputs.style is not None
+    assert metadata.inputs.style.style_id == style.id
+    assert metadata.inputs.style.name == style.name
+    assert metadata.inputs.style.prompt_text == style.prompt_text
+    assert metadata.render_prompt == ("A richly detailed garden.\n\n" + style.prompt_text)
+
+
+def test_style_changes_suppress_in_flight_generation_without_staling_prompt(
+    tmp_path: Path,
+) -> None:
+    workflow, controller, _session, workers, card = _bound_workflow(tmp_path)
+    style = controller.document.styles[0]
+    controller.execute(
+        SetRevisionStyleCommand(
+            card_id=card.id,
+            revision_id=card.active_revision.id,
+            style_id=style.id,
+        )
     )
+    failures: list[object] = []
+    workflow.failed.connect(failures.append)
+
+    workflow.generate(card.id)
+    controller.execute(
+        UpdateStyleCommand(
+            style_id=style.id,
+            name=style.name,
+            prompt_text=style.prompt_text + " More contrast.",
+        )
+    )
+    _complete_generation(workers)
+
+    revision = controller.document.cards[0].active_revision
+    assert revision.background is None
+    assert revision.image_prompt is not None
+    assert revision.image_prompt.is_current(
+        source_description=revision.description,
+        model_identifier="test",
+        prompt_version=IMAGE_PROMPT_PREPARATION_VERSION,
+    )
+    assert "changed before generation completed" in str(failures[-1])
 
 
 def test_generate_rejects_image_prompt_after_authored_text_changes(
@@ -404,9 +459,7 @@ def test_references_capture_exact_source_and_suppress_stale_results(
     assert metadata.inputs.reference is not None
     assert metadata.inputs.reference.card_id == source.id
     assert metadata.inputs.reference.revision_id == source_revision.id
-    assert metadata.inputs.reference.background_id == (
-        source_revision.background.id
-    )
+    assert metadata.inputs.reference.background_id == (source_revision.background.id)
     assert metadata.render_prompt == (
         "A richly detailed garden with the referenced visual treatment"
     )
@@ -443,6 +496,7 @@ def test_reference_card_requires_an_active_image(tmp_path: Path) -> None:
 
     with pytest.raises(BackgroundWorkflowError, match="has no image"):
         workflow.generate(target.id)
+
 
 def test_revision_duplicate_activate_delete_round_trip(tmp_path: Path) -> None:
     workflow, controller, _session, _workers, card = _bound_workflow(tmp_path)

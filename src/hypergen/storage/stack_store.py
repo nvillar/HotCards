@@ -17,12 +17,13 @@ from uuid import UUID
 from PIL import Image, UnidentifiedImageError
 from pydantic import ValidationError
 
-from hypergen.domain.models import CURRENT_SCHEMA_VERSION, Stack
+from hypergen.domain.models import BUILT_IN_STYLES, CURRENT_SCHEMA_VERSION, Stack
 
 STACK_FILENAME = "stack.json"
 ASSET_ROOT = PurePosixPath("assets/cards")
 logger = logging.getLogger(__name__)
 LEGACY_SCHEMA_VERSION = 5
+PREVIOUS_SCHEMA_VERSION = 6
 
 
 class StackStoreError(ValueError):
@@ -59,15 +60,10 @@ def _migrate_v5_payload(payload: dict[str, object]) -> dict[str, object]:
                 if not isinstance(revision, dict):
                     continue
                 assignments = [
-                    (role, revision.pop(role, None))
-                    for role in ("subject", "style", "setting")
+                    (role, revision.pop(role, None)) for role in ("subject", "style", "setting")
                 ]
                 selected_role, selected_reference = next(
-                    (
-                        (role, reference)
-                        for role, reference in assignments
-                        if reference is not None
-                    ),
+                    ((role, reference) for role, reference in assignments if reference is not None),
                     (None, None),
                 )
                 revision["reference"] = selected_reference
@@ -87,8 +83,7 @@ def _migrate_v5_payload(payload: dict[str, object]) -> dict[str, object]:
                                 "background_id": snapshot.get("background_id"),
                             }
                             for snapshot in references
-                            if isinstance(snapshot, dict)
-                            and snapshot.get("role") == selected_role
+                            if isinstance(snapshot, dict) and snapshot.get("role") == selected_role
                         ),
                         None,
                     )
@@ -99,6 +94,26 @@ def _migrate_v5_payload(payload: dict[str, object]) -> dict[str, object]:
                     "model_identifier": enriched.get("model_identifier"),
                     "prompt_version": enriched.get("prompt_version"),
                 }
+    migrated["schema_version"] = PREVIOUS_SCHEMA_VERSION
+    return migrated
+
+
+def _migrate_v6_payload(payload: dict[str, object]) -> dict[str, object]:
+    """Add stack-owned Styles without changing existing render behavior."""
+    migrated = deepcopy(payload)
+    migrated["styles"] = [style.model_dump(mode="json") for style in BUILT_IN_STYLES]
+    migrated["new_card_style_id"] = None
+    cards = migrated.get("cards")
+    if isinstance(cards, list):
+        for card in cards:
+            if not isinstance(card, dict):
+                continue
+            revisions = card.get("revisions")
+            if not isinstance(revisions, list):
+                continue
+            for revision in revisions:
+                if isinstance(revision, dict):
+                    revision["style_id"] = None
     migrated["schema_version"] = CURRENT_SCHEMA_VERSION
     return migrated
 
@@ -193,16 +208,21 @@ class StackStore:
         if not isinstance(payload, dict):
             raise StackStoreError("stack document root must be a JSON object")
         version = payload.get("schema_version")
-        if type(version) is not int or version not in {
+        supported_versions = {
             LEGACY_SCHEMA_VERSION,
+            PREVIOUS_SCHEMA_VERSION,
             CURRENT_SCHEMA_VERSION,
-        }:
+        }
+        if type(version) is not int or version not in supported_versions:
             raise StackStoreError(
-                "invalid stack document: schema_version must be "
-                f"{LEGACY_SCHEMA_VERSION} or {CURRENT_SCHEMA_VERSION}"
+                "invalid stack document: schema_version must be one of "
+                + ", ".join(str(item) for item in sorted(supported_versions))
             )
         if version == LEGACY_SCHEMA_VERSION:
             payload = _migrate_v5_payload(payload)
+            version = PREVIOUS_SCHEMA_VERSION
+        if version == PREVIOUS_SCHEMA_VERSION:
+            payload = _migrate_v6_payload(payload)
         try:
             stack = Stack.model_validate_json(json.dumps(payload))
         except ValidationError as error:
@@ -343,10 +363,7 @@ class StackStore:
             for card in stack.cards:
                 for revision in card.revisions:
                     background = revision.background
-                    if (
-                        background is None
-                        or background.image_path in copied_paths
-                    ):
+                    if background is None or background.image_path in copied_paths:
                         continue
                     temporary_store.store_image_asset(
                         self.asset_path(background.image_path),

@@ -33,6 +33,7 @@ from hypergen.domain.models import (
     ImageReferenceSnapshot,
     ResolvedCardReference,
     Stack,
+    StyleSnapshot,
     UnresolvedCardReference,
 )
 from hypergen.generation.image_prompt_preparation import (
@@ -73,6 +74,7 @@ class _GenerationTarget:
     background_id: UUID | None
     bundle_path: Path
     reference: _GenerationReferenceTarget | None
+    style: StyleSnapshot | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,9 +145,7 @@ class BackgroundWorkflow(QObject):
         card = self._card(document, card_id)
         revision = card.active_revision
         if not revision.description.strip():
-            raise BackgroundWorkflowError(
-                "enter a Description before generating"
-            )
+            raise BackgroundWorkflowError("enter a Description before generating")
         reference = self._resolve_reference(document, card)
         reference_snapshot = (
             ImageReferenceSnapshot(
@@ -159,28 +159,23 @@ class BackgroundWorkflow(QObject):
         settings = self._settings_provider()
         image_prompt = revision.image_prompt
         if image_prompt is None:
-            raise BackgroundWorkflowError(
-                "prepare an Image Prompt before generating"
-            )
+            raise BackgroundWorkflowError("prepare an Image Prompt before generating")
         if not image_prompt.is_current(
             source_description=revision.description,
             reference=reference_snapshot,
             model_identifier=settings.ollama_model,
             prompt_version=IMAGE_PROMPT_PREPARATION_VERSION,
         ):
-            raise BackgroundWorkflowError(
-                "prepare a current Image Prompt before generating"
-            )
+            raise BackgroundWorkflowError("prepare a current Image Prompt before generating")
         inputs = ImageGenerationInputs(
             description=revision.description,
             image_prompt=image_prompt.text,
             reference=reference_snapshot,
+            style=self._style_snapshot(document, revision),
         )
         render_prompt = compose_image_prompt(inputs)
         reference_image_paths = (
-            (self._reference_asset_path(reference),)
-            if reference is not None
-            else ()
+            (self._reference_asset_path(reference),) if reference is not None else ()
         )
         request_id = uuid4()
         asset_id = uuid4()
@@ -199,9 +194,7 @@ class BackgroundWorkflow(QObject):
             output_path=output_path,
             model_identifier=settings.mflux_model,
             seed=(
-                secrets.randbelow(2_147_483_648)
-                if settings.random_seed
-                else settings.fixed_seed
+                secrets.randbelow(2_147_483_648) if settings.random_seed else settings.fixed_seed
             ),
             width=document.canvas.width,
             height=document.canvas.height,
@@ -324,8 +317,7 @@ class BackgroundWorkflow(QObject):
         if not self._target_is_current(target):
             self._finish_with_error(
                 BackgroundWorkflowError(
-                    "the stack, revision, Description, or image changed "
-                    "before generation completed"
+                    "the stack, revision, Description, or image changed before generation completed"
                 )
             )
             return
@@ -402,11 +394,7 @@ class BackgroundWorkflow(QObject):
     ) -> None:
         token = self.controller.current_undo_token
         if token is not None and token != previous_token:
-            if (
-                card_id is not None
-                and revision_id is not None
-                and previous_revision is not None
-            ):
+            if card_id is not None and revision_id is not None and previous_revision is not None:
                 self.generation_applied.emit(
                     GeneratedRevisionChange(
                         message=message,
@@ -472,11 +460,10 @@ class BackgroundWorkflow(QObject):
             revision_id=revision.id,
             image_prompt=revision.image_prompt,
             image_prompt_model_identifier=image_prompt_model_identifier,
-            background_id=(
-                revision.background.id if revision.background is not None else None
-            ),
+            background_id=(revision.background.id if revision.background is not None else None),
             bundle_path=bundle_path.resolve(),
             reference=reference,
+            style=self._style_snapshot(document, revision),
         )
 
     def _target_is_current(self, target: _GenerationTarget) -> bool:
@@ -495,16 +482,11 @@ class BackgroundWorkflow(QObject):
         revision = card.active_revision
         if not (
             revision.image_prompt == target.image_prompt
-            and revision.description
-            == target.image_prompt.source_description
-            and self._settings_provider().ollama_model
-            == target.image_prompt_model_identifier
-            and (
-                revision.background.id
-                if revision.background is not None
-                else None
-            )
+            and revision.description == target.image_prompt.source_description
+            and self._settings_provider().ollama_model == target.image_prompt_model_identifier
+            and (revision.background.id if revision.background is not None else None)
             == target.background_id
+            and self._style_snapshot(document, revision) == target.style
         ):
             return False
         try:
@@ -522,9 +504,7 @@ class BackgroundWorkflow(QObject):
             return None
         if isinstance(assignment, UnresolvedCardReference):
             name = assignment.target_name or "unknown card"
-            raise BackgroundWorkflowError(
-                f"Reference {name!r} is unresolved"
-            )
+            raise BackgroundWorkflowError(f"Reference {name!r} is unresolved")
         assert isinstance(assignment, ResolvedCardReference)
         source = next(
             (
@@ -535,19 +515,29 @@ class BackgroundWorkflow(QObject):
             None,
         )
         if source is None:
-            raise BackgroundWorkflowError(
-                "Reference card no longer exists"
-            )
+            raise BackgroundWorkflowError("Reference card no longer exists")
         source_revision = source.active_revision
         if source_revision.background is None:
-            raise BackgroundWorkflowError(
-                f"Reference card {source.name!r} has no image"
-            )
+            raise BackgroundWorkflowError(f"Reference card {source.name!r} has no image")
         return _GenerationReferenceTarget(
             card_id=source.id,
             revision_id=source_revision.id,
             background_id=source_revision.background.id,
             image_path=source_revision.background.image_path,
+        )
+
+    @staticmethod
+    def _style_snapshot(
+        document: Stack,
+        revision: CardRevision,
+    ) -> StyleSnapshot | None:
+        style = document.style_by_id(revision.style_id)
+        if style is None:
+            return None
+        return StyleSnapshot(
+            style_id=style.id,
+            name=style.name,
+            prompt_text=style.prompt_text,
         )
 
     def _reference_asset_path(
@@ -556,9 +546,7 @@ class BackgroundWorkflow(QObject):
     ) -> Path:
         path = self._require_store().asset_path(reference.image_path)
         if not path.is_file():
-            raise BackgroundWorkflowError(
-                "Reference image is unavailable"
-            )
+            raise BackgroundWorkflowError("Reference image is unavailable")
         return path
 
     @staticmethod

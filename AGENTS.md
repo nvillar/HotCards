@@ -60,22 +60,32 @@ for live Ollama and MFLUX runs.
   and provenance, score observable criteria rather than exact prose, and never
   read a mutable authoring stack during benchmark runs.
 - Keep each card's complete authoring state in one of its numbered revisions:
-  Description, prepared Image Prompt with input provenance, optional background,
-  optional Reference card, and hotspot set. Visible revision numbers are
-  positional; stable UUIDs remain internal.
+  Description, selected stack Style, prepared Image Prompt with input provenance,
+  optional background, optional Reference card, and hotspot set. Visible
+  revision numbers are positional; stable UUIDs remain internal.
 - Keep at least one revision per card. Duplicate a complete revision, including
   its hotspot semantics and immutable background reference.
 - Keep at most one optional Reference card per revision and reject
   self-references. Resolve its active accepted background for both Image Prompt
   preparation and image generation. Send the Reference image once to MFLUX
   without hidden role instructions or complete source-card prose.
+- Keep an ordered, stack-owned library of editable named Styles with stable
+  UUIDs. Store the selected Style on each revision and persist the last explicit
+  Style or No Style selection as the default for new cards. Deleting a Style
+  clears its revision selections through one undoable command.
 - Compose background prompts deterministically from the current reviewed Image
-  Prompt without adding role headings or instructions. Hotspots must not alter
-  image prompts.
+  Prompt followed by the selected Style text. Do not send Style to Image Prompt
+  preparation. Capture the exact Style ID, name, text, and composed prompt in
+  generated-image provenance; changing Style must suppress an in-flight stale
+  image result without making the prepared Image Prompt stale. Hotspots must
+  not alter image prompts.
 - Keep one Description editor in the Background inspector. Show conditional
   native Description/Image Prompt radio controls below it, default to Image
-  Prompt when it exists, place the Reference selector before Prepare Image Prompt and
-  Generate, and keep generation provenance in button tooltips. Encode Image
+  Prompt when it exists, place the Style selector above Reference and before
+  Prepare Image Prompt and Generate, and keep generation provenance in button
+  tooltips. Keep Styles as the middle inspector tab with a list, compact
+  remove/add controls, and vertically stacked full-width Name and Style Text
+  fields. Encode Image
   Prompt freshness in the preparation action from the Description, exact usable
   Reference background, selected Ollama model, and preparation prompt version:
   current is a disabled completed state and stale is Update Image Prompt. Clearing the

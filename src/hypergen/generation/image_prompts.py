@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from hypergen.domain.models import ImageGenerationInputs
 
-IMAGE_PROMPT_VERSION = "image-prompt-v10"
+IMAGE_PROMPT_VERSION = "image-prompt-v11"
 
 _SCENE_PRESERVATION = (
     "Preserve the described subjects, actions, poses, object states, time, "
@@ -16,11 +16,7 @@ def _with_sentence_boundary(value: str) -> str:
     sentence_endings = (".", "!", "?", "。", "！", "？")
     if value.endswith(sentence_endings):
         return value
-    if (
-        len(value) >= 2
-        and value[-1] in {'"', "”", "’", "»"}
-        and value[-2] in sentence_endings
-    ):
+    if len(value) >= 2 and value[-1] in {'"', "”", "’", "»"} and value[-2] in sentence_endings:
         return value
     return f"{value}."
 
@@ -32,24 +28,26 @@ def compose_reference_prompt(
     """Place scene content before natural-language reference instructions."""
     scene = description.strip()
     if not scene:
-        raise ValueError(
-            "enter an Image Prompt before generating"
-        )
+        raise ValueError("enter an Image Prompt before generating")
     instructions = tuple(
-        instruction.strip()
-        for instruction in reference_instructions
-        if instruction.strip()
+        instruction.strip() for instruction in reference_instructions if instruction.strip()
     )
     if not instructions:
         return scene
-    return " ".join(
-        (_with_sentence_boundary(scene), *instructions, _SCENE_PRESERVATION)
-    )
+    return " ".join((_with_sentence_boundary(scene), *instructions, _SCENE_PRESERVATION))
 
 
 def compose_image_prompt(inputs: ImageGenerationInputs) -> str:
-    """Return the reviewed Image Prompt without adding hidden instructions."""
-    return inputs.image_prompt
+    """Append the exact selected Style to the reviewed Image Prompt."""
+    style = inputs.style
+    if style is None or not style.prompt_text.strip():
+        return inputs.image_prompt
+    return "\n\n".join(
+        (
+            _with_sentence_boundary(inputs.image_prompt),
+            style.prompt_text.strip(),
+        )
+    )
 
 
 __all__ = [

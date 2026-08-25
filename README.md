@@ -16,21 +16,24 @@ authoring shell remains usable when either service is unavailable.
 Stacks are stored as self-contained `.hypergen` directory bundles and
 autosaved atomically after creation or opening. At startup, HyperGen lists
 projects in `~/Documents/HyperGen` and offers direct Open and Create actions.
-Schema-v5 bundles are migrated in memory to the current schema when opened;
-unsupported older or future schemas are rejected.
+Schema-v5 and schema-v6 bundles are migrated in memory to the current schema
+when opened; unsupported older or future schemas are rejected.
 
 Each card owns one or more numbered revisions. A revision contains its authored
-Description, optional prepared Image Prompt, optional generated background,
-optional Reference card, and hotspot set. The compact header above the canvas
-edits the card name and selects, duplicates, or deletes revisions; the toolbar
-provides a single Author/Run mode toggle and manages hotspot visibility. An
+Description, selected stack Style, optional prepared Image Prompt, optional
+generated background, optional Reference card, and hotspot set. The compact
+header above the canvas edits the card name and selects, duplicates, or deletes
+revisions; the toolbar provides a single Author/Run mode toggle and manages
+hotspot visibility. An
 adjacent step label and progress bar to the left of the model selectors show
 actual MFLUX inference-step completion during image generation and an
 indeterminate state during Image Prompt preparation.
 
-The Background inspector follows the authoring sequence Description, optional
-Reference, Prepare Image Prompt, then Generate Image. Description and Image Prompt share one
-editor with native radio controls that appear after a prompt has been prepared.
+The inspector tabs are Background, Styles, and Hotspots. Background follows the
+authoring sequence Description, Style, optional Reference, Prepare Image Prompt,
+then Generate Image. Description and Image Prompt share one editor with native
+radio controls that appear after a prompt has been prepared. The Style selector
+chooses a named stack-wide treatment; No Style is always available.
 Description is always the authoritative author input. Prepare Image Prompt creates one
 editable Image Prompt proposal from the current Description; it never uses the
 previous Image Prompt as input or inserts a separate clarification step. With a
@@ -61,21 +64,35 @@ to survive without imposing special Description wording. It makes one
 constrained repair attempt for a valid but conflicting proposal. Private model
 deliberation is never persisted.
 
-MFLUX receives the reviewed Image Prompt unchanged and, when selected, the same
-Reference image exactly once. It receives no hidden role instructions or source
-card prose. Generated images are the only supported background source.
+Image Prompt preparation does not consume the selected Style. At final image
+generation, HyperGen deterministically appends the selected Style text to the
+reviewed Image Prompt and sends the same Reference image exactly once when
+selected. MFLUX receives no hidden role instructions or source card prose. The
+exact Style ID, name, text, and composed render prompt are retained in generated
+image metadata. Generated images are the only supported background source.
 Generate, image removal, Image Prompt preparation, and direct Image Prompt edits apply to the
 active revision through document commands. Completed generation can be kept
 there, moved into a new complete revision, or undone. Existing images remain
 visible until replacement succeeds, and successful changes offer a
 dismissible, history-safe Undo action in the notification bar.
 
+The Styles tab manages the stack's ordered, editable Style library with compact
+remove/add controls and full-width Name and Style Text fields. The built-in
+library includes HyperCard, Cinematic Film, Isometric Game, Pixel Art,
+Watercolor Painting, Color Pencil, Pencil Sketch, Glazed Ceramic, Graphic
+Novel, and Miniature Toy. A new stack starts with HyperCard selected. An
+explicit Style or No Style selection becomes the default for subsequently
+created cards. Deleting a Style clears every revision that selected it and is
+reversible through Undo. Existing schema-v5 and schema-v6 stacks migrate to No
+Style so opening them cannot change prior rendering behavior.
+
 When a schema-v5 bundle is opened, legacy Subject, Style, and Setting
 assignments collapse deterministically to one Reference in that order of
 precedence, and Enriched Description becomes Image Prompt. Historical
 generation metadata remains readable in its original role-based form. Migrated
 prompts without current model and contract provenance remain visible but must
-be enriched again before generation.
+be enriched again before generation. Schema-v6 stacks receive the built-in
+Style library but retain No Style on all existing revisions and new cards.
 
 The Hotspots inspector is the sole source of interaction semantics. A new
 hotspot is persisted and selected immediately, even before it has an area;

@@ -5,7 +5,11 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
-from hypergen.domain.models import ImageGenerationInputs, ImageReferenceSnapshot
+from hypergen.domain.models import (
+    ImageGenerationInputs,
+    ImageReferenceSnapshot,
+    StyleSnapshot,
+)
 from hypergen.generation.image_prompts import compose_image_prompt
 
 
@@ -39,6 +43,43 @@ def test_reference_does_not_add_role_instructions() -> None:
     assert result == prompt
     assert "Use image" not in result
     assert "Reference" not in result
+
+
+def test_selected_style_is_appended_after_the_reviewed_image_prompt() -> None:
+    prompt = "A red fox beneath a tree"
+    style = StyleSnapshot(
+        style_id=uuid4(),
+        name="Ink",
+        prompt_text="Rendered with bold black ink contours.",
+    )
+
+    result = compose_image_prompt(
+        ImageGenerationInputs(
+            description="A fox",
+            image_prompt=prompt,
+            style=style,
+        )
+    )
+
+    assert result == ("A red fox beneath a tree.\n\nRendered with bold black ink contours.")
+
+
+def test_blank_selected_style_does_not_change_delivery() -> None:
+    prompt = "A red fox beneath a tree."
+
+    result = compose_image_prompt(
+        ImageGenerationInputs(
+            description="A fox",
+            image_prompt=prompt,
+            style=StyleSnapshot(
+                style_id=uuid4(),
+                name="Draft Style",
+                prompt_text="",
+            ),
+        )
+    )
+
+    assert result == prompt
 
 
 @pytest.mark.parametrize("value", ("", "   "))

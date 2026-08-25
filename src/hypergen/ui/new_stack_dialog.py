@@ -12,7 +12,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from hypergen.domain.models import CanvasSize, Card, Stack
+from hypergen.domain.models import (
+    HYPERCARD_STYLE_ID,
+    CanvasSize,
+    Card,
+    CardRevision,
+    Stack,
+)
 
 
 class NewStackDialog(QDialog):
@@ -40,8 +46,7 @@ class NewStackDialog(QDialog):
         form.addRow("Canvas height", self.height_spin)
 
         buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Cancel
-            | QDialogButtonBox.StandardButton.Ok
+            QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Ok
         )
         buttons.accepted.connect(self._accept_if_valid)
         buttons.rejected.connect(self.reject)
@@ -52,7 +57,12 @@ class NewStackDialog(QDialog):
 
     def stack(self) -> Stack:
         """Build the initial saved document with one selected start card."""
-        first_card = Card(name="Card 1")
+        first_revision = CardRevision(style_id=HYPERCARD_STYLE_ID)
+        first_card = Card(
+            name="Card 1",
+            revisions=(first_revision,),
+            active_revision_id=first_revision.id,
+        )
         return Stack(
             name=self.name_edit.text(),
             canvas=CanvasSize(
