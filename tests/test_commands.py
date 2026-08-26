@@ -34,7 +34,6 @@ from hypergen.application.commands import (
     ReplaceRevisionBackgroundCommand,
     SetHotspotConditionsCommand,
     SetHotspotKeyChangesCommand,
-    SetHotspotNameCommand,
     SetRevisionImagePromptCommand,
     SetRevisionReferenceCommand,
     SetRevisionStyleCommand,
@@ -164,12 +163,6 @@ def test_key_lifecycle_and_hotspot_behavior_are_typed_changes() -> None:
 
     document = AddKeyCommand(name="Red key", key_id=key_id).apply(document)
     document = RenameKeyCommand(key_id=key_id, name="Ruby key").apply(document)
-    document = SetHotspotNameCommand(
-        card_id=source.id,
-        revision_id=revision.id,
-        interaction_id=interaction.id,
-        name="Take the key",
-    ).apply(document)
     document = SetHotspotConditionsCommand(
         card_id=source.id,
         revision_id=revision.id,
@@ -186,7 +179,7 @@ def test_key_lifecycle_and_hotspot_behavior_are_typed_changes() -> None:
     changed = document.cards[0].active_revision.hotspot_set
     assert changed is not None
     assert document.keys == (KeyDefinition(id=key_id, name="Ruby key"),)
-    assert changed.interactions[0].name == "Take the key"
+    assert changed.interactions[0].label == "Grant Ruby key"
     assert changed.interactions[0].conditions.forbids == (key_id,)
     assert changed.interactions[0].key_changes.grant == (key_id,)
     with pytest.raises(CommandError, match="still used"):

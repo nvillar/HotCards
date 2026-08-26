@@ -123,10 +123,10 @@ for live Ollama and MFLUX runs.
 - Store each hotspot set under exactly one complete card revision. Replacing a
   background preserves its hotspots so the author can review and adjust them
   manually.
-- Hotspots may have no polygons. Keep an optional custom Name; when absent,
-  derive a short label from Remove, Grant, then destination actions and display
-  long automatic labels on at most two lines. Area-less hotspots retain all
-  semantics in storage and are ignored by Run-mode hit testing.
+- Hotspots may have no polygons. Derive their labels from Remove, Grant, then
+  destination actions and display long labels on at most two lines. Area-less
+  hotspots retain all semantics in storage and are ignored by Run-mode hit
+  testing.
 - Keep Author canvas selection hierarchical: a selected vertex belongs to a
   selected polygon, which belongs to the selected hotspot. Inspector
   synchronization and same-revision edits must not discard a valid more

@@ -388,7 +388,6 @@ def test_load_migrates_v7_hotspots_to_conditional_behavior(
     payload["schema_version"] = 7
     payload.pop("keys")
     legacy = payload["cards"][0]["revisions"][0]["hotspot_set"]["interactions"][0]
-    legacy.pop("name")
     legacy.pop("conditions")
     legacy.pop("key_changes")
     store.stack_path.write_text(json.dumps(payload))
@@ -398,7 +397,7 @@ def test_load_migrates_v7_hotspots_to_conditional_behavior(
     changed = migrated.cards[0].active_revision.hotspot_set
     assert changed is not None
     assert migrated.keys == ()
-    assert changed.interactions[0].name is None
+    assert "name" not in changed.interactions[0].model_dump()
     assert changed.interactions[0].conditions.requires == ()
     assert changed.interactions[0].key_changes.grant == ()
     assert changed.interactions[0].label == "Garden"

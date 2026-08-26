@@ -193,19 +193,11 @@ class Interaction(DomainModel):
     """One conditional interaction with key changes, navigation, and geometry."""
 
     id: UUID = Field(default_factory=uuid4)
-    name: NonEmptyString | None = None
     label: NonEmptyString = "New Hotspot"
     conditions: HotspotConditions = Field(default_factory=HotspotConditions)
     key_changes: HotspotKeyChanges = Field(default_factory=HotspotKeyChanges)
     action: NavigateAction | None = None
     polygons: tuple[Polygon, ...] = Field(default_factory=tuple)
-
-    @field_validator("name", mode="before")
-    @classmethod
-    def blank_name_uses_automatic_label(cls, value: object) -> object:
-        if isinstance(value, str) and not value.strip():
-            return None
-        return value
 
 
 class ImageReferenceSnapshot(DomainModel):
@@ -557,8 +549,6 @@ def _automatic_interaction_label(
     card_names: dict[UUID, str],
     key_names: dict[UUID, str],
 ) -> str:
-    if interaction.name is not None:
-        return interaction.name
     changes: list[str] = []
     if interaction.key_changes.clear_all:
         changes.append("Clear all keys")

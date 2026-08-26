@@ -51,7 +51,6 @@ from hypergen.application.commands import (
     ReorderHotspotCommand,
     SetHotspotConditionsCommand,
     SetHotspotKeyChangesCommand,
-    SetHotspotNameCommand,
     SetRevisionImagePromptCommand,
     SetRevisionReferenceCommand,
     SetRevisionStyleCommand,
@@ -435,15 +434,6 @@ class Inspector(QWidget):
         controls.addWidget(self.add_hotspot_button)
         layout.addLayout(controls)
 
-        self.hotspot_name_label = QLabel("Name")
-        self.hotspot_name_label.setObjectName("hotspotNameLabel")
-        layout.addWidget(self.hotspot_name_label)
-        self.hotspot_name_edit = _CommitLineEdit()
-        self.hotspot_name_edit.setObjectName("hotspotNameEdit")
-        self.hotspot_name_edit.setAccessibleName("Hotspot name")
-        self.hotspot_name_edit.setPlaceholderText("Leave blank to name automatically")
-        layout.addWidget(self.hotspot_name_edit)
-
         self.hotspot_when_label = QLabel("WHEN")
         self.hotspot_when_label.setObjectName("hotspotWhenLabel")
         layout.addWidget(self.hotspot_when_label)
@@ -610,10 +600,6 @@ class Inspector(QWidget):
         self.move_hotspot_down_button.clicked.connect(lambda: self._move_hotspot(1))
         self.add_hotspot_button.clicked.connect(self._add_hotspot)
         self.delete_hotspot_button.clicked.connect(self._delete_hotspot)
-        self.hotspot_name_edit.editing_finished.connect(
-            self._hotspot_name_editing_finished
-        )
-        self.hotspot_name_edit.returnPressed.connect(self._commit_hotspot_name)
         self.add_condition_button.clicked.connect(self._add_condition)
         self.add_key_change_button.clicked.connect(self._add_key_change)
         self.clear_all_keys_checkbox.toggled.connect(
@@ -779,8 +765,6 @@ class Inspector(QWidget):
 
     def commit_card_metadata(self) -> bool:
         """Commit every visible authoring draft before a context change or save."""
-        if self._selected_interaction() is not None and not self._commit_hotspot_name():
-            return False
         if self._selected_style() is not None and not self._commit_style():
             return False
         if self._selected_key_id is not None and not self._commit_key():
@@ -1577,7 +1561,6 @@ class Inspector(QWidget):
         interaction: Interaction | None,
     ) -> None:
         has_interaction = interaction is not None
-        self.hotspot_name_edit.setEnabled(has_interaction)
         self.condition_table.setEnabled(has_interaction)
         self.add_condition_button.setEnabled(has_interaction)
         self.key_change_table.setEnabled(has_interaction)
@@ -1594,10 +1577,6 @@ class Inspector(QWidget):
         self.move_hotspot_down_button.setEnabled(
             has_interaction and current_row < self.hotspot_list.count() - 1
         )
-        with QSignalBlocker(self.hotspot_name_edit):
-            self.hotspot_name_edit.setText(
-                interaction.name if interaction is not None and interaction.name else ""
-            )
         self._render_condition_rows(document, interaction)
         self._render_key_change_rows(document, interaction)
         with QSignalBlocker(self.clear_all_keys_checkbox):
@@ -1851,41 +1830,6 @@ class Inspector(QWidget):
         ):
             self.select_interaction(interaction.id)
             self.hotspot_selected.emit(interaction.id)
-
-    def _hotspot_name_editing_finished(
-        self,
-        _next_focus: object,
-        reason: object,
-    ) -> None:
-        mouse_focus = reason == Qt.FocusReason.MouseFocusReason
-        if self._commit_hotspot_name(render_change=not mouse_focus) and mouse_focus:
-            interaction = self._selected_interaction()
-            item = self.hotspot_list.currentItem()
-            if interaction is not None and item is not None:
-                item.setText(self._hotspot_list_label(interaction))
-                item.setToolTip(interaction.label)
-                self._size_hotspot_item(item)
-
-    def _commit_hotspot_name(self, *, render_change: bool = True) -> bool:
-        if self._rendering:
-            return False
-        card = self._selected_card()
-        interaction = self._selected_interaction()
-        if card is None or interaction is None:
-            return False
-        name = self.hotspot_name_edit.text().strip() or None
-        if name == interaction.name:
-            return True
-        return self._execute(
-            SetHotspotNameCommand(
-                card_id=card.id,
-                revision_id=card.active_revision.id,
-                interaction_id=interaction.id,
-                name=name,
-            ),
-            undo_message="Hotspot name changed",
-            render_change=render_change,
-        )
 
     def _add_condition(self) -> None:
         interaction = self._selected_interaction()

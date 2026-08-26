@@ -143,7 +143,6 @@ def _migrate_v7_payload(payload: dict[str, object]) -> dict[str, object]:
                 for interaction in interactions:
                     if not isinstance(interaction, dict):
                         continue
-                    interaction["name"] = None
                     interaction["conditions"] = {"requires": [], "forbids": []}
                     interaction["key_changes"] = {
                         "remove": [],

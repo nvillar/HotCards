@@ -97,9 +97,8 @@ Style library but retain No Style on all existing revisions and new cards.
 
 The Hotspots inspector is the sole source of revision-local interaction
 semantics. A new hotspot is persisted and selected immediately, even before it
-has an area. Its optional custom Name overrides a deterministic automatic name
-derived in Remove, Grant, then destination order; clearing Name restores
-automatic naming. Long automatic names use two-line list entries. WHEN rows
+has an area. Its label is derived automatically in Remove, Grant, then
+destination order, with long labels using two-line list entries. WHEN rows
 require every Present key to exist and every Absent key not to exist. THEN rows
 apply disjoint Remove and Grant sets, or the exclusive Clear all keys action,
 before the optional Go to destination. Keys are stack-global free-form names

@@ -817,33 +817,6 @@ class ReplacePolygonCommand:
 
 
 @dataclass(frozen=True, slots=True)
-class SetHotspotNameCommand:
-    """Set or clear one hotspot's custom display name."""
-
-    card_id: UUID
-    revision_id: UUID
-    interaction_id: UUID
-    name: str | None
-
-    def apply(self, document: Stack) -> Stack:
-        interaction = _interaction(
-            document,
-            card_id=self.card_id,
-            revision_id=self.revision_id,
-            interaction_id=self.interaction_id,
-        ).model_copy(update={"name": self.name})
-        return validated_copy(
-            _replace_interaction(
-                document,
-                card_id=self.card_id,
-                revision_id=self.revision_id,
-                interaction_id=self.interaction_id,
-                replacement=interaction,
-            )
-        )
-
-
-@dataclass(frozen=True, slots=True)
 class SetHotspotConditionsCommand:
     """Replace one hotspot's complete all-of condition."""
 
@@ -1037,7 +1010,6 @@ __all__ = [
     "SetRunOverlayModeCommand",
     "SetHotspotConditionsCommand",
     "SetHotspotKeyChangesCommand",
-    "SetHotspotNameCommand",
     "SetRevisionReferenceCommand",
     "SetStartCardCommand",
     "UpdateStyleCommand",

@@ -252,7 +252,7 @@ def test_keys_tab_manages_global_names_and_lists_hotspot_usages(
     assert [key.name for key in controller.document.keys] == ["Ruby key"]
 
 
-def test_hotspot_pipeline_edits_name_conditions_changes_and_navigation(
+def test_hotspot_pipeline_edits_conditions_changes_and_navigation(
     application: QApplication,
 ) -> None:
     red_key = KeyDefinition(name="Red key")
@@ -284,10 +284,7 @@ def test_hotspot_pipeline_edits_name_conditions_changes_and_navigation(
     inspector = Inspector(controller)
     inspector.render(controller.document, source.id)
 
-    assert inspector.hotspot_name_edit.text() == ""
-    assert inspector.hotspot_name_edit.placeholderText() == (
-        "Leave blank to name automatically"
-    )
+    assert not hasattr(inspector, "hotspot_name_edit")
     assert inspector.hotspot_list.currentItem().text() == (
         "Remove Red key · Grant Door open\n→ Castle"
     )
@@ -307,18 +304,6 @@ def test_hotspot_pipeline_edits_name_conditions_changes_and_navigation(
         "When Red key is present, remove Red key, then grant Door open, "
         "then go to Castle."
     )
-
-    inspector.hotspot_name_edit.setText("Unlock castle")
-    condition_key = inspector.condition_table.cellWidget(0, 0)
-    inspector._hotspot_name_editing_finished(
-        condition_key,
-        Qt.FocusReason.MouseFocusReason,
-    )
-    changed = controller.document.cards[0].active_revision.hotspot_set
-    assert changed is not None
-    assert changed.interactions[0].name == "Unlock castle"
-    assert inspector.hotspot_list.currentItem().text() == "Unlock castle"
-    assert inspector.condition_table.cellWidget(0, 0) is condition_key
 
     grant_key = inspector.key_change_table.cellWidget(1, 1)
     assert isinstance(grant_key, QComboBox)

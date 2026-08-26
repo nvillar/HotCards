@@ -284,7 +284,7 @@ def test_stack_rejects_self_references_and_accepts_one_reference() -> None:
     )
 
 
-def test_hotspot_labels_are_derived_from_actions_unless_customized() -> None:
+def test_hotspot_labels_are_derived_from_actions() -> None:
     destination = Card(name="Castle Gate")
     red_key = KeyDefinition(name="Red key")
     door_open = KeyDefinition(name="Door open")
@@ -298,12 +298,12 @@ def test_hotspot_labels_are_derived_from_actions_unless_customized() -> None:
     unresolved = Interaction(
         action=NavigateAction(target=UnresolvedCardReference(target_name="Former room")),
     )
-    custom = Interaction(name="Use the secret door")
+    actionless = Interaction()
     source = Card(
         name="Source",
         revisions=(
             CardRevision(
-                hotspot_set=HotspotSet(interactions=(resolved, unresolved, custom))
+                hotspot_set=HotspotSet(interactions=(resolved, unresolved, actionless))
             ),
         ),
     )
@@ -319,7 +319,7 @@ def test_hotspot_labels_are_derived_from_actions_unless_customized() -> None:
     assert [item.label for item in interactions.interactions] == [
         "Remove Red key · Grant Door open → Castle Gate",
         "Former room",
-        "Use the secret door",
+        "New Hotspot",
     ]
 
 
