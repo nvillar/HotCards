@@ -67,7 +67,7 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     inspector.render(controller.document, card.id)
 
     assert inspector.inspector_tabs.count() == 4
-    assert inspector.inspector_tabs.tabText(0) == "Background"
+    assert inspector.inspector_tabs.tabText(0) == "Image"
     assert inspector.inspector_tabs.tabText(1) == "Styles"
     assert inspector.inspector_tabs.tabText(2) == "Hotspots"
     assert inspector.inspector_tabs.tabText(3) == "Keys"

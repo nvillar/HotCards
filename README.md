@@ -29,7 +29,7 @@ adjacent step label and progress bar to the left of the model selectors show
 actual MFLUX inference-step completion during image generation and an
 indeterminate state during Image Prompt preparation.
 
-The inspector tabs are Background, Styles, Hotspots, and Keys. Background
+The inspector tabs are Image, Styles, Hotspots, and Keys. Image
 follows the authoring sequence Description, Style, optional Reference, Prepare
 Image Prompt, then Generate Image. Description and Image Prompt share one
 editor with native radio controls that appear after a prompt has been prepared.

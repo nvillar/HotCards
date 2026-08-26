@@ -284,7 +284,7 @@ class Inspector(QWidget):
         }
 
         scroll.setWidget(page)
-        self.inspector_tabs.addTab(scroll, "Background")
+        self.inspector_tabs.addTab(scroll, "Image")
 
     def _build_styles_tab(self) -> None:
         page = QWidget()

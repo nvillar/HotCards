@@ -83,7 +83,7 @@ for live Ollama and MFLUX runs.
   native Description/Image Prompt radio controls below it, default to Image
   Prompt when it exists, place the Style selector above Reference and before
   Prepare Image Prompt and Generate, and keep generation provenance in button
-  tooltips. Keep inspector tabs ordered Background, Styles, Hotspots, Keys.
+  tooltips. Keep inspector tabs ordered Image, Styles, Hotspots, Keys.
   Keep Styles and Keys as stack-global list managers with compact remove/add
   controls and vertically stacked full-width fields. Encode Image
   Prompt freshness in the preparation action from the Description, exact usable

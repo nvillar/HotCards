@@ -325,7 +325,7 @@ def test_card_header_and_toolbar_match_revision_hierarchy(
     assert central_layout.indexOf(window.pane_splitter) < (
         central_layout.indexOf(window.notification_bar)
     )
-    assert window.inspector.inspector_tabs.tabText(0) == "Background"
+    assert window.inspector.inspector_tabs.tabText(0) == "Image"
     assert window.fit_canvas_button.size() == window.clear_background_button.size()
 
 
