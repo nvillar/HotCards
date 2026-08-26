@@ -1597,7 +1597,7 @@ class MainWindow(QMainWindow):
         self.card_canvas.show_image(asset_path)
         if self._is_running:
             self.card_canvas.set_run_hotspots(
-                revision.hotspot_set,
+                self._run_session.active_hotspot_set(self.controller.document),
                 self.controller.document.run_overlay_mode,
             )
             return
@@ -1877,6 +1877,7 @@ class MainWindow(QMainWindow):
             state = None
         self._apply_mode_chrome()
         self._set_run_warning("")
+        self._set_run_notice("")
         self.render_document()
         if state is not None and state.warning is not None:
             self._set_run_warning(state.warning)
@@ -1886,7 +1887,7 @@ class MainWindow(QMainWindow):
     def _run_interaction_activated(self, interaction_id: object) -> None:
         if not self._is_running or not isinstance(interaction_id, UUID):
             return
-        state = self._run_session.navigate(
+        state = self._run_session.activate(
             self.controller.document,
             interaction_id,
         )
@@ -1903,9 +1904,12 @@ class MainWindow(QMainWindow):
     def _apply_run_state(self, state: RunSessionState) -> None:
         self._selected_card_id = state.current_card_id
         self._set_run_warning("")
+        self._set_run_notice("")
         self.render_document()
         if state.warning is not None:
             self._set_run_warning(state.warning)
+        elif state.notice is not None:
+            self._set_run_notice(state.notice)
 
     def _apply_mode_chrome(self) -> None:
         authoring = not self._is_running
@@ -1965,6 +1969,12 @@ class MainWindow(QMainWindow):
             self._show_warning("run-warning", message)
         else:
             self.notification_bar.clear_notification("run-warning")
+
+    def _set_run_notice(self, message: str) -> None:
+        if message:
+            self._show_info("run-notice", message)
+        else:
+            self.notification_bar.clear_notification("run-notice")
 
     def _cancel_ai_activity_for_run(self) -> None:
         self._cancel_diagnostics()

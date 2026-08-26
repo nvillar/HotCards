@@ -5,34 +5,45 @@ from __future__ import annotations
 from dataclasses import dataclass
 from uuid import UUID
 
-from hypergen.domain.models import ResolvedCardReference, Stack
+from hypergen.domain.models import (
+    HotspotSet,
+    Interaction,
+    ResolvedCardReference,
+    Stack,
+)
 
 
 @dataclass(frozen=True, slots=True)
 class RunSessionState:
-    """Current player location, Back history, and non-blocking warning."""
+    """Current player location, keys, Back history, and transient feedback."""
 
     current_card_id: UUID | None
     history: tuple[UUID, ...]
+    keys: frozenset[UUID]
     warning: str | None
+    notice: str | None
 
 
 class RunSession:
-    """Navigate applied UUID links without mutating the authored document."""
+    """Execute conditional hotspots without mutating the authored document."""
 
     def __init__(self) -> None:
         self._current_card_id: UUID | None = None
         self._entry_card_id: UUID | None = None
         self._history: list[UUID] = []
+        self._keys: set[UUID] = set()
         self._start_warning: str | None = None
         self._warning: str | None = None
+        self._notice: str | None = None
 
     @property
     def state(self) -> RunSessionState:
         return RunSessionState(
             current_card_id=self._current_card_id,
             history=tuple(self._history),
+            keys=frozenset(self._keys),
             warning=self._warning,
+            notice=self._notice,
         )
 
     def start(
@@ -72,12 +83,32 @@ class RunSession:
         )
         self._current_card_id = current_card_id
         self._history.clear()
+        self._keys.clear()
         self._start_warning = warning
         self._warning = warning
+        self._notice = None
         return self.state
 
-    def navigate(self, document: Stack, interaction_id: UUID) -> RunSessionState:
-        """Follow one interaction from the current active revision."""
+    def active_hotspot_set(self, document: Stack) -> HotspotSet | None:
+        """Return current hotspots whose conditions pass and actions have effects."""
+        card = next(
+            (card for card in document.cards if card.id == self._current_card_id),
+            None,
+        )
+        if card is None or card.active_revision.hotspot_set is None:
+            return None
+        return HotspotSet(
+            interactions=tuple(
+                interaction
+                for interaction in card.active_revision.hotspot_set.interactions
+                if self._is_active(interaction) and self._has_effect(interaction)
+            )
+        )
+
+    def activate(self, document: Stack, interaction_id: UUID) -> RunSessionState:
+        """Execute one current hotspot's atomic key transition, then navigate."""
+        self._warning = None
+        self._notice = None
         card = next(
             (
                 card
@@ -105,6 +136,17 @@ class RunSession:
         )
         if interaction is None:
             self._warning = "That hotspot is no longer available on this card."
+            return self.state
+        if not self._is_active(interaction) or not self._has_effect(interaction):
+            return self.state
+        changes = interaction.key_changes
+        if changes.clear_all:
+            self._keys.clear()
+        else:
+            self._keys.difference_update(changes.remove)
+            self._keys.update(changes.grant)
+        if interaction.action is None:
+            self._notice = self._key_change_notice(document, interaction)
             return self.state
         target = interaction.action.target
         if not isinstance(target, ResolvedCardReference):
@@ -138,20 +180,58 @@ class RunSession:
             return self.state
         self._current_card_id = self._history.pop()
         self._warning = None
+        self._notice = None
         return self.state
 
     def restart(self) -> RunSessionState:
         self._current_card_id = self._entry_card_id
         self._history.clear()
+        self._keys.clear()
         self._warning = self._start_warning
+        self._notice = None
         return self.state
 
     def clear(self) -> None:
         self._current_card_id = None
         self._entry_card_id = None
         self._history.clear()
+        self._keys.clear()
         self._start_warning = None
         self._warning = None
+        self._notice = None
+
+    def _is_active(self, interaction: Interaction) -> bool:
+        conditions = interaction.conditions
+        return set(conditions.requires) <= self._keys and not (
+            set(conditions.forbids) & self._keys
+        )
+
+    @staticmethod
+    def _has_effect(interaction: Interaction) -> bool:
+        changes = interaction.key_changes
+        return (
+            interaction.action is not None
+            or changes.clear_all
+            or bool(changes.remove)
+            or bool(changes.grant)
+        )
+
+    @staticmethod
+    def _key_change_notice(document: Stack, interaction: Interaction) -> str:
+        changes = interaction.key_changes
+        if changes.clear_all:
+            return "Cleared all keys"
+        parts = [
+            *(
+                f"Removed {document.key_by_id(key_id).name}"
+                for key_id in changes.remove
+            ),
+            *(
+                f"Granted {document.key_by_id(key_id).name}"
+                for key_id in changes.grant
+            ),
+        ]
+        return " · ".join(parts)
 
 
 __all__ = ["RunSession", "RunSessionState"]

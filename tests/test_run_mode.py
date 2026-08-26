@@ -22,10 +22,13 @@ from hypergen.domain.models import (
     Card,
     CardRevision,
     GeneratedBackground,
+    HotspotConditions,
+    HotspotKeyChanges,
     HotspotSet,
     ImageGenerationInputs,
     ImageGenerationMetadata,
     Interaction,
+    KeyDefinition,
     NavigateAction,
     Point,
     Polygon,
@@ -146,7 +149,7 @@ def test_run_session_navigates_uuid_links_with_back_and_restart() -> None:
     assert session.restart().current_card_id == document.start_card_id
 
     session.start(document)
-    state = session.navigate(document, to_second.id)
+    state = session.activate(document, to_second.id)
     assert state.current_card_id == document.cards[1].id
     assert state.history == (document.cards[0].id,)
 
@@ -154,7 +157,7 @@ def test_run_session_navigates_uuid_links_with_back_and_restart() -> None:
     assert state.current_card_id == document.cards[0].id
     assert state.history == ()
 
-    session.navigate(document, to_second.id)
+    session.activate(document, to_second.id)
     state = session.restart()
     assert state.current_card_id == document.start_card_id
     assert state.history == ()
@@ -165,11 +168,11 @@ def test_run_session_warns_without_moving_for_unresolved_or_stale_links() -> Non
     session = RunSession()
     session.start(document)
 
-    state = session.navigate(document, unresolved.id)
+    state = session.activate(document, unresolved.id)
     assert state.current_card_id == document.cards[0].id
     assert state.warning == 'Link to "Missing room" is unresolved.'
 
-    state = session.navigate(document, document.cards[1].id)
+    state = session.activate(document, document.cards[1].id)
     assert state.current_card_id == document.cards[0].id
     assert state.warning == "That hotspot is no longer available on this card."
 
@@ -188,6 +191,100 @@ def test_run_session_uses_current_or_first_card_when_start_is_missing() -> None:
     state = session.start(Stack(name="Empty"))
     assert state.current_card_id is None
     assert state.warning == "This stack has no cards to run."
+
+
+def test_run_session_filters_conditions_and_applies_keys_before_navigation() -> None:
+    red_key = KeyDefinition(name="Red key")
+    visited = KeyDefinition(name="Visited castle")
+    destination = Card(name="Castle")
+    take_key = Interaction(
+        key_changes=HotspotKeyChanges(grant=(red_key.id,)),
+    )
+    enter = Interaction(
+        conditions=HotspotConditions(
+            requires=(red_key.id,),
+            forbids=(visited.id,),
+        ),
+        key_changes=HotspotKeyChanges(
+            remove=(red_key.id,),
+            grant=(visited.id,),
+        ),
+        action=NavigateAction(
+            target=ResolvedCardReference(target_card_id=destination.id)
+        ),
+    )
+    placeholder = Interaction()
+    revision = CardRevision(
+        hotspot_set=HotspotSet(interactions=(take_key, enter, placeholder))
+    )
+    source = Card(
+        name="Start",
+        revisions=(revision,),
+        active_revision_id=revision.id,
+    )
+    document = Stack(
+        name="Run",
+        keys=(red_key, visited),
+        cards=(source, destination),
+        start_card_id=source.id,
+    )
+    session = RunSession()
+
+    state = session.start(document)
+    active = session.active_hotspot_set(document)
+    assert active is not None
+    assert [item.id for item in active.interactions] == [take_key.id]
+    assert state.keys == frozenset()
+
+    state = session.activate(document, take_key.id)
+    assert state.keys == frozenset({red_key.id})
+    assert state.notice == "Granted Red key"
+    active = session.active_hotspot_set(document)
+    assert active is not None
+    assert [item.id for item in active.interactions] == [take_key.id, enter.id]
+
+    state = session.activate(document, enter.id)
+    assert state.current_card_id == destination.id
+    assert state.keys == frozenset({visited.id})
+    assert state.notice is None
+    assert session.back().keys == frozenset({visited.id})
+    restarted = session.restart()
+    assert restarted.current_card_id == source.id
+    assert restarted.keys == frozenset()
+
+
+def test_run_session_rechecks_conditions_and_changes_keys_before_link_warning() -> None:
+    red_key = KeyDefinition(name="Red key")
+    interaction = Interaction(
+        conditions=HotspotConditions(forbids=(red_key.id,)),
+        key_changes=HotspotKeyChanges(grant=(red_key.id,)),
+        action=NavigateAction(
+            target=UnresolvedCardReference(target_name="Missing room")
+        ),
+    )
+    revision = CardRevision(
+        hotspot_set=HotspotSet(interactions=(interaction,))
+    )
+    source = Card(
+        name="Start",
+        revisions=(revision,),
+        active_revision_id=revision.id,
+    )
+    document = Stack(
+        name="Run",
+        keys=(red_key,),
+        cards=(source,),
+        start_card_id=source.id,
+    )
+    session = RunSession()
+    session.start(document)
+
+    state = session.activate(document, interaction.id)
+    assert state.keys == frozenset({red_key.id})
+    assert state.warning == 'Link to "Missing room" is unresolved.'
+    state = session.activate(document, interaction.id)
+    assert state.keys == frozenset({red_key.id})
+    assert state.warning is None
 
 
 def polygon(
@@ -377,6 +474,68 @@ def test_run_canvas_uses_topmost_hit_with_back_and_restart(
     assert window.canvas_card_name.text() == "First"
     assert not window.back_action.isEnabled()
     assert unresolved.id != to_third.id
+    window.close()
+
+
+def test_run_canvas_skips_inactive_overlapping_hotspots_before_z_order(
+    application: QApplication,
+    tmp_path: Path,
+) -> None:
+    window, _session, to_incomplete, to_third, _unresolved = build_run_window(
+        tmp_path
+    )
+    locked = KeyDefinition(name="Door unlocked")
+    document = window.controller.document
+    first = document.cards[0]
+    revision = first.active_revision
+    assert revision.hotspot_set is not None
+    interactions = tuple(
+        interaction.model_copy(
+            update={
+                "conditions": HotspotConditions(requires=(locked.id,))
+            }
+        )
+        if interaction.id == to_third.id
+        else interaction
+        for interaction in revision.hotspot_set.interactions
+    )
+    revision = revision.model_copy(
+        update={"hotspot_set": HotspotSet(interactions=interactions)}
+    )
+    first = first.model_copy(
+        update={
+            "revisions": (revision,),
+            "active_revision_id": revision.id,
+        }
+    )
+    window.controller.replace_document(
+        document.model_copy(
+            update={
+                "keys": (locked,),
+                "cards": (first, *document.cards[1:]),
+            }
+        )
+    )
+    window.render_document()
+    window.resize(1000, 700)
+    window.show()
+    window.mode_button.click()
+    application.processEvents()
+
+    overlap = window.card_canvas.viewport_point_for(QPointF(0.3, 0.3))
+    QTest.mouseMove(
+        window.card_canvas.viewport(),
+        window.card_canvas.rect().topLeft(),
+    )
+    QTest.mouseMove(window.card_canvas.viewport(), overlap)
+    assert window.card_canvas._hovered_interaction_id == to_incomplete.id
+
+    QTest.mouseClick(
+        window.card_canvas.viewport(),
+        Qt.MouseButton.LeftButton,
+        pos=overlap,
+    )
+    assert window.canvas_card_name.text() == "Incomplete"
     window.close()
 
 
