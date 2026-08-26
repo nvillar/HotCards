@@ -15,6 +15,7 @@ from hypergen.application.commands import (
     ChangeHotspotDestinationCommand,
     CommandError,
     CreateCardCommand,
+    CreateKeyAndAddHotspotReferenceCommand,
     DeleteCardCommand,
     DeleteInteractionCommand,
     DeleteKeyCommand,
@@ -205,6 +206,28 @@ def test_key_lifecycle_and_hotspot_behavior_are_typed_changes() -> None:
     ).apply(document)
     document = DeleteKeyCommand(key_id=key_id).apply(document)
     assert document.keys == ()
+
+
+def test_create_key_and_hotspot_reference_is_atomic() -> None:
+    interaction = Interaction()
+    source, revision = card_with_revision(interaction)
+    document = Stack(name="Stack", cards=(source,))
+    command = CreateKeyAndAddHotspotReferenceCommand(
+        card_id=source.id,
+        revision_id=revision.id,
+        interaction_id=interaction.id,
+        name="Visited castle",
+        role="grant",
+    )
+
+    changed = command.apply(document)
+
+    assert changed.keys == (
+        KeyDefinition(id=command.key_id, name="Visited castle"),
+    )
+    hotspot_set = changed.cards[0].active_revision.hotspot_set
+    assert hotspot_set is not None
+    assert hotspot_set.interactions[0].key_changes.grant == (command.key_id,)
 
 
 def test_duplicate_revision_copies_style_selection() -> None:

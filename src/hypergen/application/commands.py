@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Literal, Protocol
 from uuid import UUID, uuid4
 
 from hypergen.domain.models import (
@@ -362,6 +362,48 @@ class AddKeyCommand:
             raise CommandError(f"Key {self.key_id} already exists")
         key = KeyDefinition(id=self.key_id, name=self.name)
         return validated_copy(document.model_copy(update={"keys": (*document.keys, key)}))
+
+
+@dataclass(frozen=True, slots=True)
+class CreateKeyAndAddHotspotReferenceCommand:
+    """Create one Key and reference it from one hotspot atomically."""
+
+    card_id: UUID
+    revision_id: UUID
+    interaction_id: UUID
+    name: str
+    role: Literal["requires", "forbids", "remove", "grant"]
+    key_id: UUID = field(default_factory=uuid4)
+
+    def apply(self, document: Stack) -> Stack:
+        changed = AddKeyCommand(name=self.name, key_id=self.key_id).apply(document)
+        interaction = _interaction(
+            changed,
+            card_id=self.card_id,
+            revision_id=self.revision_id,
+            interaction_id=self.interaction_id,
+        )
+        if self.role in {"requires", "forbids"}:
+            values = getattr(interaction.conditions, self.role)
+            conditions = interaction.conditions.model_copy(
+                update={self.role: (*values, self.key_id)}
+            )
+            return SetHotspotConditionsCommand(
+                card_id=self.card_id,
+                revision_id=self.revision_id,
+                interaction_id=self.interaction_id,
+                conditions=conditions,
+            ).apply(changed)
+        values = getattr(interaction.key_changes, self.role)
+        key_changes = interaction.key_changes.model_copy(
+            update={self.role: (*values, self.key_id)}
+        )
+        return SetHotspotKeyChangesCommand(
+            card_id=self.card_id,
+            revision_id=self.revision_id,
+            interaction_id=self.interaction_id,
+            key_changes=key_changes,
+        ).apply(changed)
 
 
 @dataclass(frozen=True, slots=True)
@@ -971,6 +1013,7 @@ __all__ = [
     "CommandError",
     "CreateCardAndResolveCommand",
     "CreateCardCommand",
+    "CreateKeyAndAddHotspotReferenceCommand",
     "CreateGeneratedRevisionCommand",
     "DeleteCardCommand",
     "DeleteInteractionCommand",

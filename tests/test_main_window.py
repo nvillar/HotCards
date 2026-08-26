@@ -532,6 +532,31 @@ def test_card_delete_applies_immediately_and_offers_targeted_undo(
     assert controller.document.start_card_id == controller.document.cards[0].id
 
 
+def test_card_delete_ignores_destinationless_hotspots(
+    application: QApplication,
+) -> None:
+    destination = Card(name="Destination")
+    source = Card(
+        name="Source",
+        revisions=(
+            CardRevision(
+                hotspot_set=HotspotSet(interactions=(Interaction(),))
+            ),
+        ),
+    )
+    window, controller, _workers, _background = _window(
+        Stack(
+            name="Demo",
+            cards=(source, destination),
+            start_card_id=source.id,
+        )
+    )
+
+    window._delete_card(destination.id)
+
+    assert [card.id for card in controller.document.cards] == [source.id]
+
+
 def test_context_change_cancels_background_generation_without_prompt(
     application: QApplication,
 ) -> None:

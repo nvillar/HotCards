@@ -72,12 +72,10 @@ from hypergen.domain.models import (
     Card,
     HotspotSet,
     Interaction,
-    NavigateAction,
     Polygon,
     ResolvedCardReference,
     RunOverlayMode,
     Stack,
-    UnresolvedCardReference,
 )
 from hypergen.generation.ollama_client import OllamaSettings
 from hypergen.storage.stack_store import StackStoreError
@@ -392,6 +390,7 @@ class MainWindow(QMainWindow):
         self.inspector.generate_background_requested.connect(self._generate_background)
         self.inspector.change_applied.connect(self._show_undo_notification)
         self.inspector.hotspot_selected.connect(self.card_canvas.select_interaction)
+        self.inspector.hotspot_usage_requested.connect(self._show_hotspot_usage)
         self.card_canvas.interaction_selected.connect(self.inspector.select_interaction)
         self.card_canvas.empty_area_requested.connect(self._begin_implicit_hotspot_area)
         self.card_canvas.polygon_created.connect(self._create_hotspot_polygon)
@@ -630,6 +629,46 @@ class MainWindow(QMainWindow):
         if self.card_sidebar.selected_card_id != self._selected_card_id:
             self.card_sidebar.select_card(self._selected_card_id)
         self.render_document()
+
+    def _show_hotspot_usage(
+        self,
+        card_id: object,
+        revision_id: object,
+        interaction_id: object,
+    ) -> None:
+        if (
+            self._is_running
+            or not isinstance(card_id, UUID)
+            or not isinstance(revision_id, UUID)
+            or not isinstance(interaction_id, UUID)
+            or not self._commit_authoring_metadata()
+        ):
+            return
+        self.select_card(card_id)
+        card = next(
+            (
+                candidate
+                for candidate in self.controller.document.cards
+                if candidate.id == card_id
+            ),
+            None,
+        )
+        if card is None:
+            return
+        if card.active_revision_id != revision_id:
+            self._activate_revision(revision_id)
+            card = next(
+                (
+                    candidate
+                    for candidate in self.controller.document.cards
+                    if candidate.id == card_id
+                ),
+                None,
+            )
+        if card is None or card.active_revision_id != revision_id:
+            return
+        self.inspector.show_interaction(interaction_id)
+        self.card_canvas.select_interaction(interaction_id)
 
     def _commit_canvas_card_name(self) -> bool:
         if self._rendering or self._selected_card_id is None or self._is_running:
@@ -1002,7 +1041,8 @@ class MainWindow(QMainWindow):
             for revision in candidate.revisions
             if revision.hotspot_set is not None
             for interaction in revision.hotspot_set.interactions
-            if isinstance(interaction.action.target, ResolvedCardReference)
+            if interaction.action is not None
+            and isinstance(interaction.action.target, ResolvedCardReference)
             and interaction.action.target.target_card_id == card.id
         )
         if self.background_workflow is not None and self.background_workflow.is_generating_for(
@@ -1658,10 +1698,7 @@ class MainWindow(QMainWindow):
             selected_id = interaction_id
             selected_polygon_index = len(interaction.polygons)
         else:
-            interaction = Interaction(
-                action=NavigateAction(target=UnresolvedCardReference()),
-                polygons=(polygon,),
-            )
+            interaction = Interaction(polygons=(polygon,))
             command = AddInteractionCommand(
                 card_id=card_id,
                 revision_id=revision_id,
@@ -1687,9 +1724,7 @@ class MainWindow(QMainWindow):
         card_id, revision_id, hotspot_set = context
         interaction_id = self.inspector.selected_interaction_id
         if interaction_id is None:
-            interaction = Interaction(
-                action=NavigateAction(target=UnresolvedCardReference()),
-            )
+            interaction = Interaction()
             interaction_id = interaction.id
             self._execute_hotspot_canvas_command(
                 AddInteractionCommand(

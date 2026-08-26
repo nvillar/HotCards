@@ -83,9 +83,9 @@ for live Ollama and MFLUX runs.
   native Description/Image Prompt radio controls below it, default to Image
   Prompt when it exists, place the Style selector above Reference and before
   Prepare Image Prompt and Generate, and keep generation provenance in button
-  tooltips. Keep Styles as the middle inspector tab with a list, compact
-  remove/add controls, and vertically stacked full-width Name and Style Text
-  fields. Encode Image
+  tooltips. Keep inspector tabs ordered Background, Styles, Hotspots, Keys.
+  Keep Styles and Keys as stack-global list managers with compact remove/add
+  controls and vertically stacked full-width fields. Encode Image
   Prompt freshness in the preparation action from the Description, exact usable
   Reference background, selected Ollama model, and preparation prompt version:
   current is a disabled completed state and stale is Update Image Prompt. Clearing the
@@ -123,10 +123,10 @@ for live Ollama and MFLUX runs.
 - Store each hotspot set under exactly one complete card revision. Replacing a
   background preserves its hotspots so the author can review and adjust them
   manually.
-- Hotspots may have no polygons. Derive every hotspot's label from its resolved
-  destination card's current name, or `Unresolved`; do not expose separate
-  label editing. Area-less hotspots retain their destination in storage and are
-  ignored by Run-mode hit testing.
+- Hotspots may have no polygons. Keep an optional custom Name; when absent,
+  derive a short label from Remove, Grant, then destination actions and display
+  long automatic labels on at most two lines. Area-less hotspots retain all
+  semantics in storage and are ignored by Run-mode hit testing.
 - Keep Author canvas selection hierarchical: a selected vertex belongs to a
   selected polygon, which belongs to the selected hotspot. Inspector
   synchronization and same-revision edits must not discard a valid more
@@ -156,8 +156,20 @@ for live Ollama and MFLUX runs.
   after selection. If a destination card is deleted, convert inbound references to
   unresolved while retaining the former target name; do not delete inbound
   hotspots.
-- Expose and execute only the `navigate` action initially. Keep the stored action
-  representation typed and forward-compatible, and reject unknown action types.
+- Keep an ordered, stack-owned catalog of free-form named binary Keys with
+  stable UUIDs. Key names are trimmed, nonempty, and case-insensitively unique.
+  Renaming preserves references; block deletion while any hotspot in any
+  revision references the Key. Keep the Keys inspector after Hotspots and show
+  every reference grouped by hotspot revision and semantic role.
+- Keep hotspot state behavior closed and typed: all required Keys must be
+  present, all forbidden Keys absent, Remove and Grant sets must be disjoint,
+  and Clear All is exclusive. Do not add values, counters, expressions,
+  arbitrary action sequences, or scripting.
+- Keep current Keys in `RunSession`, never in the authored stack or widgets.
+  Enter Run empty, retain Keys through Back, clear them on Restart, and discard
+  them on exit. Filter condition-failing and actionless hotspots before
+  z-order hit testing, recheck conditions on activation, then execute Remove,
+  Grant, and optional navigation in that order.
 - Do not add a database, web server, browser UI, plugin system,
   dependency-injection framework, event bus, arbitrary scripting engine, model
   downloader, or hosted experiment platform.

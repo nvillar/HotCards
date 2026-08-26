@@ -7,9 +7,12 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QApplication,
+    QComboBox,
     QFrame,
+    QInputDialog,
     QLabel,
     QRadioButton,
     QStyle,
@@ -20,9 +23,12 @@ from hypergen.application.document_controller import DocumentController
 from hypergen.domain.models import (
     Card,
     CardRevision,
+    HotspotConditions,
+    HotspotKeyChanges,
     HotspotSet,
     ImagePrompt,
     Interaction,
+    KeyDefinition,
     NavigateAction,
     ResolvedCardReference,
     Stack,
@@ -60,10 +66,11 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     inspector = Inspector(controller)
     inspector.render(controller.document, card.id)
 
-    assert inspector.inspector_tabs.count() == 3
+    assert inspector.inspector_tabs.count() == 4
     assert inspector.inspector_tabs.tabText(0) == "Background"
     assert inspector.inspector_tabs.tabText(1) == "Styles"
     assert inspector.inspector_tabs.tabText(2) == "Hotspots"
+    assert inspector.inspector_tabs.tabText(3) == "Keys"
     root_layout = inspector.layout()
     assert root_layout is not None
     assert root_layout.contentsMargins().top() == 16
@@ -126,7 +133,7 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     assert styles_layout.indexOf(inspector.style_prompt_label) < (
         styles_layout.indexOf(inspector.style_prompt_edit)
     )
-    assert inspector.hotspot_target_label.text() == "Hotspot Target"
+    assert inspector.hotspot_target_label.text() == "Go to"
     assert inspector.hotspot_target_label.font().pointSizeF() == (
         inspector.description_label.font().pointSizeF()
     )
@@ -156,6 +163,15 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     assert hotspot_controls.indexOf(inspector.delete_hotspot_button) < hotspot_controls.indexOf(
         inspector.add_hotspot_button
     )
+    keys_layout = inspector.key_list.parentWidget().layout()
+    assert keys_layout is not None
+    key_controls = keys_layout.itemAt(
+        keys_layout.indexOf(inspector.key_list) + 1
+    ).layout()
+    assert key_controls is not None
+    assert key_controls.indexOf(inspector.delete_key_button) < (
+        key_controls.indexOf(inspector.add_key_button)
+    )
 
     visible_copy = " ".join(label.text() for label in inspector.findChildren(QLabel))
     for obsolete in (
@@ -168,6 +184,207 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
         "Generate Hotspots",
     ):
         assert obsolete not in visible_copy
+
+
+def test_keys_tab_manages_global_names_and_lists_hotspot_usages(
+    application: QApplication,
+) -> None:
+    red_key = KeyDefinition(name="Red key")
+    interaction = Interaction(
+        key_changes=HotspotKeyChanges(remove=(red_key.id,)),
+        conditions=HotspotConditions(requires=(red_key.id,)),
+    )
+    card = Card(
+        name="Castle",
+        revisions=(
+            CardRevision(hotspot_set=HotspotSet(interactions=(interaction,))),
+        ),
+    )
+    controller = DocumentController(
+        Stack(name="Demo", keys=(red_key,), cards=(card,))
+    )
+    inspector = Inspector(controller)
+    inspector.render(controller.document, card.id)
+
+    assert inspector.key_list.currentItem().text() == "Red key — 1 use"
+    assert inspector.key_name_edit.text() == "Red key"
+    assert not inspector.delete_key_button.isEnabled()
+    assert inspector.key_usage_list.count() == 1
+    assert inspector.key_usage_list.item(0).text() == (
+        "Castle · Version 1\n"
+        "Remove Red key\n"
+        "Requires · Removes"
+    )
+
+    inspector.key_name_edit.setText("Ruby key")
+    usage_item = inspector.key_usage_list.item(0)
+    inspector._key_name_editing_finished(
+        inspector.show_hotspot_usage_button,
+        Qt.FocusReason.MouseFocusReason,
+    )
+    assert controller.document.keys[0].name == "Ruby key"
+    assert inspector.key_usage_list.item(0) is usage_item
+    assert inspector.key_usage_list.item(0).text().splitlines()[1] == (
+        "Remove Ruby key"
+    )
+    hotspot_set = controller.document.cards[0].active_revision.hotspot_set
+    assert hotspot_set is not None
+    assert hotspot_set.interactions[0].label == "Remove Ruby key"
+
+    requested: list[tuple[object, object, object]] = []
+    inspector.hotspot_usage_requested.connect(
+        lambda card_id, revision_id, interaction_id: requested.append(
+            (card_id, revision_id, interaction_id)
+        )
+    )
+    inspector.key_usage_list.setCurrentRow(0)
+    inspector.show_hotspot_usage_button.click()
+    assert requested == [
+        (card.id, card.active_revision.id, interaction.id)
+    ]
+
+    inspector.add_key_button.click()
+    assert [key.name for key in controller.document.keys] == [
+        "Ruby key",
+        "New Key",
+    ]
+    assert inspector.delete_key_button.isEnabled()
+    inspector.delete_key_button.click()
+    assert [key.name for key in controller.document.keys] == ["Ruby key"]
+
+
+def test_hotspot_pipeline_edits_name_conditions_changes_and_navigation(
+    application: QApplication,
+) -> None:
+    red_key = KeyDefinition(name="Red key")
+    door_open = KeyDefinition(name="Door open")
+    destination = Card(name="Castle")
+    interaction = Interaction(
+        conditions=HotspotConditions(requires=(red_key.id,)),
+        key_changes=HotspotKeyChanges(
+            remove=(red_key.id,),
+            grant=(door_open.id,),
+        ),
+        action=NavigateAction(
+            target=ResolvedCardReference(target_card_id=destination.id)
+        ),
+    )
+    source = Card(
+        name="Source",
+        revisions=(
+            CardRevision(hotspot_set=HotspotSet(interactions=(interaction,))),
+        ),
+    )
+    controller = DocumentController(
+        Stack(
+            name="Demo",
+            keys=(red_key, door_open),
+            cards=(source, destination),
+        )
+    )
+    inspector = Inspector(controller)
+    inspector.render(controller.document, source.id)
+
+    assert inspector.hotspot_name_edit.text() == ""
+    assert inspector.hotspot_name_edit.placeholderText() == (
+        "Leave blank to name automatically"
+    )
+    assert inspector.hotspot_list.currentItem().text() == (
+        "Remove Red key · Grant Door open\n→ Castle"
+    )
+    assert inspector.condition_table.rowCount() == 1
+    condition_state = inspector.condition_table.cellWidget(0, 1)
+    assert isinstance(condition_state, QComboBox)
+    assert condition_state.currentText() == "Present"
+    assert inspector.key_change_table.rowCount() == 2
+    remove_change = inspector.key_change_table.cellWidget(0, 0)
+    grant_change = inspector.key_change_table.cellWidget(1, 0)
+    assert isinstance(remove_change, QComboBox)
+    assert isinstance(grant_change, QComboBox)
+    assert remove_change.currentText() == "Remove"
+    assert grant_change.currentText() == "Grant"
+    assert inspector.hotspot_target_label.text() == "Go to"
+    assert inspector.hotspot_summary.text() == (
+        "When Red key is present, remove Red key, then grant Door open, "
+        "then go to Castle."
+    )
+
+    inspector.hotspot_name_edit.setText("Unlock castle")
+    condition_key = inspector.condition_table.cellWidget(0, 0)
+    inspector._hotspot_name_editing_finished(
+        condition_key,
+        Qt.FocusReason.MouseFocusReason,
+    )
+    changed = controller.document.cards[0].active_revision.hotspot_set
+    assert changed is not None
+    assert changed.interactions[0].name == "Unlock castle"
+    assert inspector.hotspot_list.currentItem().text() == "Unlock castle"
+    assert inspector.condition_table.cellWidget(0, 0) is condition_key
+
+    grant_key = inspector.key_change_table.cellWidget(1, 1)
+    assert isinstance(grant_key, QComboBox)
+    grant_key.setCurrentIndex(
+        next(
+            index
+            for index in range(grant_key.count())
+            if grant_key.itemData(index) == red_key.id
+        )
+    )
+    assert "both removed and granted" in inspector.hotspot_error.text()
+    assert not inspector.hotspot_error.isHidden()
+    changed = controller.document.cards[0].active_revision.hotspot_set
+    assert changed is not None
+    assert changed.interactions[0].key_changes.grant == (door_open.id,)
+
+    inspector.clear_all_keys_checkbox.click()
+    changed = controller.document.cards[0].active_revision.hotspot_set
+    assert changed is not None
+    assert changed.interactions[0].key_changes == HotspotKeyChanges(
+        clear_all=True
+    )
+    assert inspector.key_change_table.rowCount() == 0
+    assert not inspector.add_key_change_button.isEnabled()
+
+    no_destination_index = next(
+        index
+        for index in range(inspector.hotspot_destination_combo.count())
+        if inspector.hotspot_destination_combo.itemData(index) is None
+    )
+    inspector.hotspot_destination_combo.setCurrentIndex(no_destination_index)
+    application.processEvents()
+    changed = controller.document.cards[0].active_revision.hotspot_set
+    assert changed is not None
+    assert changed.interactions[0].action is None
+
+
+def test_contextual_key_creation_label_does_not_reserve_free_form_name(
+    application: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    key = KeyDefinition(name="Create New Key...")
+    interaction = Interaction()
+    card = Card(
+        name="Card",
+        revisions=(
+            CardRevision(hotspot_set=HotspotSet(interactions=(interaction,))),
+        ),
+    )
+    controller = DocumentController(
+        Stack(name="Demo", keys=(key,), cards=(card,))
+    )
+    inspector = Inspector(controller)
+    inspector.render(controller.document, card.id)
+    monkeypatch.setattr(
+        QInputDialog,
+        "getItem",
+        lambda *_args, **_kwargs: ("Create New Key...", True),
+    )
+
+    inspector.add_condition_button.click()
+
+    changed = controller.document.cards[0].active_revision.hotspot_set
+    assert changed is not None
+    assert changed.interactions[0].conditions.requires == (key.id,)
 
 
 def test_description_edits_target_active_revision(
@@ -552,7 +769,7 @@ def test_add_hotspot_persists_and_selects_area_less_entry(
     assert hotspot_set is not None
     assert len(hotspot_set.interactions) == 1
     interaction = hotspot_set.interactions[0]
-    assert interaction.label == "Unresolved destination"
+    assert interaction.label == "New Hotspot"
     assert interaction.polygons == ()
     assert inspector.selected_interaction_id == interaction.id
 

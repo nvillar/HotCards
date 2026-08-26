@@ -16,7 +16,7 @@ authoring shell remains usable when either service is unavailable.
 Stacks are stored as self-contained `.hypergen` directory bundles and
 autosaved atomically after creation or opening. At startup, HyperGen lists
 projects in `~/Documents/HyperGen` and offers direct Open and Create actions.
-Schema-v5 and schema-v6 bundles are migrated in memory to the current schema
+Schema-v5 through schema-v7 bundles are migrated in memory to the current schema
 when opened; unsupported older or future schemas are rejected.
 
 Each card owns one or more numbered revisions. A revision contains its authored
@@ -29,11 +29,12 @@ adjacent step label and progress bar to the left of the model selectors show
 actual MFLUX inference-step completion during image generation and an
 indeterminate state during Image Prompt preparation.
 
-The inspector tabs are Background, Styles, and Hotspots. Background follows the
-authoring sequence Description, Style, optional Reference, Prepare Image Prompt,
-then Generate Image. Description and Image Prompt share one editor with native
-radio controls that appear after a prompt has been prepared. The Style selector
-chooses a named stack-wide treatment; No Style is always available.
+The inspector tabs are Background, Styles, Hotspots, and Keys. Background
+follows the authoring sequence Description, Style, optional Reference, Prepare
+Image Prompt, then Generate Image. Description and Image Prompt share one
+editor with native radio controls that appear after a prompt has been prepared.
+The Style selector chooses a named stack-wide treatment; No Style is always
+available.
 Description is always the authoritative author input. Prepare Image Prompt creates one
 editable Image Prompt proposal from the current Description; it never uses the
 previous Image Prompt as input or inserts a separate clarification step. With a
@@ -94,23 +95,43 @@ prompts without current model and contract provenance remain visible but must
 be enriched again before generation. Schema-v6 stacks receive the built-in
 Style library but retain No Style on all existing revisions and new cards.
 
-The Hotspots inspector is the sole source of interaction semantics. A new
-hotspot is persisted and selected immediately, even before it has an area;
-its displayed name is always its destination card's current name, or
-`Unresolved` when it has no resolved destination. Hotspot names are not edited
-separately. While the Hotspots tab is active, clicking empty canvas begins a
-polygon for the selected hotspot and creates one first when needed. Leaving the
-tab cancels any unfinished polygon and hides its authoring overlays. Canvas
-editing uses hierarchical hotspot, area, and vertex selection: drag an area or
-vertex to move it, use the edge `+` or double-click an edge to add a vertex,
-press Delete to remove the selected vertex or area, and press Escape to step
-back through the selection. Context menus expose the same geometry actions, and
-successful edits offer a dismissible Undo. Replacing
-a background preserves its hotspots so the author can review and adjust them
-manually. Run mode supports deterministic hotspot navigation, Back/Restart
-history, and configurable overlays. It opens on the current Author card and,
-when that differs from the configured start card, offers a dismissible restart
-action. Run presents Back and Restart as standard-size controls and hides the
+The Hotspots inspector is the sole source of revision-local interaction
+semantics. A new hotspot is persisted and selected immediately, even before it
+has an area. Its optional custom Name overrides a deterministic automatic name
+derived in Remove, Grant, then destination order; clearing Name restores
+automatic naming. Long automatic names use two-line list entries. WHEN rows
+require every Present key to exist and every Absent key not to exist. THEN rows
+apply disjoint Remove and Grant sets, or the exclusive Clear all keys action,
+before the optional Go to destination. Keys are stack-global free-form names
+with stable internal IDs.
+
+The Keys tab manages that global catalog with the same list, compact remove/add,
+and full-width Name patterns as Styles. It reports every card revision and
+hotspot that Requires, Forbids, Removes, or Grants the selected key, and can
+jump to that exact hotspot. Renaming updates every display through stable
+references. In-use keys cannot be deleted. Keys can also be created while
+adding a condition or key change.
+
+While the Hotspots tab is active, clicking empty canvas begins a polygon for the
+selected hotspot and creates one first when needed. Leaving the tab cancels any
+unfinished polygon and hides its authoring overlays. Canvas editing uses
+hierarchical hotspot, area, and vertex selection: drag an area or vertex to
+move it, use the edge `+` or double-click an edge to add a vertex, press Delete
+to remove the selected vertex or area, and press Escape to step back through
+the selection. Context menus expose the same geometry actions, and successful
+edits offer a dismissible Undo. Replacing a background preserves its hotspots
+so the author can review and adjust them manually.
+
+Run mode keeps its current keys only in the session. It starts empty, Back
+retains keys, Restart clears them, and leaving Run discards them. Condition-
+failing and actionless placeholder hotspots are omitted from hover, overlays,
+and hit testing; existing z-order selects the topmost remaining hotspot.
+Activation rechecks conditions, removes keys, grants keys, and finally
+navigates, so the destination sees the updated state. Pure key actions are
+valid. Run also retains deterministic Back/Restart navigation history and
+configurable overlays. It opens on the current Author card and, when that
+differs from the configured start card, offers a dismissible restart action.
+Run presents Back and Restart as standard-size controls and hides the
 authoring-only card name and version header. Run-only navigation and overlay
 controls stay hidden in Author mode. Cards without hotspots are valid terminal
 cards and do not produce a warning.
