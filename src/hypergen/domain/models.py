@@ -21,7 +21,7 @@ from pydantic import (
     model_validator,
 )
 
-CURRENT_SCHEMA_VERSION = 8
+CURRENT_SCHEMA_VERSION = 9
 
 NonEmptyString = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 NormalizedCoordinate = Annotated[float, Field(ge=0.0, le=1.0)]
@@ -174,7 +174,6 @@ class HotspotKeyChanges(DomainModel):
 
     remove: tuple[UUID, ...] = Field(default_factory=tuple)
     grant: tuple[UUID, ...] = Field(default_factory=tuple)
-    clear_all: bool = False
 
     @model_validator(mode="after")
     def require_unambiguous_changes(self) -> HotspotKeyChanges:
@@ -184,8 +183,6 @@ class HotspotKeyChanges(DomainModel):
             raise ValueError("granted keys must be unique")
         if set(self.remove) & set(self.grant):
             raise ValueError("a key cannot be both removed and granted")
-        if self.clear_all and (self.remove or self.grant):
-            raise ValueError("clear_all cannot be combined with remove or grant")
         return self
 
 
@@ -550,21 +547,18 @@ def _automatic_interaction_label(
     key_names: dict[UUID, str],
 ) -> str:
     changes: list[str] = []
-    if interaction.key_changes.clear_all:
-        changes.append("Clear all keys")
-    else:
-        if interaction.key_changes.remove:
-            changes.append(
-                f"Remove {key_names[interaction.key_changes.remove[0]]}"
-                if len(interaction.key_changes.remove) == 1
-                else "Remove keys"
-            )
-        if interaction.key_changes.grant:
-            changes.append(
-                f"Grant {key_names[interaction.key_changes.grant[0]]}"
-                if len(interaction.key_changes.grant) == 1
-                else "Grant keys"
-            )
+    if interaction.key_changes.remove:
+        changes.append(
+            f"Remove {key_names[interaction.key_changes.remove[0]]}"
+            if len(interaction.key_changes.remove) == 1
+            else "Remove keys"
+        )
+    if interaction.key_changes.grant:
+        changes.append(
+            f"Grant {key_names[interaction.key_changes.grant[0]]}"
+            if len(interaction.key_changes.grant) == 1
+            else "Grant keys"
+        )
     destination: str | None = None
     action = interaction.action
     if action is not None:

@@ -348,8 +348,6 @@ def test_hotspot_key_contract_is_closed_and_references_stack_keys() -> None:
         HotspotConditions(requires=(red_key.id,), forbids=(red_key.id,))
     with pytest.raises(ValidationError, match="both removed and granted"):
         HotspotKeyChanges(remove=(red_key.id,), grant=(red_key.id,))
-    with pytest.raises(ValidationError, match="clear_all"):
-        HotspotKeyChanges(grant=(red_key.id,), clear_all=True)
     with pytest.raises(ValidationError, match="hotspot key references"):
         Stack(
             name="Castle",

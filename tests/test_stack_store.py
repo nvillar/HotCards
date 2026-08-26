@@ -16,10 +16,12 @@ from hypergen.domain.models import (
     Card,
     CardRevision,
     GeneratedBackground,
+    HotspotKeyChanges,
     HotspotSet,
     ImageGenerationInputs,
     ImageGenerationMetadata,
     Interaction,
+    KeyDefinition,
     NavigateAction,
     Point,
     Polygon,
@@ -265,7 +267,7 @@ def test_load_rejects_missing_unsupported_and_future_versions(
         ({"name": "Missing"}, "schema_version"),
         ({"schema_version": 3, "name": "Legacy"}, "schema_version"),
         ({"schema_version": 4, "name": "Legacy"}, "schema_version"),
-        ({"schema_version": 9, "name": "Future"}, "schema_version"),
+        ({"schema_version": 10, "name": "Future"}, "schema_version"),
     ]:
         store.stack_path.write_text(json.dumps(payload))
         with pytest.raises(StackStoreError, match=message):
@@ -401,6 +403,58 @@ def test_load_migrates_v7_hotspots_to_conditional_behavior(
     assert changed.interactions[0].conditions.requires == ()
     assert changed.interactions[0].key_changes.grant == ()
     assert changed.interactions[0].label == "Garden"
+
+
+def test_load_migrates_v8_clear_all_to_explicit_key_removals(
+    tmp_path: Path,
+) -> None:
+    store = StackStore(tmp_path / "Version8.hypergen")
+    store.bundle_path.mkdir()
+    red_key = KeyDefinition(name="Red key")
+    blue_key = KeyDefinition(name="Blue key")
+    clear_interaction = Interaction()
+    grant_interaction = Interaction(
+        key_changes=HotspotKeyChanges(grant=(red_key.id,))
+    )
+    source = Card(
+        name="Source",
+        revisions=(
+            CardRevision(
+                hotspot_set=HotspotSet(
+                    interactions=(clear_interaction, grant_interaction)
+                )
+            ),
+        ),
+    )
+    payload = Stack(
+        name="Legacy",
+        keys=(red_key, blue_key),
+        cards=(source,),
+    ).model_dump(mode="json")
+    payload["schema_version"] = 8
+    interactions = payload["cards"][0]["revisions"][0]["hotspot_set"]["interactions"]
+    interactions[0]["name"] = "Clear state"
+    interactions[0]["key_changes"]["clear_all"] = True
+    interactions[1]["name"] = None
+    interactions[1]["key_changes"]["clear_all"] = False
+    store.stack_path.write_text(json.dumps(payload))
+
+    migrated = store.load()
+
+    changed = migrated.cards[0].active_revision.hotspot_set
+    assert changed is not None
+    assert migrated.schema_version == CURRENT_SCHEMA_VERSION
+    assert changed.interactions[0].key_changes.remove == (
+        red_key.id,
+        blue_key.id,
+    )
+    assert changed.interactions[0].key_changes.grant == ()
+    assert changed.interactions[1].key_changes.grant == (red_key.id,)
+    assert all(
+        "name" not in interaction.model_dump()
+        and "clear_all" not in interaction.key_changes.model_dump()
+        for interaction in changed.interactions
+    )
 
 
 def test_symlinked_asset_directory_cannot_escape_bundle(tmp_path: Path) -> None:

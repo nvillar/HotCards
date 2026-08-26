@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 LEGACY_SCHEMA_VERSION = 5
 PREVIOUS_SCHEMA_VERSION = 6
 STYLE_SCHEMA_VERSION = 7
+KEY_SCHEMA_VERSION = 8
 
 
 class StackStoreError(ValueError):
@@ -120,7 +121,7 @@ def _migrate_v6_payload(payload: dict[str, object]) -> dict[str, object]:
 
 
 def _migrate_v7_payload(payload: dict[str, object]) -> dict[str, object]:
-    """Add stack-owned Keys and closed conditional hotspot behavior."""
+    """Add the schema-v8 Key catalog and conditional hotspot behavior."""
     migrated = deepcopy(payload)
     migrated["keys"] = []
     cards = migrated.get("cards")
@@ -143,12 +144,62 @@ def _migrate_v7_payload(payload: dict[str, object]) -> dict[str, object]:
                 for interaction in interactions:
                     if not isinstance(interaction, dict):
                         continue
+                    interaction["name"] = None
                     interaction["conditions"] = {"requires": [], "forbids": []}
                     interaction["key_changes"] = {
                         "remove": [],
                         "grant": [],
                         "clear_all": False,
                     }
+    migrated["schema_version"] = KEY_SCHEMA_VERSION
+    return migrated
+
+
+def _migrate_v8_payload(payload: dict[str, object]) -> dict[str, object]:
+    """Replace Clear All with explicit removals and drop custom hotspot names."""
+    migrated = deepcopy(payload)
+    keys = migrated.get("keys")
+    key_ids = (
+        [
+            key.get("id")
+            for key in keys
+            if isinstance(key, dict) and isinstance(key.get("id"), str)
+        ]
+        if isinstance(keys, list)
+        else []
+    )
+    cards = migrated.get("cards")
+    if isinstance(cards, list):
+        for card in cards:
+            if not isinstance(card, dict):
+                continue
+            revisions = card.get("revisions")
+            if not isinstance(revisions, list):
+                continue
+            for revision in revisions:
+                if not isinstance(revision, dict):
+                    continue
+                hotspot_set = revision.get("hotspot_set")
+                if not isinstance(hotspot_set, dict):
+                    continue
+                interactions = hotspot_set.get("interactions")
+                if not isinstance(interactions, list):
+                    continue
+                for interaction in interactions:
+                    if not isinstance(interaction, dict):
+                        continue
+                    interaction.pop("name", None)
+                    key_changes = interaction.get("key_changes")
+                    if not isinstance(key_changes, dict):
+                        continue
+                    clear_all = key_changes.pop("clear_all", False)
+                    if type(clear_all) is not bool:
+                        raise StackStoreError(
+                            "invalid stack document: schema-v8 clear_all must be boolean"
+                        )
+                    if clear_all is True:
+                        key_changes["remove"] = list(key_ids)
+                        key_changes["grant"] = []
     migrated["schema_version"] = CURRENT_SCHEMA_VERSION
     return migrated
 
@@ -247,6 +298,7 @@ class StackStore:
             LEGACY_SCHEMA_VERSION,
             PREVIOUS_SCHEMA_VERSION,
             STYLE_SCHEMA_VERSION,
+            KEY_SCHEMA_VERSION,
             CURRENT_SCHEMA_VERSION,
         }
         if type(version) is not int or version not in supported_versions:
@@ -262,6 +314,9 @@ class StackStore:
             version = STYLE_SCHEMA_VERSION
         if version == STYLE_SCHEMA_VERSION:
             payload = _migrate_v7_payload(payload)
+            version = KEY_SCHEMA_VERSION
+        if version == KEY_SCHEMA_VERSION:
+            payload = _migrate_v8_payload(payload)
         try:
             stack = Stack.model_validate_json(json.dumps(payload))
         except ValidationError as error:

@@ -140,11 +140,8 @@ class RunSession:
         if not self._is_active(interaction) or not self._has_effect(interaction):
             return self.state
         changes = interaction.key_changes
-        if changes.clear_all:
-            self._keys.clear()
-        else:
-            self._keys.difference_update(changes.remove)
-            self._keys.update(changes.grant)
+        self._keys.difference_update(changes.remove)
+        self._keys.update(changes.grant)
         if interaction.action is None:
             self._notice = self._key_change_notice(document, interaction)
             return self.state
@@ -211,7 +208,6 @@ class RunSession:
         changes = interaction.key_changes
         return (
             interaction.action is not None
-            or changes.clear_all
             or bool(changes.remove)
             or bool(changes.grant)
         )
@@ -219,8 +215,6 @@ class RunSession:
     @staticmethod
     def _key_change_notice(document: Stack, interaction: Interaction) -> str:
         changes = interaction.key_changes
-        if changes.clear_all:
-            return "Cleared all keys"
         parts = [
             *(
                 f"Removed {document.key_by_id(key_id).name}"

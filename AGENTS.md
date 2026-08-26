@@ -162,8 +162,8 @@ for live Ollama and MFLUX runs.
   revision references the Key. Keep the Keys inspector after Hotspots and show
   every reference grouped by hotspot revision and semantic role.
 - Keep hotspot state behavior closed and typed: all required Keys must be
-  present, all forbidden Keys absent, Remove and Grant sets must be disjoint,
-  and Clear All is exclusive. Do not add values, counters, expressions,
+  present, all forbidden Keys absent, and explicit Remove and Grant sets must be
+  disjoint. Do not add clear-all behavior, values, counters, expressions,
   arbitrary action sequences, or scripting.
 - Keep current Keys in `RunSession`, never in the authored stack or widgets.
   Enter Run empty, retain Keys through Back, clear them on Restart, and discard

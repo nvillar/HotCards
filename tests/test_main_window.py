@@ -35,11 +35,14 @@ from hypergen.domain.models import (
     Card,
     CardRevision,
     GeneratedBackground,
+    HotspotConditions,
+    HotspotKeyChanges,
     HotspotSet,
     ImageGenerationInputs,
     ImageGenerationMetadata,
     ImagePrompt,
     Interaction,
+    KeyDefinition,
     NavigateAction,
     Point,
     Polygon,
@@ -273,6 +276,42 @@ def test_card_header_and_toolbar_match_revision_hierarchy(
     assert window.revision_combo.currentText() == "1"
     assert window.revision_label.text() == "Version:"
     assert window.revision_combo.width() < 100
+
+
+def test_hotspot_rule_editor_scrolls_without_growing_the_window(
+    application: QApplication,
+) -> None:
+    keys = tuple(KeyDefinition(name=f"Key {number}") for number in range(6))
+    interaction = Interaction(
+        conditions=HotspotConditions(
+            requires=tuple(key.id for key in keys[:3]),
+        ),
+        key_changes=HotspotKeyChanges(
+            grant=tuple(key.id for key in keys[3:]),
+        ),
+    )
+    card = Card(
+        name="Card",
+        revisions=(
+            CardRevision(hotspot_set=HotspotSet(interactions=(interaction,))),
+        ),
+    )
+    window, _controller, _workers, _background = _window(
+        Stack(name="Demo", keys=keys, cards=(card,))
+    )
+    window.inspector.inspector_tabs.setCurrentIndex(
+        window.inspector._hotspots_tab_index
+    )
+    window.resize(1180, 760)
+    window.show()
+    application.processEvents()
+    try:
+        assert window.minimumSizeHint().height() <= 760
+        assert window.height() == 760
+        assert window.inspector.hotspot_rule_scroll.verticalScrollBar().maximum() > 0
+    finally:
+        window.close()
+        application.processEvents()
     assert window.revision_combo.width() >= (
         window.revision_combo.fontMetrics().horizontalAdvance("0000")
     )

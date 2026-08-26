@@ -71,6 +71,10 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     assert inspector.inspector_tabs.tabText(1) == "Styles"
     assert inspector.inspector_tabs.tabText(2) == "Hotspots"
     assert inspector.inspector_tabs.tabText(3) == "Keys"
+    assert all(
+        label.text() != "Keys are global to this stack."
+        for label in inspector.findChildren(QLabel)
+    )
     root_layout = inspector.layout()
     assert root_layout is not None
     assert root_layout.contentsMargins().top() == 16
@@ -137,10 +141,25 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     assert inspector.hotspot_target_label.font().pointSizeF() == (
         inspector.description_label.font().pointSizeF()
     )
+    assert inspector.hotspot_when_label.text() == "When"
+    assert inspector.hotspot_then_label.text() == "Then"
+    assert inspector.add_condition_button.text() == "+ Add condition"
+    assert inspector.add_condition_button.isFlat()
+    assert inspector.add_key_change_button.text() == "+ Add key change"
+    assert inspector.add_key_change_button.isFlat()
+    assert not hasattr(inspector, "clear_all_keys_checkbox")
     hotspot_layout = inspector.hotspot_list.parentWidget().layout()
     assert hotspot_layout is not None
-    assert hotspot_layout.indexOf(inspector.hotspot_target_label) < (
-        hotspot_layout.indexOf(inspector.hotspot_destination_combo)
+    then_layout = inspector.hotspot_then_panel.layout()
+    assert then_layout is not None
+    assert then_layout.indexOf(inspector.key_change_table) < (
+        then_layout.indexOf(inspector.add_key_change_button)
+    )
+    assert then_layout.indexOf(inspector.add_key_change_button) < (
+        then_layout.indexOf(inspector.hotspot_target_label)
+    )
+    assert then_layout.indexOf(inspector.hotspot_target_label) < (
+        then_layout.indexOf(inspector.hotspot_destination_combo)
     )
     assert hotspot_layout.stretch(hotspot_layout.indexOf(inspector.hotspot_list)) == 1
     hotspot_control_sizes = {
@@ -292,6 +311,18 @@ def test_hotspot_pipeline_edits_conditions_changes_and_navigation(
     condition_state = inspector.condition_table.cellWidget(0, 1)
     assert isinstance(condition_state, QComboBox)
     assert condition_state.currentText() == "Present"
+    condition_remove = inspector.condition_table.cellWidget(0, 2)
+    assert condition_remove.width() == condition_remove.height()
+    assert condition_remove.height() == condition_state.sizeHint().height()
+    assert inspector.condition_table.height() == (
+        inspector.condition_table.horizontalHeader().sizeHint().height()
+        + sum(
+            inspector.condition_table.rowHeight(row)
+            for row in range(inspector.condition_table.rowCount())
+        )
+        + 2
+    )
+    assert inspector.no_conditions_label.isHidden()
     assert inspector.key_change_table.rowCount() == 2
     remove_change = inspector.key_change_table.cellWidget(0, 0)
     grant_change = inspector.key_change_table.cellWidget(1, 0)
@@ -299,6 +330,10 @@ def test_hotspot_pipeline_edits_conditions_changes_and_navigation(
     assert isinstance(grant_change, QComboBox)
     assert remove_change.currentText() == "Remove"
     assert grant_change.currentText() == "Grant"
+    key_change_remove = inspector.key_change_table.cellWidget(0, 2)
+    assert key_change_remove.width() == key_change_remove.height()
+    assert key_change_remove.height() == remove_change.sizeHint().height()
+    assert inspector.no_key_changes_label.isHidden()
     assert inspector.hotspot_target_label.text() == "Go to"
     assert inspector.hotspot_summary.text() == (
         "When Red key is present, remove Red key, then grant Door open, "
@@ -320,15 +355,6 @@ def test_hotspot_pipeline_edits_conditions_changes_and_navigation(
     assert changed is not None
     assert changed.interactions[0].key_changes.grant == (door_open.id,)
 
-    inspector.clear_all_keys_checkbox.click()
-    changed = controller.document.cards[0].active_revision.hotspot_set
-    assert changed is not None
-    assert changed.interactions[0].key_changes == HotspotKeyChanges(
-        clear_all=True
-    )
-    assert inspector.key_change_table.rowCount() == 0
-    assert not inspector.add_key_change_button.isEnabled()
-
     no_destination_index = next(
         index
         for index in range(inspector.hotspot_destination_combo.count())
@@ -339,6 +365,29 @@ def test_hotspot_pipeline_edits_conditions_changes_and_navigation(
     changed = controller.document.cards[0].active_revision.hotspot_set
     assert changed is not None
     assert changed.interactions[0].action is None
+
+
+def test_empty_hotspot_rule_sections_use_plain_language_placeholders(
+    application: QApplication,
+) -> None:
+    interaction = Interaction()
+    card = Card(
+        name="Card",
+        revisions=(
+            CardRevision(hotspot_set=HotspotSet(interactions=(interaction,))),
+        ),
+    )
+    inspector = Inspector(DocumentController(Stack(name="Demo", cards=(card,))))
+
+    inspector.render(inspector.controller.document, card.id)
+
+    assert inspector.condition_table.isHidden()
+    assert inspector.no_conditions_label.text() == "No conditions (always activates)"
+    assert not inspector.no_conditions_label.isHidden()
+    assert inspector.key_change_table.isHidden()
+    assert inspector.no_key_changes_label.text() == "No key changes"
+    assert not inspector.no_key_changes_label.isHidden()
+    assert inspector.hotspot_destination_combo.currentText() == "No destination"
 
 
 def test_contextual_key_creation_label_does_not_reserve_free_form_name(

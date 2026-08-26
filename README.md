@@ -16,7 +16,7 @@ authoring shell remains usable when either service is unavailable.
 Stacks are stored as self-contained `.hypergen` directory bundles and
 autosaved atomically after creation or opening. At startup, HyperGen lists
 projects in `~/Documents/HyperGen` and offers direct Open and Create actions.
-Schema-v5 through schema-v7 bundles are migrated in memory to the current schema
+Schema-v5 through schema-v8 bundles are migrated in memory to the current schema
 when opened; unsupported older or future schemas are rejected.
 
 Each card owns one or more numbered revisions. A revision contains its authored
@@ -98,11 +98,11 @@ Style library but retain No Style on all existing revisions and new cards.
 The Hotspots inspector is the sole source of revision-local interaction
 semantics. A new hotspot is persisted and selected immediately, even before it
 has an area. Its label is derived automatically in Remove, Grant, then
-destination order, with long labels using two-line list entries. WHEN rows
-require every Present key to exist and every Absent key not to exist. THEN rows
-apply disjoint Remove and Grant sets, or the exclusive Clear all keys action,
-before the optional Go to destination. Keys are stack-global free-form names
-with stable internal IDs.
+destination order, with long labels using two-line list entries. The bordered
+When section requires every Present key to exist and every Absent key not to
+exist. The bordered Then section applies disjoint explicit Remove and Grant
+sets before its optional Go to destination. Keys are stack-global free-form
+names with stable internal IDs.
 
 The Keys tab manages that global catalog with the same list, compact remove/add,
 and full-width Name patterns as Styles. It reports every card revision and
