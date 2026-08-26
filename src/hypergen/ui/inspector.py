@@ -1335,12 +1335,11 @@ class Inspector(QWidget):
             )
         with QSignalBlocker(self.key_usage_list):
             self.key_usage_list.clear()
-            for card, revision_number, interaction, roles in usages:
+            for card, revision_number, interaction, _roles in usages:
                 text = self._key_usage_text(
                     card,
                     revision_number,
                     interaction,
-                    roles,
                 )
                 item = QListWidgetItem(text)
                 item.setData(
@@ -1356,12 +1355,10 @@ class Inspector(QWidget):
         card: Card,
         revision_number: int,
         interaction: Interaction,
-        roles: tuple[str, ...],
     ) -> str:
         return (
             f"{card.name} · Version {revision_number}\n"
-            f"{interaction.label}\n"
-            f"{' · '.join(roles)}"
+            f"{interaction.label}"
         )
 
     def _key_selection_changed(
@@ -1440,12 +1437,11 @@ class Inspector(QWidget):
             usage_item = self.key_usage_list.item(row)
             if usage_item is None:
                 continue
-            card, revision_number, interaction, roles = usage
+            card, revision_number, interaction, _roles = usage
             text = self._key_usage_text(
                 card,
                 revision_number,
                 interaction,
-                roles,
             )
             usage_item.setText(text)
             usage_item.setToolTip(text)

@@ -212,8 +212,7 @@ def test_keys_tab_manages_global_names_and_lists_hotspot_usages(
     assert inspector.key_usage_list.count() == 1
     assert inspector.key_usage_list.item(0).text() == (
         "Castle · Version 1\n"
-        "Remove Red key\n"
-        "Requires · Removes"
+        "Remove Red key"
     )
 
     inspector.key_name_edit.setText("Ruby key")
