@@ -9,6 +9,7 @@ from pydantic import ValidationError
 from hypergen.application.commands import (
     ActivateRevisionCommand,
     AddInteractionCommand,
+    AddKeyCommand,
     AddPolygonCommand,
     AddStyleCommand,
     ChangeHotspotDestinationCommand,
@@ -16,18 +17,23 @@ from hypergen.application.commands import (
     CreateCardCommand,
     DeleteCardCommand,
     DeleteInteractionCommand,
+    DeleteKeyCommand,
     DeletePolygonCommand,
     DeleteRevisionCommand,
     DeleteStyleCommand,
     DuplicateRevisionCommand,
     EditRevisionDescriptionCommand,
     RenameCardCommand,
+    RenameKeyCommand,
     ReorderCardCommand,
     ReorderHotspotCommand,
     ReplaceHotspotSetCommand,
     ReplaceInteractionPolygonsCommand,
     ReplacePolygonCommand,
     ReplaceRevisionBackgroundCommand,
+    SetHotspotConditionsCommand,
+    SetHotspotKeyChangesCommand,
+    SetHotspotNameCommand,
     SetRevisionImagePromptCommand,
     SetRevisionReferenceCommand,
     SetRevisionStyleCommand,
@@ -39,11 +45,14 @@ from hypergen.domain.models import (
     Card,
     CardRevision,
     GeneratedBackground,
+    HotspotConditions,
+    HotspotKeyChanges,
     HotspotSet,
     ImageGenerationInputs,
     ImageGenerationMetadata,
     ImagePrompt,
     Interaction,
+    KeyDefinition,
     NavigateAction,
     Point,
     Polygon,
@@ -146,6 +155,58 @@ def test_style_lifecycle_and_new_card_default_are_typed_changes() -> None:
     assert all(card.active_revision.style_id is None for card in document.cards)
 
 
+def test_key_lifecycle_and_hotspot_behavior_are_typed_changes() -> None:
+    key_id = uuid4()
+    interaction = Interaction()
+    source, revision = card_with_revision(interaction)
+    document = Stack(name="Stack", cards=(source,))
+
+    document = AddKeyCommand(name="Red key", key_id=key_id).apply(document)
+    document = RenameKeyCommand(key_id=key_id, name="Ruby key").apply(document)
+    document = SetHotspotNameCommand(
+        card_id=source.id,
+        revision_id=revision.id,
+        interaction_id=interaction.id,
+        name="Take the key",
+    ).apply(document)
+    document = SetHotspotConditionsCommand(
+        card_id=source.id,
+        revision_id=revision.id,
+        interaction_id=interaction.id,
+        conditions=HotspotConditions(forbids=(key_id,)),
+    ).apply(document)
+    document = SetHotspotKeyChangesCommand(
+        card_id=source.id,
+        revision_id=revision.id,
+        interaction_id=interaction.id,
+        key_changes=HotspotKeyChanges(grant=(key_id,)),
+    ).apply(document)
+
+    changed = document.cards[0].active_revision.hotspot_set
+    assert changed is not None
+    assert document.keys == (KeyDefinition(id=key_id, name="Ruby key"),)
+    assert changed.interactions[0].name == "Take the key"
+    assert changed.interactions[0].conditions.forbids == (key_id,)
+    assert changed.interactions[0].key_changes.grant == (key_id,)
+    with pytest.raises(CommandError, match="still used"):
+        DeleteKeyCommand(key_id=key_id).apply(document)
+
+    document = SetHotspotConditionsCommand(
+        card_id=source.id,
+        revision_id=revision.id,
+        interaction_id=interaction.id,
+        conditions=HotspotConditions(),
+    ).apply(document)
+    document = SetHotspotKeyChangesCommand(
+        card_id=source.id,
+        revision_id=revision.id,
+        interaction_id=interaction.id,
+        key_changes=HotspotKeyChanges(),
+    ).apply(document)
+    document = DeleteKeyCommand(key_id=key_id).apply(document)
+    assert document.keys == ()
+
+
 def test_duplicate_revision_copies_style_selection() -> None:
     style = StyleDefinition(name="Ink", prompt_text="Rendered in ink")
     revision = CardRevision(style_id=style.id)
@@ -242,7 +303,10 @@ def test_revision_activation_and_complete_hotspot_replacement() -> None:
     assert [item.id for item in changed_revision.hotspot_set.interactions] == [
         item.id for item in replacement.interactions
     ]
-    assert all(item.label == "Unresolved" for item in changed_revision.hotspot_set.interactions)
+    assert [item.label for item in changed_revision.hotspot_set.interactions] == [
+        "Garden",
+        "Tower",
+    ]
     assert (
         ReplaceHotspotSetCommand(
             card_id=source.id,
@@ -369,7 +433,7 @@ def test_interaction_and_polygon_component_lifecycle() -> None:
     hotspot_set = document.cards[0].revisions[0].hotspot_set
     assert hotspot_set is not None
     assert len(hotspot_set.interactions) == 1
-    assert hotspot_set.interactions[0].label == "Unresolved"
+    assert hotspot_set.interactions[0].label == "Hall"
     assert hotspot_set.interactions[0].polygons == (extra,)
 
 
@@ -437,7 +501,7 @@ def test_delete_card_converts_all_inbound_references_and_clears_start() -> None:
     assert hotspot_set is not None
     target = hotspot_set.interactions[0].action.target
     assert target == UnresolvedCardReference(target_name="Former Hall")
-    assert hotspot_set.interactions[0].label == "Unresolved"
+    assert hotspot_set.interactions[0].label == "Former Hall"
     assert changed.cards[0].active_revision.reference == UnresolvedCardReference(
         target_name="Former Hall"
     )

@@ -265,7 +265,7 @@ def test_load_rejects_missing_unsupported_and_future_versions(
         ({"name": "Missing"}, "schema_version"),
         ({"schema_version": 3, "name": "Legacy"}, "schema_version"),
         ({"schema_version": 4, "name": "Legacy"}, "schema_version"),
-        ({"schema_version": 8, "name": "Future"}, "schema_version"),
+        ({"schema_version": 9, "name": "Future"}, "schema_version"),
     ]:
         store.stack_path.write_text(json.dumps(payload))
         with pytest.raises(StackStoreError, match=message):
@@ -362,6 +362,46 @@ def test_load_migrates_v6_to_stack_styles_without_changing_existing_cards(
     assert migrated.styles == BUILT_IN_STYLES
     assert migrated.new_card_style_id is None
     assert migrated.cards[0].active_revision.style_id is None
+
+
+def test_load_migrates_v7_hotspots_to_conditional_behavior(
+    tmp_path: Path,
+) -> None:
+    store = StackStore(tmp_path / "Version7.hypergen")
+    store.bundle_path.mkdir()
+    destination = Card(name="Garden")
+    interaction = Interaction(
+        action=NavigateAction(
+            target=ResolvedCardReference(target_card_id=destination.id)
+        )
+    )
+    source = Card(
+        name="Source",
+        revisions=(
+            CardRevision(hotspot_set=HotspotSet(interactions=(interaction,))),
+        ),
+    )
+    payload = Stack(
+        name="Legacy",
+        cards=(source, destination),
+    ).model_dump(mode="json")
+    payload["schema_version"] = 7
+    payload.pop("keys")
+    legacy = payload["cards"][0]["revisions"][0]["hotspot_set"]["interactions"][0]
+    legacy.pop("name")
+    legacy.pop("conditions")
+    legacy.pop("key_changes")
+    store.stack_path.write_text(json.dumps(payload))
+
+    migrated = store.load()
+
+    changed = migrated.cards[0].active_revision.hotspot_set
+    assert changed is not None
+    assert migrated.keys == ()
+    assert changed.interactions[0].name is None
+    assert changed.interactions[0].conditions.requires == ()
+    assert changed.interactions[0].key_changes.grant == ()
+    assert changed.interactions[0].label == "Garden"
 
 
 def test_symlinked_asset_directory_cannot_escape_bundle(tmp_path: Path) -> None:

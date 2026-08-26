@@ -15,12 +15,15 @@ from hypergen.domain.models import (
     Card,
     CardRevision,
     GeneratedBackground,
+    HotspotConditions,
+    HotspotKeyChanges,
     HotspotSet,
     ImageGenerationInputs,
     ImageGenerationMetadata,
     ImagePrompt,
     ImageReferenceSnapshot,
     Interaction,
+    KeyDefinition,
     NavigateAction,
     Point,
     Polygon,
@@ -63,6 +66,7 @@ def test_stack_defaults_match_document_contract() -> None:
     assert stack.run_overlay_mode is RunOverlayMode.HIDDEN
     assert stack.styles == BUILT_IN_STYLES
     assert stack.new_card_style_id == HYPERCARD_STYLE_ID
+    assert stack.keys == ()
     assert stack.cards == ()
 
 
@@ -222,6 +226,7 @@ def test_card_references_are_discriminated_and_consistent() -> None:
 
     assert resolved.target.target_card_id == card_id
     assert unresolved.target.target_name == "Former garden"
+    assert UnresolvedCardReference(target_name="   ").target_name is None
 
     with pytest.raises(ValidationError):
         NavigateAction.model_validate(
@@ -279,29 +284,99 @@ def test_stack_rejects_self_references_and_accepts_one_reference() -> None:
     )
 
 
-def test_hotspot_labels_are_derived_from_destinations() -> None:
+def test_hotspot_labels_are_derived_from_actions_unless_customized() -> None:
     destination = Card(name="Castle Gate")
+    red_key = KeyDefinition(name="Red key")
+    door_open = KeyDefinition(name="Door open")
     resolved = Interaction(
-        label="Author-entered value",
         action=NavigateAction(target=ResolvedCardReference(target_card_id=destination.id)),
+        key_changes=HotspotKeyChanges(
+            remove=(red_key.id,),
+            grant=(door_open.id,),
+        ),
     )
     unresolved = Interaction(
-        label="Former label",
         action=NavigateAction(target=UnresolvedCardReference(target_name="Former room")),
     )
+    custom = Interaction(name="Use the secret door")
     source = Card(
         name="Source",
-        revisions=(CardRevision(hotspot_set=HotspotSet(interactions=(resolved, unresolved))),),
+        revisions=(
+            CardRevision(
+                hotspot_set=HotspotSet(interactions=(resolved, unresolved, custom))
+            ),
+        ),
     )
 
-    stack = Stack(name="Castle", cards=(source, destination))
+    stack = Stack(
+        name="Castle",
+        keys=(red_key, door_open),
+        cards=(source, destination),
+    )
 
     interactions = stack.cards[0].active_revision.hotspot_set
     assert interactions is not None
     assert [item.label for item in interactions.interactions] == [
-        "Castle Gate",
-        "Unresolved",
+        "Remove Red key · Grant Door open → Castle Gate",
+        "Former room",
+        "Use the secret door",
     ]
+
+
+def test_hotspot_key_contract_is_closed_and_references_stack_keys() -> None:
+    red_key = KeyDefinition(name=" Red key ")
+    interaction = Interaction(
+        conditions=HotspotConditions(requires=(red_key.id,)),
+        key_changes=HotspotKeyChanges(remove=(red_key.id,)),
+    )
+    stack = Stack(
+        name="Castle",
+        keys=(red_key,),
+        cards=(
+            Card(
+                name="Card",
+                revisions=(
+                    CardRevision(hotspot_set=HotspotSet(interactions=(interaction,))),
+                ),
+            ),
+        ),
+    )
+
+    assert stack.keys[0].name == "Red key"
+    assert stack.key_by_id(red_key.id) == red_key
+    with pytest.raises(ValidationError, match="both required and forbidden"):
+        HotspotConditions(requires=(red_key.id,), forbids=(red_key.id,))
+    with pytest.raises(ValidationError, match="both removed and granted"):
+        HotspotKeyChanges(remove=(red_key.id,), grant=(red_key.id,))
+    with pytest.raises(ValidationError, match="clear_all"):
+        HotspotKeyChanges(grant=(red_key.id,), clear_all=True)
+    with pytest.raises(ValidationError, match="hotspot key references"):
+        Stack(
+            name="Castle",
+            cards=(
+                Card(
+                    name="Card",
+                    revisions=(
+                        CardRevision(
+                            hotspot_set=HotspotSet(
+                                interactions=(
+                                    Interaction(
+                                        conditions=HotspotConditions(
+                                            requires=(uuid4(),)
+                                        )
+                                    ),
+                                )
+                            )
+                        ),
+                    ),
+                ),
+            ),
+        )
+    with pytest.raises(ValidationError, match="Key names"):
+        Stack(
+            name="Castle",
+            keys=(red_key, KeyDefinition(name="red KEY")),
+        )
 
 
 def test_generation_inputs_capture_exact_reference_source_state() -> None:
@@ -373,7 +448,7 @@ def test_hotspots_are_nested_in_their_image_revision() -> None:
     assert loaded.cards[0].revisions[0].hotspot_set is not None
     loaded_interaction = loaded.cards[0].revisions[0].hotspot_set.interactions[0]
     assert loaded_interaction.id == interaction.id
-    assert loaded_interaction.label == "Unresolved"
+    assert loaded_interaction.label == "Garden"
     assert loaded_interaction.action == interaction.action
     assert loaded_interaction.polygons == interaction.polygons
 
@@ -483,9 +558,7 @@ def test_revision_cannot_be_attached_to_multiple_cards() -> None:
 
 
 def test_blank_hotspot_is_valid_but_has_no_hit_geometry() -> None:
-    interaction = Interaction(
-        action=NavigateAction(target=UnresolvedCardReference()),
-    )
+    interaction = Interaction()
 
-    assert interaction.label == "Unresolved"
+    assert interaction.label == "New Hotspot"
     assert interaction.polygons == ()

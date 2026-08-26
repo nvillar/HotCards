@@ -21,7 +21,7 @@ from pydantic import (
     model_validator,
 )
 
-CURRENT_SCHEMA_VERSION = 7
+CURRENT_SCHEMA_VERSION = 8
 
 NonEmptyString = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 NormalizedCoordinate = Annotated[float, Field(ge=0.0, le=1.0)]
@@ -112,7 +112,14 @@ class UnresolvedCardReference(DomainModel):
     """A runtime reference whose target is not currently available."""
 
     type: Literal["unresolved"] = "unresolved"
-    target_name: str | None = None
+    target_name: NonEmptyString | None = None
+
+    @field_validator("target_name", mode="before")
+    @classmethod
+    def blank_target_has_no_retained_name(cls, value: object) -> object:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
 
 CardReference = Annotated[
@@ -138,13 +145,67 @@ class NavigateAction(DomainModel):
     target: CardReference
 
 
-class Interaction(DomainModel):
-    """One destination-derived interaction with one or more polygon components."""
+class KeyDefinition(DomainModel):
+    """One stack-owned binary state token."""
 
     id: UUID = Field(default_factory=uuid4)
-    label: NonEmptyString = "Unresolved"
-    action: NavigateAction
+    name: NonEmptyString
+
+
+class HotspotConditions(DomainModel):
+    """The complete all-of condition that gates one hotspot."""
+
+    requires: tuple[UUID, ...] = Field(default_factory=tuple)
+    forbids: tuple[UUID, ...] = Field(default_factory=tuple)
+
+    @model_validator(mode="after")
+    def require_unambiguous_keys(self) -> HotspotConditions:
+        if len(self.requires) != len(set(self.requires)):
+            raise ValueError("required keys must be unique")
+        if len(self.forbids) != len(set(self.forbids)):
+            raise ValueError("forbidden keys must be unique")
+        if set(self.requires) & set(self.forbids):
+            raise ValueError("a key cannot be both required and forbidden")
+        return self
+
+
+class HotspotKeyChanges(DomainModel):
+    """One atomic key transition applied before optional navigation."""
+
+    remove: tuple[UUID, ...] = Field(default_factory=tuple)
+    grant: tuple[UUID, ...] = Field(default_factory=tuple)
+    clear_all: bool = False
+
+    @model_validator(mode="after")
+    def require_unambiguous_changes(self) -> HotspotKeyChanges:
+        if len(self.remove) != len(set(self.remove)):
+            raise ValueError("removed keys must be unique")
+        if len(self.grant) != len(set(self.grant)):
+            raise ValueError("granted keys must be unique")
+        if set(self.remove) & set(self.grant):
+            raise ValueError("a key cannot be both removed and granted")
+        if self.clear_all and (self.remove or self.grant):
+            raise ValueError("clear_all cannot be combined with remove or grant")
+        return self
+
+
+class Interaction(DomainModel):
+    """One conditional interaction with key changes, navigation, and geometry."""
+
+    id: UUID = Field(default_factory=uuid4)
+    name: NonEmptyString | None = None
+    label: NonEmptyString = "New Hotspot"
+    conditions: HotspotConditions = Field(default_factory=HotspotConditions)
+    key_changes: HotspotKeyChanges = Field(default_factory=HotspotKeyChanges)
+    action: NavigateAction | None = None
     polygons: tuple[Polygon, ...] = Field(default_factory=tuple)
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def blank_name_uses_automatic_label(cls, value: object) -> object:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
 
 class ImageReferenceSnapshot(DomainModel):
@@ -490,6 +551,48 @@ class Card(DomainModel):
         )
 
 
+def _automatic_interaction_label(
+    interaction: Interaction,
+    *,
+    card_names: dict[UUID, str],
+    key_names: dict[UUID, str],
+) -> str:
+    if interaction.name is not None:
+        return interaction.name
+    changes: list[str] = []
+    if interaction.key_changes.clear_all:
+        changes.append("Clear all keys")
+    else:
+        if interaction.key_changes.remove:
+            changes.append(
+                f"Remove {key_names[interaction.key_changes.remove[0]]}"
+                if len(interaction.key_changes.remove) == 1
+                else "Remove keys"
+            )
+        if interaction.key_changes.grant:
+            changes.append(
+                f"Grant {key_names[interaction.key_changes.grant[0]]}"
+                if len(interaction.key_changes.grant) == 1
+                else "Grant keys"
+            )
+    destination: str | None = None
+    action = interaction.action
+    if action is not None:
+        target = action.target
+        destination = (
+            card_names[target.target_card_id]
+            if isinstance(target, ResolvedCardReference)
+            else target.target_name or "Unresolved destination"
+        )
+    if changes and destination is not None:
+        return f"{' · '.join(changes)} → {destination}"
+    if changes:
+        return " · ".join(changes)
+    if destination is not None:
+        return destination
+    return "New Hotspot"
+
+
 class Stack(DomainModel):
     """The authoritative portable HyperGen stack document."""
 
@@ -501,6 +604,7 @@ class Stack(DomainModel):
     start_card_id: UUID | None = None
     styles: tuple[StyleDefinition, ...] = Field(default_factory=lambda: BUILT_IN_STYLES)
     new_card_style_id: UUID | None = HYPERCARD_STYLE_ID
+    keys: tuple[KeyDefinition, ...] = Field(default_factory=tuple)
     cards: tuple[Card, ...] = Field(default_factory=tuple)
 
     @field_validator("schema_version")
@@ -536,6 +640,14 @@ class Stack(DomainModel):
             raise ValueError("Style names must be unique within a stack")
         if self.new_card_style_id is not None and self.new_card_style_id not in known_style_ids:
             raise ValueError("new_card_style_id must identify a Style in this stack")
+        key_ids = [key.id for key in self.keys]
+        known_key_ids = set(key_ids)
+        if len(key_ids) != len(known_key_ids):
+            raise ValueError("Key IDs must be unique within a stack")
+        key_names = [key.name.casefold() for key in self.keys]
+        if len(key_names) != len(set(key_names)):
+            raise ValueError("Key names must be unique within a stack")
+        key_names_by_id = {key.id: key.name for key in self.keys}
         for card in self.cards:
             for revision in card.revisions:
                 if revision.style_id is not None and revision.style_id not in known_style_ids:
@@ -551,18 +663,29 @@ class Stack(DomainModel):
                 if revision.hotspot_set is None:
                     continue
                 for interaction in revision.hotspot_set.interactions:
-                    target = interaction.action.target
-                    if (
-                        isinstance(target, ResolvedCardReference)
-                        and target.target_card_id not in known_card_ids
-                    ):
+                    referenced_key_ids = (
+                        *interaction.conditions.requires,
+                        *interaction.conditions.forbids,
+                        *interaction.key_changes.remove,
+                        *interaction.key_changes.grant,
+                    )
+                    if any(key_id not in known_key_ids for key_id in referenced_key_ids):
                         raise ValueError(
-                            "resolved card references must identify a card in this stack"
+                            "hotspot key references must identify Keys in this stack"
                         )
-                    derived_label = (
-                        card_names[target.target_card_id]
-                        if isinstance(target, ResolvedCardReference)
-                        else "Unresolved"
+                    if interaction.action is not None:
+                        target = interaction.action.target
+                        if (
+                            isinstance(target, ResolvedCardReference)
+                            and target.target_card_id not in known_card_ids
+                        ):
+                            raise ValueError(
+                                "resolved card references must identify a card in this stack"
+                            )
+                    derived_label = _automatic_interaction_label(
+                        interaction,
+                        card_names=card_names,
+                        key_names=key_names_by_id,
                     )
                     if interaction.label != derived_label:
                         object.__setattr__(
@@ -577,3 +700,7 @@ class Stack(DomainModel):
         if style_id is None:
             return None
         return next(style for style in self.styles if style.id == style_id)
+
+    def key_by_id(self, key_id: UUID) -> KeyDefinition:
+        """Return one validated stack-owned Key definition."""
+        return next(key for key in self.keys if key.id == key_id)

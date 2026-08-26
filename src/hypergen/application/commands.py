@@ -11,9 +11,12 @@ from hypergen.domain.models import (
     Card,
     CardReference,
     CardRevision,
+    HotspotConditions,
+    HotspotKeyChanges,
     HotspotSet,
     ImagePrompt,
     Interaction,
+    KeyDefinition,
     NavigateAction,
     Polygon,
     ResolvedCardReference,
@@ -59,6 +62,13 @@ def _style_index(document: Stack, style_id: UUID) -> int:
         if style.id == style_id:
             return index
     raise CommandError(f"Style {style_id} does not exist")
+
+
+def _key_index(document: Stack, key_id: UUID) -> int:
+    for index, key in enumerate(document.keys):
+        if key.id == key_id:
+            return index
+    raise CommandError(f"Key {key_id} does not exist")
 
 
 def _interaction_index(revision: CardRevision, interaction_id: UUID) -> int:
@@ -178,6 +188,8 @@ def _replace_deleted_target(
     deleted_card_id: UUID,
     deleted_card_name: str,
 ) -> Interaction:
+    if interaction.action is None:
+        return interaction
     target = interaction.action.target
     if not (isinstance(target, ResolvedCardReference) and target.target_card_id == deleted_card_id):
         return interaction
@@ -336,6 +348,62 @@ class DeleteStyleCommand:
                 }
             )
         )
+
+
+@dataclass(frozen=True, slots=True)
+class AddKeyCommand:
+    """Append one stack-owned Key definition."""
+
+    name: str
+    key_id: UUID = field(default_factory=uuid4)
+
+    def apply(self, document: Stack) -> Stack:
+        if any(key.id == self.key_id for key in document.keys):
+            raise CommandError(f"Key {self.key_id} already exists")
+        key = KeyDefinition(id=self.key_id, name=self.name)
+        return validated_copy(document.model_copy(update={"keys": (*document.keys, key)}))
+
+
+@dataclass(frozen=True, slots=True)
+class RenameKeyCommand:
+    """Rename one stack-owned Key without changing hotspot references."""
+
+    key_id: UUID
+    name: str
+
+    def apply(self, document: Stack) -> Stack:
+        index = _key_index(document, self.key_id)
+        keys = list(document.keys)
+        keys[index] = keys[index].model_copy(update={"name": self.name})
+        return validated_copy(document.model_copy(update={"keys": tuple(keys)}))
+
+
+@dataclass(frozen=True, slots=True)
+class DeleteKeyCommand:
+    """Delete one unused stack-owned Key."""
+
+    key_id: UUID
+
+    def apply(self, document: Stack) -> Stack:
+        index = _key_index(document, self.key_id)
+        for card in document.cards:
+            for revision in card.revisions:
+                if revision.hotspot_set is None:
+                    continue
+                for interaction in revision.hotspot_set.interactions:
+                    referenced = (
+                        *interaction.conditions.requires,
+                        *interaction.conditions.forbids,
+                        *interaction.key_changes.remove,
+                        *interaction.key_changes.grant,
+                    )
+                    if self.key_id in referenced:
+                        raise CommandError(
+                            f'Key "{document.keys[index].name}" is still used by hotspots'
+                        )
+        keys = list(document.keys)
+        keys.pop(index)
+        return validated_copy(document.model_copy(update={"keys": tuple(keys)}))
 
 
 @dataclass(frozen=True, slots=True)
@@ -707,13 +775,94 @@ class ReplacePolygonCommand:
 
 
 @dataclass(frozen=True, slots=True)
-class ChangeHotspotDestinationCommand:
-    """Change one hotspot's resolved or unresolved navigation destination."""
+class SetHotspotNameCommand:
+    """Set or clear one hotspot's custom display name."""
 
     card_id: UUID
     revision_id: UUID
     interaction_id: UUID
-    destination: ResolvedCardReference | UnresolvedCardReference
+    name: str | None
+
+    def apply(self, document: Stack) -> Stack:
+        interaction = _interaction(
+            document,
+            card_id=self.card_id,
+            revision_id=self.revision_id,
+            interaction_id=self.interaction_id,
+        ).model_copy(update={"name": self.name})
+        return validated_copy(
+            _replace_interaction(
+                document,
+                card_id=self.card_id,
+                revision_id=self.revision_id,
+                interaction_id=self.interaction_id,
+                replacement=interaction,
+            )
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class SetHotspotConditionsCommand:
+    """Replace one hotspot's complete all-of condition."""
+
+    card_id: UUID
+    revision_id: UUID
+    interaction_id: UUID
+    conditions: HotspotConditions
+
+    def apply(self, document: Stack) -> Stack:
+        interaction = _interaction(
+            document,
+            card_id=self.card_id,
+            revision_id=self.revision_id,
+            interaction_id=self.interaction_id,
+        ).model_copy(update={"conditions": self.conditions})
+        return validated_copy(
+            _replace_interaction(
+                document,
+                card_id=self.card_id,
+                revision_id=self.revision_id,
+                interaction_id=self.interaction_id,
+                replacement=interaction,
+            )
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class SetHotspotKeyChangesCommand:
+    """Replace one hotspot's complete atomic key transition."""
+
+    card_id: UUID
+    revision_id: UUID
+    interaction_id: UUID
+    key_changes: HotspotKeyChanges
+
+    def apply(self, document: Stack) -> Stack:
+        interaction = _interaction(
+            document,
+            card_id=self.card_id,
+            revision_id=self.revision_id,
+            interaction_id=self.interaction_id,
+        ).model_copy(update={"key_changes": self.key_changes})
+        return validated_copy(
+            _replace_interaction(
+                document,
+                card_id=self.card_id,
+                revision_id=self.revision_id,
+                interaction_id=self.interaction_id,
+                replacement=interaction,
+            )
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ChangeHotspotDestinationCommand:
+    """Change or clear one hotspot's navigation destination."""
+
+    card_id: UUID
+    revision_id: UUID
+    interaction_id: UUID
+    destination: ResolvedCardReference | UnresolvedCardReference | None
 
     def apply(self, document: Stack) -> Stack:
         interaction = _interaction(
@@ -722,7 +871,15 @@ class ChangeHotspotDestinationCommand:
             revision_id=self.revision_id,
             interaction_id=self.interaction_id,
         )
-        changed = interaction.model_copy(update={"action": NavigateAction(target=self.destination)})
+        changed = interaction.model_copy(
+            update={
+                "action": (
+                    NavigateAction(target=self.destination)
+                    if self.destination is not None
+                    else None
+                )
+            }
+        )
         return validated_copy(
             _replace_interaction(
                 document,
@@ -779,7 +936,7 @@ class CreateCardAndResolveCommand:
             revision_id=self.revision_id,
             interaction_id=self.interaction_id,
         )
-        target = interaction.action.target
+        target = interaction.action.target if interaction.action is not None else None
         name = (
             self.card_name
             if self.card_name is not None
@@ -806,6 +963,7 @@ class CreateCardAndResolveCommand:
 
 __all__ = [
     "ActivateRevisionCommand",
+    "AddKeyCommand",
     "AddStyleCommand",
     "AddInteractionCommand",
     "AddPolygonCommand",
@@ -816,6 +974,7 @@ __all__ = [
     "CreateGeneratedRevisionCommand",
     "DeleteCardCommand",
     "DeleteInteractionCommand",
+    "DeleteKeyCommand",
     "DeleteRevisionCommand",
     "DeleteStyleCommand",
     "DeletePolygonCommand",
@@ -825,6 +984,7 @@ __all__ = [
     "SetRevisionImagePromptCommand",
     "SetRevisionStyleCommand",
     "RenameCardCommand",
+    "RenameKeyCommand",
     "ReorderCardCommand",
     "ReorderHotspotCommand",
     "ReplaceHotspotSetCommand",
@@ -832,6 +992,9 @@ __all__ = [
     "ReplacePolygonCommand",
     "ReplaceRevisionBackgroundCommand",
     "SetRunOverlayModeCommand",
+    "SetHotspotConditionsCommand",
+    "SetHotspotKeyChangesCommand",
+    "SetHotspotNameCommand",
     "SetRevisionReferenceCommand",
     "SetStartCardCommand",
     "UpdateStyleCommand",

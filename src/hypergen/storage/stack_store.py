@@ -24,6 +24,7 @@ ASSET_ROOT = PurePosixPath("assets/cards")
 logger = logging.getLogger(__name__)
 LEGACY_SCHEMA_VERSION = 5
 PREVIOUS_SCHEMA_VERSION = 6
+STYLE_SCHEMA_VERSION = 7
 
 
 class StackStoreError(ValueError):
@@ -114,6 +115,41 @@ def _migrate_v6_payload(payload: dict[str, object]) -> dict[str, object]:
             for revision in revisions:
                 if isinstance(revision, dict):
                     revision["style_id"] = None
+    migrated["schema_version"] = STYLE_SCHEMA_VERSION
+    return migrated
+
+
+def _migrate_v7_payload(payload: dict[str, object]) -> dict[str, object]:
+    """Add stack-owned Keys and closed conditional hotspot behavior."""
+    migrated = deepcopy(payload)
+    migrated["keys"] = []
+    cards = migrated.get("cards")
+    if isinstance(cards, list):
+        for card in cards:
+            if not isinstance(card, dict):
+                continue
+            revisions = card.get("revisions")
+            if not isinstance(revisions, list):
+                continue
+            for revision in revisions:
+                if not isinstance(revision, dict):
+                    continue
+                hotspot_set = revision.get("hotspot_set")
+                if not isinstance(hotspot_set, dict):
+                    continue
+                interactions = hotspot_set.get("interactions")
+                if not isinstance(interactions, list):
+                    continue
+                for interaction in interactions:
+                    if not isinstance(interaction, dict):
+                        continue
+                    interaction["name"] = None
+                    interaction["conditions"] = {"requires": [], "forbids": []}
+                    interaction["key_changes"] = {
+                        "remove": [],
+                        "grant": [],
+                        "clear_all": False,
+                    }
     migrated["schema_version"] = CURRENT_SCHEMA_VERSION
     return migrated
 
@@ -211,6 +247,7 @@ class StackStore:
         supported_versions = {
             LEGACY_SCHEMA_VERSION,
             PREVIOUS_SCHEMA_VERSION,
+            STYLE_SCHEMA_VERSION,
             CURRENT_SCHEMA_VERSION,
         }
         if type(version) is not int or version not in supported_versions:
@@ -223,6 +260,9 @@ class StackStore:
             version = PREVIOUS_SCHEMA_VERSION
         if version == PREVIOUS_SCHEMA_VERSION:
             payload = _migrate_v6_payload(payload)
+            version = STYLE_SCHEMA_VERSION
+        if version == STYLE_SCHEMA_VERSION:
+            payload = _migrate_v7_payload(payload)
         try:
             stack = Stack.model_validate_json(json.dumps(payload))
         except ValidationError as error:

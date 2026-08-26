@@ -552,7 +552,7 @@ def test_add_hotspot_persists_and_selects_area_less_entry(
     assert hotspot_set is not None
     assert len(hotspot_set.interactions) == 1
     interaction = hotspot_set.interactions[0]
-    assert interaction.label == "Unresolved"
+    assert interaction.label == "Unresolved destination"
     assert interaction.polygons == ()
     assert inspector.selected_interaction_id == interaction.id
 

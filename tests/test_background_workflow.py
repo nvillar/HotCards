@@ -215,7 +215,7 @@ def test_generate_applies_to_active_revision_and_preserves_other_content(
     assert revision.background.type == "generated"
     assert revision.description == "A garden"
     assert revision.hotspot_set is not None
-    assert revision.hotspot_set.interactions[0].label == "Unresolved"
+    assert revision.hotspot_set.interactions[0].label == "Unresolved destination"
     metadata = revision.generation_metadata
     assert metadata is not None
     assert metadata.inputs.description == "A garden"

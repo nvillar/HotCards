@@ -125,13 +125,13 @@ def test_complete_hotspot_replacement_is_one_atomic_undo_step() -> None:
     assert [item.id for item in changed.interactions] == [
         item.id for item in replacement.interactions
     ]
-    assert all(item.label == "Unresolved" for item in changed.interactions)
+    assert [item.label for item in changed.interactions] == ["One", "Two"]
 
     assert controller.undo()
     restored = controller.document.cards[0].revisions[0].hotspot_set
     assert restored is not None
     assert restored.interactions[0].id == original.id
-    assert restored.interactions[0].label == "Unresolved"
+    assert restored.interactions[0].label == "Retained destination"
     assert restored.interactions[0].action == original.action
     assert restored.interactions[0].polygons == original.polygons
     assert controller.redo()
@@ -140,7 +140,7 @@ def test_complete_hotspot_replacement_is_one_atomic_undo_step() -> None:
     assert [item.id for item in redone.interactions] == [
         item.id for item in replacement.interactions
     ]
-    assert all(item.label == "Unresolved" for item in redone.interactions)
+    assert [item.label for item in redone.interactions] == ["One", "Two"]
 
 
 def test_destination_resolution_is_one_undoable_command() -> None:
@@ -178,7 +178,7 @@ def test_manual_interaction_add_has_an_undo_boundary() -> None:
     )
     hotspot_set = controller.document.cards[0].revisions[0].hotspot_set
     assert hotspot_set is not None
-    assert hotspot_set.interactions[-1].label == "Unresolved"
+    assert hotspot_set.interactions[-1].label == "New destination"
     assert controller.undo()
     hotspot_set = controller.document.cards[0].revisions[0].hotspot_set
     assert hotspot_set is not None
