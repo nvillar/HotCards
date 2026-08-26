@@ -1517,7 +1517,10 @@ class MainWindow(QMainWindow):
             for index in range(self.llm_model_combo.count())
         )
         self.llm_model_combo.setEnabled(
-            authoring and not image_prompt_busy and has_ollama_model
+            authoring
+            and not image_prompt_busy
+            and not workflow_busy
+            and has_ollama_model
         )
         self.image_model_combo.setEnabled(authoring and not workflow_busy)
         pending = [
@@ -1591,6 +1594,7 @@ class MainWindow(QMainWindow):
                 return
             if selected not in models:
                 selected = models[0]
+                self._cancel_background_generation()
                 self.image_prompt_workflow.cancel()
                 self.settings.setValue(OLLAMA_MODEL_KEY, selected)
                 self.settings.sync()
@@ -1602,6 +1606,7 @@ class MainWindow(QMainWindow):
             return
         if model == load_machine_settings(self.settings).ollama_model:
             return
+        self._cancel_background_generation()
         self.image_prompt_workflow.cancel()
         self.settings.setValue(OLLAMA_MODEL_KEY, model)
         self.settings.sync()

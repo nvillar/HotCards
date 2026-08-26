@@ -850,16 +850,68 @@ def test_bottom_model_selectors_persist_and_follow_operation_state(
     assert window.image_model_combo.toolTip() == window.llm_model_combo.toolTip()
 
     background.busy = True
-    window.image_prompt_workflow._busy = True
+    window.image_prompt_workflow._busy = False
     window._update_generation_actions()
     assert not window.llm_model_combo.isEnabled()
     assert not window.image_model_combo.isEnabled()
+
+    window._availability_check_succeeded(
+        AdapterKind.OLLAMA,
+        window._diagnostic_generation,
+        ("qwen3.5:9b-mlx",),
+    )
+    assert background.cancel_calls == 1
+    assert settings.values["services/ollama_model"] == "qwen3.5:9b-mlx"
+
+    window._availability_check_succeeded(
+        AdapterKind.OLLAMA,
+        window._diagnostic_generation,
+        ("llama3.2:latest", "qwen3.5:9b-mlx"),
+    )
+    background.busy = True
+    window._llm_model_changed(
+        window.llm_model_combo.findData("llama3.2:latest")
+    )
+    assert background.cancel_calls == 2
+    assert settings.values["services/ollama_model"] == "llama3.2:latest"
 
     background.busy = False
     window.image_prompt_workflow._busy = False
     window.mode_button.click()
     assert not window.llm_model_combo.isEnabled()
     assert not window.image_model_combo.isEnabled()
+
+
+def test_generation_failure_keeps_current_image_prompt_reusable(
+    application: QApplication,
+) -> None:
+    revision = CardRevision(
+        description="A courtyard",
+        image_prompt=ImagePrompt(
+            text="A prepared courtyard",
+            source_description="A courtyard",
+            model_identifier="qwen3.5:9b-mlx",
+            prompt_version=main_window_module.IMAGE_PROMPT_PREPARATION_VERSION,
+        ),
+    )
+    card = Card(name="Card", revisions=(revision,))
+    window, _controller, _workers, background = _window(
+        Stack(name="Demo", cards=(card,))
+    )
+    window._availability[AdapterKind.OLLAMA] = True
+    window._availability[AdapterKind.MFLUX] = True
+    window._update_generation_actions()
+    assert window.inspector.has_current_image_prompt()
+    assert window.inspector.generate_background_button.isEnabled()
+
+    background.busy = True
+    window._update_generation_actions()
+    background.busy = False
+    background.failed.emit(RuntimeError("transient MFLUX failure"))
+
+    assert window.inspector.has_current_image_prompt()
+    assert window.inspector.enrich_button.text() == "Image Prompt Current"
+    assert window.inspector.generate_background_button.isEnabled()
 
 
 def test_ollama_selector_disables_when_no_vision_model_is_installed(

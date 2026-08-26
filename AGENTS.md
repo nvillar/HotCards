@@ -147,7 +147,8 @@ for live Ollama and MFLUX runs.
 - Keep LLM and image-model selectors in the status bar and persist them through
   Qt settings. List only installed Ollama models that advertise vision support;
   offer FLUX.2 Klein 4B and FLUX.2 Klein 9B KV. Keep model fields out of
-  Advanced Settings.
+  Advanced Settings. Disable both selectors while image generation is running;
+  changing either model must cancel work using the previous setting.
 - Represent a revision's applied hotspot set as `HotspotSet | None`.
   `None` means no set has been applied; an empty `HotspotSet` means an applied
   set currently contains no interactions.
