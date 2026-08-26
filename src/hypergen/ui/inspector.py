@@ -334,7 +334,7 @@ class Inspector(QWidget):
         self.style_name_label = QLabel("Name")
         self.style_name_label.setObjectName("styleNameLabel")
         layout.addWidget(self.style_name_label)
-        self.style_name_edit = QLineEdit()
+        self.style_name_edit = _CommitLineEdit()
         self.style_name_edit.setObjectName("styleNameEdit")
         self.style_name_edit.setAccessibleName("Style name")
         layout.addWidget(self.style_name_edit)
@@ -603,10 +603,8 @@ class Inspector(QWidget):
         self.style_list.currentItemChanged.connect(self._style_selection_changed)
         self.add_style_button.clicked.connect(self._add_style)
         self.delete_style_button.clicked.connect(self._delete_style)
-        self.style_name_edit.editingFinished.connect(self._commit_style)
-        self.style_prompt_edit.editing_finished.connect(
-            lambda _next_focus, _reason: self._commit_style()
-        )
+        self.style_name_edit.editing_finished.connect(self._style_editing_finished)
+        self.style_prompt_edit.editing_finished.connect(self._style_editing_finished)
         self.hotspot_list.currentItemChanged.connect(self._hotspot_selection_changed)
         self.move_hotspot_up_button.clicked.connect(lambda: self._move_hotspot(-1))
         self.move_hotspot_down_button.clicked.connect(lambda: self._move_hotspot(1))
@@ -1164,6 +1162,15 @@ class Inspector(QWidget):
         self._set_error(self.style_error, "")
         self._render_style_properties(self._selected_style())
 
+    def _style_editing_finished(
+        self,
+        _next_focus: object,
+        reason: object,
+    ) -> None:
+        self._commit_style(
+            render_change=reason != Qt.FocusReason.MouseFocusReason
+        )
+
     def _add_style(self) -> None:
         document = self.controller.document
         existing_names = {style.name.casefold() for style in document.styles}
@@ -1194,7 +1201,7 @@ class Inspector(QWidget):
             undo_message="Style deleted",
         )
 
-    def _commit_style(self) -> bool:
+    def _commit_style(self, *, render_change: bool = True) -> bool:
         if self._rendering:
             return False
         style = self._selected_style()
@@ -1212,6 +1219,7 @@ class Inspector(QWidget):
             ),
             error_label=self.style_error,
             undo_message="Style updated",
+            render_change=render_change,
         )
 
     def _selected_style(self) -> StyleDefinition | None:

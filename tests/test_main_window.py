@@ -13,7 +13,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtCore import QObject, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QPixmap
+from PySide6.QtGui import QCloseEvent, QColor, QPixmap
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel
 
@@ -614,6 +614,54 @@ def test_successful_save_as_cancels_generation_and_expires_undo(
     assert prompt_cancellations == [True]
     assert window.notification_bar.current_key != "undo"
     assert not controller.can_undo
+
+
+def test_failed_authoring_commit_blocks_save_and_close(
+    application: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window, _controller, _workers, background = _window()
+    flush_calls: list[bool] = []
+    window.document_session = SimpleNamespace(
+        store=object(),
+        flush=lambda: flush_calls.append(True) or True,
+    )
+    monkeypatch.setattr(window, "_commit_authoring_metadata", lambda: False)
+
+    assert not window.save_document()
+    assert flush_calls == []
+
+    event = QCloseEvent()
+    window.closeEvent(event)
+    assert not event.isAccepted()
+    assert not background.closed
+
+
+def test_failed_style_focus_commit_blocks_save(
+    application: QApplication,
+) -> None:
+    window, controller, _workers, _background = _window()
+    flush_calls: list[bool] = []
+    window.document_session = SimpleNamespace(
+        store=object(),
+        flush=lambda: flush_calls.append(True) or True,
+    )
+    style = controller.document.styles[0]
+    window.inspector.inspector_tabs.setCurrentIndex(
+        window.inspector._styles_tab_index
+    )
+    window.inspector.style_name_edit.setFocus()
+    window.inspector.style_name_edit.setText("")
+
+    window.inspector._style_editing_finished(
+        window,
+        Qt.FocusReason.MouseFocusReason,
+    )
+
+    assert window.inspector.style_name_edit.text() == ""
+    assert not window.save_document()
+    assert flush_calls == []
+    assert controller.document.style_by_id(style.id) == style
 
 
 def test_author_and_run_modes_apply_consistent_read_only_chrome(

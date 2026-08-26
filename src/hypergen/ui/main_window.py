@@ -710,6 +710,8 @@ class MainWindow(QMainWindow):
         self.canvas_card_name_error.setVisible(bool(message))
 
     def _commit_authoring_metadata(self) -> bool:
+        if self._selected_card_id is None:
+            return True
         if not self._commit_canvas_card_name():
             return False
         return self.inspector.commit_card_metadata()
@@ -928,7 +930,8 @@ class MainWindow(QMainWindow):
         """Create and bind a new stack before exposing its initial card."""
         if self.document_session is None:
             return
-        self._commit_authoring_metadata()
+        if not self._commit_authoring_metadata():
+            return
         dialog = NewStackDialog(self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
@@ -951,7 +954,8 @@ class MainWindow(QMainWindow):
         """Open a validated bundle without replacing the current session on failure."""
         if self.document_session is None:
             return
-        self._commit_authoring_metadata()
+        if not self._commit_authoring_metadata():
+            return
         selected_path = QFileDialog.getExistingDirectory(
             self,
             "Open HyperGen Stack",
@@ -968,7 +972,8 @@ class MainWindow(QMainWindow):
         """Flush accepted mutations and keep a failed save visible."""
         if self.document_session is None:
             return True
-        self._commit_authoring_metadata()
+        if not self._commit_authoring_metadata():
+            return False
         saved = self.document_session.flush()
         if not saved:
             self._show_document_error(
@@ -981,7 +986,8 @@ class MainWindow(QMainWindow):
         """Clone the current bound bundle and rebind future autosaves."""
         if self.document_session is None or self.document_session.store is None:
             return
-        self._commit_authoring_metadata()
+        if not self._commit_authoring_metadata():
+            return
         selected_path, _filter = QFileDialog.getSaveFileName(
             self,
             "Save HyperGen Stack As",
@@ -2052,7 +2058,9 @@ class MainWindow(QMainWindow):
         return dialog.clickedButton() is retry_button
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        self._commit_authoring_metadata()
+        if not self._commit_authoring_metadata():
+            event.ignore()
+            return
         if self.document_session is not None and not self.document_session.flush():
             if self._ask_retry_failed_close_save(
                 (self.document_session.state.error or "The stack could not be saved.")
