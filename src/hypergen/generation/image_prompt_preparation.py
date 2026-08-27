@@ -21,7 +21,7 @@ from hypergen.generation.ollama_client import (
 )
 from hypergen.generation.structured_output import structured_json_content
 
-IMAGE_PROMPT_PREPARATION_VERSION = "image-prompt-preparation-v7"
+IMAGE_PROMPT_PREPARATION_VERSION = "image-prompt-preparation-v8"
 
 
 class ImagePromptPreparationRequest(DomainModel):
@@ -106,6 +106,12 @@ def build_image_prompt_preparation_prompt(
         """\
 REFERENCE INTERPRETATION
 - Inspect the attached Reference image directly. The authored Description is authoritative.
+- The attached Reference is the first and only input image. In image_prompt, call it exactly
+  "image 1".
+- Treat authored phrases such as "Reference", "reference card", "reference image",
+  "reference picture", "source image", "previous image", and "same [entity]" as relationships
+  to image 1. Preserve each relationship's meaning instead of reducing the continuing entity
+  to a generic new subject.
 - reference_generation_description is the effective authored prompt captured when this exact
   Reference background was generated, including any reviewed Image Prompt or legacy enriched
   text that generation actually used. Treat its explicit identity and visual-style language as
@@ -126,6 +132,9 @@ REFERENCE INTERPRETATION
   "same [entity]" also request continuity.
 - For a continuing entity, retain unmentioned stable identity and construction plus reusable
   visual treatment unless the Description explicitly overrides them.
+- When the viewpoint moves into, out of, behind, or through a continuing entity, identify that
+  entity as coming from image 1 and do not also preserve an incompatible depiction of it in
+  the surrounding scene.
 - A request for the same visual style transfers only reusable medium, linework, texture,
   palette, shading, and rendering. It must not copy the Reference subject, setting, objects,
   screen contents, composition, or narrative.
@@ -148,6 +157,28 @@ NO REFERENCE
   rendering technology, camera specification, visible text, interaction, or story fact.
 - A vague requested change may be resolved as a plausible concrete proposal. Do not ask a
   question or discuss ambiguity; the author will review and edit the Image Prompt.
+"""
+    )
+    image_prompt_contract = (
+        """\
+- Synthesize one concrete, direct FLUX.2 editing instruction for image 1.
+- Mention image 1 explicitly at least once, using exactly that label rather than "Reference",
+  "reference card", "reference image", "source image", or "original image".
+- Put the relationship to image 1 and the critical authored change first. State which visible
+  entity, setting, or treatment comes from image 1 and how the target changes it.
+- Preserve authored continuity explicitly. For example, "inside the vehicle in the Reference"
+  becomes "inside the vehicle shown in image 1", never merely "inside a vehicle".
+- Use concrete edit verbs and positive target details. Use remove, replace, or preservation
+  language only to disambiguate a specific edit to image 1, not as a negative-prompt list.
+"""
+        if request.has_reference
+        else """\
+- Synthesize one concrete, positive, standalone description of only the desired final image.
+- Never mention an input image, reference, source image, original image, previous version,
+  comparison, transfer, replacement, omission, inference, instruction, ambiguity, or
+  alternative.
+- Never use process language such as "same style", "inspired by", "instead of", "replacing",
+  "unchanged", or "has changed".
 """
     )
     return f"""\
@@ -191,7 +222,7 @@ PRIVATE DELIBERATION
   palette, linework, texture, shading, rendering technique, and visual style; otherwise null.
 
 IMAGE PROMPT
-- Synthesize one concrete, positive, standalone description of only the desired final image.
+{image_prompt_contract}
 - Put the main subject, action, and critical authored changes first.
 - Incorporate every applicable non-null subject_traits, setting_traits, visual_treatment, and
   target_overrides detail. Private deliberation is a checklist for the final Image Prompt,
@@ -203,11 +234,6 @@ IMAGE PROMPT
 - Never retain old screen or sign contents when the Description changes that surface.
 - Resolve every explicit override consistently. Do not blend an overridden medium or style
   back into the result.
-- Never mention a reference image, source image, original image, previous version,
-  comparison, transfer, replacement, omission, inference, instruction, ambiguity,
-  or alternative.
-- Never use process language such as "same style", "inspired by", "instead of", "replacing",
-  "unchanged", or "has changed".
 - Include no hotspots, navigation, destinations, dimensions, model settings, steps, seeds,
   or other machine parameters.
 
@@ -281,11 +307,23 @@ _STATE_PHRASE_BOUNDARIES = frozenset(
         "with",
     }
 )
-_PROCESS_LANGUAGE = re.compile(
-    r"\b(?:reference image|source image|original image|previous (?:image|version)|"
-    r"prior (?:image|version)|comparison|transfer|replacement|replacing|unchanged|"
-    r"inference|ambiguity|alternative)\b"
-    r"|\binstead of\b|\bsame style\b|\binspired by\b|\bhas changed\b",
+_TEXT_ONLY_PROCESS_LANGUAGE = re.compile(
+    r"\b(?:reference (?:card|image|picture|photo)|"
+    r"(?:source|input|original|previous|prior) (?:image|picture|photo)|"
+    r"previous version|prior version|comparison|transfer|replacement|replacing|"
+    r"unchanged|inference|ambiguity|alternative)\b"
+    r"|\bimage\s+1\b|\binstead of\b|\bsame style\b|\binspired by\b|\bhas changed\b",
+    flags=re.IGNORECASE,
+)
+_IMAGE_ONE_LANGUAGE = re.compile(r"\bimage\s+1\b", flags=re.IGNORECASE)
+_NONCANONICAL_REFERENCE_LANGUAGE = re.compile(
+    r"\b(?:the\s+)?reference\s+(?:card|image|picture|photo)\b"
+    r"|\b(?:the\s+)?reference\b(?!\s+(?:grid|grids|line|lines|mark|marks)\b)"
+    r"|\b(?:source|input|original|previous|prior)\s+(?:image|picture|photo)\b",
+    flags=re.IGNORECASE,
+)
+_META_LANGUAGE = re.compile(
+    r"\b(?:comparison|inference|ambiguity|alternative)\b",
     flags=re.IGNORECASE,
 )
 _ACHROMATIC_LANGUAGE = re.compile(
@@ -484,6 +522,7 @@ def validate_image_prompt(
     authored: str,
     image_prompt: str,
     *,
+    has_reference: bool = False,
     visual_treatment: str | None = None,
 ) -> None:
     output_assertions = _authored_state_assertions(image_prompt)
@@ -532,9 +571,31 @@ def validate_image_prompt(
                 "Image Prompt invented chromatic color under an achromatic "
                 f"Reference treatment: {values}"
             )
-    process_language = _PROCESS_LANGUAGE.search(
-        _without_quoted_text(image_prompt)
-    )
+    unquoted_prompt = _without_quoted_text(image_prompt)
+    if has_reference:
+        if _IMAGE_ONE_LANGUAGE.search(unquoted_prompt) is None:
+            raise ValueError(
+                "Reference-backed Image Prompt must identify the attached Reference as 'image 1'"
+            )
+        noncanonical_reference = _NONCANONICAL_REFERENCE_LANGUAGE.search(
+            unquoted_prompt
+        )
+        if noncanonical_reference is not None:
+            raise ValueError(
+                "Reference-backed Image Prompt must use 'image 1' instead of "
+                f"{noncanonical_reference.group(0)!r}"
+            )
+        meta_language = _META_LANGUAGE.search(unquoted_prompt)
+        if meta_language is not None:
+            raise ValueError(
+                f"Image Prompt contains model-process language: {meta_language.group(0)!r}"
+            )
+        return
+    process_language = _TEXT_ONLY_PROCESS_LANGUAGE.search(unquoted_prompt)
+    if process_language is None:
+        process_language = _NONCANONICAL_REFERENCE_LANGUAGE.search(
+            unquoted_prompt
+        )
     if process_language is not None:
         raise ValueError(
             "Image Prompt contains comparison or process language: "
@@ -546,15 +607,39 @@ def build_image_prompt_repair_prompt(
     request: ImagePromptPreparationRequest,
     image_prompt: str,
     conflict: str,
+    *,
+    reference_backed_output: bool | None = None,
 ) -> str:
+    if reference_backed_output is None:
+        reference_backed_output = request.has_reference
+    preserved_inputs = (
+        "visible-text exclusions, viewpoint, framing, composition, requested "
+        "medium, and Reference relationships."
+        if reference_backed_output
+        else "visible-text exclusions, viewpoint, framing, composition, and "
+        "requested medium."
+    )
+    delivery_contract = (
+        """\
+The repaired Image Prompt is a direct editing instruction that must call the attached
+Reference exactly "image 1" and explicitly preserve every authored relationship to it.
+Concrete remove, replace, same, and preservation language is allowed when it disambiguates
+the requested edit to image 1. Do not use "Reference", "reference image", "source image", or
+another alias in the repaired result."""
+        if reference_backed_output
+        else """\
+The repaired Image Prompt must be a positive standalone description of only the desired final
+image, without input-image, comparison, or editing-process language."""
+    )
     return f"""\
 Repair an Image Prompt that violated its final-state contract.
 
 Return exactly {{"image_prompt": "<corrected Image Prompt>"}} with no surrounding text.
 Change only what is necessary to resolve the detected conflict. Preserve all explicit
 authored subjects, actions, object states, colors, affirmatively requested visible text,
-visible-text exclusions, viewpoint, framing, composition, and requested medium. Describe
-only the desired final image.
+{preserved_inputs}
+
+{delivery_contract}
 
 Authored Description:
 {request.description}
@@ -682,6 +767,7 @@ class OllamaImagePromptPreparer:
             validate_image_prompt(
                 request.description,
                 output.image_prompt,
+                has_reference=request.has_reference,
                 visual_treatment=output.visual_treatment,
             )
         except ValueError as error:
@@ -721,6 +807,7 @@ class OllamaImagePromptPreparer:
                 validate_image_prompt(
                     request.description,
                     repaired.image_prompt,
+                    has_reference=request.has_reference,
                     visual_treatment=output.visual_treatment,
                 )
                 output = output.model_copy(

@@ -43,25 +43,33 @@ active generated image in the same preparation request. The exact authored
 prompt used to generate that Reference image, including its reviewed Image
 Prompt or legacy enriched text, provides the primary semantics for its identity
 and visual style, while the pixels provide visible evidence and missing detail.
-Without a Reference, the request is text-only.
+Without a Reference, the request is text-only. The selected Reference is always
+identified to the image model as `image 1`; preparation translates user-facing
+phrases such as “Reference card,” “reference image,” and “the same vehicle” into
+explicit `image 1` relationships rather than stripping that continuity.
 
 The optional Reference has no fixed Subject, Style, or Setting role. The
 Description states what should carry over or change, while preparation interprets
-the image and produces a concrete final-image proposal for review. Definite
-continuity can retain stable visible identity, construction, and rendering
-treatment; an explicit target subject, state, style, palette, setting,
-viewpoint, or composition overrides the corresponding reference trait. A vague
-change may produce a plausible concrete proposal that the author can edit or
-replace by revising the Description and enriching again.
+the image and produces a concrete direct editing instruction for review.
+Reference-backed Image Prompts explicitly state which entity, setting, or
+treatment comes from `image 1` and how it changes. Definite continuity can
+retain stable visible identity, construction, and rendering treatment; an
+explicit target subject, state, style, palette, setting, viewpoint, or
+composition overrides the corresponding reference trait. A vague change may
+produce a plausible concrete proposal that the author can edit.
 
 An Image Prompt is Current only while its source Description, exact Reference
 card/revision/background snapshot, selected Ollama model, and preparation
 contract still match. Out-of-date prompts remain visible and editable, but
-Generate requires a current prompt. Preparation validates structured output,
+Generate requires a current prompt. Manually editing a non-empty Image Prompt
+marks the reviewed text current against the present Description, Reference,
+model, and preparation contract, so generation can proceed without another
+model preparation call. Preparation validates structured output,
 preserves exact affirmatively authored quoted text, respects explicit quoted-text
-exclusions, rejects recognized object-state reversals and model-process
-language, and requires the meaning of every explicit authored visual property
-to survive without imposing special Description wording. It makes one
+exclusions, rejects recognized object-state reversals and inappropriate
+model-process language, requires canonical `image 1` attribution when a
+Reference is attached, and requires the meaning of every explicit authored
+visual property to survive without imposing special Description wording. It makes one
 constrained repair attempt for a valid but conflicting proposal. Private model
 deliberation is never persisted.
 

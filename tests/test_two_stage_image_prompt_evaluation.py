@@ -361,6 +361,68 @@ def test_two_stage_candidate_uses_production_repair_contract() -> None:
     assert result.repair_applied
 
 
+def test_two_stage_reference_repair_remains_standalone(
+    tmp_path: Path,
+) -> None:
+    reference_path = tmp_path / "reference.png"
+    reference_path.write_bytes(b"fixture")
+    repaired = "A circular metal hatch stands open."
+    preparer, client = _preparer(
+        [
+            json.dumps({"reference_account": "A circular metal hatch is closed."}),
+            _model_output("The same hatch is open instead of closed."),
+            json.dumps({"image_prompt": repaired}),
+        ]
+    )
+
+    result = preparer.prepare(
+        ImagePromptPreparationRequest(
+            description="A circular metal hatch stands open.",
+            has_reference=True,
+            reference_description="A circular metal hatch is closed.",
+            prompt_version=TWO_STAGE_IMAGE_PROMPT_VERSION,
+        ),
+        reference_image_path=reference_path,
+    )
+
+    repair_prompt = str(client.messages[2]["content"])
+    assert result.image_prompt == repaired
+    assert "positive standalone description" in repair_prompt
+    assert 'must call the attached\nReference exactly "image 1"' not in repair_prompt
+
+
+def test_evidence_gate_reference_repair_remains_standalone(
+    tmp_path: Path,
+) -> None:
+    reference_path = tmp_path / "reference.png"
+    reference_path.write_bytes(b"fixture")
+    repaired = "A circular metal hatch stands open."
+    preparer, client = _evidence_preparer(
+        [
+            json.dumps(
+                {"applicable_reference_evidence": "A circular metal hatch."}
+            ),
+            _model_output("The same hatch is open instead of closed."),
+            json.dumps({"image_prompt": repaired}),
+        ]
+    )
+
+    result = preparer.prepare(
+        ImagePromptPreparationRequest(
+            description="A circular metal hatch stands open.",
+            has_reference=True,
+            reference_description="A circular metal hatch is closed.",
+            prompt_version=EVIDENCE_GATE_IMAGE_PROMPT_VERSION,
+        ),
+        reference_image_path=reference_path,
+    )
+
+    repair_prompt = str(client.messages[2]["content"])
+    assert result.image_prompt == repaired
+    assert "positive standalone description" in repair_prompt
+    assert 'must call the attached\nReference exactly "image 1"' not in repair_prompt
+
+
 def test_synthesis_failure_retains_all_stage_metadata(
     tmp_path: Path,
 ) -> None:

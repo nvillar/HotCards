@@ -45,7 +45,7 @@ def _write_benchmark(tmp_path: Path) -> Path:
     image = references / "reference.png"
     Image.new("RGB", (8, 6), "navy").save(image, format="PNG")
     payload = {
-        "benchmark_version": "image-prompt-benchmark-v1",
+        "benchmark_version": "image-prompt-benchmark-v2",
         "benchmark_id": "test-benchmark",
         "title": "Test benchmark",
         "description": "A self-contained benchmark fixture.",
@@ -171,7 +171,7 @@ def test_benchmark_rejects_path_traversal_and_unknown_assets() -> None:
     with pytest.raises(ValidationError, match="safe relative data"):
         ImagePromptBenchmark.model_validate(
             {
-                "benchmark_version": "image-prompt-benchmark-v1",
+                "benchmark_version": "image-prompt-benchmark-v2",
                 "benchmark_id": "bad",
                 "title": "Bad benchmark",
                 "description": "Invalid path fixture.",

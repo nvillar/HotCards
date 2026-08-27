@@ -914,6 +914,44 @@ def test_generation_failure_keeps_current_image_prompt_reusable(
     assert window.inspector.generate_background_button.isEnabled()
 
 
+def test_manual_image_prompt_edit_reenables_generation_after_description_change(
+    application: QApplication,
+) -> None:
+    revision = CardRevision(
+        description="A courtyard",
+        image_prompt=ImagePrompt(
+            text="A prepared courtyard",
+            source_description="A courtyard",
+            model_identifier="qwen3.5:9b-mlx",
+            prompt_version=main_window_module.IMAGE_PROMPT_PREPARATION_VERSION,
+        ),
+    )
+    card = Card(name="Card", revisions=(revision,))
+    window, controller, _workers, background = _window(Stack(name="Demo", cards=(card,)))
+    window._availability[AdapterKind.OLLAMA] = True
+    window._availability[AdapterKind.MFLUX] = True
+    window._update_generation_actions()
+
+    window.inspector.description_edit.setPlainText("A moonlit courtyard")
+    assert window.inspector.commit_revision_metadata()
+    assert not window.inspector.generate_background_button.isEnabled()
+
+    window.inspector.image_prompt_button.click()
+    window.inspector.description_edit.setPlainText("A manually revised moonlit courtyard")
+
+    assert window.inspector.generate_background_button.isEnabled()
+    window._generate_background()
+
+    assert background.generate_calls == [card.id]
+    image_prompt = controller.document.cards[0].active_revision.image_prompt
+    assert image_prompt is not None
+    assert image_prompt.text == "A manually revised moonlit courtyard"
+    assert image_prompt.source_description == "A moonlit courtyard"
+    assert image_prompt.model_identifier == "qwen3.5:9b-mlx"
+    assert image_prompt.prompt_version == (main_window_module.IMAGE_PROMPT_PREPARATION_VERSION)
+    window.close()
+
+
 def test_ollama_selector_disables_when_no_vision_model_is_installed(
     application: QApplication,
 ) -> None:

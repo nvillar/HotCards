@@ -35,6 +35,9 @@ from hypergen.domain.models import (
     StyleDefinition,
     UnresolvedCardReference,
 )
+from hypergen.generation.image_prompt_preparation import (
+    IMAGE_PROMPT_PREPARATION_VERSION,
+)
 from hypergen.ui.inspector import Inspector
 
 
@@ -654,6 +657,60 @@ def test_image_prompt_status_and_generation_source(
     assert "Using: Image Prompt" in inspector.generate_background_button.toolTip()
     assert controller.undo()
     assert controller.document.cards[0].active_revision.image_prompt is not None
+
+
+def test_manual_image_prompt_edit_refreshes_changed_description(
+    application: QApplication,
+) -> None:
+    revision = CardRevision(
+        description="A courtyard",
+        image_prompt=ImagePrompt(
+            text="A richly detailed courtyard",
+            source_description="A courtyard",
+            model_identifier="qwen3.5:9b-mlx",
+            prompt_version=IMAGE_PROMPT_PREPARATION_VERSION,
+        ),
+    )
+    card = Card(name="Card", revisions=(revision,))
+    controller = DocumentController(Stack(name="Demo", cards=(card,)))
+    inspector = Inspector(controller)
+    inspector.render(controller.document, card.id)
+    inspector.set_image_prompt_capabilities(
+        can_enrich=True,
+        reason="Ready to prepare Image Prompt",
+        busy=False,
+        model_identifier="qwen3.5:9b-mlx",
+        prompt_version=IMAGE_PROMPT_PREPARATION_VERSION,
+    )
+
+    inspector.description_edit.setPlainText("A moonlit courtyard")
+    assert inspector.commit_revision_metadata()
+    assert not inspector.has_current_image_prompt()
+
+    inspector.image_prompt_button.click()
+    inspector.description_edit.setPlainText("A manually revised moonlit courtyard")
+
+    assert inspector.has_current_image_prompt()
+    assert inspector.enrich_button.text() == "Image Prompt Current"
+    inspector.show()
+    inspector.description_edit.setFocus()
+    application.processEvents()
+    assert inspector.description_edit.hasFocus()
+    inspector.render(controller.document, card.id)
+    assert (
+        inspector.description_edit.toPlainText()
+        == "A manually revised moonlit courtyard"
+    )
+    assert inspector.has_current_image_prompt()
+    assert inspector.commit_revision_metadata(render_change=False)
+
+    image_prompt = controller.document.cards[0].active_revision.image_prompt
+    assert image_prompt is not None
+    assert image_prompt.text == "A manually revised moonlit courtyard"
+    assert image_prompt.source_description == "A moonlit courtyard"
+    assert image_prompt.model_identifier == "qwen3.5:9b-mlx"
+    assert image_prompt.prompt_version == IMAGE_PROMPT_PREPARATION_VERSION
+    assert inspector.has_current_image_prompt()
 
 
 def test_switching_cards_defaults_to_description(

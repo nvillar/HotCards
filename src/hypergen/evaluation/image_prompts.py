@@ -42,7 +42,7 @@ from hypergen.generation.ollama_client import (
     OllamaSettings,
 )
 
-IMAGE_PROMPT_BENCHMARK_VERSION = "image-prompt-benchmark-v1"
+IMAGE_PROMPT_BENCHMARK_VERSION = "image-prompt-benchmark-v2"
 IMAGE_PROMPT_BENCHMARK_RESULT_VERSION = "image-prompt-benchmark-result-v1"
 DEFAULT_IMAGE_PROMPT_BENCHMARK = Path(
     "evals/cases/image_prompts/benchmark.json"
@@ -126,7 +126,7 @@ class ImagePromptBenchmarkCase(DomainModel):
 class ImagePromptBenchmark(DomainModel):
     """Version-controlled Image Prompt inputs, assets, and scoring criteria."""
 
-    benchmark_version: Literal["image-prompt-benchmark-v1"] = (
+    benchmark_version: Literal["image-prompt-benchmark-v2"] = (
         IMAGE_PROMPT_BENCHMARK_VERSION
     )
     benchmark_id: SafeCaseId

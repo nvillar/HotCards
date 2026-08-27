@@ -87,6 +87,11 @@ def test_prompt_defines_one_reviewable_result_without_clarification() -> None:
     assert "Do not ask a" in prompt
     assert "question or discuss ambiguity" in prompt
     assert "Inspect the attached Reference image directly" in prompt
+    assert 'call it exactly\n  "image 1"' in prompt
+    assert '"reference card"' in prompt
+    assert '"reference picture"' in prompt
+    assert "inside the vehicle shown in image 1" in prompt
+    assert "direct FLUX.2 editing instruction for image 1" in prompt
     assert "same visual style" in prompt
     assert "reference_generation_description" in prompt
     assert "primary semantic interpretation" in prompt
@@ -114,6 +119,8 @@ def test_text_only_prompt_does_not_claim_an_attached_reference() -> None:
 
     assert "NO REFERENCE" in prompt
     assert "Inspect the attached Reference image directly" not in prompt
+    assert "direct FLUX.2 editing instruction for image 1" not in prompt
+    assert "positive, standalone description" in prompt
 
 
 def test_request_rejects_empty_description() -> None:
@@ -127,8 +134,8 @@ def test_preparer_attaches_reference_and_parses_one_image_prompt(
     image_path = tmp_path / "reference.png"
     image_path.write_bytes(b"fixture")
     prompt = (
-        "A boxy CRT computer terminal in high-contrast halftone linework. "
-        "Its screen is filled with dense static."
+        "Update the boxy CRT computer terminal in image 1 so its screen is "
+        "filled with dense static, preserving the high-contrast halftone linework."
     )
     preparer, client = _preparer(_output(prompt))
 
@@ -146,6 +153,170 @@ def test_preparer_attaches_reference_and_parses_one_image_prompt(
     assert result.total_duration_ns == 2_000_000
     assert client.call_count == 1
     assert client.messages[0]["images"] == [image_path]
+
+
+def test_preparer_repairs_missing_image_one_attribution(
+    tmp_path: Path,
+) -> None:
+    image_path = tmp_path / "reference.png"
+    image_path.write_bytes(b"fixture")
+    repaired = (
+        "Move the camera inside the vehicle shown in image 1, framing the "
+        "airlock through its windshield."
+    )
+    preparer, client = _preparer(
+        [
+            _output("Viewed from inside a small vehicle, an airlock fills the windshield."),
+            json.dumps({"image_prompt": repaired}),
+        ]
+    )
+
+    result = preparer.prepare(
+        ImagePromptPreparationRequest(
+            description="View from inside the vehicle in the reference card.",
+            has_reference=True,
+            reference_description="A small vehicle faces an airlock.",
+        ),
+        reference_image_path=image_path,
+    )
+
+    assert result.image_prompt == repaired
+    assert result.repair_applied
+    assert client.call_count == 2
+    assert "must identify the attached Reference as 'image 1'" in str(
+        client.messages[-1]["content"]
+    )
+
+
+def test_preparer_accepts_direct_image_one_edit_language(
+    tmp_path: Path,
+) -> None:
+    image_path = tmp_path / "reference.png"
+    image_path.write_bytes(b"fixture")
+    prompt = (
+        "Move the camera in image 1 inside its vehicle, replacing the exterior "
+        "vehicle with an angular cockpit while preserving the same visual style."
+    )
+    preparer, client = _preparer(_output(prompt))
+
+    result = preparer.prepare(
+        ImagePromptPreparationRequest(
+            description="View from inside the vehicle in the reference picture.",
+            has_reference=True,
+            reference_description="A vehicle in a monochrome hangar.",
+        ),
+        reference_image_path=image_path,
+    )
+
+    assert result.image_prompt == prompt
+    assert client.call_count == 1
+
+
+def test_preparer_repairs_noncanonical_reference_alias(
+    tmp_path: Path,
+) -> None:
+    image_path = tmp_path / "reference.png"
+    image_path.write_bytes(b"fixture")
+    repaired = "Change the vehicle in image 1 into a view from its cockpit."
+    preparer, client = _preparer(
+        [
+            _output("Use image 1, the reference image, as the vehicle identity."),
+            json.dumps({"image_prompt": repaired}),
+        ]
+    )
+
+    result = preparer.prepare(
+        ImagePromptPreparationRequest(
+            description="Show the vehicle from the reference image from inside.",
+            has_reference=True,
+            reference_description="A small angular vehicle.",
+        ),
+        reference_image_path=image_path,
+    )
+
+    assert result.image_prompt == repaired
+    assert client.call_count == 2
+    assert "must use 'image 1'" in str(client.messages[-1]["content"])
+
+
+@pytest.mark.parametrize(
+    "invalid_prompt",
+    (
+        "Use image 1 to create a moonlit courtyard.",
+        "Use the Reference to create a moonlit courtyard.",
+        "Use the reference card to create a moonlit courtyard.",
+        "Use the reference picture to create a moonlit courtyard.",
+        "Use the input image to create a moonlit courtyard.",
+    ),
+)
+def test_text_only_preparer_repairs_input_image_language(
+    invalid_prompt: str,
+) -> None:
+    repaired = "A moonlit courtyard with pale stone arches."
+    preparer, client = _preparer(
+        [
+            _output(invalid_prompt),
+            json.dumps({"image_prompt": repaired}),
+        ]
+    )
+
+    result = preparer.prepare(
+        ImagePromptPreparationRequest(description="A moonlit courtyard with pale stone arches.")
+    )
+
+    assert result.image_prompt == repaired
+    assert client.call_count == 2
+
+
+def test_reference_preparer_allows_reference_as_scene_terminology(
+    tmp_path: Path,
+) -> None:
+    image_path = tmp_path / "reference.png"
+    image_path.write_bytes(b"fixture")
+    prompt = (
+        "Add reference grid lines behind the object from image 1 while "
+        "preserving its high-contrast treatment."
+    )
+    preparer, client = _preparer(_output(prompt))
+
+    result = preparer.prepare(
+        ImagePromptPreparationRequest(
+            description="Add reference grid lines behind the object.",
+            has_reference=True,
+            reference_description="A geometric object in high contrast.",
+        ),
+        reference_image_path=image_path,
+    )
+
+    assert result.image_prompt == prompt
+    assert client.call_count == 1
+
+
+def test_reference_preparer_repairs_bare_reference_alias(
+    tmp_path: Path,
+) -> None:
+    image_path = tmp_path / "reference.png"
+    image_path.write_bytes(b"fixture")
+    repaired = "Preserve the vehicle from image 1 while moving the camera inside it."
+    preparer, client = _preparer(
+        [
+            _output("Use image 1 while preserving the Reference vehicle."),
+            json.dumps({"image_prompt": repaired}),
+        ]
+    )
+
+    result = preparer.prepare(
+        ImagePromptPreparationRequest(
+            description="Move inside the vehicle in the Reference.",
+            has_reference=True,
+            reference_description="A small angular vehicle.",
+        ),
+        reference_image_path=image_path,
+    )
+
+    assert result.image_prompt == repaired
+    assert client.call_count == 2
+    assert "must use 'image 1'" in str(client.messages[-1]["content"])
 
 
 def test_preparer_requires_a_vision_capable_model() -> None:
@@ -302,15 +473,15 @@ def test_preparer_repairs_invented_color_under_monochrome_treatment(
     preparer, client = _preparer(
         [
             _output(
-                "A close-up of an old beige CRT monitor rendered in "
-                "high-contrast black and white halftone.",
+                "Show the CRT monitor from image 1 as an old beige close-up "
+                "rendered in high-contrast black and white halftone.",
                 visual_treatment="high-contrast black and white halftone",
             ),
             json.dumps(
                 {
                     "image_prompt": (
-                        "A close-up of the distinctive computer monitor, "
-                        "rendered in high-contrast black-and-white halftone."
+                        "Show the distinctive computer monitor from image 1 in "
+                        "a close-up rendered in high-contrast black-and-white halftone."
                     )
                 }
             ),

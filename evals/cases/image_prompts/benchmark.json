@@ -1,14 +1,14 @@
 {
-  "benchmark_version": "image-prompt-benchmark-v1",
+  "benchmark_version": "image-prompt-benchmark-v2",
   "benchmark_id": "hypergen-image-prompts",
   "title": "HyperGen Image Prompt benchmark",
   "description": "A maintained, self-contained benchmark for judging whether Image Prompt preparation preserves authored intent while applying only requested Reference continuity.",
   "common_criteria": [
     {
-      "criterion_id": "standalone-final-image",
+      "criterion_id": "canonical-delivery",
       "category": "prompt_quality",
       "severity": "critical",
-      "description": "The result is one standalone description of the desired final image rather than a comparison, explanation, instruction, or discussion of alternatives."
+      "description": "The result is one production-ready paragraph: text-only prompts describe the standalone final image, while Reference-backed prompts give a direct edit instruction that explicitly calls the attached Reference image 1."
     },
     {
       "criterion_id": "description-authority",
@@ -17,10 +17,10 @@
       "description": "The authored Description remains the dominant scene authority; Reference content does not replace its subject, view, state, or composition."
     },
     {
-      "criterion_id": "no-process-or-machine-language",
+      "criterion_id": "no-meta-or-machine-language",
       "category": "prompt_quality",
       "severity": "major",
-      "description": "The result does not mention a Reference, source image, previous version, prompt process, model, dimensions, steps, seeds, hotspots, or navigation."
+      "description": "The result contains no explanation, ambiguity discussion, alternatives, model names, dimensions, steps, seeds, hotspots, or navigation; Reference-backed prompts use the canonical label image 1 rather than Reference, source image, or another alias."
     },
     {
       "criterion_id": "no-unrequested-visible-text",
@@ -32,7 +32,7 @@
       "criterion_id": "positive-image-language",
       "category": "prompt_quality",
       "severity": "major",
-      "description": "The final image is described positively; exclusions are realized by omission or positive text-free wording rather than a negative-prompt checklist."
+      "description": "The target image is described with concrete positive details; remove, replace, or preservation language appears only when it disambiguates a specific edit to image 1, never as a negative-prompt checklist."
     }
   ],
   "assets": [

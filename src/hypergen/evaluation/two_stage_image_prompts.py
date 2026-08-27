@@ -520,6 +520,7 @@ class TwoStageImagePromptPreparer:
                         request,
                         output.image_prompt,
                         str(conflict),
+                        reference_backed_output=False,
                     ),
                     schema=ImagePromptRepairOutput.model_json_schema(),
                 )
@@ -684,6 +685,7 @@ class EvidenceGateImagePromptPreparer:
                         request,
                         output.image_prompt,
                         str(conflict),
+                        reference_backed_output=False,
                     ),
                     schema=ImagePromptRepairOutput.model_json_schema(),
                 )

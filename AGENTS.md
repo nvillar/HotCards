@@ -67,8 +67,10 @@ for live Ollama and MFLUX runs.
   its hotspot semantics and immutable background reference.
 - Keep at most one optional Reference card per revision and reject
   self-references. Resolve its active accepted background for both Image Prompt
-  preparation and image generation. Send the Reference image once to MFLUX
-  without hidden role instructions or complete source-card prose.
+  preparation and image generation. Send the Reference image once to MFLUX as
+  `image 1`; keep its required continuity and edit instructions visible in the
+  reviewed Image Prompt rather than adding hidden role instructions or complete
+  source-card prose.
 - Keep an ordered, stack-owned library of editable named Styles with stable
   UUIDs. Store the selected Style on each revision and persist the last explicit
   Style or No Style selection as the default for new cards. Deleting a Style
@@ -88,7 +90,9 @@ for live Ollama and MFLUX runs.
   controls and vertically stacked full-width fields. Encode Image
   Prompt freshness in the preparation action from the Description, exact usable
   Reference background, selected Ollama model, and preparation prompt version:
-  current is a disabled completed state and stale is Update Image Prompt. Clearing the
+  current is a disabled completed state and stale is Update Image Prompt.
+  Treat a non-empty direct user edit as a reviewed refresh against those current
+  inputs so generation can proceed without another model call. Clearing the
   Image Prompt editor removes that derived value. Require a current Image Prompt
   for image generation.
 - Support generated backgrounds only; do not add image import. Apply Generate
@@ -112,11 +116,14 @@ for live Ollama and MFLUX runs.
   for applicable identity and style language; use the image as visual evidence
   and to fill gaps rather than relabeling explicit authored treatment. Preserve
   the meaning of every explicit target visual property without special keywords
-  or required wording. Allow a plausible concrete proposal for ambiguity rather
-  than adding clarification state. Store only the final Image Prompt through one
-  undoable command; private deliberation must not enter the stack. Track source
-  Description, exact Reference provenance, Ollama model,
-  and prompt version so freshness is strict. Reject recognized authored
+  or required wording. For Reference-backed preparation, translate user-facing
+  aliases such as Reference card, image, or picture into the canonical `image 1`
+  label, preserve explicit entity relationships, and produce a direct editing
+  instruction rather than a standalone caption. Allow a plausible concrete
+  proposal for ambiguity rather than adding clarification state. Store only the
+  final Image Prompt through one undoable command; private deliberation must not
+  enter the stack. Track source Description, exact Reference provenance, Ollama
+  model, and prompt version so freshness is strict. Reject recognized authored
   object-state reversals, invented or altered affirmative quoted visible text,
   and violations of explicit quoted-text exclusions after one constrained
   repair attempt.

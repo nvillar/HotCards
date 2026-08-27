@@ -805,15 +805,29 @@ class Inspector(QWidget):
                 undo_message="Image Prompt removed",
                 render_change=render_change,
             )
-        return self._execute(
+        changed = self._execute(
             SetRevisionImagePromptCommand(
                 card_id=card.id,
                 revision_id=card.active_revision.id,
-                value=existing.model_copy(update={"text": value.strip()}),
+                value=existing.model_copy(
+                    update={
+                        "text": value.strip(),
+                        "source_description": card.active_revision.description,
+                        "reference": image_prompt_reference_snapshot(
+                            self.controller.document,
+                            card,
+                        ),
+                        "model_identifier": self._image_prompt_model_identifier,
+                        "prompt_version": self._image_prompt_prompt_version,
+                    }
+                ),
             ),
             error_label=self.description_error,
             render_change=render_change,
         )
+        if changed and not render_change:
+            self._update_image_prompt_freshness()
+        return changed
 
     def commit_card_metadata(self) -> bool:
         """Commit every visible authoring draft before a context change or save."""
@@ -896,25 +910,10 @@ class Inspector(QWidget):
         style_suffix = " + Style" if revision.style_id is not None else ""
         self._enrich_using_text = f"Using: Description{reference_suffix}"
         image_prompt = revision.image_prompt
-        if image_prompt is None:
-            self._image_prompt_current = None
-        else:
-            authored_description = (
-                self.description_edit.toPlainText()
-                if self._description_mode == "description"
-                else revision.description
-            )
-            reference_snapshot = image_prompt_reference_snapshot(
-                document,
-                card,
-            )
-            reference_is_usable = revision.reference is None or reference_snapshot is not None
-            self._image_prompt_current = reference_is_usable and image_prompt.is_current(
-                source_description=authored_description,
-                reference=reference_snapshot,
-                model_identifier=self._image_prompt_model_identifier,
-                prompt_version=self._image_prompt_prompt_version,
-            )
+        self._image_prompt_current = self._current_image_prompt_state(
+            document,
+            card,
+        )
         self.description_toggle.setVisible(image_prompt is not None)
         self.description_button.setChecked(self._description_mode == "description")
         self.image_prompt_button.setChecked(self._description_mode == "image_prompt")
@@ -962,32 +961,49 @@ class Inspector(QWidget):
 
     def _update_image_prompt_freshness(self) -> None:
         card = self._selected_card()
-        if card is None or card.active_revision.image_prompt is None:
-            self._image_prompt_current = None
-        else:
-            source_description = (
-                self.description_edit.toPlainText()
-                if self._description_mode == "description"
-                else card.active_revision.description
-            )
-            reference_snapshot = image_prompt_reference_snapshot(
+        self._image_prompt_current = (
+            None
+            if card is None
+            else self._current_image_prompt_state(
                 self.controller.document,
                 card,
             )
-            reference_is_usable = (
-                card.active_revision.reference is None or reference_snapshot is not None
-            )
-            self._image_prompt_current = (
-                reference_is_usable
-                and card.active_revision.image_prompt.is_current(
-                    source_description=source_description,
-                    reference=reference_snapshot,
-                    model_identifier=self._image_prompt_model_identifier,
-                    prompt_version=self._image_prompt_prompt_version,
-                )
-            )
+        )
         self._update_enrich_button()
         self._refresh_generation_tooltips()
+
+    def _current_image_prompt_state(
+        self,
+        document: Stack,
+        card: Card,
+    ) -> bool | None:
+        image_prompt = card.active_revision.image_prompt
+        if image_prompt is None:
+            return None
+        source_description = (
+            self.description_edit.toPlainText()
+            if self._description_mode == "description"
+            else card.active_revision.description
+        )
+        reference_snapshot = image_prompt_reference_snapshot(document, card)
+        reference_is_usable = (
+            card.active_revision.reference is None or reference_snapshot is not None
+        )
+        visible_prompt = self.description_edit.toPlainText().strip()
+        has_manual_update = (
+            self._description_mode == "image_prompt"
+            and bool(visible_prompt)
+            and visible_prompt != image_prompt.text
+        )
+        return reference_is_usable and (
+            has_manual_update
+            or image_prompt.is_current(
+                source_description=source_description,
+                reference=reference_snapshot,
+                model_identifier=self._image_prompt_model_identifier,
+                prompt_version=self._image_prompt_prompt_version,
+            )
+        )
 
     def _update_enrich_button(self) -> None:
         card = self._selected_card()
