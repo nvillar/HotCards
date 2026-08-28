@@ -151,7 +151,10 @@ class CardSidebar(QWidget):
         draft_card_ids: Collection[UUID] = (),
     ) -> None:
         """Render a controller snapshot while preserving valid selection."""
-        desired = selected_card_id if selected_card_id is not None else self.selected_card_id
+        current_card_id = self.selected_card_id
+        desired = selected_card_id if selected_card_id is not None else current_card_id
+        scroll_bar = self.card_list.verticalScrollBar()
+        scroll_position = scroll_bar.value()
         draft_ids = frozenset(draft_card_ids)
         with QSignalBlocker(self.card_list):
             self.card_list.clear()
@@ -174,9 +177,12 @@ class CardSidebar(QWidget):
                 item.setToolTip(" · ".join(states) if states else card.name)
                 self.card_list.addItem(item)
             selected_row = self._row_for(desired)
+            preserve_scroll = selected_row >= 0 and desired == current_card_id
             if selected_row < 0 and self.card_list.count():
                 selected_row = 0
             self.card_list.setCurrentRow(selected_row)
+            if preserve_scroll:
+                scroll_bar.setValue(scroll_position)
         self.empty_label.setVisible(not document.cards)
         self._update_buttons()
 

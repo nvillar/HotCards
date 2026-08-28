@@ -543,7 +543,12 @@ class MainWindow(QMainWindow):
         self.advanced_settings_action.triggered.connect(self.open_advanced_settings)
         self.menuBar().addMenu("HyperGen").addAction(self.advanced_settings_action)
 
-    def render_document(self, _document: Stack | None = None) -> None:
+    def render_document(
+        self,
+        _document: Stack | None = None,
+        *,
+        render_sidebar: bool = True,
+    ) -> None:
         """Refresh all panes from the controller's authoritative snapshot."""
         snapshot = self.controller.document
         previous_card_id = self._rendered_card_id
@@ -561,11 +566,12 @@ class MainWindow(QMainWindow):
             self._selected_card_id = snapshot.cards[0].id if snapshot.cards else None
         self._rendering = True
         try:
-            self.card_sidebar.render(
-                snapshot,
-                self._selected_card_id,
-                draft_card_ids=(),
-            )
+            if render_sidebar:
+                self.card_sidebar.render(
+                    snapshot,
+                    self._selected_card_id,
+                    draft_card_ids=(),
+                )
             self.inspector.render(snapshot, self._selected_card_id)
             selected_card = next(
                 (card for card in snapshot.cards if card.id == self._selected_card_id),
@@ -628,7 +634,8 @@ class MainWindow(QMainWindow):
         self._selected_card_id = selected_card_id
         if self.card_sidebar.selected_card_id != self._selected_card_id:
             self.card_sidebar.select_card(self._selected_card_id)
-        self.render_document()
+        card_ids = {card.id for card in self.controller.document.cards}
+        self.render_document(render_sidebar=self._selected_card_id not in card_ids)
 
     def _show_hotspot_usage(
         self,

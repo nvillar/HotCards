@@ -426,6 +426,46 @@ def test_card_browser_uses_thumbnails_and_compact_action_row(
     )
 
 
+def test_selecting_scrolled_card_survives_focus_out_render(
+    application: QApplication,
+) -> None:
+    cards = tuple(Card(name=f"Card {number}") for number in range(20))
+    window, _controller, _workers, _background = _window(
+        Stack(name="Demo", cards=cards)
+    )
+    window.resize(900, 500)
+    window.show()
+    application.processEvents()
+    try:
+        window.canvas_card_name.setFocus()
+        window.canvas_card_name.setText("Renamed Card")
+        card_list = window.card_sidebar.card_list
+        scroll_bar = card_list.verticalScrollBar()
+        scroll_bar.setValue(scroll_bar.maximum())
+        application.processEvents()
+        target = cards[-2]
+        target_item = card_list.item(len(cards) - 2)
+        target_position = card_list.visualItemRect(target_item).center()
+        assert card_list.viewport().rect().contains(target_position)
+        scroll_position = scroll_bar.value()
+        assert scroll_position > scroll_bar.minimum()
+
+        QTest.mouseClick(
+            card_list.viewport(),
+            Qt.MouseButton.LeftButton,
+            pos=target_position,
+        )
+        application.processEvents()
+
+        assert window.controller.document.cards[0].name == "Renamed Card"
+        assert window.card_sidebar.selected_card_id == target.id
+        assert window._selected_card_id == target.id
+        assert scroll_bar.value() == scroll_position
+    finally:
+        window.close()
+        application.processEvents()
+
+
 def test_card_header_displays_serialized_active_revision(
     application: QApplication,
 ) -> None:
