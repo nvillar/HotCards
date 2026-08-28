@@ -327,10 +327,7 @@ def test_hotspot_pipeline_edits_conditions_changes_and_navigation(
         Qt.AlignmentFlag.AlignCenter
     )
     assert condition_remove.width() == condition_remove.height()
-    assert condition_remove.size() == QSize(
-        condition_state.sizeHint().height(),
-        condition_state.sizeHint().height(),
-    )
+    assert condition_remove.size() == QSize(20, 20)
     assert inspector.condition_table.height() == (
         inspector.condition_table.horizontalHeader().sizeHint().height()
         + sum(
@@ -354,10 +351,7 @@ def test_hotspot_pipeline_edits_conditions_changes_and_navigation(
         Qt.AlignmentFlag.AlignCenter
     )
     assert key_change_remove.width() == key_change_remove.height()
-    assert key_change_remove.size() == QSize(
-        remove_change.sizeHint().height(),
-        remove_change.sizeHint().height(),
-    )
+    assert key_change_remove.size() == QSize(20, 20)
     assert inspector.no_key_changes_label.isHidden()
     assert inspector.hotspot_target_label.text() == "Go to"
     assert inspector.hotspot_summary.text() == (

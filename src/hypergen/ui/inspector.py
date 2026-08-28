@@ -1742,7 +1742,7 @@ class Inspector(QWidget):
                 key_combo.sizeHint().height(),
                 state_combo.sizeHint().height(),
             )
-            remove_button.setFixedSize(control_extent, control_extent)
+            remove_button.setFixedSize(20, 20)
             row_height = control_extent + 4
             self.condition_table.setRowHeight(row, row_height)
             row_heights.append(row_height)
@@ -1821,7 +1821,7 @@ class Inspector(QWidget):
                 change_combo.sizeHint().height(),
                 key_combo.sizeHint().height(),
             )
-            remove_button.setFixedSize(control_extent, control_extent)
+            remove_button.setFixedSize(20, 20)
             row_height = control_extent + 4
             self.key_change_table.setRowHeight(row, row_height)
             row_heights.append(row_height)
