@@ -262,7 +262,9 @@ def test_revision_description_and_reference_edits_are_typed_changes() -> None:
 
     changed = document.cards[0].active_revision
     assert changed.description == "A quiet library"
-    assert changed.reference == ResolvedCardReference(target_card_id=reference.id)
+    assert changed.references == (
+        ResolvedCardReference(target_card_id=reference.id),
+    )
 
 
 def test_image_prompt_is_set_and_cleared_independently() -> None:
@@ -498,7 +500,13 @@ def test_delete_card_converts_all_inbound_references_and_clears_start() -> None:
         update={
             "revisions": (
                 source.active_revision.model_copy(
-                    update={"reference": ResolvedCardReference(target_card_id=destination.id)}
+                    update={
+                        "references": (
+                            ResolvedCardReference(
+                                target_card_id=destination.id
+                            ),
+                        )
+                    }
                 ),
             )
         }
@@ -518,8 +526,8 @@ def test_delete_card_converts_all_inbound_references_and_clears_start() -> None:
     target = hotspot_set.interactions[0].action.target
     assert target == UnresolvedCardReference(target_name="Former Hall")
     assert hotspot_set.interactions[0].label == "Former Hall"
-    assert changed.cards[0].active_revision.reference == UnresolvedCardReference(
-        target_name="Former Hall"
+    assert changed.cards[0].active_revision.references == (
+        UnresolvedCardReference(target_name="Former Hall"),
     )
 
 
@@ -588,4 +596,4 @@ def test_reference_assignment_and_background_replacement_are_guarded() -> None:
         revision_id=revision_id,
         reference=None,
     ).apply(document)
-    assert document.cards[0].active_revision.reference is None
+    assert document.cards[0].active_revision.references == ()

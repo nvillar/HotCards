@@ -212,11 +212,16 @@ class OllamaRuntime:
         prompt: str,
         schema: dict[str, Any],
         image_path: Path | None = None,
+        image_paths: tuple[Path, ...] = (),
     ) -> OllamaCallResult:
         """Run one synchronous structured-output request."""
+        if image_path is not None and image_paths:
+            raise ValueError("provide image_path or image_paths, not both")
         message: dict[str, Any] = {"role": "user", "content": prompt}
         if image_path is not None:
             message["images"] = [image_path]
+        elif image_paths:
+            message["images"] = list(image_paths)
         started = perf_counter()
         try:
             response = self._client.chat(

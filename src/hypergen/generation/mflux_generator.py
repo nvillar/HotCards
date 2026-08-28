@@ -149,7 +149,7 @@ class MfluxGenerationRequest(DomainModel):
 
     @model_validator(mode="after")
     def require_matching_reference_inputs(self) -> MfluxGenerationRequest:
-        if len(self.inputs.references()) != len(self.reference_image_paths):
+        if len(self.inputs.references) != len(self.reference_image_paths):
             raise ValueError(
                 "reference image paths must match captured reference inputs"
             )

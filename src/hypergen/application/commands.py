@@ -206,12 +206,17 @@ def _unresolve_inbound_references(
     revisions: list[CardRevision] = []
     for revision in card.revisions:
         updates: dict[str, object] = {}
-        reference = revision.reference
-        if (
-            isinstance(reference, ResolvedCardReference)
-            and reference.target_card_id == deleted_card_id
-        ):
-            updates["reference"] = UnresolvedCardReference(target_name=deleted_card_name)
+        references = tuple(
+            UnresolvedCardReference(target_name=deleted_card_name)
+            if (
+                isinstance(reference, ResolvedCardReference)
+                and reference.target_card_id == deleted_card_id
+            )
+            else reference
+            for reference in revision.references
+        )
+        if references != revision.references:
+            updates["references"] = references
         if revision.hotspot_set is None:
             revisions.append(revision.model_copy(update=updates))
             continue
@@ -484,17 +489,32 @@ class SetRevisionImagePromptCommand:
 
 @dataclass(frozen=True, slots=True)
 class SetRevisionReferenceCommand:
-    """Assign or clear the revision's optional image Reference."""
+    """Assign or clear one ordered revision image Reference."""
 
     card_id: UUID
     revision_id: UUID
     reference: CardReference | None
+    position: int = 1
 
     def apply(self, document: Stack) -> Stack:
         card_index = _card_index(document, self.card_id)
         card = document.cards[card_index]
         revision_index = _revision_index(card, self.revision_id)
-        revision = card.revisions[revision_index].model_copy(update={"reference": self.reference})
+        revision = card.revisions[revision_index]
+        if not 1 <= self.position <= 2:
+            raise CommandError("Reference position must be 1 or 2")
+        references = list(revision.references)
+        index = self.position - 1
+        if self.reference is None:
+            if index < len(references):
+                references.pop(index)
+        elif index < len(references):
+            references[index] = self.reference
+        elif index == len(references):
+            references.append(self.reference)
+        else:
+            raise CommandError("set Reference 1 before Reference 2")
+        revision = revision.model_copy(update={"references": tuple(references)})
         card = _replace_revision(card, revision_index, revision)
         return validated_copy(_replace_card(document, card_index, card))
 

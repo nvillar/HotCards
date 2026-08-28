@@ -56,9 +56,12 @@ from hypergen.application.document_session import (
 )
 from hypergen.application.generated_revision_change import GeneratedRevisionChange
 from hypergen.application.image_prompt_workflow import (
-    IMAGE_PROMPT_PREPARATION_VERSION,
+    IMAGE_PROMPT_PREPARATION_VERSION as IMAGE_PROMPT_PREPARATION_VERSION,
+)
+from hypergen.application.image_prompt_workflow import (
     ImagePromptWorkflow,
     ImagePromptWorkflowError,
+    image_prompt_preparation_version,
 )
 from hypergen.application.run_session import RunSession, RunSessionState
 from hypergen.application.workers import (
@@ -1467,20 +1470,29 @@ class MainWindow(QMainWindow):
             enrich_reason = "Image Prompt preparation is running"
         elif not ollama_available:
             enrich_reason = self._action_diagnostic(AdapterKind.OLLAMA)
+        selected_card = next(
+            (
+                card
+                for card in self.controller.document.cards
+                if card.id == self._selected_card_id
+            ),
+            None,
+        )
+        reference_count = (
+            len(selected_card.active_revision.references)
+            if selected_card is not None
+            else 0
+        )
         self.inspector.set_image_prompt_capabilities(
             can_enrich=can_enrich,
             reason=enrich_reason,
             busy=image_prompt_busy,
             model_identifier=load_machine_settings(self.settings).ollama_model,
-            prompt_version=IMAGE_PROMPT_PREPARATION_VERSION,
+            prompt_version=image_prompt_preparation_version(reference_count),
         )
         has_render_prompt = self.inspector.has_current_image_prompt()
         workflow_busy = (
             self.background_workflow.busy if self.background_workflow is not None else False
-        )
-        selected_card = next(
-            (card for card in self.controller.document.cards if card.id == self._selected_card_id),
-            None,
         )
         active_revision = selected_card.active_revision if selected_card is not None else None
         has_image = active_revision is not None and active_revision.background is not None

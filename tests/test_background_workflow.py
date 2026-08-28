@@ -44,6 +44,7 @@ from hypergen.domain.models import (
 )
 from hypergen.generation.image_prompt_preparation import (
     IMAGE_PROMPT_PREPARATION_VERSION,
+    MULTI_REFERENCE_IMAGE_PROMPT_PREPARATION_VERSION,
 )
 from hypergen.generation.mflux_generator import MfluxGenerator
 from hypergen.storage.stack_store import StackStore
@@ -220,7 +221,7 @@ def test_generate_applies_to_active_revision_and_preserves_other_content(
     assert metadata is not None
     assert metadata.inputs.description == "A garden"
     assert metadata.inputs.image_prompt == "A richly detailed garden"
-    assert metadata.inputs.reference is None
+    assert metadata.inputs.references == ()
     assert session.flush()
     assert StackStore(session.state.bundle_path).load() == controller.document
     assert applied[0].message == "Image generated"
@@ -444,7 +445,7 @@ def test_references_capture_exact_source_and_suppress_stale_results(
             value=ImagePrompt(
                 text="A richly detailed garden with the referenced visual treatment",
                 source_description="A garden",
-                reference=snapshot,
+                references=(snapshot,),
                 model_identifier="test",
                 prompt_version=IMAGE_PROMPT_PREPARATION_VERSION,
             ),
@@ -456,10 +457,11 @@ def test_references_capture_exact_source_and_suppress_stale_results(
     target_revision = controller.document.cards[0].active_revision
     metadata = target_revision.generation_metadata
     assert metadata is not None
-    assert metadata.inputs.reference is not None
-    assert metadata.inputs.reference.card_id == source.id
-    assert metadata.inputs.reference.revision_id == source_revision.id
-    assert metadata.inputs.reference.background_id == (source_revision.background.id)
+    assert metadata.inputs.references[0].card_id == source.id
+    assert metadata.inputs.references[0].revision_id == source_revision.id
+    assert metadata.inputs.references[0].background_id == (
+        source_revision.background.id
+    )
     assert metadata.render_prompt == (
         "A richly detailed garden with the referenced visual treatment"
     )
@@ -496,6 +498,160 @@ def test_reference_card_requires_an_active_image(tmp_path: Path) -> None:
 
     with pytest.raises(BackgroundWorkflowError, match="has no image"):
         workflow.generate(target.id)
+
+
+def test_unreadable_second_reference_is_reported_by_position(
+    tmp_path: Path,
+) -> None:
+    workflow, controller, session, workers, target = _bound_workflow(tmp_path)
+    source_ids = (uuid4(), uuid4())
+    for position, source_id in enumerate(source_ids, start=1):
+        controller.execute(
+            CreateCardCommand(name=f"Reference {position}", card_id=source_id)
+        )
+        source = next(
+            card for card in controller.document.cards if card.id == source_id
+        )
+        controller.execute(
+            EditRevisionDescriptionCommand(
+                card_id=source.id,
+                revision_id=source.active_revision.id,
+                value=f"Reference scene {position}",
+            )
+        )
+        controller.execute(
+            SetRevisionImagePromptCommand(
+                card_id=source.id,
+                revision_id=source.active_revision.id,
+                value=ImagePrompt(
+                    text=f"Reference scene {position}",
+                    source_description=f"Reference scene {position}",
+                    model_identifier="test",
+                    prompt_version=IMAGE_PROMPT_PREPARATION_VERSION,
+                ),
+            )
+        )
+        workflow.generate(source.id)
+        _complete_generation(workers)
+        controller.execute(
+            SetRevisionReferenceCommand(
+                card_id=target.id,
+                revision_id=target.active_revision.id,
+                reference=ResolvedCardReference(target_card_id=source_id),
+                position=position,
+            )
+        )
+    target = controller.document.cards[0]
+    snapshots = tuple(
+        ImageReferenceSnapshot(
+            card_id=source.id,
+            revision_id=source.active_revision.id,
+            background_id=source.active_revision.background.id,
+        )
+        for source in controller.document.cards[1:]
+        if source.active_revision.background is not None
+    )
+    controller.execute(
+        SetRevisionImagePromptCommand(
+            card_id=target.id,
+            revision_id=target.active_revision.id,
+            value=ImagePrompt(
+                text="Place the subject from image 1 in image 2.",
+                source_description=target.active_revision.description,
+                references=snapshots,
+                model_identifier="test",
+                prompt_version=MULTI_REFERENCE_IMAGE_PROMPT_PREPARATION_VERSION,
+            ),
+        )
+    )
+    second_source = controller.document.cards[2]
+    assert second_source.active_revision.background is not None
+    session.store.asset_path(
+        second_source.active_revision.background.image_path
+    ).write_bytes(b"not an image")
+
+    with pytest.raises(BackgroundWorkflowError, match="Reference 2.*unreadable"):
+        workflow.generate(target.id)
+
+
+def test_generation_captures_two_references_in_image_order(
+    tmp_path: Path,
+) -> None:
+    workflow, controller, _session, workers, target = _bound_workflow(tmp_path)
+    source_ids = (uuid4(), uuid4())
+    source_snapshots: list[ImageReferenceSnapshot] = []
+    for number, source_id in enumerate(source_ids, start=1):
+        controller.execute(
+            CreateCardCommand(name=f"Reference {number}", card_id=source_id)
+        )
+        source = next(
+            card for card in controller.document.cards if card.id == source_id
+        )
+        description = f"Reference scene {number}"
+        controller.execute(
+            EditRevisionDescriptionCommand(
+                card_id=source.id,
+                revision_id=source.active_revision.id,
+                value=description,
+            )
+        )
+        controller.execute(
+            SetRevisionImagePromptCommand(
+                card_id=source.id,
+                revision_id=source.active_revision.id,
+                value=ImagePrompt(
+                    text=description,
+                    source_description=description,
+                    model_identifier="test",
+                    prompt_version=IMAGE_PROMPT_PREPARATION_VERSION,
+                ),
+            )
+        )
+        workflow.generate(source.id)
+        _complete_generation(workers)
+        source = next(
+            card for card in controller.document.cards if card.id == source_id
+        )
+        assert source.active_revision.background is not None
+        source_snapshots.append(
+            ImageReferenceSnapshot(
+                card_id=source.id,
+                revision_id=source.active_revision.id,
+                background_id=source.active_revision.background.id,
+            )
+        )
+
+    for position, source_id in enumerate(source_ids, start=1):
+        controller.execute(
+            SetRevisionReferenceCommand(
+                card_id=target.id,
+                revision_id=target.active_revision.id,
+                reference=ResolvedCardReference(target_card_id=source_id),
+                position=position,
+            )
+        )
+    controller.execute(
+        SetRevisionImagePromptCommand(
+            card_id=target.id,
+            revision_id=target.active_revision.id,
+            value=ImagePrompt(
+                text="Place the subject from image 1 in image 2.",
+                source_description="A garden",
+                references=tuple(source_snapshots),
+                model_identifier="test",
+                prompt_version=MULTI_REFERENCE_IMAGE_PROMPT_PREPARATION_VERSION,
+            ),
+        )
+    )
+
+    workflow.generate(target.id)
+    _complete_generation(workers)
+
+    metadata = controller.document.cards[0].active_revision.generation_metadata
+    assert metadata is not None
+    assert metadata.inputs.references == tuple(source_snapshots)
+    assert metadata.effective_settings["reference_count"] == 2
+    assert metadata.render_prompt == "Place the subject from image 1 in image 2."
 
 
 def test_revision_duplicate_activate_delete_round_trip(tmp_path: Path) -> None:

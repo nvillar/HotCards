@@ -110,7 +110,7 @@ def test_revision_uses_current_image_prompt_when_available() -> None:
     image_prompt = ImagePrompt(
         text="A richer courtyard",
         source_description="A courtyard",
-        reference=reference,
+        references=(reference,),
         model_identifier="qwen3.5:9b-mlx",
         prompt_version=IMAGE_PROMPT_PREPARATION_VERSION,
     )
@@ -122,35 +122,35 @@ def test_revision_uses_current_image_prompt_when_available() -> None:
     inputs = ImageGenerationInputs(
         description=revision.description,
         image_prompt=image_prompt.text,
-        reference=reference,
+        references=(reference,),
     )
     assert inputs.effective_description == "A richer courtyard"
     assert image_prompt.is_current(
         source_description="A courtyard",
-        reference=reference,
+        references=(reference,),
         model_identifier="qwen3.5:9b-mlx",
         prompt_version=IMAGE_PROMPT_PREPARATION_VERSION,
     )
     assert not image_prompt.is_current(
         source_description="A courtyard",
-        reference=reference,
+        references=(reference,),
         model_identifier="llama3.2:latest",
         prompt_version=IMAGE_PROMPT_PREPARATION_VERSION,
     )
     assert not image_prompt.is_current(
         source_description="A changed courtyard",
-        reference=reference,
+        references=(reference,),
         prompt_version=IMAGE_PROMPT_PREPARATION_VERSION,
     )
     assert not image_prompt.is_current(
         source_description="A courtyard",
-        reference=reference,
+        references=(reference,),
         model_identifier="qwen3.5:9b-mlx",
         prompt_version="image-prompt-preparation-v0",
     )
     assert not image_prompt.is_current(
         source_description="A courtyard",
-        reference=None,
+        references=(),
         model_identifier="qwen3.5:9b-mlx",
         prompt_version=IMAGE_PROMPT_PREPARATION_VERSION,
     )
@@ -164,22 +164,30 @@ def test_revision_uses_current_image_prompt_when_available() -> None:
     )
     assert not image_prompt.is_current(
         source_description="A courtyard",
-        reference=reference,
+        references=(reference,),
         model_identifier="qwen3.5:9b-mlx",
         prompt_version="image-prompt-preparation-v6",
     )
 
 
-def test_stack_serializes_one_optional_reference() -> None:
-    destination = Card(name="Portrait")
-    revision = CardRevision(reference=ResolvedCardReference(target_card_id=destination.id))
+def test_stack_serializes_ordered_references() -> None:
+    destinations = (Card(name="Portrait"), Card(name="Studio"))
+    revision = CardRevision(
+        references=tuple(
+            ResolvedCardReference(target_card_id=destination.id)
+            for destination in destinations
+        )
+    )
     source = Card(name="Source", revisions=(revision,))
-    stack = Stack(name="Castle", cards=(source, destination))
+    stack = Stack(name="Castle", cards=(source, *destinations))
 
     values = stack.model_dump(mode="json")
 
     serialized_revision = values["cards"][0]["revisions"][0]
-    assert serialized_revision["reference"]["target_card_id"] == str(destination.id)
+    assert tuple(
+        reference["target_card_id"]
+        for reference in serialized_revision["references"]
+    ) == tuple(str(destination.id) for destination in destinations)
     assert "subject" not in serialized_revision
     assert "style" not in serialized_revision
     assert "setting" not in serialized_revision
@@ -251,7 +259,7 @@ def test_hotspot_set_distinguishes_never_applied_from_applied_empty() -> None:
     assert applied_empty.hotspot_set.interactions == ()
 
 
-def test_stack_rejects_self_references_and_accepts_one_reference() -> None:
+def test_stack_rejects_self_and_duplicate_references() -> None:
     source = Card(name="Source")
     with pytest.raises(ValidationError, match="own card"):
         Stack(
@@ -262,7 +270,11 @@ def test_stack_rejects_self_references_and_accepts_one_reference() -> None:
                         "revisions": (
                             source.active_revision.model_copy(
                                 update={
-                                    "reference": ResolvedCardReference(target_card_id=source.id)
+                                    "references": (
+                                        ResolvedCardReference(
+                                            target_card_id=source.id
+                                        ),
+                                    )
                                 }
                             ),
                         )
@@ -272,16 +284,35 @@ def test_stack_rejects_self_references_and_accepts_one_reference() -> None:
         )
     reference = Card(name="Reference")
     revision = CardRevision(
-        reference=ResolvedCardReference(target_card_id=reference.id),
+        references=(ResolvedCardReference(target_card_id=reference.id),),
     )
     stack = Stack(
         name="Castle",
         cards=(Card(name="Source", revisions=(revision,)), reference),
     )
 
-    assert stack.cards[0].active_revision.reference == (
-        ResolvedCardReference(target_card_id=reference.id)
+    assert stack.cards[0].active_revision.references == (
+        ResolvedCardReference(target_card_id=reference.id),
     )
+    duplicate = CardRevision(
+        references=(
+            ResolvedCardReference(target_card_id=reference.id),
+            ResolvedCardReference(target_card_id=reference.id),
+        )
+    )
+    with pytest.raises(ValidationError, match="same card twice"):
+        Stack(
+            name="Castle",
+            cards=(Card(name="Source", revisions=(duplicate,)), reference),
+        )
+    with pytest.raises(ValidationError, match="at most 2"):
+        CardRevision(
+            references=(
+                UnresolvedCardReference(target_name="One"),
+                UnresolvedCardReference(target_name="Two"),
+                UnresolvedCardReference(target_name="Three"),
+            )
+        )
 
 
 def test_hotspot_labels_are_derived_from_actions() -> None:
@@ -386,10 +417,10 @@ def test_generation_inputs_capture_exact_reference_source_state() -> None:
     inputs = ImageGenerationInputs(
         description="Portrait at dusk",
         image_prompt="Portrait at dusk",
-        reference=snapshot,
+        references=(snapshot,),
     )
 
-    assert inputs.reference == snapshot
+    assert inputs.references == (snapshot,)
 
 
 def test_generation_inputs_capture_exact_style_snapshot() -> None:

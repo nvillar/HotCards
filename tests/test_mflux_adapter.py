@@ -142,7 +142,7 @@ def test_reference_generation_uses_edit_model_and_kv_cache(
             "inputs": ImageGenerationInputs(
                 description="A referenced portrait",
                 image_prompt="A referenced portrait",
-                reference=snapshot,
+                references=(snapshot,),
             ),
             "render_prompt": "REFERENCE IMAGE 1\nIDENTITY\nPreserve identity",
             "model_identifier": "flux2-klein-9b-kv",
@@ -164,7 +164,7 @@ def test_reference_generation_uses_edit_model_and_kv_cache(
     assert edit_calls == [("flux2-klein-9b-kv", None)]
     assert edit_model.calls[0]["image_paths"] == [tmp_path / "identity.png"]
     assert edit_model.calls[0]["use_kv_cache"] is True
-    assert result.metadata.inputs.reference == snapshot
+    assert result.metadata.inputs.references == (snapshot,)
     assert result.metadata.effective_settings["reference_count"] == 1
     assert result.metadata.effective_settings["use_kv_cache"] is True
 
@@ -196,7 +196,7 @@ def test_one_reference_snapshot_requires_one_image_path(
         inputs=ImageGenerationInputs(
             description="Same castle",
             image_prompt="Same castle",
-            reference=snapshot,
+            references=(snapshot,),
         ),
         render_prompt="Same castle",
         output_path=tmp_path / "multi-role.png",
@@ -207,6 +207,35 @@ def test_one_reference_snapshot_requires_one_image_path(
     assert generation_request.reference_image_paths == (
         tmp_path / "castle.png",
     )
+
+
+def test_two_reference_snapshots_require_two_ordered_image_paths(
+    tmp_path: Path,
+) -> None:
+    snapshots = tuple(
+        ImageReferenceSnapshot(
+            card_id=uuid4(),
+            revision_id=uuid4(),
+            background_id=uuid4(),
+        )
+        for _ in range(2)
+    )
+    paths = (tmp_path / "first.png", tmp_path / "second.png")
+
+    generation_request = MfluxGenerationRequest(
+        inputs=ImageGenerationInputs(
+            description="Combine two references",
+            image_prompt="Use image 1 in image 2.",
+            references=snapshots,
+        ),
+        render_prompt="Use image 1 in image 2.",
+        output_path=tmp_path / "combined.png",
+        reference_image_paths=paths,
+        seed=1,
+    )
+
+    assert generation_request.inputs.references == snapshots
+    assert generation_request.reference_image_paths == paths
 
 
 def test_switching_generation_modes_evicts_the_previous_model(
@@ -246,7 +275,7 @@ def test_switching_generation_modes_evicts_the_previous_model(
             inputs=ImageGenerationInputs(
                 description="Referenced scene",
                 image_prompt="Referenced scene",
-                reference=snapshot,
+                references=(snapshot,),
             ),
             render_prompt="Referenced scene",
             output_path=tmp_path / "edit.png",

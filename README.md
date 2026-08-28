@@ -16,12 +16,11 @@ authoring shell remains usable when either service is unavailable.
 Stacks are stored as self-contained `.hypergen` directory bundles and
 autosaved atomically after creation or opening. At startup, HyperGen lists
 projects in `~/Documents/HyperGen` and offers direct Open and Create actions.
-Schema-v5 through schema-v8 bundles are migrated in memory to the current schema
-when opened; unsupported older or future schemas are rejected.
+Only the current schema is accepted; older and future schemas are rejected.
 
 Each card owns one or more numbered revisions. A revision contains its authored
 Description, selected stack Style, optional prepared Image Prompt, optional
-generated background, optional Reference card, and hotspot set. The compact
+generated background, up to two ordered Reference cards, and hotspot set. The compact
 header above the canvas edits the card name and selects, duplicates, or deletes
 revisions; the toolbar provides a single Author/Run mode toggle and manages
 hotspot visibility. An
@@ -30,29 +29,31 @@ actual MFLUX inference-step completion during image generation and an
 indeterminate state during Image Prompt preparation.
 
 The inspector tabs are Image, Styles, Hotspots, and Keys. Image
-follows the authoring sequence Description, Style, optional Reference, Prepare
+follows the authoring sequence Description, Style, optional References, Prepare
 Image Prompt, then Generate Image. Description and Image Prompt share one
 editor with native radio controls that appear after a prompt has been prepared.
 The Style selector chooses a named stack-wide treatment; No Style is always
 available.
 Description is always the authoritative author input. Prepare Image Prompt creates one
 editable Image Prompt proposal from the current Description; it never uses the
-previous Image Prompt as input or inserts a separate clarification step. With a
-Reference, the selected vision-capable Ollama model also inspects that card's
-active generated image in the same preparation request. The exact authored
-prompt used to generate that Reference image, including its reviewed Image
-Prompt or legacy enriched text, provides the primary semantics for its identity
-and visual style, while the pixels provide visible evidence and missing detail.
-Without a Reference, the request is text-only. The selected Reference is always
-identified to the image model as `image 1`; preparation translates user-facing
-phrases such as “Reference card,” “reference image,” and “the same vehicle” into
-explicit `image 1` relationships rather than stripping that continuity.
+previous Image Prompt as input or inserts a separate clarification step. With
+References, the selected vision-capable Ollama model also inspects their active
+generated images in the same preparation request. The exact authored prompt
+used to generate each Reference image, including its reviewed Image Prompt or
+legacy enriched text, provides the primary semantics for its identity and
+visual style, while the pixels provide visible evidence and missing detail.
+Without a Reference, the request is text-only. Reference order is authoritative:
+the first selected card is `image 1` and takes precedence where the Description
+does not resolve an ambiguity; the optional second card is `image 2` and
+contributes only relevant assigned or inferred properties. Preparation
+recognizes selected card names and user-facing Reference aliases, then emits
+explicit canonical `image 1` and `image 2` relationships.
 
-The optional Reference has no fixed Subject, Style, or Setting role. The
+References have no fixed Subject, Style, or Setting roles. The
 Description states what should carry over or change, while preparation interprets
 the image and produces a concrete direct editing instruction for review.
 Reference-backed Image Prompts explicitly state which entity, setting, or
-treatment comes from `image 1` and how it changes. Definite continuity can
+treatment comes from each used image and how it changes. Definite continuity can
 retain stable visible identity, construction, and rendering treatment; an
 explicit target subject, state, style, palette, setting, viewpoint, or
 composition overrides the corresponding reference trait. Preparation keeps
@@ -61,8 +62,8 @@ requested continuity, and does not preserve or inventory Reference details
 that the Description changes or does not need. A vague change may produce a
 plausible concrete proposal that the author can edit.
 
-An Image Prompt is Current only while its source Description, exact Reference
-card/revision/background snapshot, selected Ollama model, and preparation
+An Image Prompt is Current only while its source Description, exact ordered
+Reference card/revision/background snapshots, selected Ollama model, and preparation
 contract still match. Out-of-date prompts remain visible and editable, but
 Generate requires a current prompt. Manually editing a non-empty Image Prompt
 marks the reviewed text current against the present Description, Reference,
@@ -70,16 +71,16 @@ model, and preparation contract, so generation can proceed without another
 model preparation call. Preparation validates structured output,
 preserves exact affirmatively authored quoted text, respects explicit quoted-text
 exclusions, rejects recognized object-state reversals and inappropriate
-model-process language, requires canonical `image 1` attribution when a
-Reference is attached, and requires the meaning of every explicit authored
+model-process language, requires canonical numbered attribution when References are attached, and
+requires the meaning of every explicit authored
 visual property to survive without imposing special Description wording. It makes one
 constrained repair attempt for a valid but conflicting proposal. Private model
 deliberation is never persisted.
 
 Image Prompt preparation does not consume the selected Style. At final image
 generation, HyperGen deterministically appends the selected Style text to the
-reviewed Image Prompt and sends the same Reference image exactly once when
-selected. MFLUX receives no hidden role instructions or source card prose. The
+reviewed Image Prompt and sends each Reference image exactly once in numbered
+order. MFLUX receives no hidden role instructions or source card prose. The
 exact Style ID, name, text, and composed render prompt are retained in generated
 image metadata. Generated images are the only supported background source.
 Generate, image removal, Image Prompt preparation, and direct Image Prompt edits apply to the
@@ -95,16 +96,7 @@ Watercolor Painting, Color Pencil, Pencil Sketch, Glazed Ceramic, Graphic
 Novel, and Miniature Toy. A new stack starts with HyperCard selected. An
 explicit Style or No Style selection becomes the default for subsequently
 created cards. Deleting a Style clears every revision that selected it and is
-reversible through Undo. Existing schema-v5 and schema-v6 stacks migrate to No
-Style so opening them cannot change prior rendering behavior.
-
-When a schema-v5 bundle is opened, legacy Subject, Style, and Setting
-assignments collapse deterministically to one Reference in that order of
-precedence, and Enriched Description becomes Image Prompt. Historical
-generation metadata remains readable in its original role-based form. Migrated
-prompts without current model and contract provenance remain visible but must
-be enriched again before generation. Schema-v6 stacks receive the built-in
-Style library but retain No Style on all existing revisions and new cards.
+reversible through Undo.
 
 The Hotspots inspector is the sole source of revision-local interaction
 semantics. A new hotspot is persisted and selected immediately, even before it

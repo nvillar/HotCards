@@ -410,7 +410,9 @@ def _execute_inline_reference_evaluation(
                     inputs=ImageGenerationInputs(
                         description=benchmark_case.description,
                         image_prompt=prompt,
-                        reference=_reference_snapshot(reference.asset_id),
+                        references=(
+                            _reference_snapshot(reference.asset_id),
+                        ),
                     ),
                     render_prompt=prompt,
                     output_path=audit_output_path,

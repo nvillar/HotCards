@@ -483,13 +483,58 @@ def test_reference_selector_assigns_one_card_with_undo(
     )
     inspector.reference_combo.setCurrentIndex(identity_index)
 
-    assert controller.document.cards[0].active_revision.reference == (
-        ResolvedCardReference(target_card_id=portrait.id)
+    assert controller.document.cards[0].active_revision.references == (
+        ResolvedCardReference(target_card_id=portrait.id),
     )
     assert applied[-1][0] == "Reference changed"
     assert controller.undo_if_current(applied[-1][1])  # type: ignore[arg-type]
     inspector.render(controller.document, source.id)
-    assert controller.document.cards[0].active_revision.reference is None
+    assert controller.document.cards[0].active_revision.references == ()
+
+
+def test_second_reference_is_ordered_unique_and_promoted_when_first_clears(
+    application: QApplication,
+) -> None:
+    source = Card(name="Source")
+    portrait = Card(name="Portrait")
+    room = Card(name="Room")
+    controller = DocumentController(
+        Stack(name="Demo", cards=(source, portrait, room))
+    )
+    inspector = Inspector(controller)
+    inspector.render(controller.document, source.id)
+
+    assert inspector.reference_label.text() == "References"
+    assert not inspector.additional_reference_combo.isEnabled()
+    inspector.reference_combo.setCurrentIndex(
+        inspector._combo_index_for_data(inspector.reference_combo, portrait.id)
+    )
+    assert inspector.additional_reference_combo.isEnabled()
+    assert (
+        inspector._combo_index_for_data(
+            inspector.additional_reference_combo,
+            portrait.id,
+        )
+        == -1
+    )
+
+    inspector.additional_reference_combo.setCurrentIndex(
+        inspector._combo_index_for_data(
+            inspector.additional_reference_combo,
+            room.id,
+        )
+    )
+    assert controller.document.cards[0].active_revision.references == (
+        ResolvedCardReference(target_card_id=portrait.id),
+        ResolvedCardReference(target_card_id=room.id),
+    )
+
+    inspector.reference_combo.setCurrentIndex(0)
+    assert controller.document.cards[0].active_revision.references == (
+        ResolvedCardReference(target_card_id=room.id),
+    )
+    assert inspector.reference_combo.currentData() == room.id
+    assert inspector.additional_reference_combo.currentData() is None
 
 
 def test_style_selector_updates_revision_and_new_card_default_with_undo(
@@ -582,7 +627,9 @@ def test_deleted_reference_is_shown_as_unresolved(
     application: QApplication,
 ) -> None:
     destination = Card(name="Former portrait")
-    revision = CardRevision(reference=ResolvedCardReference(target_card_id=destination.id))
+    revision = CardRevision(
+        references=(ResolvedCardReference(target_card_id=destination.id),)
+    )
     source = Card(name="Source", revisions=(revision,))
     controller = DocumentController(Stack(name="Demo", cards=(source, destination)))
     inspector = Inspector(controller)
@@ -592,8 +639,8 @@ def test_deleted_reference_is_shown_as_unresolved(
     inspector.render(changed, source.id)
 
     assert inspector.reference_combo.currentText() == ("Missing: Former portrait")
-    assert controller.document.cards[0].active_revision.reference == (
-        UnresolvedCardReference(target_name="Former portrait")
+    assert controller.document.cards[0].active_revision.references == (
+        UnresolvedCardReference(target_name="Former portrait"),
     )
 
 
@@ -823,7 +870,7 @@ def test_using_labels_name_single_reference(
         revisions=(
             CardRevision(
                 description="A courtyard",
-                reference=ResolvedCardReference(target_card_id=reference.id),
+                references=(ResolvedCardReference(target_card_id=reference.id),),
             ),
         ),
     )
@@ -831,7 +878,7 @@ def test_using_labels_name_single_reference(
     inspector = Inspector(controller)
     inspector.render(controller.document, source.id)
 
-    assert inspector.reference_label.text() == "Reference"
+    assert inspector.reference_label.text() == "References"
     assert "Using: Description + Reference" in inspector.enrich_button.toolTip()
     assert "Using: Image Prompt + Reference" in inspector.generate_background_button.toolTip()
 

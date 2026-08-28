@@ -36,7 +36,7 @@ def test_reference_does_not_add_role_instructions() -> None:
         ImageGenerationInputs(
             description="A red fox using the same visual style.",
             image_prompt=prompt,
-            reference=snapshot,
+            references=(snapshot,),
         )
     )
 

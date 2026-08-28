@@ -58,7 +58,7 @@ from hypergen.application.commands import (
 )
 from hypergen.application.document_controller import DocumentController
 from hypergen.application.image_prompt_workflow import (
-    image_prompt_reference_snapshot,
+    image_prompt_reference_snapshots,
 )
 from hypergen.domain.models import (
     Card,
@@ -300,20 +300,34 @@ class Inspector(QWidget):
         layout.addWidget(self.style_combo)
 
         layout.addSpacing(8)
-        self.reference_label = QLabel("Reference")
+        self.reference_label = QLabel("References")
         self.reference_label.setObjectName("referenceLabel")
         layout.addWidget(self.reference_label)
         self.reference_panel = QWidget()
         self.reference_panel.setObjectName("referencePanel")
         reference_layout = QVBoxLayout(self.reference_panel)
         reference_layout.setContentsMargins(0, 0, 0, 0)
+        reference_layout.setSpacing(4)
+        first_reference_row = QHBoxLayout()
+        first_reference_row.addWidget(QLabel("1."))
         self.reference_combo = QComboBox()
         self.reference_combo.setObjectName("referenceCombo")
-        self.reference_combo.setAccessibleName("Reference card")
+        self.reference_combo.setAccessibleName("Reference card 1")
         self.reference_combo.setToolTip(
-            "Optional image whose relevant visible characteristics can inform the Image Prompt"
+            "Primary Reference; its image is sent to the model as image 1"
         )
-        reference_layout.addWidget(self.reference_combo)
+        first_reference_row.addWidget(self.reference_combo, 1)
+        reference_layout.addLayout(first_reference_row)
+        second_reference_row = QHBoxLayout()
+        second_reference_row.addWidget(QLabel("2."))
+        self.additional_reference_combo = QComboBox()
+        self.additional_reference_combo.setObjectName("additionalReferenceCombo")
+        self.additional_reference_combo.setAccessibleName("Reference card 2")
+        self.additional_reference_combo.setToolTip(
+            "Optional additional Reference; its image is sent to the model as image 2"
+        )
+        second_reference_row.addWidget(self.additional_reference_combo, 1)
+        reference_layout.addLayout(second_reference_row)
         self.reference_error = QLabel()
         self.reference_error.setObjectName("referenceValidationError")
         self.reference_error.setWordWrap(True)
@@ -655,7 +669,12 @@ class Inspector(QWidget):
         self.enrich_button.clicked.connect(self.prepare_image_prompt_requested)
         self.generate_background_button.clicked.connect(self.generate_background_requested)
         self.style_combo.currentIndexChanged.connect(self._revision_style_changed)
-        self.reference_combo.currentIndexChanged.connect(self._reference_changed)
+        self.reference_combo.currentIndexChanged.connect(
+            lambda index: self._reference_changed(1, index)
+        )
+        self.additional_reference_combo.currentIndexChanged.connect(
+            lambda index: self._reference_changed(2, index)
+        )
         self.style_list.currentItemChanged.connect(self._style_selection_changed)
         self.add_style_button.clicked.connect(self._add_style)
         self.delete_style_button.clicked.connect(self._delete_style)
@@ -824,7 +843,7 @@ class Inspector(QWidget):
                     update={
                         "text": value.strip(),
                         "source_description": card.active_revision.description,
-                        "reference": image_prompt_reference_snapshot(
+                        "references": image_prompt_reference_snapshots(
                             self.controller.document,
                             card,
                         ),
@@ -917,7 +936,14 @@ class Inspector(QWidget):
         card: Card,
         revision: CardRevision,
     ) -> None:
-        reference_suffix = " + Reference" if revision.reference is not None else ""
+        reference_count = len(revision.references)
+        reference_suffix = (
+            f" + {reference_count} References"
+            if reference_count > 1
+            else " + Reference"
+            if reference_count == 1
+            else ""
+        )
         style_suffix = " + Style" if revision.style_id is not None else ""
         self._enrich_using_text = f"Using: Description{reference_suffix}"
         image_prompt = revision.image_prompt
@@ -996,9 +1022,9 @@ class Inspector(QWidget):
             if self._description_mode == "description"
             else card.active_revision.description
         )
-        reference_snapshot = image_prompt_reference_snapshot(document, card)
+        reference_snapshots = image_prompt_reference_snapshots(document, card)
         reference_is_usable = (
-            card.active_revision.reference is None or reference_snapshot is not None
+            len(reference_snapshots) == len(card.active_revision.references)
         )
         visible_prompt = self.description_edit.toPlainText().strip()
         has_manual_update = (
@@ -1010,7 +1036,7 @@ class Inspector(QWidget):
             has_manual_update
             or image_prompt.is_current(
                 source_description=source_description,
-                reference=reference_snapshot,
+                references=reference_snapshots,
                 model_identifier=self._image_prompt_model_identifier,
                 prompt_version=self._image_prompt_prompt_version,
             )
@@ -1539,48 +1565,72 @@ class Inspector(QWidget):
         card: Card,
         revision: CardRevision,
     ) -> None:
-        reference = revision.reference
-        with QSignalBlocker(self.reference_combo):
-            self.reference_combo.clear()
-            self.reference_combo.addItem("No reference", None)
-            for candidate in document.cards:
-                if candidate.id == card.id:
-                    continue
-                self.reference_combo.addItem(candidate.name, candidate.id)
-            if isinstance(reference, ResolvedCardReference):
-                self.reference_combo.setCurrentIndex(
-                    self._combo_index_for_data(
-                        self.reference_combo,
-                        reference.target_card_id,
-                    )
+        references = revision.references
+        combos = (self.reference_combo, self.additional_reference_combo)
+        resolved_ids = {
+            reference.target_card_id
+            for reference in references
+            if isinstance(reference, ResolvedCardReference)
+        }
+        for position, combo in enumerate(combos):
+            reference = references[position] if position < len(references) else None
+            with QSignalBlocker(combo):
+                combo.clear()
+                combo.addItem("No reference", None)
+                current_id = (
+                    reference.target_card_id
+                    if isinstance(reference, ResolvedCardReference)
+                    else None
                 )
-            elif isinstance(reference, UnresolvedCardReference):
-                name = reference.target_name or "Unknown card"
-                self.reference_combo.addItem(f"Missing: {name}", reference)
-                self.reference_combo.setCurrentIndex(self.reference_combo.count() - 1)
-            else:
-                self.reference_combo.setCurrentIndex(0)
+                for candidate in document.cards:
+                    if candidate.id == card.id:
+                        continue
+                    if candidate.id in resolved_ids and candidate.id != current_id:
+                        continue
+                    combo.addItem(candidate.name, candidate.id)
+                if isinstance(reference, ResolvedCardReference):
+                    combo.setCurrentIndex(
+                        self._combo_index_for_data(combo, reference.target_card_id)
+                    )
+                elif isinstance(reference, UnresolvedCardReference):
+                    name = reference.target_name or "Unknown card"
+                    combo.addItem(f"Missing: {name}", reference)
+                    combo.setCurrentIndex(combo.count() - 1)
+                else:
+                    combo.setCurrentIndex(0)
+        self.additional_reference_combo.setEnabled(bool(references))
 
-    def _reference_changed(self, index: int) -> None:
+    def _reference_changed(self, position: int, index: int) -> None:
         if self._rendering or index < 0:
             return
         card = self._selected_card()
         if card is None:
             return
-        value = self.reference_combo.itemData(index)
+        combo = (
+            self.reference_combo
+            if position == 1
+            else self.additional_reference_combo
+        )
+        value = combo.itemData(index)
         if isinstance(value, UUID):
             reference = ResolvedCardReference(target_card_id=value)
         elif isinstance(value, UnresolvedCardReference):
             reference = value
         else:
             reference = None
-        if reference == card.active_revision.reference:
+        current = (
+            card.active_revision.references[position - 1]
+            if position <= len(card.active_revision.references)
+            else None
+        )
+        if reference == current:
             return
         self._execute(
             SetRevisionReferenceCommand(
                 card_id=card.id,
                 revision_id=card.active_revision.id,
                 reference=reference,
+                position=position,
             ),
             error_label=self.reference_error,
             undo_message="Reference changed",

@@ -10,6 +10,7 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
+from PIL import Image
 from PySide6.QtCore import QObject, Signal
 
 from hypergen.application.commands import (
@@ -34,6 +35,7 @@ from hypergen.domain.models import (
 )
 from hypergen.generation.image_prompt_preparation import (
     IMAGE_PROMPT_PREPARATION_VERSION,
+    MULTI_REFERENCE_IMAGE_PROMPT_PREPARATION_VERSION,
     ImagePromptPreparationRequest,
     ImagePromptPreparationResult,
 )
@@ -75,7 +77,7 @@ class FakeWorkers:
 class RecordingPreparer:
     def __init__(self) -> None:
         self.requests: list[
-            tuple[ImagePromptPreparationRequest, Path | None]
+            tuple[ImagePromptPreparationRequest, Path | None, Path | None]
         ] = []
 
     def prepare(
@@ -83,19 +85,28 @@ class RecordingPreparer:
         request: ImagePromptPreparationRequest,
         *,
         reference_image_path: Path | None = None,
+        additional_reference_image_path: Path | None = None,
     ) -> ImagePromptPreparationResult:
-        self.requests.append((request, reference_image_path))
-        return _result()
+        self.requests.append(
+            (
+                request,
+                reference_image_path,
+                additional_reference_image_path,
+            )
+        )
+        return _result(prompt_version=request.prompt_version)
 
 
 def _result(
     image_prompt: str = "A richer courtyard",
+    *,
+    prompt_version: str = IMAGE_PROMPT_PREPARATION_VERSION,
 ) -> ImagePromptPreparationResult:
     return ImagePromptPreparationResult(
         image_prompt=image_prompt,
         raw_response=f'{{"image_prompt":"{image_prompt}"}}',
         model_identifier="test",
-        prompt_version=IMAGE_PROMPT_PREPARATION_VERSION,
+        prompt_version=prompt_version,
         duration_seconds=0.1,
     )
 
@@ -147,7 +158,8 @@ def _workflow(
     def resolve(image_path: str) -> Path:
         path = tmp_path / image_path
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(b"image")
+        if not path.exists():
+            Image.new("RGB", (8, 6), "navy").save(path)
         return path
 
     workflow = ImagePromptWorkflow(
@@ -179,10 +191,11 @@ def test_preparation_applies_with_one_undo_boundary(tmp_path: Path) -> None:
     assert workers.stages == ["preparing Image Prompt"]
     _complete(workers)
 
-    request, reference_path = preparer.requests[0]
+    request, reference_path, additional_reference_path = preparer.requests[0]
     assert request.description == "A courtyard"
     assert not request.has_reference
     assert reference_path is None
+    assert additional_reference_path is None
     revision = controller.document.cards[0].active_revision
     assert revision.description == "A courtyard"
     assert revision.image_prompt is not None
@@ -204,7 +217,7 @@ def test_empty_description_is_rejected_even_with_a_reference(
         name="Card",
         revisions=(
             CardRevision(
-                reference=ResolvedCardReference(target_card_id=source.id)
+                references=(ResolvedCardReference(target_card_id=source.id),)
             ),
         ),
     )
@@ -235,7 +248,7 @@ def test_reference_image_is_attached_once_and_captured_in_provenance(
         revisions=(
             CardRevision(
                 description='The screen now displays "ERROR".',
-                reference=ResolvedCardReference(target_card_id=source.id),
+                references=(ResolvedCardReference(target_card_id=source.id),),
             ),
         ),
     )
@@ -248,16 +261,16 @@ def test_reference_image_is_attached_once_and_captured_in_provenance(
     workflow.start(target.id)
     _complete(workers)
 
-    request, reference_path = preparer.requests[0]
+    request, reference_path, additional_reference_path = preparer.requests[0]
     assert request.has_reference
     assert request.reference_description == "Generated prompt"
     assert reference_path == tmp_path / "computer.png"
+    assert additional_reference_path is None
     prompt = controller.document.cards[0].active_revision.image_prompt
     assert prompt is not None
-    assert prompt.reference is not None
-    assert prompt.reference.card_id == source.id
-    assert prompt.reference.revision_id == source.active_revision.id
-    assert prompt.reference.background_id == source.active_revision.background.id
+    assert prompt.references[0].card_id == source.id
+    assert prompt.references[0].revision_id == source.active_revision.id
+    assert prompt.references[0].background_id == source.active_revision.background.id
 
 
 def test_current_reference_card_text_does_not_replace_generation_provenance(
@@ -284,7 +297,7 @@ def test_current_reference_card_text_does_not_replace_generation_provenance(
         revisions=(
             CardRevision(
                 description="A close-up of the computer monitor.",
-                reference=ResolvedCardReference(target_card_id=source.id),
+                references=(ResolvedCardReference(target_card_id=source.id),),
             ),
         ),
     )
@@ -304,7 +317,7 @@ def test_current_reference_card_text_does_not_replace_generation_provenance(
     )
     _complete(workers)
 
-    request, _reference_path = preparer.requests[0]
+    request, _reference_path, _additional_reference_path = preparer.requests[0]
     assert request.reference_description == (
         "Black-and-white dithered graphics reminiscent of early Mac and "
         "HyperCard."
@@ -313,6 +326,110 @@ def test_current_reference_card_text_does_not_replace_generation_provenance(
         controller.document.cards[0].active_revision.image_prompt
         is not None
     )
+
+
+def test_two_reference_images_are_prepared_and_captured_in_order(
+    tmp_path: Path,
+) -> None:
+    first = Card(
+        name="Explorer",
+        revisions=(
+            CardRevision(
+                background=_background(
+                    "A compact angular exploration vehicle",
+                    "explorer.png",
+                )
+            ),
+        ),
+    )
+    second = Card(
+        name="Hangar",
+        revisions=(
+            CardRevision(
+                background=_background(
+                    "A vast monochrome station hangar",
+                    "hangar.png",
+                )
+            ),
+        ),
+    )
+    target = Card(
+        name="Target",
+        revisions=(
+            CardRevision(
+                description="Place the Explorer in the Hangar.",
+                references=(
+                    ResolvedCardReference(target_card_id=first.id),
+                    ResolvedCardReference(target_card_id=second.id),
+                ),
+            ),
+        ),
+    )
+    workflow, controller, workers, preparer = _workflow(
+        tmp_path,
+        target,
+        first,
+        second,
+    )
+
+    workflow.start(target.id)
+    _complete(workers)
+
+    request, first_path, second_path = preparer.requests[0]
+    assert request.reference_card_name == "Explorer"
+    assert request.additional_reference_card_name == "Hangar"
+    assert request.prompt_version == MULTI_REFERENCE_IMAGE_PROMPT_PREPARATION_VERSION
+    assert first_path == tmp_path / "explorer.png"
+    assert second_path == tmp_path / "hangar.png"
+    prompt = controller.document.cards[0].active_revision.image_prompt
+    assert prompt is not None
+    assert prompt.prompt_version == MULTI_REFERENCE_IMAGE_PROMPT_PREPARATION_VERSION
+    assert tuple(snapshot.card_id for snapshot in prompt.references) == (
+        first.id,
+        second.id,
+    )
+
+
+def test_unreadable_second_reference_is_reported_by_position(
+    tmp_path: Path,
+) -> None:
+    first = Card(
+        name="Explorer",
+        revisions=(
+            CardRevision(
+                background=_background("An exploration vehicle", "explorer.png")
+            ),
+        ),
+    )
+    second = Card(
+        name="Hangar",
+        revisions=(
+            CardRevision(background=_background("A hangar", "hangar.png")),
+        ),
+    )
+    target = Card(
+        name="Target",
+        revisions=(
+            CardRevision(
+                description="Place the vehicle in the hangar.",
+                references=(
+                    ResolvedCardReference(target_card_id=first.id),
+                    ResolvedCardReference(target_card_id=second.id),
+                ),
+            ),
+        ),
+    )
+    workflow, _controller, _workers, _preparer = _workflow(
+        tmp_path,
+        target,
+        first,
+        second,
+    )
+    Image.new("RGB", (8, 6), "navy").save(tmp_path / "explorer.png")
+    (tmp_path / "hangar.png").write_bytes(b"not an image")
+
+    with pytest.raises(ImagePromptWorkflowError, match="Reference 2.*unreadable"):
+        workflow.start(target.id)
 
 
 def test_stale_description_or_reference_result_does_not_apply(
@@ -331,7 +448,9 @@ def test_stale_description_or_reference_result_does_not_apply(
         revisions=(
             CardRevision(
                 description="The screen has changed",
-                reference=ResolvedCardReference(target_card_id=first_source.id),
+                references=(
+                    ResolvedCardReference(target_card_id=first_source.id),
+                ),
             ),
         ),
     )

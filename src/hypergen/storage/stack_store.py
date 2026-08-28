@@ -10,22 +10,17 @@ import shutil
 import sys
 import tempfile
 from collections.abc import Callable
-from copy import deepcopy
 from pathlib import Path, PurePosixPath
 from uuid import UUID
 
 from PIL import Image, UnidentifiedImageError
 from pydantic import ValidationError
 
-from hypergen.domain.models import BUILT_IN_STYLES, CURRENT_SCHEMA_VERSION, Stack
+from hypergen.domain.models import CURRENT_SCHEMA_VERSION, Stack
 
 STACK_FILENAME = "stack.json"
 ASSET_ROOT = PurePosixPath("assets/cards")
 logger = logging.getLogger(__name__)
-LEGACY_SCHEMA_VERSION = 5
-PREVIOUS_SCHEMA_VERSION = 6
-STYLE_SCHEMA_VERSION = 7
-KEY_SCHEMA_VERSION = 8
 
 
 class StackStoreError(ValueError):
@@ -45,163 +40,6 @@ def _relative_asset_path(value: str) -> PurePosixPath:
 
 def _image_asset_path(card_id: UUID, asset_id: UUID) -> PurePosixPath:
     return ASSET_ROOT / str(card_id) / f"image-{asset_id}.png"
-
-
-def _migrate_v5_payload(payload: dict[str, object]) -> dict[str, object]:
-    """Convert role-based references and Enriched text to schema v6."""
-    migrated = deepcopy(payload)
-    cards = migrated.get("cards")
-    if isinstance(cards, list):
-        for card in cards:
-            if not isinstance(card, dict):
-                continue
-            revisions = card.get("revisions")
-            if not isinstance(revisions, list):
-                continue
-            for revision in revisions:
-                if not isinstance(revision, dict):
-                    continue
-                assignments = [
-                    (role, revision.pop(role, None)) for role in ("subject", "style", "setting")
-                ]
-                selected_role, selected_reference = next(
-                    ((role, reference) for role, reference in assignments if reference is not None),
-                    (None, None),
-                )
-                revision["reference"] = selected_reference
-
-                enriched = revision.pop("enriched_description", None)
-                if not isinstance(enriched, dict):
-                    revision["image_prompt"] = None
-                    continue
-                selected_snapshot = None
-                references = enriched.get("references")
-                if isinstance(references, list):
-                    selected_snapshot = next(
-                        (
-                            {
-                                "card_id": snapshot.get("card_id"),
-                                "revision_id": snapshot.get("revision_id"),
-                                "background_id": snapshot.get("background_id"),
-                            }
-                            for snapshot in references
-                            if isinstance(snapshot, dict) and snapshot.get("role") == selected_role
-                        ),
-                        None,
-                    )
-                revision["image_prompt"] = {
-                    "text": enriched.get("text"),
-                    "source_description": enriched.get("source_description", ""),
-                    "reference": selected_snapshot,
-                    "model_identifier": enriched.get("model_identifier"),
-                    "prompt_version": enriched.get("prompt_version"),
-                }
-    migrated["schema_version"] = PREVIOUS_SCHEMA_VERSION
-    return migrated
-
-
-def _migrate_v6_payload(payload: dict[str, object]) -> dict[str, object]:
-    """Add stack-owned Styles without changing existing render behavior."""
-    migrated = deepcopy(payload)
-    migrated["styles"] = [style.model_dump(mode="json") for style in BUILT_IN_STYLES]
-    migrated["new_card_style_id"] = None
-    cards = migrated.get("cards")
-    if isinstance(cards, list):
-        for card in cards:
-            if not isinstance(card, dict):
-                continue
-            revisions = card.get("revisions")
-            if not isinstance(revisions, list):
-                continue
-            for revision in revisions:
-                if isinstance(revision, dict):
-                    revision["style_id"] = None
-    migrated["schema_version"] = STYLE_SCHEMA_VERSION
-    return migrated
-
-
-def _migrate_v7_payload(payload: dict[str, object]) -> dict[str, object]:
-    """Add the schema-v8 Key catalog and conditional hotspot behavior."""
-    migrated = deepcopy(payload)
-    migrated["keys"] = []
-    cards = migrated.get("cards")
-    if isinstance(cards, list):
-        for card in cards:
-            if not isinstance(card, dict):
-                continue
-            revisions = card.get("revisions")
-            if not isinstance(revisions, list):
-                continue
-            for revision in revisions:
-                if not isinstance(revision, dict):
-                    continue
-                hotspot_set = revision.get("hotspot_set")
-                if not isinstance(hotspot_set, dict):
-                    continue
-                interactions = hotspot_set.get("interactions")
-                if not isinstance(interactions, list):
-                    continue
-                for interaction in interactions:
-                    if not isinstance(interaction, dict):
-                        continue
-                    interaction["name"] = None
-                    interaction["conditions"] = {"requires": [], "forbids": []}
-                    interaction["key_changes"] = {
-                        "remove": [],
-                        "grant": [],
-                        "clear_all": False,
-                    }
-    migrated["schema_version"] = KEY_SCHEMA_VERSION
-    return migrated
-
-
-def _migrate_v8_payload(payload: dict[str, object]) -> dict[str, object]:
-    """Replace Clear All with explicit removals and drop custom hotspot names."""
-    migrated = deepcopy(payload)
-    keys = migrated.get("keys")
-    key_ids = (
-        [
-            key.get("id")
-            for key in keys
-            if isinstance(key, dict) and isinstance(key.get("id"), str)
-        ]
-        if isinstance(keys, list)
-        else []
-    )
-    cards = migrated.get("cards")
-    if isinstance(cards, list):
-        for card in cards:
-            if not isinstance(card, dict):
-                continue
-            revisions = card.get("revisions")
-            if not isinstance(revisions, list):
-                continue
-            for revision in revisions:
-                if not isinstance(revision, dict):
-                    continue
-                hotspot_set = revision.get("hotspot_set")
-                if not isinstance(hotspot_set, dict):
-                    continue
-                interactions = hotspot_set.get("interactions")
-                if not isinstance(interactions, list):
-                    continue
-                for interaction in interactions:
-                    if not isinstance(interaction, dict):
-                        continue
-                    interaction.pop("name", None)
-                    key_changes = interaction.get("key_changes")
-                    if not isinstance(key_changes, dict):
-                        continue
-                    clear_all = key_changes.pop("clear_all", False)
-                    if type(clear_all) is not bool:
-                        raise StackStoreError(
-                            "invalid stack document: schema-v8 clear_all must be boolean"
-                        )
-                    if clear_all is True:
-                        key_changes["remove"] = list(key_ids)
-                        key_changes["grant"] = []
-    migrated["schema_version"] = CURRENT_SCHEMA_VERSION
-    return migrated
 
 
 def _fsync_directory(path: Path) -> None:
@@ -282,7 +120,7 @@ class StackStore:
                     )
 
     def load(self) -> Stack:
-        """Load, migrate when supported, and validate one bundle document."""
+        """Load and validate one current-schema bundle document."""
         try:
             payload = json.loads(self.stack_path.read_text(encoding="utf-8"))
         except FileNotFoundError as error:
@@ -294,29 +132,12 @@ class StackStore:
         if not isinstance(payload, dict):
             raise StackStoreError("stack document root must be a JSON object")
         version = payload.get("schema_version")
-        supported_versions = {
-            LEGACY_SCHEMA_VERSION,
-            PREVIOUS_SCHEMA_VERSION,
-            STYLE_SCHEMA_VERSION,
-            KEY_SCHEMA_VERSION,
-            CURRENT_SCHEMA_VERSION,
-        }
+        supported_versions = {CURRENT_SCHEMA_VERSION}
         if type(version) is not int or version not in supported_versions:
             raise StackStoreError(
                 "invalid stack document: schema_version must be one of "
                 + ", ".join(str(item) for item in sorted(supported_versions))
             )
-        if version == LEGACY_SCHEMA_VERSION:
-            payload = _migrate_v5_payload(payload)
-            version = PREVIOUS_SCHEMA_VERSION
-        if version == PREVIOUS_SCHEMA_VERSION:
-            payload = _migrate_v6_payload(payload)
-            version = STYLE_SCHEMA_VERSION
-        if version == STYLE_SCHEMA_VERSION:
-            payload = _migrate_v7_payload(payload)
-            version = KEY_SCHEMA_VERSION
-        if version == KEY_SCHEMA_VERSION:
-            payload = _migrate_v8_payload(payload)
         try:
             stack = Stack.model_validate_json(json.dumps(payload))
         except ValidationError as error:

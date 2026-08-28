@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 from typing import Literal
 
-from pydantic import ValidationError
+from pydantic import ValidationError, model_validator
 
 from hypergen.domain.models import (
     DomainModel,
@@ -22,6 +22,9 @@ from hypergen.generation.ollama_client import (
 from hypergen.generation.structured_output import structured_json_content
 
 IMAGE_PROMPT_PREPARATION_VERSION = "image-prompt-preparation-v9"
+MULTI_REFERENCE_IMAGE_PROMPT_PREPARATION_VERSION = (
+    "image-prompt-preparation-multi-v1"
+)
 
 
 class ImagePromptPreparationRequest(DomainModel):
@@ -30,7 +33,38 @@ class ImagePromptPreparationRequest(DomainModel):
     description: NonEmptyString
     has_reference: bool = False
     reference_description: str | None = None
+    reference_card_name: NonEmptyString | None = None
+    additional_reference_description: str | None = None
+    additional_reference_card_name: NonEmptyString | None = None
     prompt_version: NonEmptyString = IMAGE_PROMPT_PREPARATION_VERSION
+
+    @model_validator(mode="after")
+    def require_contiguous_reference_inputs(self) -> ImagePromptPreparationRequest:
+        """Reject a second Reference without a complete first slot."""
+        if self.additional_reference_description is not None and not self.has_reference:
+            raise ValueError("a second Reference requires the first Reference")
+        if (
+            self.additional_reference_card_name is not None
+            and self.additional_reference_description is None
+        ):
+            raise ValueError("a second Reference name requires its image context")
+        return self
+
+    @property
+    def reference_count(self) -> int:
+        """Return the ordered number of attached Reference inputs."""
+        if self.additional_reference_description is not None:
+            return 2
+        return int(self.has_reference)
+
+
+def image_prompt_preparation_version(reference_count: int) -> str:
+    """Return the production contract version for an ordered Reference count."""
+    if reference_count in (0, 1):
+        return IMAGE_PROMPT_PREPARATION_VERSION
+    if reference_count == 2:
+        return MULTI_REFERENCE_IMAGE_PROMPT_PREPARATION_VERSION
+    raise ValueError("Image Prompt preparation supports at most two References")
 
 
 class ImagePromptModelOutput(DomainModel):
@@ -89,8 +123,24 @@ def build_image_prompt_preparation_prompt(
     request: ImagePromptPreparationRequest,
 ) -> str:
     """Build the bounded preparation prompt for text-only or image-aware use."""
-    source = json.dumps(
-        {
+    if request.reference_count == 2:
+        source_data = {
+            "references": [
+                {
+                    "image_label": "image 1",
+                    "card_name": request.reference_card_name,
+                    "generation_description": request.reference_description,
+                },
+                {
+                    "image_label": "image 2",
+                    "card_name": request.additional_reference_card_name,
+                    "generation_description": request.additional_reference_description,
+                },
+            ],
+            "authored_description": request.description,
+        }
+    else:
+        source_data = {
             "reference_attached": request.has_reference,
             "reference_generation_description": (
                 request.reference_description
@@ -98,11 +148,52 @@ def build_image_prompt_preparation_prompt(
                 else None
             ),
             "authored_description": request.description,
-        },
-        ensure_ascii=False,
-        indent=2,
-    )
-    reference_contract = (
+        }
+    source = json.dumps(source_data, ensure_ascii=False, indent=2)
+    if request.reference_count == 2:
+        reference_contract = """\
+MULTI-REFERENCE INTERPRETATION
+- Inspect both attached Reference images directly. The authored Description is authoritative.
+- The first attached image is "image 1"; the second attached image is "image 2". Keep this
+  ordering exact in image_prompt.
+- Image 1 is the primary continuity source. When both images could supply the same property
+  and the Description does not decide, use image 1.
+- Infer roles from visible entities and authored relationships. Image 2 contributes only
+  subjects, settings, composition, treatment, or other properties that support the authored
+  target; do not force unrelated content from either image into the result.
+- Treat "Reference", "the Reference", an unnumbered reference-card/image/picture alias, and
+  "same [entity]" as relationships to image 1. Treat "Reference 1", "first Reference", and
+  the exact first selected card name as image 1. Treat "Reference 2", "second Reference", and
+  the exact second selected card name as image 2. Translate every used relationship into the
+  canonical label "image 1" or "image 2" in image_prompt.
+- Each generation_description is the effective authored prompt captured when that exact
+  Reference background was generated. Use its explicit identity and visual-style language as
+  the primary semantic interpretation of its corresponding image when applicable.
+- Preserve applicable explicit treatment terms from generation_description. Do not relabel
+  "early Mac and HyperCard", pixel art, watercolor, engraving, collage, or another authored
+  treatment as a merely similar-looking medium such as newspaper print or comic art.
+- Use each image's pixels to confirm visible appearance and fill relevant gaps. Do not let a
+  visual guess override compatible authored semantics.
+- A generation_description is context, not a target prompt. Do not copy transient action,
+  object state, screen or sign contents, viewpoint, framing, composition, weather, time, or
+  setting unless the target Description requests that continuity from that image.
+- For a continuing entity, retain unmentioned stable identity and construction plus reusable
+  visual treatment unless the Description explicitly overrides them.
+- A requested style transfer carries only reusable medium, linework, texture, palette,
+  shading, and rendering. It does not copy unrelated subjects, settings, objects, screen
+  contents, composition, or narrative.
+- An explicit target medium, rendering style, palette, identity, setting, state, viewpoint,
+  crop, framing, or composition overrides the corresponding characteristic from either image.
+- Screen or sign contents, object state, pose, action, weather, time, lighting state,
+  viewpoint, crop, framing, and surrounding composition are transient unless explicitly
+  retained.
+- Treat visible rendered appearance as truth. Never infer a conventional real-world color,
+  material, age, era, or technology that is not visible or authored.
+- A vague requested change may be resolved as a plausible concrete proposal. Do not ask a
+  question or discuss ambiguity; the author will review and edit the Image Prompt.
+"""
+    elif request.has_reference:
+        reference_contract = (
         """\
 REFERENCE INTERPRETATION
 - Inspect the attached Reference image directly. The authored Description is authoritative.
@@ -149,8 +240,9 @@ REFERENCE INTERPRETATION
 - A vague requested change may be resolved as a plausible concrete proposal. Do not ask a
   question or discuss ambiguity; the author will review and edit the Image Prompt.
 """
-        if request.has_reference
-        else """\
+        )
+    else:
+        reference_contract = """\
 NO REFERENCE
 - Prepare the Image Prompt only from the authored Description.
 - Add concrete visual detail where it helps image generation, but do not invent a medium,
@@ -158,8 +250,26 @@ NO REFERENCE
 - A vague requested change may be resolved as a plausible concrete proposal. Do not ask a
   question or discuss ambiguity; the author will review and edit the Image Prompt.
 """
-    )
-    image_prompt_contract = (
+    if request.reference_count == 2:
+        image_prompt_contract = """\
+- Synthesize one concrete, direct FLUX.2 editing instruction using image 1 and image 2.
+- Mention each used input with its exact canonical label. State which entity, setting,
+  structure, composition, or treatment comes from each image and how they combine or change.
+- Put the critical authored result first. Keep image 1 authoritative wherever the Description
+  does not explicitly or implicitly assign a property to image 2.
+- Preserve every authored relationship to either selected card. Never reduce a continuing
+  entity to a generic new subject or silently blend identities from the two images.
+- Keep the instruction concise. Include only the desired result, its necessary relationships
+  to image 1 and image 2, and details needed for the requested change or continuity.
+- State only important stable identity, construction, proportions, materials, distinguishing
+  components, or visual-treatment properties to preserve, identifying their source image.
+- Never preserve a property that the Description changes. Do not inventory unrelated visible
+  details or append blanket preservation boilerplate unless explicitly requested.
+- Use concrete edit verbs and positive target details. Use remove, replace, or preservation
+  language only to disambiguate a specific edit, not as a negative-prompt list.
+"""
+    elif request.has_reference:
+        image_prompt_contract = (
         """\
 - Synthesize one concrete, direct FLUX.2 editing instruction for image 1.
 - Mention image 1 explicitly at least once, using exactly that label rather than "Reference",
@@ -181,8 +291,9 @@ NO REFERENCE
 - Use concrete edit verbs and positive target details. Use remove, replace, or preservation
   language only to disambiguate a specific edit to image 1, not as a negative-prompt list.
 """
-        if request.has_reference
-        else """\
+        )
+    else:
+        image_prompt_contract = """\
 - Synthesize one concrete, positive, standalone description of only the desired final image.
 - Never mention an input image, reference, source image, original image, previous version,
   comparison, transfer, replacement, omission, inference, instruction, ambiguity, or
@@ -190,7 +301,6 @@ NO REFERENCE
 - Never use process language such as "same style", "inspired by", "instead of", "replacing",
   "unchanged", or "has changed".
 """
-    )
     return f"""\
 Prepare a production-ready FLUX.2 Image Prompt.
 
@@ -327,6 +437,7 @@ _TEXT_ONLY_PROCESS_LANGUAGE = re.compile(
     flags=re.IGNORECASE,
 )
 _IMAGE_ONE_LANGUAGE = re.compile(r"\bimage\s+1\b", flags=re.IGNORECASE)
+_IMAGE_TWO_LANGUAGE = re.compile(r"\bimage\s+2\b", flags=re.IGNORECASE)
 _NONCANONICAL_REFERENCE_LANGUAGE = re.compile(
     r"\b(?:the\s+)?reference\s+(?:card|image|picture|photo)\b"
     r"|\b(?:the\s+)?reference\b(?!\s+(?:grid|grids|line|lines|mark|marks)\b)"
@@ -534,8 +645,13 @@ def validate_image_prompt(
     image_prompt: str,
     *,
     has_reference: bool = False,
+    reference_count: int | None = None,
     visual_treatment: str | None = None,
 ) -> None:
+    if reference_count is None:
+        reference_count = int(has_reference)
+    if reference_count not in (0, 1, 2):
+        raise ValueError("Image Prompt validation supports at most two References")
     output_assertions = _authored_state_assertions(image_prompt)
     for noun, state in _authored_state_assertions(authored):
         for opposite in _STATE_OPPOSITES[state]:
@@ -583,10 +699,15 @@ def validate_image_prompt(
                 f"Reference treatment: {values}"
             )
     unquoted_prompt = _without_quoted_text(image_prompt)
-    if has_reference:
+    if reference_count:
         if _IMAGE_ONE_LANGUAGE.search(unquoted_prompt) is None:
             raise ValueError(
                 "Reference-backed Image Prompt must identify the attached Reference as 'image 1'"
+            )
+        if reference_count == 2 and _IMAGE_TWO_LANGUAGE.search(unquoted_prompt) is None:
+            raise ValueError(
+                "Multi-Reference Image Prompt must identify the second attached Reference as "
+                "'image 2'"
             )
         noncanonical_reference = _NONCANONICAL_REFERENCE_LANGUAGE.search(
             unquoted_prompt
@@ -620,9 +741,13 @@ def build_image_prompt_repair_prompt(
     conflict: str,
     *,
     reference_backed_output: bool | None = None,
+    reference_count: int | None = None,
 ) -> str:
-    if reference_backed_output is None:
-        reference_backed_output = request.has_reference
+    if reference_count is None:
+        reference_count = request.reference_count
+    if reference_backed_output is not None:
+        reference_count = reference_count if reference_backed_output else 0
+    reference_backed_output = reference_count > 0
     preserved_inputs = (
         "visible-text exclusions, viewpoint, framing, composition, requested "
         "medium, and Reference relationships."
@@ -630,7 +755,16 @@ def build_image_prompt_repair_prompt(
         else "visible-text exclusions, viewpoint, framing, composition, and "
         "requested medium."
     )
-    delivery_contract = (
+    if reference_count == 2:
+        delivery_contract = """\
+The repaired Image Prompt is a direct editing instruction that must call the first attached
+Reference "image 1" and the second "image 2". Explicitly assign every used entity, setting,
+composition, or treatment to its source image. Image 1 takes precedence where the authored
+Description does not resolve a conflict. Preserve every authored relationship, name only
+important stable properties that must carry over, and never preserve a property that the
+Description changes. Do not use Reference aliases or selected card names in the result."""
+    elif reference_backed_output:
+        delivery_contract = (
         """\
 The repaired Image Prompt is a direct editing instruction that must call the attached
 Reference exactly "image 1" and explicitly preserve every authored relationship to it.
@@ -640,11 +774,11 @@ that must carry over, and never preserve a property that the authored Descriptio
 Do not inventory unrelated Reference details or add blanket preservation boilerplate unless
 the Description requests it. Do not use "Reference", "reference image", "source image", or
 another alias in the repaired result."""
-        if reference_backed_output
-        else """\
+        )
+    else:
+        delivery_contract = """\
 The repaired Image Prompt must be a positive standalone description of only the desired final
 image, without input-image, comparison, or editing-process language."""
-    )
     return f"""\
 Repair an Image Prompt that violated its final-state contract.
 
@@ -751,20 +885,33 @@ class OllamaImagePromptPreparer:
         request: ImagePromptPreparationRequest,
         *,
         reference_image_path: Path | None = None,
+        additional_reference_image_path: Path | None = None,
     ) -> ImagePromptPreparationResult:
-        if request.has_reference != (reference_image_path is not None):
+        reference_image_paths = tuple(
+            path
+            for path in (
+                reference_image_path,
+                additional_reference_image_path,
+            )
+            if path is not None
+        )
+        if request.reference_count != len(reference_image_paths):
             raise ValueError(
-                "request reference state must match the attached image"
+                "request reference state must match the attached images"
             )
         self._runtime.require_model(
             capabilities=frozenset({VISION_CAPABILITY})
         )
         try:
-            call = self._runtime.chat_structured(
-                prompt=build_image_prompt_preparation_prompt(request),
-                schema=ImagePromptModelOutput.model_json_schema(),
-                image_path=reference_image_path,
-            )
+            call_arguments: dict[str, object] = {
+                "prompt": build_image_prompt_preparation_prompt(request),
+                "schema": ImagePromptModelOutput.model_json_schema(),
+            }
+            if len(reference_image_paths) == 1:
+                call_arguments["image_path"] = reference_image_paths[0]
+            elif reference_image_paths:
+                call_arguments["image_paths"] = reference_image_paths
+            call = self._runtime.chat_structured(**call_arguments)
         except ModelResponseError as initial_call_error:
             initial_call_error.response_attempts = (
                 _failed_call_attempt("initial", initial_call_error),
@@ -781,7 +928,7 @@ class OllamaImagePromptPreparer:
             validate_image_prompt(
                 request.description,
                 output.image_prompt,
-                has_reference=request.has_reference,
+                reference_count=request.reference_count,
                 visual_treatment=output.visual_treatment,
             )
         except ValueError as error:
@@ -791,6 +938,7 @@ class OllamaImagePromptPreparer:
                         request,
                         output.image_prompt,
                         str(error),
+                        reference_count=request.reference_count,
                     ),
                     schema=ImagePromptRepairOutput.model_json_schema(),
                 )
@@ -821,7 +969,7 @@ class OllamaImagePromptPreparer:
                 validate_image_prompt(
                     request.description,
                     repaired.image_prompt,
-                    has_reference=request.has_reference,
+                    reference_count=request.reference_count,
                     visual_treatment=output.visual_treatment,
                 )
                 output = output.model_copy(
@@ -898,6 +1046,7 @@ def _model_response_error(
 
 __all__ = [
     "IMAGE_PROMPT_PREPARATION_VERSION",
+    "MULTI_REFERENCE_IMAGE_PROMPT_PREPARATION_VERSION",
     "ImagePromptPreparationAttempt",
     "ImagePromptModelOutput",
     "ImagePromptPreparationRequest",
@@ -906,5 +1055,6 @@ __all__ = [
     "OllamaImagePromptPreparer",
     "build_image_prompt_repair_prompt",
     "build_image_prompt_preparation_prompt",
+    "image_prompt_preparation_version",
     "validate_image_prompt",
 ]

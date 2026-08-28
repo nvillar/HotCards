@@ -14,6 +14,10 @@ from PySide6.QtCore import QObject, Signal
 from hypergen.application.commands import SetRevisionImagePromptCommand
 from hypergen.application.document_controller import DocumentController
 from hypergen.application.generated_revision_change import GeneratedRevisionChange
+from hypergen.application.image_files import (
+    UnreadableImageError,
+    require_readable_image,
+)
 from hypergen.application.workers import AdapterWorkers, WorkerOperation
 from hypergen.domain.models import (
     Card,
@@ -25,9 +29,11 @@ from hypergen.domain.models import (
 )
 from hypergen.generation.image_prompt_preparation import (
     IMAGE_PROMPT_PREPARATION_VERSION,
+    MULTI_REFERENCE_IMAGE_PROMPT_PREPARATION_VERSION,
     ImagePromptPreparationRequest,
     ImagePromptPreparationResult,
     OllamaImagePromptPreparer,
+    image_prompt_preparation_version,
 )
 from hypergen.generation.ollama_client import OllamaRuntime, OllamaSettings
 
@@ -42,6 +48,7 @@ class ImagePromptPreparerProtocol(Protocol):
         request: ImagePromptPreparationRequest,
         *,
         reference_image_path: Path | None = None,
+        additional_reference_image_path: Path | None = None,
     ) -> ImagePromptPreparationResult: ...
 
 
@@ -62,6 +69,7 @@ def _default_preparer_factory(
 @dataclass(frozen=True, slots=True)
 class _ReferenceTarget:
     card_id: UUID
+    card_name: str
     revision_id: UUID
     background_id: UUID
     image_path: str
@@ -83,7 +91,7 @@ class _ImagePromptTarget:
     card_id: UUID
     revision_id: UUID
     source_description: str
-    reference: _ReferenceTarget | None
+    references: tuple[_ReferenceTarget, ...]
 
 
 class ImagePromptWorkflow(QObject):
@@ -138,7 +146,7 @@ class ImagePromptWorkflow(QObject):
             card_id=card.id,
             revision_id=revision.id,
             source_description=revision.description,
-            reference=self._reference_target(document, card),
+            references=self._reference_targets(document, card),
         )
         settings = self._settings_provider()
         request_id = uuid4()
@@ -215,10 +223,8 @@ class ImagePromptWorkflow(QObject):
                 value=ImagePrompt(
                     text=result.image_prompt,
                     source_description=target.source_description,
-                    reference=(
-                        target.reference.snapshot
-                        if target.reference is not None
-                        else None
+                    references=tuple(
+                        reference.snapshot for reference in target.references
                     ),
                     model_identifier=result.model_identifier,
                     prompt_version=result.prompt_version,
@@ -268,20 +274,36 @@ class ImagePromptWorkflow(QObject):
         settings: OllamaSettings,
         target: _ImagePromptTarget,
     ) -> ImagePromptPreparationResult:
+        if len(target.references) == 2:
+            request = ImagePromptPreparationRequest(
+                description=target.source_description,
+                has_reference=True,
+                reference_description=target.references[0].generation_description,
+                reference_card_name=target.references[0].card_name,
+                additional_reference_description=(
+                    target.references[1].generation_description
+                ),
+                additional_reference_card_name=target.references[1].card_name,
+                prompt_version=MULTI_REFERENCE_IMAGE_PROMPT_PREPARATION_VERSION,
+            )
+            return self._preparer_factory(settings).prepare(
+                request,
+                reference_image_path=target.references[0].asset_path,
+                additional_reference_image_path=target.references[1].asset_path,
+            )
+        reference = target.references[0] if target.references else None
         return self._preparer_factory(settings).prepare(
             ImagePromptPreparationRequest(
                 description=target.source_description,
-                has_reference=target.reference is not None,
+                has_reference=reference is not None,
                 reference_description=(
-                    target.reference.generation_description
-                    if target.reference is not None
+                    reference.generation_description
+                    if reference is not None
                     else None
                 ),
             ),
             reference_image_path=(
-                target.reference.asset_path
-                if target.reference is not None
-                else None
+                reference.asset_path if reference is not None else None
             ),
         )
 
@@ -300,66 +322,78 @@ class ImagePromptWorkflow(QObject):
         ):
             return False
         try:
-            return self._reference_target(document, card) == target.reference
+            return self._reference_targets(document, card) == target.references
         except ImagePromptWorkflowError:
             return False
 
-    def _reference_target(
+    def _reference_targets(
         self,
         document: Stack,
         card: Card,
-    ) -> _ReferenceTarget | None:
-        assignment = card.active_revision.reference
-        if assignment is None:
-            return None
-        if isinstance(assignment, UnresolvedCardReference):
-            name = assignment.target_name or "unknown card"
-            raise ImagePromptWorkflowError(
-                f"Reference {name!r} is unresolved"
+    ) -> tuple[_ReferenceTarget, ...]:
+        targets: list[_ReferenceTarget] = []
+        for position, assignment in enumerate(
+            card.active_revision.references,
+            start=1,
+        ):
+            if isinstance(assignment, UnresolvedCardReference):
+                name = assignment.target_name or "unknown card"
+                raise ImagePromptWorkflowError(
+                    f"Reference {position} {name!r} is unresolved"
+                )
+            assert isinstance(assignment, ResolvedCardReference)
+            source = next(
+                (
+                    candidate
+                    for candidate in document.cards
+                    if candidate.id == assignment.target_card_id
+                ),
+                None,
             )
-        assert isinstance(assignment, ResolvedCardReference)
-        source = next(
-            (
-                candidate
-                for candidate in document.cards
-                if candidate.id == assignment.target_card_id
-            ),
-            None,
-        )
-        if source is None:
-            raise ImagePromptWorkflowError(
-                "Reference card no longer exists"
+            if source is None:
+                raise ImagePromptWorkflowError(
+                    f"Reference {position} card no longer exists"
+                )
+            source_revision = source.active_revision
+            background = source_revision.background
+            if background is None:
+                raise ImagePromptWorkflowError(
+                    f"Reference {position} card {source.name!r} has no image"
+                )
+            if self._reference_image_resolver is None:
+                raise ImagePromptWorkflowError(
+                    "save the stack before using Reference images"
+                )
+            try:
+                asset_path = self._reference_image_resolver(
+                    background.image_path
+                )
+            except (OSError, ValueError) as error:
+                raise ImagePromptWorkflowError(str(error)) from error
+            if not asset_path.is_file():
+                raise ImagePromptWorkflowError(
+                    f"Reference {position} image for {source.name!r} is unavailable"
+                )
+            try:
+                require_readable_image(asset_path)
+            except UnreadableImageError as error:
+                raise ImagePromptWorkflowError(
+                    f"Reference {position} image for {source.name!r} is unreadable"
+                ) from error
+            targets.append(
+                _ReferenceTarget(
+                    card_id=source.id,
+                    card_name=source.name,
+                    revision_id=source_revision.id,
+                    background_id=background.id,
+                    image_path=background.image_path,
+                    asset_path=asset_path,
+                    generation_description=(
+                        background.generation_metadata.inputs.effective_description
+                    ),
+                )
             )
-        source_revision = source.active_revision
-        background = source_revision.background
-        if background is None:
-            raise ImagePromptWorkflowError(
-                f"Reference card {source.name!r} has no image"
-            )
-        if self._reference_image_resolver is None:
-            raise ImagePromptWorkflowError(
-                "save the stack before using a Reference image"
-            )
-        try:
-            asset_path = self._reference_image_resolver(
-                background.image_path
-            )
-        except (OSError, ValueError) as error:
-            raise ImagePromptWorkflowError(str(error)) from error
-        if not asset_path.is_file():
-            raise ImagePromptWorkflowError(
-                f"Reference image for {source.name!r} is unavailable"
-            )
-        return _ReferenceTarget(
-            card_id=source.id,
-            revision_id=source_revision.id,
-            background_id=background.id,
-            image_path=background.image_path,
-            asset_path=asset_path,
-            generation_description=(
-                background.generation_metadata.inputs.effective_description
-            ),
-        )
+        return tuple(targets)
 
     @staticmethod
     def _card(document: Stack, card_id: UUID) -> Card:
@@ -372,38 +406,44 @@ class ImagePromptWorkflow(QObject):
         return card
 
 
-def image_prompt_reference_snapshot(
+def image_prompt_reference_snapshots(
     document: Stack,
     card: Card,
-) -> ImageReferenceSnapshot | None:
-    """Return exact usable Reference provenance for freshness checks."""
-    assignment = card.active_revision.reference
-    if not isinstance(assignment, ResolvedCardReference):
-        return None
-    source = next(
-        (
-            candidate
-            for candidate in document.cards
-            if candidate.id == assignment.target_card_id
-        ),
-        None,
-    )
-    if source is None or source.active_revision.background is None:
-        return None
-    return ImageReferenceSnapshot(
-        card_id=source.id,
-        revision_id=source.active_revision.id,
-        background_id=source.active_revision.background.id,
-    )
+) -> tuple[ImageReferenceSnapshot, ...]:
+    """Return usable Reference provenance in stable image-number order."""
+    snapshots: list[ImageReferenceSnapshot] = []
+    for assignment in card.active_revision.references:
+        if not isinstance(assignment, ResolvedCardReference):
+            continue
+        source = next(
+            (
+                candidate
+                for candidate in document.cards
+                if candidate.id == assignment.target_card_id
+            ),
+            None,
+        )
+        if source is None or source.active_revision.background is None:
+            continue
+        snapshots.append(
+            ImageReferenceSnapshot(
+                card_id=source.id,
+                revision_id=source.active_revision.id,
+                background_id=source.active_revision.background.id,
+            )
+        )
+    return tuple(snapshots)
 
 
 __all__ = [
     "IMAGE_PROMPT_PREPARATION_VERSION",
+    "MULTI_REFERENCE_IMAGE_PROMPT_PREPARATION_VERSION",
     "ImagePromptPreparerFactory",
     "ImagePromptPreparerProtocol",
     "ImagePromptWorkflow",
     "ImagePromptWorkflowError",
     "OllamaSettingsProvider",
     "ReferenceImageResolver",
-    "image_prompt_reference_snapshot",
+    "image_prompt_reference_snapshots",
+    "image_prompt_preparation_version",
 ]

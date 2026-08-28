@@ -21,7 +21,7 @@ from pydantic import (
     model_validator,
 )
 
-CURRENT_SCHEMA_VERSION = 9
+CURRENT_SCHEMA_VERSION = 10
 
 NonEmptyString = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 NormalizedCoordinate = Annotated[float, Field(ge=0.0, le=1.0)]
@@ -333,18 +333,16 @@ class ImageGenerationInputs(DomainModel):
 
     description: str
     image_prompt: NonEmptyString
-    reference: ImageReferenceSnapshot | None = None
+    references: tuple[ImageReferenceSnapshot, ...] = Field(
+        default_factory=tuple,
+        max_length=2,
+    )
     style: StyleSnapshot | None = None
 
     @property
     def effective_description(self) -> str:
         """Return the prepared Image Prompt sent to image generation."""
         return self.image_prompt
-
-    def references(self) -> tuple[ImageReferenceSnapshot, ...]:
-        """Return the optional generation reference as a uniform tuple."""
-        return (self.reference,) if self.reference is not None else ()
-
 
 class LegacyImageGenerationInputs(DomainModel):
     """Exact schema-v5 inputs retained in historical generation metadata."""
@@ -451,7 +449,10 @@ class ImagePrompt(DomainModel):
 
     text: NonEmptyString
     source_description: str
-    reference: ImageReferenceSnapshot | None = None
+    references: tuple[ImageReferenceSnapshot, ...] = Field(
+        default_factory=tuple,
+        max_length=2,
+    )
     model_identifier: NonEmptyString | None = None
     prompt_version: NonEmptyString | None = None
 
@@ -459,14 +460,14 @@ class ImagePrompt(DomainModel):
         self,
         *,
         source_description: str,
-        reference: ImageReferenceSnapshot | None = None,
+        references: tuple[ImageReferenceSnapshot, ...] = (),
         model_identifier: str | None = None,
         prompt_version: str | None = None,
     ) -> bool:
         """Return whether the derived text still matches its upstream inputs."""
         return (
             self.source_description == source_description
-            and self.reference == reference
+            and self.references == references
             and (model_identifier is None or self.model_identifier == model_identifier)
             and (prompt_version is None or self.prompt_version == prompt_version)
         )
@@ -480,7 +481,10 @@ class CardRevision(DomainModel):
     image_prompt: ImagePrompt | None = None
     background: Background | None = None
     hotspot_set: HotspotSet | None = None
-    reference: CardReference | None = None
+    references: tuple[CardReference, ...] = Field(
+        default_factory=tuple,
+        max_length=2,
+    )
     style_id: UUID | None = None
 
     @field_validator("hotspot_set")
@@ -636,14 +640,21 @@ class Stack(DomainModel):
             for revision in card.revisions:
                 if revision.style_id is not None and revision.style_id not in known_style_ids:
                     raise ValueError("revision style_id must identify a Style in this stack")
-                reference = revision.reference
-                if isinstance(reference, ResolvedCardReference):
+                resolved_reference_ids: list[UUID] = []
+                for reference in revision.references:
+                    if not isinstance(reference, ResolvedCardReference):
+                        continue
                     if reference.target_card_id not in known_card_ids:
                         raise ValueError(
                             "resolved card references must identify a card in this stack"
                         )
                     if reference.target_card_id == card.id:
                         raise ValueError("a card revision cannot reference its own card")
+                    resolved_reference_ids.append(reference.target_card_id)
+                if len(resolved_reference_ids) != len(set(resolved_reference_ids)):
+                    raise ValueError(
+                        "a card revision cannot reference the same card twice"
+                    )
                 if revision.hotspot_set is None:
                     continue
                 for interaction in revision.hotspot_set.interactions:

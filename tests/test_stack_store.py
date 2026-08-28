@@ -11,17 +11,14 @@ from PIL import Image
 
 import hypergen.storage.stack_store as stack_store_module
 from hypergen.domain.models import (
-    BUILT_IN_STYLES,
     CURRENT_SCHEMA_VERSION,
     Card,
     CardRevision,
     GeneratedBackground,
-    HotspotKeyChanges,
     HotspotSet,
     ImageGenerationInputs,
     ImageGenerationMetadata,
     Interaction,
-    KeyDefinition,
     NavigateAction,
     Point,
     Polygon,
@@ -266,195 +263,12 @@ def test_load_rejects_missing_unsupported_and_future_versions(
     for payload, message in [
         ({"name": "Missing"}, "schema_version"),
         ({"schema_version": 3, "name": "Legacy"}, "schema_version"),
-        ({"schema_version": 4, "name": "Legacy"}, "schema_version"),
-        ({"schema_version": 10, "name": "Future"}, "schema_version"),
+        ({"schema_version": 9, "name": "Previous"}, "schema_version"),
+        ({"schema_version": 11, "name": "Future"}, "schema_version"),
     ]:
         store.stack_path.write_text(json.dumps(payload))
         with pytest.raises(StackStoreError, match=message):
             store.load()
-
-
-def test_load_migrates_v5_roles_and_enrichment_to_one_reference_and_prompt(
-    tmp_path: Path,
-) -> None:
-    store = StackStore(tmp_path / "Legacy.hypergen")
-    store.bundle_path.mkdir()
-    subject = Card(name="Subject")
-    style = Card(name="Style")
-    target = Card(name="Target")
-    payload = Stack(
-        name="Legacy",
-        cards=(target, subject, style),
-    ).model_dump(mode="json")
-    revision = payload["cards"][0]["revisions"][0]
-    revision.pop("reference")
-    revision.pop("image_prompt")
-    revision["subject"] = {
-        "type": "resolved",
-        "target_card_id": str(subject.id),
-    }
-    revision["style"] = {
-        "type": "resolved",
-        "target_card_id": str(style.id),
-    }
-    revision["setting"] = None
-    subject_snapshot = {
-        "role": "subject",
-        "card_id": str(subject.id),
-        "revision_id": str(subject.active_revision.id),
-        "background_id": str(uuid4()),
-    }
-    revision["enriched_description"] = {
-        "text": "A prepared legacy prompt",
-        "source_description": "",
-        "references": [
-            subject_snapshot,
-            {
-                "role": "style",
-                "card_id": str(style.id),
-                "revision_id": str(style.active_revision.id),
-                "background_id": str(uuid4()),
-            },
-        ],
-        "model_identifier": "legacy-model",
-        "prompt_version": "scene-enrichment-v9",
-    }
-    payload["schema_version"] = 5
-    store.stack_path.write_text(json.dumps(payload))
-
-    migrated = store.load()
-
-    migrated_revision = migrated.cards[0].active_revision
-    assert migrated.schema_version == CURRENT_SCHEMA_VERSION
-    assert migrated_revision.reference == ResolvedCardReference(target_card_id=subject.id)
-    assert migrated_revision.image_prompt is not None
-    assert migrated_revision.image_prompt.text == "A prepared legacy prompt"
-    assert migrated_revision.image_prompt.reference is not None
-    assert migrated_revision.image_prompt.reference.card_id == subject.id
-    assert migrated_revision.style_id is None
-    assert migrated.new_card_style_id is None
-    assert migrated.styles == BUILT_IN_STYLES
-
-
-def test_load_migrates_v6_to_stack_styles_without_changing_existing_cards(
-    tmp_path: Path,
-) -> None:
-    store = StackStore(tmp_path / "Version6.hypergen")
-    store.bundle_path.mkdir()
-    source = Card(name="Source")
-    payload = Stack(name="Legacy", cards=(source,)).model_dump(mode="json")
-    payload["schema_version"] = 6
-    payload.pop("styles")
-    payload.pop("new_card_style_id")
-    for card in payload["cards"]:
-        for revision in card["revisions"]:
-            revision.pop("style_id")
-            metadata = (
-                revision["background"]["generation_metadata"]
-                if revision["background"] is not None
-                else None
-            )
-            if metadata is not None:
-                metadata["inputs"].pop("style")
-    store.stack_path.write_text(json.dumps(payload))
-
-    migrated = store.load()
-
-    assert migrated.schema_version == CURRENT_SCHEMA_VERSION
-    assert migrated.styles == BUILT_IN_STYLES
-    assert migrated.new_card_style_id is None
-    assert migrated.cards[0].active_revision.style_id is None
-
-
-def test_load_migrates_v7_hotspots_to_conditional_behavior(
-    tmp_path: Path,
-) -> None:
-    store = StackStore(tmp_path / "Version7.hypergen")
-    store.bundle_path.mkdir()
-    destination = Card(name="Garden")
-    interaction = Interaction(
-        action=NavigateAction(
-            target=ResolvedCardReference(target_card_id=destination.id)
-        )
-    )
-    source = Card(
-        name="Source",
-        revisions=(
-            CardRevision(hotspot_set=HotspotSet(interactions=(interaction,))),
-        ),
-    )
-    payload = Stack(
-        name="Legacy",
-        cards=(source, destination),
-    ).model_dump(mode="json")
-    payload["schema_version"] = 7
-    payload.pop("keys")
-    legacy = payload["cards"][0]["revisions"][0]["hotspot_set"]["interactions"][0]
-    legacy.pop("conditions")
-    legacy.pop("key_changes")
-    store.stack_path.write_text(json.dumps(payload))
-
-    migrated = store.load()
-
-    changed = migrated.cards[0].active_revision.hotspot_set
-    assert changed is not None
-    assert migrated.keys == ()
-    assert "name" not in changed.interactions[0].model_dump()
-    assert changed.interactions[0].conditions.requires == ()
-    assert changed.interactions[0].key_changes.grant == ()
-    assert changed.interactions[0].label == "Garden"
-
-
-def test_load_migrates_v8_clear_all_to_explicit_key_removals(
-    tmp_path: Path,
-) -> None:
-    store = StackStore(tmp_path / "Version8.hypergen")
-    store.bundle_path.mkdir()
-    red_key = KeyDefinition(name="Red key")
-    blue_key = KeyDefinition(name="Blue key")
-    clear_interaction = Interaction()
-    grant_interaction = Interaction(
-        key_changes=HotspotKeyChanges(grant=(red_key.id,))
-    )
-    source = Card(
-        name="Source",
-        revisions=(
-            CardRevision(
-                hotspot_set=HotspotSet(
-                    interactions=(clear_interaction, grant_interaction)
-                )
-            ),
-        ),
-    )
-    payload = Stack(
-        name="Legacy",
-        keys=(red_key, blue_key),
-        cards=(source,),
-    ).model_dump(mode="json")
-    payload["schema_version"] = 8
-    interactions = payload["cards"][0]["revisions"][0]["hotspot_set"]["interactions"]
-    interactions[0]["name"] = "Clear state"
-    interactions[0]["key_changes"]["clear_all"] = True
-    interactions[1]["name"] = None
-    interactions[1]["key_changes"]["clear_all"] = False
-    store.stack_path.write_text(json.dumps(payload))
-
-    migrated = store.load()
-
-    changed = migrated.cards[0].active_revision.hotspot_set
-    assert changed is not None
-    assert migrated.schema_version == CURRENT_SCHEMA_VERSION
-    assert changed.interactions[0].key_changes.remove == (
-        red_key.id,
-        blue_key.id,
-    )
-    assert changed.interactions[0].key_changes.grant == ()
-    assert changed.interactions[1].key_changes.grant == (red_key.id,)
-    assert all(
-        "name" not in interaction.model_dump()
-        and "clear_all" not in interaction.key_changes.model_dump()
-        for interaction in changed.interactions
-    )
 
 
 def test_symlinked_asset_directory_cannot_escape_bundle(tmp_path: Path) -> None:

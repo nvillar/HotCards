@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from hypergen.generation.errors import ModelResponseError, ModelUnavailableError
 from hypergen.generation.image_prompt_preparation import (
     IMAGE_PROMPT_PREPARATION_VERSION,
+    MULTI_REFERENCE_IMAGE_PROMPT_PREPARATION_VERSION,
     ImagePromptPreparationRequest,
     OllamaImagePromptPreparer,
     build_image_prompt_preparation_prompt,
@@ -129,6 +130,62 @@ def test_text_only_prompt_does_not_claim_an_attached_reference() -> None:
     assert "direct FLUX.2 editing instruction for image 1" not in prompt
     assert "append blanket preservation" not in prompt
     assert "positive, standalone description" in prompt
+
+
+def test_multi_reference_prompt_uses_only_multi_reference_contract() -> None:
+    prompt = build_image_prompt_preparation_prompt(
+        ImagePromptPreparationRequest(
+            description="Place the Explorer in the Hangar.",
+            has_reference=True,
+            reference_description="A compact angular exploration vehicle.",
+            reference_card_name="Explorer",
+            additional_reference_description="A vast monochrome station hangar.",
+            additional_reference_card_name="Hangar",
+            prompt_version=MULTI_REFERENCE_IMAGE_PROMPT_PREPARATION_VERSION,
+        )
+    )
+
+    assert "MULTI-REFERENCE INTERPRETATION" in prompt
+    assert "Image 1 is the primary continuity source" in prompt
+    assert '"card_name": "Explorer"' in prompt
+    assert '"card_name": "Hangar"' in prompt
+    assert "exact first selected card name as image 1" in prompt
+    assert "exact second selected card name as image 2" in prompt
+    assert "\nREFERENCE INTERPRETATION\n" not in prompt
+    assert "first and only input image" not in prompt
+    assert "NO REFERENCE" not in prompt
+
+
+def test_multi_reference_preparer_attaches_images_in_order(
+    tmp_path: Path,
+) -> None:
+    first_path = tmp_path / "first.png"
+    second_path = tmp_path / "second.png"
+    first_path.write_bytes(b"first")
+    second_path.write_bytes(b"second")
+    prompt = (
+        "Place the vehicle from image 1 inside the hangar from image 2, "
+        "preserving the vehicle's angular construction."
+    )
+    preparer, client = _preparer(_output(prompt))
+
+    result = preparer.prepare(
+        ImagePromptPreparationRequest(
+            description="Place the Explorer in the Hangar.",
+            has_reference=True,
+            reference_description="A compact angular exploration vehicle.",
+            reference_card_name="Explorer",
+            additional_reference_description="A vast monochrome station hangar.",
+            additional_reference_card_name="Hangar",
+            prompt_version=MULTI_REFERENCE_IMAGE_PROMPT_PREPARATION_VERSION,
+        ),
+        reference_image_path=first_path,
+        additional_reference_image_path=second_path,
+    )
+
+    assert result.image_prompt == prompt
+    assert result.prompt_version == MULTI_REFERENCE_IMAGE_PROMPT_PREPARATION_VERSION
+    assert client.messages[0]["images"] == [first_path, second_path]
 
 
 def test_request_rejects_empty_description() -> None:

@@ -38,7 +38,7 @@ for live Ollama and MFLUX runs.
 ## Repository layout
 
 - `src/hypergen/domain/` — stack models, geometry, validation.
-- `src/hypergen/storage/` — bundle persistence and migrations.
+- `src/hypergen/storage/` — bundle persistence.
 - `src/hypergen/generation/` — prompt builders and model adapters.
 - `src/hypergen/application/` — document controller, commands, workers.
 - `src/hypergen/ui/` — PySide6 widgets.
@@ -61,16 +61,19 @@ for live Ollama and MFLUX runs.
   read a mutable authoring stack during benchmark runs.
 - Keep each card's complete authoring state in one of its numbered revisions:
   Description, selected stack Style, prepared Image Prompt with input provenance,
-  optional background, optional Reference card, and hotspot set. Visible
+  optional background, ordered Reference cards, and hotspot set. Visible
   revision numbers are positional; stable UUIDs remain internal.
 - Keep at least one revision per card. Duplicate a complete revision, including
   its hotspot semantics and immutable background reference.
-- Keep at most one optional Reference card per revision and reject
-  self-references. Resolve its active accepted background for both Image Prompt
-  preparation and image generation. Send the Reference image once to MFLUX as
-  `image 1`; keep its required continuity and edit instructions visible in the
-  reviewed Image Prompt rather than adding hidden role instructions or complete
-  source-card prose.
+- Keep an ordered collection of at most two optional Reference cards per
+  revision and reject self-references and duplicates. Display slots as `1.` and
+  `2.` under one References section; clearing slot 1 promotes slot 2. Resolve
+  each active accepted background for both Image Prompt preparation and image
+  generation. Send each Reference once to Ollama and MFLUX in stable order as
+  `image 1` and `image 2`; image 1 takes precedence where the Description does
+  not resolve ambiguity. Keep all required roles, continuity, and edit
+  instructions visible in the reviewed Image Prompt rather than adding hidden
+  role instructions or complete source-card prose.
 - Keep an ordered, stack-owned library of editable named Styles with stable
   UUIDs. Store the selected Style on each revision and persist the last explicit
   Style or No Style selection as the default for new cards. Deleting a Style
@@ -89,7 +92,7 @@ for live Ollama and MFLUX runs.
   Keep Styles and Keys as stack-global list managers with compact remove/add
   controls and vertically stacked full-width fields. Encode Image
   Prompt freshness in the preparation action from the Description, exact usable
-  Reference background, selected Ollama model, and preparation prompt version:
+  ordered Reference backgrounds, selected Ollama model, and preparation prompt version:
   current is a disabled completed state and stale is Update Image Prompt.
   Treat a non-empty direct user edit as a reviewed refresh against those current
   inputs so generation can proceed without another model call. Clearing the
@@ -107,9 +110,10 @@ for live Ollama and MFLUX runs.
   bar; keep field validation beside its input and the status bar passive. Use a
   blocking decision dialog only when proceeding could lose persisted work and
   Undo cannot recover it.
-- Image Prompt preparation requires authored Description text. Without a Reference it is
-  text-only; with a readable active Reference background it is one multimodal
-  Ollama request. The target Description is authoritative and the existing
+- Image Prompt preparation requires authored Description text. Without References it is
+  text-only; with readable active Reference backgrounds it is one multimodal
+  Ollama request containing them in numbered order. The target Description is
+  authoritative and the existing
   Image Prompt is never preparation input. Use the immutable effective prompt
   captured in the exact Reference background's generation metadata, including a
   reviewed Image Prompt or legacy enriched text, as the primary semantic source
@@ -117,9 +121,10 @@ for live Ollama and MFLUX runs.
   and to fill gaps rather than relabeling explicit authored treatment. Preserve
   the meaning of every explicit target visual property without special keywords
   or required wording. For Reference-backed preparation, translate user-facing
-  aliases such as Reference card, image, or picture into the canonical `image 1`
-  label, preserve explicit entity relationships, and produce a direct editing
-  instruction rather than a standalone caption. Keep that instruction concise:
+  aliases and exact selected card names into canonical `image 1` and `image 2`
+  labels, preserve explicit and inferable entity relationships, apply image 1
+  precedence where ambiguity remains, and produce a direct editing instruction
+  rather than a standalone caption. Keep that instruction concise:
   name only stable identity, construction, material, distinguishing-component,
   or visual-treatment properties needed for continuity; do not preserve
   target-overridden pose, action, state, viewpoint, crop, framing, composition,
