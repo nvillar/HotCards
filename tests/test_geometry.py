@@ -2,7 +2,7 @@
 
 import pytest
 
-from hypergen.domain.geometry import (
+from hotcards.domain.geometry import (
     PolygonIssueCode,
     hit_test_interactions,
     model_coordinate_to_normalized,
@@ -12,7 +12,7 @@ from hypergen.domain.geometry import (
     polygon_signed_area,
     validate_polygon,
 )
-from hypergen.domain.models import (
+from hotcards.domain.models import (
     Interaction,
     NavigateAction,
     Point,

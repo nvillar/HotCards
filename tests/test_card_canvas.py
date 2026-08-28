@@ -13,8 +13,8 @@ from PySide6.QtCore import QPointF, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
-from hypergen.domain.models import CanvasSize
-from hypergen.ui.card_canvas import CardCanvas
+from hotcards.domain.models import CanvasSize
+from hotcards.ui.card_canvas import CardCanvas
 
 
 @pytest.fixture(scope="module")

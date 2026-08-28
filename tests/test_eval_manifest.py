@@ -8,8 +8,8 @@ from pathlib import Path
 
 import pytest
 
-import hypergen.evaluation.manifest as manifest_module
-from hypergen.evaluation.manifest import RunLifecycle, atomic_write_json, safe_run_path
+import hotcards.evaluation.manifest as manifest_module
+from hotcards.evaluation.manifest import RunLifecycle, atomic_write_json, safe_run_path
 
 
 def test_manifest_is_immediate_deterministic_and_finalizes_artifacts(tmp_path: Path) -> None:

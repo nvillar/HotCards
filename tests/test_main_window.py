@@ -17,8 +17,8 @@ from PySide6.QtGui import QCloseEvent, QColor, QPixmap
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel
 
-import hypergen.ui.main_window as main_window_module
-from hypergen.application.commands import (
+import hotcards.ui.main_window as main_window_module
+from hotcards.application.commands import (
     ActivateRevisionCommand,
     DeleteRevisionCommand,
     DuplicateRevisionCommand,
@@ -26,11 +26,11 @@ from hypergen.application.commands import (
     ReplaceRevisionBackgroundCommand,
     SetRevisionImagePromptCommand,
 )
-from hypergen.application.document_controller import DocumentController
-from hypergen.application.document_session import DocumentSession, DocumentSessionState
-from hypergen.application.generated_revision_change import GeneratedRevisionChange
-from hypergen.application.workers import AdapterKind, AvailabilityDiagnostic
-from hypergen.domain.models import (
+from hotcards.application.document_controller import DocumentController
+from hotcards.application.document_session import DocumentSession, DocumentSessionState
+from hotcards.application.generated_revision_change import GeneratedRevisionChange
+from hotcards.application.workers import AdapterKind, AvailabilityDiagnostic
+from hotcards.domain.models import (
     HYPERCARD_STYLE_ID,
     Card,
     CardRevision,
@@ -49,9 +49,9 @@ from hypergen.domain.models import (
     Stack,
     UnresolvedCardReference,
 )
-from hypergen.ui.card_sidebar import CardSidebar
-from hypergen.ui.main_window import MainWindow
-from hypergen.ui.new_stack_dialog import NewStackDialog
+from hotcards.ui.card_sidebar import CardSidebar
+from hotcards.ui.main_window import MainWindow
+from hotcards.ui.new_stack_dialog import NewStackDialog
 
 
 class FakeSettings:
@@ -654,7 +654,7 @@ def test_successful_save_as_cancels_generation_and_expires_undo(
 ) -> None:
     controller = DocumentController(_stack())
     session = DocumentSession(controller)
-    session.create(controller.document, tmp_path / "Original.hypergen")
+    session.create(controller.document, tmp_path / "Original.hotcards")
     workers = FakeWorkers()
     background = FakeBackgroundWorkflow(controller)
     background.busy = True
@@ -676,8 +676,8 @@ def test_successful_save_as_cancels_generation_and_expires_undo(
         main_window_module.QFileDialog,
         "getSaveFileName",
         lambda *_args, **_kwargs: (
-            str(tmp_path / "Copy.hypergen"),
-            "HyperGen Stack (*.hypergen)",
+            str(tmp_path / "Copy.hotcards"),
+            "HotCards Stack (*.hotcards)",
         ),
     )
     prompt_cancellations: list[bool] = []
@@ -1566,7 +1566,7 @@ def test_clean_session_state_clears_previous_document_error(
 
     window._session_state_changed(
         DocumentSessionState(
-            bundle_path=tmp_path / "Demo.hypergen",
+            bundle_path=tmp_path / "Demo.hotcards",
             dirty=False,
             error=None,
         )

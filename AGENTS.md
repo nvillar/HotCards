@@ -1,9 +1,9 @@
 # AGENTS.md
 
-Durable coding and repository guidance for HyperGen. For what the project is
+Durable coding and repository guidance for HotCards. For what the project is
 and how to run it, see `README.md`. For planned work and acceptance criteria,
 see GitHub Issues and the
-[**HyperGen POC** milestone](https://github.com/nvillar/HyperGen/milestone/1).
+[**HotCards POC** milestone](https://github.com/nvillar/HotCards/milestone/1).
 Do not duplicate that material here.
 
 ## Environment and commands
@@ -12,37 +12,37 @@ Use `uv` only; do not add ad hoc `pip` instructions.
 
 ```sh
 uv sync
-uv run hypergen
+uv run hotcards
 uv run pytest
 uv run ruff check .
 uv run ruff format .
-uv run hypergen-eval smoke
-uv run hypergen-eval images
-uv run hypergen-eval image-prompts --validate-only
-uv run hypergen-eval image-prompts
-uv run hypergen-eval image-prompts-two-stage --validate-only
-uv run hypergen-eval image-prompts-two-stage
-uv run hypergen-eval image-prompts-evidence-gate --validate-only
-uv run hypergen-eval image-prompts-evidence-gate
-uv run hypergen-eval inline-references --validate-only
-uv run hypergen-eval inline-references
-uv run hypergen-eval style-presets --validate-only
-uv run hypergen-eval style-presets
-uv run hypergen-eval flux-references --stack /path/to/Stack.hypergen
+uv run hotcards-eval smoke
+uv run hotcards-eval images
+uv run hotcards-eval image-prompts --validate-only
+uv run hotcards-eval image-prompts
+uv run hotcards-eval image-prompts-two-stage --validate-only
+uv run hotcards-eval image-prompts-two-stage
+uv run hotcards-eval image-prompts-evidence-gate --validate-only
+uv run hotcards-eval image-prompts-evidence-gate
+uv run hotcards-eval inline-references --validate-only
+uv run hotcards-eval inline-references
+uv run hotcards-eval style-presets --validate-only
+uv run hotcards-eval style-presets
+uv run hotcards-eval flux-references --stack /path/to/Stack.hotcards
 ```
 
 Ordinary automated tests must not require live model calls. Use recorded
-responses and fakes in `pytest`; use `hypergen-eval` or explicit smoke commands
+responses and fakes in `pytest`; use `hotcards-eval` or explicit smoke commands
 for live Ollama and MFLUX runs.
 
 ## Repository layout
 
-- `src/hypergen/domain/` — stack models, geometry, validation.
-- `src/hypergen/storage/` — bundle persistence.
-- `src/hypergen/generation/` — prompt builders and model adapters.
-- `src/hypergen/application/` — document controller, commands, workers.
-- `src/hypergen/ui/` — PySide6 widgets.
-- `src/hypergen/evaluation/` — evaluation harness implementation.
+- `src/hotcards/domain/` — stack models, geometry, validation.
+- `src/hotcards/storage/` — bundle persistence.
+- `src/hotcards/generation/` — prompt builders and model adapters.
+- `src/hotcards/application/` — document controller, commands, workers.
+- `src/hotcards/ui/` — PySide6 widgets.
+- `src/hotcards/evaluation/` — evaluation harness implementation.
 - `tests/` — focused unit tests.
 - `evals/cases/` — version-controlled cases, rubrics, and permitted frozen inputs.
 - `evals/runs/` — generated immutable run output; keep it out of Git.

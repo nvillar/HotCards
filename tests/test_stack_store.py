@@ -1,4 +1,4 @@
-"""Tests for safe, atomic HyperGen stack bundles."""
+"""Tests for safe, atomic HotCards stack bundles."""
 
 import errno
 import json
@@ -9,8 +9,8 @@ from uuid import UUID, uuid4
 import pytest
 from PIL import Image
 
-import hypergen.storage.stack_store as stack_store_module
-from hypergen.domain.models import (
+import hotcards.storage.stack_store as stack_store_module
+from hotcards.domain.models import (
     CURRENT_SCHEMA_VERSION,
     Card,
     CardRevision,
@@ -25,7 +25,7 @@ from hypergen.domain.models import (
     ResolvedCardReference,
     Stack,
 )
-from hypergen.storage.stack_store import StackStore, StackStoreError
+from hotcards.storage.stack_store import StackStore, StackStoreError
 
 
 def _write_png(path: Path) -> None:
@@ -99,7 +99,7 @@ def _stack_with_asset(store: StackStore, source: Path) -> Stack:
 def test_bundle_round_trip_preserves_document_and_relative_asset(tmp_path: Path) -> None:
     source = tmp_path / "source.png"
     _write_png(source)
-    store = StackStore(tmp_path / "Castle.hypergen")
+    store = StackStore(tmp_path / "Castle.hotcards")
     stack = _stack_with_asset(store, source)
 
     store.save(stack)
@@ -116,14 +116,14 @@ def test_failed_replace_preserves_active_stack_and_removes_temporary_file(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    store = StackStore(tmp_path / "Castle.hypergen")
+    store = StackStore(tmp_path / "Castle.hotcards")
     store.save(Stack(name="Original"))
     original = store.stack_path.read_bytes()
 
     def fail_replace(source: Path, destination: Path) -> None:
         raise OSError("simulated interruption")
 
-    monkeypatch.setattr("hypergen.storage.stack_store.os.replace", fail_replace)
+    monkeypatch.setattr("hotcards.storage.stack_store.os.replace", fail_replace)
 
     with pytest.raises(StackStoreError, match="simulated interruption"):
         store.save(Stack(name="Changed"))
@@ -133,7 +133,7 @@ def test_failed_replace_preserves_active_stack_and_removes_temporary_file(
 
 
 def test_create_never_replaces_existing_stack_document(tmp_path: Path) -> None:
-    store = StackStore(tmp_path / "Existing.hypergen")
+    store = StackStore(tmp_path / "Existing.hotcards")
     store.create(Stack(name="Existing"))
 
     with pytest.raises(StackStoreError, match="refusing to overwrite"):
@@ -152,7 +152,7 @@ def test_create_never_replaces_existing_stack_document(tmp_path: Path) -> None:
     ],
 )
 def test_load_rejects_unsafe_asset_paths(tmp_path: Path, unsafe_path: str) -> None:
-    store = StackStore(tmp_path / "Castle.hypergen")
+    store = StackStore(tmp_path / "Castle.hotcards")
     store.bundle_path.mkdir()
     revision_id = uuid4()
     payload = Stack(
@@ -176,7 +176,7 @@ def test_load_rejects_unsafe_asset_paths(tmp_path: Path, unsafe_path: str) -> No
 
 
 def test_save_requires_asset_before_json_reference(tmp_path: Path) -> None:
-    store = StackStore(tmp_path / "Castle.hypergen")
+    store = StackStore(tmp_path / "Castle.hotcards")
     card_id = uuid4()
     revision_id = uuid4()
     stack = Stack(
@@ -207,7 +207,7 @@ def test_save_requires_asset_before_json_reference(tmp_path: Path) -> None:
 def test_save_requires_asset_path_to_match_card_and_revision_ids(tmp_path: Path) -> None:
     source = tmp_path / "source.png"
     _write_png(source)
-    store = StackStore(tmp_path / "Castle.hypergen")
+    store = StackStore(tmp_path / "Castle.hotcards")
     wrong_card_id = uuid4()
     revision_id = uuid4()
     image_path = store.store_image_asset(
@@ -239,7 +239,7 @@ def test_store_image_asset_refuses_overwrite_and_invalid_content(
 ) -> None:
     source = tmp_path / "source.png"
     _write_png(source)
-    store = StackStore(tmp_path / "Castle.hypergen")
+    store = StackStore(tmp_path / "Castle.hotcards")
     card_id = uuid4()
     revision_id = uuid4()
 
@@ -257,7 +257,7 @@ def test_store_image_asset_refuses_overwrite_and_invalid_content(
 def test_load_rejects_missing_unsupported_and_future_versions(
     tmp_path: Path,
 ) -> None:
-    store = StackStore(tmp_path / "Castle.hypergen")
+    store = StackStore(tmp_path / "Castle.hotcards")
     store.bundle_path.mkdir()
 
     for payload, message in [
@@ -272,7 +272,7 @@ def test_load_rejects_missing_unsupported_and_future_versions(
 
 
 def test_symlinked_asset_directory_cannot_escape_bundle(tmp_path: Path) -> None:
-    store = StackStore(tmp_path / "Castle.hypergen")
+    store = StackStore(tmp_path / "Castle.hotcards")
     outside = tmp_path / "outside"
     outside.mkdir()
     asset_parent = store.bundle_path / "assets"
@@ -290,11 +290,11 @@ def test_symlinked_asset_directory_cannot_escape_bundle(tmp_path: Path) -> None:
 def test_clone_to_creates_independent_bundle_with_referenced_assets(tmp_path: Path) -> None:
     source = tmp_path / "source.png"
     _write_png(source)
-    original = StackStore(tmp_path / "Original.hypergen")
+    original = StackStore(tmp_path / "Original.hotcards")
     stack = _stack_with_asset(original, source)
     original.save(stack)
 
-    destination = tmp_path / "Copy.hypergen"
+    destination = tmp_path / "Copy.hotcards"
     copied_store = original.clone_to(destination, stack)
 
     assert copied_store.load() == stack
@@ -306,9 +306,9 @@ def test_clone_to_creates_independent_bundle_with_referenced_assets(tmp_path: Pa
 
 
 def test_clone_to_refuses_existing_destination(tmp_path: Path) -> None:
-    source_store = StackStore(tmp_path / "Source.hypergen")
+    source_store = StackStore(tmp_path / "Source.hotcards")
     source_store.save(Stack(name="Source"))
-    destination = tmp_path / "Existing.hypergen"
+    destination = tmp_path / "Existing.hotcards"
     destination.mkdir()
 
     with pytest.raises(StackStoreError, match="refusing to overwrite"):
@@ -319,17 +319,17 @@ def test_clone_to_wraps_destination_preparation_errors(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    source_store = StackStore(tmp_path / "Source.hypergen")
+    source_store = StackStore(tmp_path / "Source.hotcards")
     source_store.save(Stack(name="Source"))
 
     def fail_mkdtemp(**_kwargs: object) -> str:
         raise PermissionError("destination is read-only")
 
-    monkeypatch.setattr("hypergen.storage.stack_store.tempfile.mkdtemp", fail_mkdtemp)
+    monkeypatch.setattr("hotcards.storage.stack_store.tempfile.mkdtemp", fail_mkdtemp)
 
     with pytest.raises(StackStoreError, match="destination is read-only"):
         source_store.clone_to(
-            tmp_path / "Copy.hypergen",
+            tmp_path / "Copy.hotcards",
             Stack(name="Source"),
         )
 
@@ -360,4 +360,4 @@ def test_save_wraps_bundle_directory_preparation_error(
     monkeypatch.setattr(stack_store_module, "_mkdir_durable", fail_mkdir)
 
     with pytest.raises(StackStoreError, match="protected folder"):
-        StackStore(tmp_path / "Protected.hypergen").save(Stack(name="Protected"))
+        StackStore(tmp_path / "Protected.hotcards").save(Stack(name="Protected"))

@@ -1,0 +1,1 @@
+"""HotCards application package."""

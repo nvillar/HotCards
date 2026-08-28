@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 from ollama import ResponseError
 
-from hypergen.generation.ollama_client import OllamaRuntime, OllamaSettings
+from hotcards.generation.ollama_client import OllamaRuntime, OllamaSettings
 
 
 class FakeOllamaClient:

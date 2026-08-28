@@ -7,9 +7,9 @@ from uuid import uuid4
 import pytest
 from PIL import Image
 
-from hypergen.domain.models import ImageGenerationInputs, ImageReferenceSnapshot
-from hypergen.generation.errors import ImageGenerationError, ModelLoadError
-from hypergen.generation.mflux_generator import (
+from hotcards.domain.models import ImageGenerationInputs, ImageReferenceSnapshot
+from hotcards.generation.errors import ImageGenerationError, ModelLoadError
+from hotcards.generation.mflux_generator import (
     MfluxGenerationRequest,
     MfluxGenerator,
 )

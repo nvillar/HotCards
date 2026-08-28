@@ -10,7 +10,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 from PySide6.QtWidgets import QApplication
 
-from hypergen.ui.settings_dialog import (
+from hotcards.ui.settings_dialog import (
     MFLUX_MODEL_KEY,
     OLLAMA_MODEL_KEY,
     SettingsDialog,

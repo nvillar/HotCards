@@ -15,8 +15,8 @@ from PySide6.QtGui import QContextMenuEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
-import hypergen.ui.card_canvas as card_canvas_module
-from hypergen.domain.models import (
+import hotcards.ui.card_canvas as card_canvas_module
+from hotcards.domain.models import (
     CanvasSize,
     HotspotSet,
     Interaction,
@@ -25,7 +25,7 @@ from hypergen.domain.models import (
     Polygon,
     UnresolvedCardReference,
 )
-from hypergen.ui.card_canvas import CardCanvas
+from hotcards.ui.card_canvas import CardCanvas
 
 
 @pytest.fixture(scope="module")

@@ -1,7 +1,7 @@
 {
   "benchmark_version": "image-prompt-benchmark-v2",
-  "benchmark_id": "hypergen-image-prompts",
-  "title": "HyperGen Image Prompt benchmark",
+  "benchmark_id": "hotcards-image-prompts",
+  "title": "HotCards Image Prompt benchmark",
   "description": "A maintained, self-contained benchmark for judging whether Image Prompt preparation preserves authored intent while applying only requested Reference continuity.",
   "common_criteria": [
     {
@@ -42,8 +42,8 @@
       "sha256": "d0a803fd4d8a4d6f60d247cc0889b59218f37fae32a07d1a662a762653b1f017",
       "provenance": {
         "source_kind": "project-generated",
-        "description": "Frozen from an author-generated HyperGen space-station scene on 2026-08-24; the benchmark owns this copy and does not read the source stack.",
-        "reuse_terms": "Project-generated evaluation input; reusable and redistributable with HyperGen."
+        "description": "Frozen from an author-generated HotCards space-station scene on 2026-08-24; the benchmark owns this copy and does not read the source stack.",
+        "reuse_terms": "Project-generated evaluation input; reusable and redistributable with HotCards."
       }
     },
     {
@@ -52,8 +52,8 @@
       "sha256": "dae309fdc9222d11894a3f7fdc8c3b2e6938de77e80b2f0f7f1ab514c28ecb84",
       "provenance": {
         "source_kind": "project-generated",
-        "description": "Frozen from an author-generated HyperGen retrofuturistic laboratory scene on 2026-08-24; the benchmark owns this copy and does not read the source stack.",
-        "reuse_terms": "Project-generated evaluation input; reusable and redistributable with HyperGen."
+        "description": "Frozen from an author-generated HotCards retrofuturistic laboratory scene on 2026-08-24; the benchmark owns this copy and does not read the source stack.",
+        "reuse_terms": "Project-generated evaluation input; reusable and redistributable with HotCards."
       }
     },
     {
@@ -62,8 +62,8 @@
       "sha256": "ce2e510b0e4d1d1215d17497db03daa159068a9a032663c2ea5865483ad617cd",
       "provenance": {
         "source_kind": "project-generated",
-        "description": "Frozen from an author-generated HyperGen wedge-shaped computer scene on 2026-08-24; the benchmark owns this copy and does not read the source stack.",
-        "reuse_terms": "Project-generated evaluation input; reusable and redistributable with HyperGen."
+        "description": "Frozen from an author-generated HotCards wedge-shaped computer scene on 2026-08-24; the benchmark owns this copy and does not read the source stack.",
+        "reuse_terms": "Project-generated evaluation input; reusable and redistributable with HotCards."
       }
     },
     {
@@ -72,8 +72,8 @@
       "sha256": "330f407023093b3a1176cc00323d34b61d7ef0c3d03df0a87031a0a189000be3",
       "provenance": {
         "source_kind": "project-generated",
-        "description": "Frozen from an author-generated HyperGen front-facing computer scene on 2026-08-24; the benchmark owns this copy and does not read the source stack.",
-        "reuse_terms": "Project-generated evaluation input; reusable and redistributable with HyperGen."
+        "description": "Frozen from an author-generated HotCards front-facing computer scene on 2026-08-24; the benchmark owns this copy and does not read the source stack.",
+        "reuse_terms": "Project-generated evaluation input; reusable and redistributable with HotCards."
       }
     },
     {
@@ -82,8 +82,8 @@
       "sha256": "52b8ffe184f09d07736659d07dec1caba7c7de3f909325329b21ad7b7d576c6e",
       "provenance": {
         "source_kind": "project-generated",
-        "description": "Frozen from an author-generated HyperGen computer error-screen scene on 2026-08-24; the benchmark owns this copy and does not read the source stack.",
-        "reuse_terms": "Project-generated evaluation input; reusable and redistributable with HyperGen."
+        "description": "Frozen from an author-generated HotCards computer error-screen scene on 2026-08-24; the benchmark owns this copy and does not read the source stack.",
+        "reuse_terms": "Project-generated evaluation input; reusable and redistributable with HotCards."
       }
     },
     {
@@ -92,8 +92,8 @@
       "sha256": "bcf9c548ca271b7e4d67175b4c4971c8157537912ab22b29762f15c00d1df29b",
       "provenance": {
         "source_kind": "project-generated",
-        "description": "Copied from HyperGen's project-authored synthetic workshop evaluation fixture to add a non-photorealistic color Reference independent of the seed deck.",
-        "reuse_terms": "Project-generated evaluation input; reusable and redistributable with HyperGen."
+        "description": "Copied from HotCards' project-authored synthetic workshop evaluation fixture to add a non-photorealistic color Reference independent of the seed deck.",
+        "reuse_terms": "Project-generated evaluation input; reusable and redistributable with HotCards."
       }
     }
   ],
@@ -151,7 +151,7 @@
       "provenance": {
         "source_kind": "authored",
         "description": "Canonicalized from an authored space-station card used to seed the benchmark.",
-        "reuse_terms": "Original HyperGen benchmark text; reusable and redistributable with HyperGen."
+        "reuse_terms": "Original HotCards benchmark text; reusable and redistributable with HotCards."
       }
     },
     {
@@ -204,7 +204,7 @@
       "provenance": {
         "source_kind": "authored",
         "description": "Adapted from an authored state-change card used to seed the benchmark.",
-        "reuse_terms": "Original HyperGen benchmark text; reusable and redistributable with HyperGen."
+        "reuse_terms": "Original HotCards benchmark text; reusable and redistributable with HotCards."
       }
     },
     {
@@ -262,7 +262,7 @@
       "provenance": {
         "source_kind": "authored",
         "description": "Canonicalized from an authored new-setting card used to seed the benchmark.",
-        "reuse_terms": "Original HyperGen benchmark text; reusable and redistributable with HyperGen."
+        "reuse_terms": "Original HotCards benchmark text; reusable and redistributable with HotCards."
       }
     },
     {
@@ -309,7 +309,7 @@
       "provenance": {
         "source_kind": "authored",
         "description": "Canonicalized from an authored extreme-reframing card used to seed the benchmark.",
-        "reuse_terms": "Original HyperGen benchmark text; reusable and redistributable with HyperGen."
+        "reuse_terms": "Original HotCards benchmark text; reusable and redistributable with HotCards."
       }
     },
     {
@@ -368,7 +368,7 @@
       "provenance": {
         "source_kind": "authored",
         "description": "Canonicalized from an authored object-extraction card used to seed the benchmark.",
-        "reuse_terms": "Original HyperGen benchmark text; reusable and redistributable with HyperGen."
+        "reuse_terms": "Original HotCards benchmark text; reusable and redistributable with HotCards."
       }
     },
     {
@@ -426,7 +426,7 @@
       "provenance": {
         "source_kind": "authored",
         "description": "Canonicalized from an authored viewpoint-change card used to seed the benchmark.",
-        "reuse_terms": "Original HyperGen benchmark text; reusable and redistributable with HyperGen."
+        "reuse_terms": "Original HotCards benchmark text; reusable and redistributable with HotCards."
       }
     },
     {
@@ -484,7 +484,7 @@
       "provenance": {
         "source_kind": "authored",
         "description": "Canonicalized from an authored screen-replacement card used to seed the benchmark.",
-        "reuse_terms": "Original HyperGen benchmark text; reusable and redistributable with HyperGen."
+        "reuse_terms": "Original HotCards benchmark text; reusable and redistributable with HotCards."
       }
     },
     {
@@ -542,7 +542,7 @@
       "provenance": {
         "source_kind": "authored",
         "description": "Canonicalized from an authored forbidden-text card used to seed the benchmark.",
-        "reuse_terms": "Original HyperGen benchmark text; reusable and redistributable with HyperGen."
+        "reuse_terms": "Original HotCards benchmark text; reusable and redistributable with HotCards."
       }
     },
     {
@@ -595,7 +595,7 @@
       "provenance": {
         "source_kind": "authored",
         "description": "Canonicalized from an authored setting-continuity card used to seed the benchmark.",
-        "reuse_terms": "Original HyperGen benchmark text; reusable and redistributable with HyperGen."
+        "reuse_terms": "Original HotCards benchmark text; reusable and redistributable with HotCards."
       }
     },
     {
@@ -654,7 +654,7 @@
       "provenance": {
         "source_kind": "authored",
         "description": "Canonicalized from the authored new-view failure that motivated the benchmark.",
-        "reuse_terms": "Original HyperGen benchmark text; reusable and redistributable with HyperGen."
+        "reuse_terms": "Original HotCards benchmark text; reusable and redistributable with HotCards."
       }
     },
     {
@@ -694,7 +694,7 @@
       "provenance": {
         "source_kind": "authored",
         "description": "Authored as a style-only transfer edge case after early benchmark experiments exposed Reference scene leakage.",
-        "reuse_terms": "Original HyperGen benchmark text; reusable and redistributable with HyperGen."
+        "reuse_terms": "Original HotCards benchmark text; reusable and redistributable with HotCards."
       }
     },
     {
@@ -740,7 +740,7 @@
       "provenance": {
         "source_kind": "authored",
         "description": "Authored as an explicit treatment-override edge case after weak-model experiments.",
-        "reuse_terms": "Original HyperGen benchmark text; reusable and redistributable with HyperGen."
+        "reuse_terms": "Original HotCards benchmark text; reusable and redistributable with HotCards."
       }
     },
     {
@@ -792,7 +792,7 @@
       "provenance": {
         "source_kind": "authored",
         "description": "Authored as a local palette-override edge case for the maintained benchmark.",
-        "reuse_terms": "Original HyperGen benchmark text; reusable and redistributable with HyperGen."
+        "reuse_terms": "Original HotCards benchmark text; reusable and redistributable with HotCards."
       }
     },
     {
@@ -836,7 +836,7 @@
       "provenance": {
         "source_kind": "authored",
         "description": "Authored as an exact-visible-text and no-Reference edge case for the maintained benchmark.",
-        "reuse_terms": "Original HyperGen benchmark text; reusable and redistributable with HyperGen."
+        "reuse_terms": "Original HotCards benchmark text; reusable and redistributable with HotCards."
       }
     },
     {
@@ -877,7 +877,7 @@
       "provenance": {
         "source_kind": "authored",
         "description": "Authored to prevent benchmark overfitting to monochrome early-Mac References.",
-        "reuse_terms": "Original HyperGen benchmark text; reusable and redistributable with HyperGen."
+        "reuse_terms": "Original HotCards benchmark text; reusable and redistributable with HotCards."
       }
     },
     {
@@ -930,7 +930,7 @@
       "provenance": {
         "source_kind": "authored",
         "description": "Authored as a colored identity-and-state continuity case beyond the seed deck.",
-        "reuse_terms": "Original HyperGen benchmark text; reusable and redistributable with HyperGen."
+        "reuse_terms": "Original HotCards benchmark text; reusable and redistributable with HotCards."
       }
     }
   ]

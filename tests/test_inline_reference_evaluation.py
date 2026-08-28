@@ -8,14 +8,14 @@ import pytest
 from PIL import Image, PngImagePlugin
 from pydantic import ValidationError
 
-from hypergen.evaluation.cli import build_parser, run_cli
-from hypergen.evaluation.inline_references import (
+from hotcards.evaluation.cli import build_parser, run_cli
+from hotcards.evaluation.inline_references import (
     DEFAULT_INLINE_REFERENCE_EXPERIMENT,
     InlineReferenceSettings,
     load_inline_reference_experiment,
     run_inline_reference_evaluation,
 )
-from hypergen.generation.mflux_generator import MfluxGenerator
+from hotcards.generation.mflux_generator import MfluxGenerator
 
 
 class FakeGeneratedImage:

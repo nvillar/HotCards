@@ -7,7 +7,7 @@ from uuid import uuid4
 
 from PIL import Image
 
-from hypergen.domain.models import (
+from hotcards.domain.models import (
     Card,
     CardRevision,
     GeneratedBackground,
@@ -15,11 +15,11 @@ from hypergen.domain.models import (
     ImageGenerationMetadata,
     Stack,
 )
-from hypergen.evaluation.flux_references import (
+from hotcards.evaluation.flux_references import (
     _model_config,
     run_flux_reference_evaluation,
 )
-from hypergen.storage.stack_store import StackStore
+from hotcards.storage.stack_store import StackStore
 
 
 class FakeGeneratedImage:
@@ -104,7 +104,7 @@ def _card_with_image(
 
 
 def _write_reference_stack(tmp_path: Path) -> tuple[Path, Path]:
-    bundle = tmp_path / "References.hypergen"
+    bundle = tmp_path / "References.hotcards"
     store = StackStore(bundle)
     map_source = tmp_path / "map.png"
     castle_source = tmp_path / "castle.png"

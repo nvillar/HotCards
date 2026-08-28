@@ -5,12 +5,12 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
-from hypergen.domain.models import (
+from hotcards.domain.models import (
     ImageGenerationInputs,
     ImageReferenceSnapshot,
     StyleSnapshot,
 )
-from hypergen.generation.image_prompts import compose_image_prompt
+from hotcards.generation.image_prompts import compose_image_prompt
 
 
 def test_image_prompt_is_delivered_without_hidden_rewriting() -> None:

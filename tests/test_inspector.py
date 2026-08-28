@@ -19,9 +19,9 @@ from PySide6.QtWidgets import (
     QToolButton,
 )
 
-from hypergen.application.commands import DeleteCardCommand, RenameCardCommand
-from hypergen.application.document_controller import DocumentController
-from hypergen.domain.models import (
+from hotcards.application.commands import DeleteCardCommand, RenameCardCommand
+from hotcards.application.document_controller import DocumentController
+from hotcards.domain.models import (
     Card,
     CardRevision,
     HotspotConditions,
@@ -36,10 +36,10 @@ from hypergen.domain.models import (
     StyleDefinition,
     UnresolvedCardReference,
 )
-from hypergen.generation.image_prompt_preparation import (
+from hotcards.generation.image_prompt_preparation import (
     IMAGE_PROMPT_PREPARATION_VERSION,
 )
-from hypergen.ui.inspector import Inspector
+from hotcards.ui.inspector import Inspector
 
 
 @pytest.fixture(scope="module")

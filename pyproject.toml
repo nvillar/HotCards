@@ -1,5 +1,5 @@
 [project]
-name = "hypergen"
+name = "hotcards"
 version = "0.1.0"
 description = "Local-first AI-assisted authoring for illustrated interactive card stacks"
 authors = [
@@ -15,8 +15,8 @@ dependencies = [
 ]
 
 [project.scripts]
-hypergen = "hypergen.main:main"
-hypergen-eval = "hypergen.evaluation.cli:main"
+hotcards = "hotcards.main:main"
+hotcards-eval = "hotcards.evaluation.cli:main"
 
 [build-system]
 requires = ["uv_build>=0.10.3,<0.11.0"]

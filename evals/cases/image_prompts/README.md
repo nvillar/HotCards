@@ -1,6 +1,6 @@
 # Image Prompt benchmark
 
-`benchmark.json` is the maintained HyperGen benchmark for Image Prompt
+`benchmark.json` is the maintained HotCards benchmark for Image Prompt
 preparation. It is a self-contained dataset: cases refer only to frozen images
 under `references/`, and each image has a checked SHA-256 digest and reuse
 provenance. The benchmark never opens or depends on the authoring stack that
@@ -29,7 +29,7 @@ critical omission away with successes on cosmetic criteria.
 ## Validate
 
 ```sh
-uv run hypergen-eval image-prompts --validate-only
+uv run hotcards-eval image-prompts --validate-only
 ```
 
 Validation checks strict JSON structure, unique case and criterion IDs, safe
@@ -39,8 +39,8 @@ no model call.
 ## Run the production baseline
 
 ```sh
-uv run hypergen-eval image-prompts
-uv run hypergen-eval image-prompts \
+uv run hotcards-eval image-prompts
+uv run hotcards-eval image-prompts \
   --ollama-model qwen3.5:9b-mlx \
   --repetitions 3
 ```
@@ -63,8 +63,8 @@ text-only call. It reuses the production output schema, final-state validation,
 and repair contract without changing production preparation:
 
 ```sh
-uv run hypergen-eval image-prompts-two-stage --validate-only
-uv run hypergen-eval image-prompts-two-stage \
+uv run hotcards-eval image-prompts-two-stage --validate-only
+uv run hotcards-eval image-prompts-two-stage \
   --ollama-model qwen3.5:9b-mlx
 ```
 
@@ -77,8 +77,8 @@ target-applicable Reference evidence. Final synthesis cannot access discarded
 Reference details:
 
 ```sh
-uv run hypergen-eval image-prompts-evidence-gate --validate-only
-uv run hypergen-eval image-prompts-evidence-gate \
+uv run hotcards-eval image-prompts-evidence-gate --validate-only
+uv run hotcards-eval image-prompts-evidence-gate \
   --ollama-model qwen3.5:9b-mlx
 ```
 
@@ -95,8 +95,8 @@ the same target expressed using explicit natural-language scope for the input
 Reference image:
 
 ```sh
-uv run hypergen-eval inline-references --validate-only
-uv run hypergen-eval inline-references
+uv run hotcards-eval inline-references --validate-only
+uv run hotcards-eval inline-references
 ```
 
 The live command uses three matched seeds by default and writes blinded A/B

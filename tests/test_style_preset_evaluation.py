@@ -6,16 +6,16 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from hypergen.evaluation.cli import build_parser, run_cli
-from hypergen.evaluation.style_presets import (
+from hotcards.evaluation.cli import build_parser, run_cli
+from hotcards.evaluation.style_presets import (
     DEFAULT_STYLE_PRESET_EXPERIMENT,
     StylePresetSettings,
     compose_style_preset_prompt,
     load_style_preset_experiment,
     run_style_preset_evaluation,
 )
-from hypergen.generation.errors import ImageGenerationError
-from hypergen.generation.mflux_generator import MfluxGenerator
+from hotcards.generation.errors import ImageGenerationError
+from hotcards.generation.mflux_generator import MfluxGenerator
 
 
 class FakeGeneratedImage:

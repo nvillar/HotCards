@@ -6,7 +6,7 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
-from hypergen.application.commands import (
+from hotcards.application.commands import (
     ActivateRevisionCommand,
     AddInteractionCommand,
     AddKeyCommand,
@@ -40,8 +40,8 @@ from hypergen.application.commands import (
     SetStartCardCommand,
     UpdateStyleCommand,
 )
-from hypergen.application.document_controller import DocumentController
-from hypergen.domain.models import (
+from hotcards.application.document_controller import DocumentController
+from hotcards.domain.models import (
     Card,
     CardRevision,
     GeneratedBackground,

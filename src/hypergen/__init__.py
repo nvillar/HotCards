@@ -1,1 +1,0 @@
-"""HyperGen application package."""

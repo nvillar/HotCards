@@ -14,14 +14,14 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QEventLoop, QTimer
 from PySide6.QtWidgets import QApplication
 
-from hypergen.application.workers import (
+from hotcards.application.workers import (
     AdapterKind,
     AdapterWorkers,
     OperationStatus,
     WorkerFailure,
     WorkerFailureKind,
 )
-from hypergen.generation.errors import ModelResponseError, ServiceUnavailableError
+from hotcards.generation.errors import ModelResponseError, ServiceUnavailableError
 
 
 @pytest.fixture(scope="session", autouse=True)

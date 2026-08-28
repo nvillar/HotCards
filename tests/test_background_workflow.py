@@ -13,12 +13,12 @@ import pytest
 from PIL import Image
 from PySide6.QtCore import QObject, Signal
 
-from hypergen.application.background_workflow import (
+from hotcards.application.background_workflow import (
     BackgroundGenerationSettings,
     BackgroundWorkflow,
     BackgroundWorkflowError,
 )
-from hypergen.application.commands import (
+from hotcards.application.commands import (
     CreateCardCommand,
     DuplicateRevisionCommand,
     EditRevisionDescriptionCommand,
@@ -27,10 +27,10 @@ from hypergen.application.commands import (
     SetRevisionStyleCommand,
     UpdateStyleCommand,
 )
-from hypergen.application.document_controller import DocumentController, UndoToken
-from hypergen.application.document_session import DocumentSession
-from hypergen.application.generated_revision_change import GeneratedRevisionChange
-from hypergen.domain.models import (
+from hotcards.application.document_controller import DocumentController, UndoToken
+from hotcards.application.document_session import DocumentSession
+from hotcards.application.generated_revision_change import GeneratedRevisionChange
+from hotcards.domain.models import (
     Card,
     CardRevision,
     HotspotSet,
@@ -42,12 +42,12 @@ from hypergen.domain.models import (
     Stack,
     UnresolvedCardReference,
 )
-from hypergen.generation.image_prompt_preparation import (
+from hotcards.generation.image_prompt_preparation import (
     IMAGE_PROMPT_PREPARATION_VERSION,
     MULTI_REFERENCE_IMAGE_PROMPT_PREPARATION_VERSION,
 )
-from hypergen.generation.mflux_generator import MfluxGenerator
-from hypergen.storage.stack_store import StackStore
+from hotcards.generation.mflux_generator import MfluxGenerator
+from hotcards.storage.stack_store import StackStore
 
 
 class FakeOperation(QObject):
@@ -166,7 +166,7 @@ def _bound_workflow(
         )
     )
     session = DocumentSession(controller)
-    session.create(controller.document, tmp_path / "Stack.hypergen")
+    session.create(controller.document, tmp_path / "Stack.hotcards")
     workers = FakeWorkers()
     workflow = BackgroundWorkflow(
         controller,

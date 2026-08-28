@@ -1,6 +1,6 @@
-# HyperGen
+# HotCards
 
-HyperGen is an experimental, local-first authoring tool for illustrated,
+HotCards is an experimental, local-first authoring tool for illustrated,
 spatially interactive stacks of cards, inspired by classic HyperCard.
 
 Authors describe each card in natural language, generate a background image
@@ -13,9 +13,9 @@ experience. All generation runs on-device.
 [Ollama](https://ollama.com) daemon and locally cached MFLUX image models; the
 authoring shell remains usable when either service is unavailable.
 
-Stacks are stored as self-contained `.hypergen` directory bundles and
-autosaved atomically after creation or opening. At startup, HyperGen lists
-projects in `~/Documents/HyperGen` and offers direct Open and Create actions.
+Stacks are stored as self-contained `.hotcards` directory bundles and
+autosaved atomically after creation or opening. At startup, HotCards lists
+projects in `~/Documents/HotCards` and offers direct Open and Create actions.
 Only the current schema is accepted; older and future schemas are rejected.
 
 Each card owns one or more numbered revisions. A revision contains its authored
@@ -78,7 +78,7 @@ constrained repair attempt for a valid but conflicting proposal. Private model
 deliberation is never persisted.
 
 Image Prompt preparation does not consume the selected Style. At final image
-generation, HyperGen deterministically appends the selected Style text to the
+generation, HotCards deterministically appends the selected Style text to the
 reviewed Image Prompt and sends each Reference image exactly once in numbered
 order. MFLUX receives no hidden role instructions or source card prose. The
 exact Style ID, name, text, and composed render prompt are retained in generated
@@ -163,25 +163,25 @@ the 9B KV weights for reference generation.
 
 ```sh
 uv sync
-uv run hypergen
+uv run hotcards
 ```
 
 ## Evaluation harness
 
 ```sh
-uv run hypergen-eval smoke
-uv run hypergen-eval images
-uv run hypergen-eval image-prompts --validate-only
-uv run hypergen-eval image-prompts
-uv run hypergen-eval image-prompts-two-stage --validate-only
-uv run hypergen-eval image-prompts-two-stage
-uv run hypergen-eval image-prompts-evidence-gate --validate-only
-uv run hypergen-eval image-prompts-evidence-gate
-uv run hypergen-eval inline-references --validate-only
-uv run hypergen-eval inline-references
-uv run hypergen-eval style-presets --validate-only
-uv run hypergen-eval style-presets
-uv run hypergen-eval flux-references --stack /path/to/Stack.hypergen
+uv run hotcards-eval smoke
+uv run hotcards-eval images
+uv run hotcards-eval image-prompts --validate-only
+uv run hotcards-eval image-prompts
+uv run hotcards-eval image-prompts-two-stage --validate-only
+uv run hotcards-eval image-prompts-two-stage
+uv run hotcards-eval image-prompts-evidence-gate --validate-only
+uv run hotcards-eval image-prompts-evidence-gate
+uv run hotcards-eval inline-references --validate-only
+uv run hotcards-eval inline-references
+uv run hotcards-eval style-presets --validate-only
+uv run hotcards-eval style-presets
+uv run hotcards-eval flux-references --stack /path/to/Stack.hotcards
 ```
 
 Each live command creates one immutable directory under `evals/runs/` with an
@@ -220,14 +220,14 @@ subject and composition preservation, consistency, and artifact leakage.
 ## Architecture at a glance
 
 - `domain/` — in-memory stack model, geometry, validation.
-- `storage/` — human-readable `*.hypergen` bundle storage.
+- `storage/` — human-readable `*.hotcards` bundle storage.
 - `generation/` — deterministic MFLUX prompt composition, image generation,
   and Description enrichment.
 - `application/` — document controller, typed commands, session undo, workers.
 - `ui/` — PySide6 Author and Run interface.
-- `evaluation/` — `hypergen-eval` harness reusing production adapters.
+- `evaluation/` — `hotcards-eval` harness reusing production adapters.
 
 ## Roadmap
 
 Planned work, acceptance criteria, and progress live in GitHub Issues and the
-[**HyperGen POC** milestone](https://github.com/nvillar/HyperGen/milestone/1).
+[**HotCards POC** milestone](https://github.com/nvillar/HotCards/milestone/1).

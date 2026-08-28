@@ -2,12 +2,12 @@
 
 import json
 from datetime import UTC, datetime
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from pydantic import ValidationError
 
-from hypergen.domain.models import (
+from hotcards.domain.models import (
     BUILT_IN_STYLES,
     CURRENT_SCHEMA_VERSION,
     HYPERCARD_STYLE_ID,
@@ -34,7 +34,7 @@ from hypergen.domain.models import (
     StyleSnapshot,
     UnresolvedCardReference,
 )
-from hypergen.generation.image_prompt_preparation import (
+from hotcards.generation.image_prompt_preparation import (
     IMAGE_PROMPT_PREPARATION_VERSION,
 )
 
@@ -68,6 +68,21 @@ def test_stack_defaults_match_document_contract() -> None:
     assert stack.new_card_style_id == HYPERCARD_STYLE_ID
     assert stack.keys == ()
     assert stack.cards == ()
+
+
+def test_built_in_style_ids_remain_stable_across_product_renames() -> None:
+    assert tuple(style.id for style in BUILT_IN_STYLES) == (
+        UUID("2372dddb-99e0-5e62-b740-405d0f7dab2a"),
+        UUID("a23ac4cf-0358-500a-a4fb-1f120f1f9e47"),
+        UUID("7baf1057-786a-587e-a52f-c63b513519c6"),
+        UUID("72b678e8-49b0-50d8-af4b-735b31def4c0"),
+        UUID("5f602dd8-d459-5633-bd1a-f9b1c86fe473"),
+        UUID("61a9ca01-5458-5607-9940-8088955640a2"),
+        UUID("1e0aeb8e-7112-5ddc-becf-f6053ce31ffb"),
+        UUID("a73faa84-f09b-5832-b8a7-9af17fcb7c86"),
+        UUID("ea72f569-5ac1-5906-88b8-a0b7171b4d15"),
+        UUID("eda5058a-d463-5fd7-82dc-f50e7a571efa"),
+    )
 
 
 def test_stack_style_references_use_stable_ids_and_unique_names() -> None:

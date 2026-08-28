@@ -9,7 +9,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 from PySide6.QtWidgets import QApplication
 
-from hypergen.ui.notification_bar import (
+from hotcards.ui.notification_bar import (
     Notification,
     NotificationAction,
     NotificationBar,

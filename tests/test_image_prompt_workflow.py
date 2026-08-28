@@ -13,18 +13,18 @@ import pytest
 from PIL import Image
 from PySide6.QtCore import QObject, Signal
 
-from hypergen.application.commands import (
+from hotcards.application.commands import (
     ActivateRevisionCommand,
     EditRevisionDescriptionCommand,
     SetRevisionReferenceCommand,
 )
-from hypergen.application.document_controller import DocumentController, UndoToken
-from hypergen.application.generated_revision_change import GeneratedRevisionChange
-from hypergen.application.image_prompt_workflow import (
+from hotcards.application.document_controller import DocumentController, UndoToken
+from hotcards.application.generated_revision_change import GeneratedRevisionChange
+from hotcards.application.image_prompt_workflow import (
     ImagePromptWorkflow,
     ImagePromptWorkflowError,
 )
-from hypergen.domain.models import (
+from hotcards.domain.models import (
     Card,
     CardRevision,
     GeneratedBackground,
@@ -33,13 +33,13 @@ from hypergen.domain.models import (
     ResolvedCardReference,
     Stack,
 )
-from hypergen.generation.image_prompt_preparation import (
+from hotcards.generation.image_prompt_preparation import (
     IMAGE_PROMPT_PREPARATION_VERSION,
     MULTI_REFERENCE_IMAGE_PROMPT_PREPARATION_VERSION,
     ImagePromptPreparationRequest,
     ImagePromptPreparationResult,
 )
-from hypergen.generation.ollama_client import OllamaSettings
+from hotcards.generation.ollama_client import OllamaSettings
 
 
 class FakeOperation(QObject):

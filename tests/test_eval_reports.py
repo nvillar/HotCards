@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from hypergen.evaluation.reports import render_reports
+from hotcards.evaluation.reports import render_reports
 
 
 def _image_result(run_dir: Path, artifact_path: str) -> Path:

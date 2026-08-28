@@ -14,10 +14,10 @@ from PIL import Image
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
-from hypergen.application.commands import CreateCardCommand, RenameCardCommand
-from hypergen.application.document_controller import DocumentController
-from hypergen.application.document_session import DocumentSession, DocumentSessionError
-from hypergen.domain.models import (
+from hotcards.application.commands import CreateCardCommand, RenameCardCommand
+from hotcards.application.document_controller import DocumentController
+from hotcards.application.document_session import DocumentSession, DocumentSessionError
+from hotcards.domain.models import (
     Card,
     CardRevision,
     GeneratedBackground,
@@ -25,7 +25,7 @@ from hypergen.domain.models import (
     ImageGenerationMetadata,
     Stack,
 )
-from hypergen.storage.stack_store import StackStore, StackStoreError
+from hotcards.storage.stack_store import StackStore, StackStoreError
 
 
 @pytest.fixture(scope="module")
@@ -44,7 +44,7 @@ def test_create_binds_bundle_before_mutations_and_flushes_autosave(
         cards=(first_card,),
         start_card_id=first_card.id,
     )
-    bundle = tmp_path / "Garden.hypergen"
+    bundle = tmp_path / "Garden.hotcards"
 
     session.create(created, bundle)
     assert session.store is not None
@@ -64,7 +64,7 @@ def test_autosave_runs_after_debounce(
 ) -> None:
     controller = DocumentController(Stack(name="Welcome"))
     session = DocumentSession(controller, debounce_milliseconds=10)
-    bundle = tmp_path / "Debounced.hypergen"
+    bundle = tmp_path / "Debounced.hotcards"
     session.create(Stack(name="Debounced"), bundle)
 
     controller.execute(CreateCardCommand(name="Saved shortly"))
@@ -84,7 +84,7 @@ def test_failed_save_remains_dirty_and_can_retry(
 ) -> None:
     controller = DocumentController(Stack(name="Welcome"))
     session = DocumentSession(controller)
-    session.create(Stack(name="Retry"), tmp_path / "Retry.hypergen")
+    session.create(Stack(name="Retry"), tmp_path / "Retry.hotcards")
     controller.execute(CreateCardCommand(name="Pending"))
     assert session.store is not None
     real_save = session.store.save
@@ -106,8 +106,8 @@ def test_failed_save_remains_dirty_and_can_retry(
 def test_invalid_open_preserves_current_document(tmp_path: Path) -> None:
     controller = DocumentController(Stack(name="Welcome"))
     session = DocumentSession(controller)
-    session.create(Stack(name="Current"), tmp_path / "Current.hypergen")
-    invalid = tmp_path / "Invalid.hypergen"
+    session.create(Stack(name="Current"), tmp_path / "Current.hotcards")
+    invalid = tmp_path / "Invalid.hotcards"
     invalid.mkdir()
     (invalid / "stack.json").write_text("not json")
 
@@ -115,13 +115,13 @@ def test_invalid_open_preserves_current_document(tmp_path: Path) -> None:
         session.open(invalid)
 
     assert controller.document.name == "Current"
-    assert session.state.bundle_path == tmp_path / "Current.hypergen"
+    assert session.state.bundle_path == tmp_path / "Current.hotcards"
 
 
 def test_reopening_active_bundle_flushes_before_reload(tmp_path: Path) -> None:
     controller = DocumentController(Stack(name="Welcome"))
     session = DocumentSession(controller)
-    bundle = tmp_path / "Current.hypergen"
+    bundle = tmp_path / "Current.hotcards"
     session.create(Stack(name="Current"), bundle)
     controller.execute(CreateCardCommand(name="Pending"))
     assert session.state.dirty
@@ -136,7 +136,7 @@ def test_reopening_active_bundle_flushes_before_reload(tmp_path: Path) -> None:
 def test_save_as_copies_assets_and_rebinds_autosave(tmp_path: Path) -> None:
     source_image = tmp_path / "source.png"
     Image.new("RGB", (32, 24), "green").save(source_image)
-    source_bundle = tmp_path / "Source.hypergen"
+    source_bundle = tmp_path / "Source.hotcards"
     source_store = StackStore(source_bundle)
     card = Card(name="Garden")
     asset_id = uuid4()
@@ -179,7 +179,7 @@ def test_save_as_copies_assets_and_rebinds_autosave(tmp_path: Path) -> None:
     controller = DocumentController(Stack(name="Welcome"))
     session = DocumentSession(controller)
     session.open(source_bundle)
-    destination = tmp_path / "Copy.hypergen"
+    destination = tmp_path / "Copy.hotcards"
     session.save_as(destination)
 
     copied = StackStore(destination).load()
@@ -196,8 +196,8 @@ def test_save_as_copies_assets_and_rebinds_autosave(tmp_path: Path) -> None:
 def test_save_as_refuses_existing_destination(tmp_path: Path) -> None:
     controller = DocumentController(Stack(name="Welcome"))
     session = DocumentSession(controller)
-    session.create(Stack(name="Current"), tmp_path / "Current.hypergen")
-    existing = tmp_path / "Existing.hypergen"
+    session.create(Stack(name="Current"), tmp_path / "Current.hotcards")
+    existing = tmp_path / "Existing.hotcards"
     existing.mkdir()
 
     with pytest.raises(DocumentSessionError, match="refusing to overwrite"):
@@ -209,12 +209,12 @@ def test_save_as_clears_history_that_can_reference_uncloned_assets(
 ) -> None:
     controller = DocumentController(Stack(name="Welcome"))
     session = DocumentSession(controller)
-    session.create(Stack(name="Current"), tmp_path / "Current.hypergen")
+    session.create(Stack(name="Current"), tmp_path / "Current.hotcards")
     controller.execute(CreateCardCommand(name="Undo-only state"))
     assert controller.undo()
     assert controller.can_redo
 
-    session.save_as(tmp_path / "Copy.hypergen")
+    session.save_as(tmp_path / "Copy.hotcards")
 
     assert not controller.can_undo
     assert not controller.can_redo
@@ -223,7 +223,7 @@ def test_save_as_clears_history_that_can_reference_uncloned_assets(
 def test_create_can_recover_empty_bundle_left_by_failed_attempt(tmp_path: Path) -> None:
     controller = DocumentController(Stack(name="Welcome"))
     session = DocumentSession(controller)
-    bundle = tmp_path / "Retry.hypergen"
+    bundle = tmp_path / "Retry.hotcards"
     bundle.mkdir()
 
     session.create(Stack(name="Retry"), bundle)
@@ -234,7 +234,7 @@ def test_create_can_recover_empty_bundle_left_by_failed_attempt(tmp_path: Path) 
 def test_create_refuses_nonempty_existing_bundle(tmp_path: Path) -> None:
     controller = DocumentController(Stack(name="Welcome"))
     session = DocumentSession(controller)
-    bundle = tmp_path / "Existing.hypergen"
+    bundle = tmp_path / "Existing.hotcards"
     StackStore(bundle).save(Stack(name="Existing"))
 
     with pytest.raises(DocumentSessionError, match="bundle already exists"):
@@ -247,7 +247,7 @@ def test_create_does_not_replace_stack_created_after_destination_check(
 ) -> None:
     controller = DocumentController(Stack(name="Welcome"))
     session = DocumentSession(controller)
-    bundle = tmp_path / "Race.hypergen"
+    bundle = tmp_path / "Race.hotcards"
     bundle.mkdir()
 
     def competing_create() -> bool:

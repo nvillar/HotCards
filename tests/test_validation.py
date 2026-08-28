@@ -3,8 +3,8 @@
 import pytest
 from pydantic import ValidationError
 
-from hypergen.domain.models import Card, Stack
-from hypergen.domain.validation import normalize_card_name
+from hotcards.domain.models import Card, Stack
+from hotcards.domain.validation import normalize_card_name
 
 
 def test_normalize_card_name_is_case_and_unicode_insensitive() -> None:

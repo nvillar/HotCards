@@ -209,7 +209,7 @@ tempCodeRunnerFile.py
 # PyPI configuration file
 .pypirc
 
-# HyperGen evaluation outputs
+# HotCards evaluation outputs
 evals/runs/
 
 # Marimo

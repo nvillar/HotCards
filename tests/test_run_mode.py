@@ -15,10 +15,10 @@ from PySide6.QtCore import QObject, QPointF, Qt, Signal
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
-from hypergen.application.document_controller import DocumentController
-from hypergen.application.document_session import DocumentSession
-from hypergen.application.run_session import RunSession
-from hypergen.domain.models import (
+from hotcards.application.document_controller import DocumentController
+from hotcards.application.document_session import DocumentSession
+from hotcards.application.run_session import RunSession
+from hotcards.domain.models import (
     Card,
     CardRevision,
     GeneratedBackground,
@@ -37,8 +37,8 @@ from hypergen.domain.models import (
     Stack,
     UnresolvedCardReference,
 )
-from hypergen.storage.stack_store import StackStore
-from hypergen.ui.main_window import MainWindow
+from hotcards.storage.stack_store import StackStore
+from hotcards.ui.main_window import MainWindow
 
 
 class FakeWorkers(QObject):
@@ -335,7 +335,7 @@ def build_run_window(
         ),
         polygons=(polygon(0.1, 0.1, 0.5, 0.5),),
     )
-    bundle = tmp_path / "Run.hypergen"
+    bundle = tmp_path / "Run.hotcards"
     store = StackStore(bundle)
 
     def revision_for(

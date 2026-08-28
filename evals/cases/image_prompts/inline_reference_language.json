@@ -1,6 +1,6 @@
 {
   "experiment_version": "inline-reference-language-v1",
-  "experiment_id": "hypergen-inline-reference-language",
+  "experiment_id": "hotcards-inline-reference-language",
   "title": "Inline Reference language for FLUX.2 Klein",
   "description": "A paired image-level experiment comparing complete target prompts with and without explicit natural-language scope for one input Reference image.",
   "cases": [

@@ -7,14 +7,14 @@ import pytest
 from PIL import Image
 from pydantic import ValidationError
 
-from hypergen.evaluation.images import (
+from hotcards.evaluation.images import (
     DEFAULT_MFLUX_MODELS,
     ImageEvaluationCase,
     ImageEvaluationSettings,
     load_image_cases,
     run_image_evaluation,
 )
-from hypergen.generation.mflux_generator import MfluxGenerator
+from hotcards.generation.mflux_generator import MfluxGenerator
 
 
 class FakeGeneratedImage:

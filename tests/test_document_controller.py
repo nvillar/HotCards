@@ -1,6 +1,6 @@
 """Focused tests for authoritative document history and autosave signaling."""
 
-from hypergen.application.commands import (
+from hotcards.application.commands import (
     AddInteractionCommand,
     ChangeHotspotDestinationCommand,
     CreateCardAndResolveCommand,
@@ -10,8 +10,8 @@ from hypergen.application.commands import (
     RenameCardCommand,
     ReplaceHotspotSetCommand,
 )
-from hypergen.application.document_controller import DocumentController
-from hypergen.domain.models import (
+from hotcards.application.document_controller import DocumentController
+from hotcards.domain.models import (
     Card,
     CardRevision,
     HotspotSet,

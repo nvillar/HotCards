@@ -9,15 +9,15 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
-from hypergen.generation.errors import ModelResponseError, ModelUnavailableError
-from hypergen.generation.image_prompt_preparation import (
+from hotcards.generation.errors import ModelResponseError, ModelUnavailableError
+from hotcards.generation.image_prompt_preparation import (
     IMAGE_PROMPT_PREPARATION_VERSION,
     MULTI_REFERENCE_IMAGE_PROMPT_PREPARATION_VERSION,
     ImagePromptPreparationRequest,
     OllamaImagePromptPreparer,
     build_image_prompt_preparation_prompt,
 )
-from hypergen.generation.ollama_client import OllamaRuntime, OllamaSettings
+from hotcards.generation.ollama_client import OllamaRuntime, OllamaSettings
 
 
 class FakeOllamaClient:

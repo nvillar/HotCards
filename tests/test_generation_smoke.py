@@ -6,9 +6,9 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from hypergen.evaluation.cli import run_cli
-from hypergen.evaluation.smoke import SmokeSettings, SmokeStageError, run_smoke
-from hypergen.generation.mflux_generator import MfluxGenerator
+from hotcards.evaluation.cli import run_cli
+from hotcards.evaluation.smoke import SmokeSettings, SmokeStageError, run_smoke
+from hotcards.generation.mflux_generator import MfluxGenerator
 
 
 class FakeGeneratedImage:

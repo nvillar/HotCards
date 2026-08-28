@@ -10,8 +10,8 @@ import httpx
 import pytest
 from pydantic import ValidationError
 
-from hypergen.evaluation.cli import build_parser, run_cli
-from hypergen.evaluation.two_stage_image_prompts import (
+from hotcards.evaluation.cli import build_parser, run_cli
+from hotcards.evaluation.two_stage_image_prompts import (
     EVIDENCE_GATE_IMAGE_PROMPT_VERSION,
     TWO_STAGE_IMAGE_PROMPT_VERSION,
     ApplicableReferenceEvidenceOutput,
@@ -22,14 +22,14 @@ from hypergen.evaluation.two_stage_image_prompts import (
     build_reference_account_prompt,
     build_two_stage_synthesis_prompt,
 )
-from hypergen.generation.errors import (
+from hotcards.generation.errors import (
     ModelResponseError,
     ServiceUnavailableError,
 )
-from hypergen.generation.image_prompt_preparation import (
+from hotcards.generation.image_prompt_preparation import (
     ImagePromptPreparationRequest,
 )
-from hypergen.generation.ollama_client import OllamaRuntime, OllamaSettings
+from hotcards.generation.ollama_client import OllamaRuntime, OllamaSettings
 
 
 class FakeOllamaClient:

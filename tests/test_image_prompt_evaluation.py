@@ -10,19 +10,19 @@ import pytest
 from PIL import Image
 from pydantic import ValidationError
 
-from hypergen.evaluation.cli import build_parser, run_cli
-from hypergen.evaluation.image_prompts import (
+from hotcards.evaluation.cli import build_parser, run_cli
+from hotcards.evaluation.image_prompts import (
     ImagePromptBenchmark,
     ImagePromptBenchmarkSettings,
     load_image_prompt_benchmark,
     run_image_prompt_benchmark,
 )
-from hypergen.generation.errors import ModelResponseError
-from hypergen.generation.image_prompt_preparation import (
+from hotcards.generation.errors import ModelResponseError
+from hotcards.generation.image_prompt_preparation import (
     ImagePromptPreparationAttempt,
     ImagePromptPreparationResult,
 )
-from hypergen.generation.ollama_client import OllamaSettings
+from hotcards.generation.ollama_client import OllamaSettings
 
 
 def _criterion(
@@ -60,7 +60,7 @@ def _write_benchmark(tmp_path: Path) -> Path:
                 "provenance": {
                     "source_kind": "project-generated",
                     "description": "Generated for this test.",
-                    "reuse_terms": "Reusable with HyperGen.",
+                    "reuse_terms": "Reusable with HotCards.",
                 },
             }
         ],
@@ -79,7 +79,7 @@ def _write_benchmark(tmp_path: Path) -> Path:
                 "provenance": {
                     "source_kind": "authored",
                     "description": "Written for this test.",
-                    "reuse_terms": "Reusable with HyperGen.",
+                    "reuse_terms": "Reusable with HotCards.",
                 },
             },
             {
@@ -93,7 +93,7 @@ def _write_benchmark(tmp_path: Path) -> Path:
                 "provenance": {
                     "source_kind": "authored",
                     "description": "Written for this test.",
-                    "reuse_terms": "Reusable with HyperGen.",
+                    "reuse_terms": "Reusable with HotCards.",
                 },
             },
         ],
@@ -138,7 +138,7 @@ def test_tracked_image_prompt_benchmark_is_self_contained() -> None:
     path = Path("evals/cases/image_prompts/benchmark.json")
     benchmark = load_image_prompt_benchmark(path)
 
-    assert benchmark.benchmark_id == "hypergen-image-prompts"
+    assert benchmark.benchmark_id == "hotcards-image-prompts"
     assert {case.case_id for case in benchmark.cases} == {
         "closed-hatch-text-only",
         "open-hatch-state-change",
