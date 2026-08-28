@@ -7,7 +7,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSize, Qt
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QRadioButton,
     QStyle,
+    QToolButton,
 )
 
 from hypergen.application.commands import DeleteCardCommand, RenameCardCommand
@@ -234,7 +235,7 @@ def test_keys_tab_manages_global_names_and_lists_hotspot_usages(
     assert inspector.key_usage_list.count() == 1
     assert inspector.key_usage_list.item(0).text() == (
         "Castle · Version 1\n"
-        "Remove Red key"
+        "Lose Red key"
     )
 
     inspector.key_name_edit.setText("Ruby key")
@@ -246,11 +247,11 @@ def test_keys_tab_manages_global_names_and_lists_hotspot_usages(
     assert controller.document.keys[0].name == "Ruby key"
     assert inspector.key_usage_list.item(0) is usage_item
     assert inspector.key_usage_list.item(0).text().splitlines()[1] == (
-        "Remove Ruby key"
+        "Lose Ruby key"
     )
     hotspot_set = controller.document.cards[0].active_revision.hotspot_set
     assert hotspot_set is not None
-    assert hotspot_set.interactions[0].label == "Remove Ruby key"
+    assert hotspot_set.interactions[0].label == "Lose Ruby key"
 
     requested: list[tuple[object, object, object]] = []
     inspector.hotspot_usage_requested.connect(
@@ -308,15 +309,28 @@ def test_hotspot_pipeline_edits_conditions_changes_and_navigation(
 
     assert not hasattr(inspector, "hotspot_name_edit")
     assert inspector.hotspot_list.currentItem().text() == (
-        "Remove Red key · Grant Door open\n→ Castle"
+        "Lose Red key · Gain Door open\n→ Castle"
     )
     assert inspector.condition_table.rowCount() == 1
-    condition_state = inspector.condition_table.cellWidget(0, 1)
+    assert inspector.condition_table.horizontalHeaderItem(0).text() == "State"
+    assert inspector.condition_table.horizontalHeaderItem(1).text() == "Key"
+    condition_state = inspector.condition_table.cellWidget(0, 0)
+    condition_key = inspector.condition_table.cellWidget(0, 1)
     assert isinstance(condition_state, QComboBox)
-    assert condition_state.currentText() == "Present"
-    condition_remove = inspector.condition_table.cellWidget(0, 2)
+    assert isinstance(condition_key, QComboBox)
+    assert condition_state.currentText() == "Has"
+    assert condition_key.currentData() == red_key.id
+    condition_remove_cell = inspector.condition_table.cellWidget(0, 2)
+    condition_remove = condition_remove_cell.findChild(QToolButton)
+    assert condition_remove is not None
+    assert condition_remove_cell.layout().itemAt(0).alignment() == (
+        Qt.AlignmentFlag.AlignCenter
+    )
     assert condition_remove.width() == condition_remove.height()
-    assert condition_remove.height() == condition_state.sizeHint().height()
+    assert condition_remove.size() == QSize(
+        condition_state.sizeHint().height(),
+        condition_state.sizeHint().height(),
+    )
     assert inspector.condition_table.height() == (
         inspector.condition_table.horizontalHeader().sizeHint().height()
         + sum(
@@ -331,15 +345,23 @@ def test_hotspot_pipeline_edits_conditions_changes_and_navigation(
     grant_change = inspector.key_change_table.cellWidget(1, 0)
     assert isinstance(remove_change, QComboBox)
     assert isinstance(grant_change, QComboBox)
-    assert remove_change.currentText() == "Remove"
-    assert grant_change.currentText() == "Grant"
-    key_change_remove = inspector.key_change_table.cellWidget(0, 2)
+    assert remove_change.currentText() == "Lose"
+    assert grant_change.currentText() == "Gain"
+    key_change_remove_cell = inspector.key_change_table.cellWidget(0, 2)
+    key_change_remove = key_change_remove_cell.findChild(QToolButton)
+    assert key_change_remove is not None
+    assert key_change_remove_cell.layout().itemAt(0).alignment() == (
+        Qt.AlignmentFlag.AlignCenter
+    )
     assert key_change_remove.width() == key_change_remove.height()
-    assert key_change_remove.height() == remove_change.sizeHint().height()
+    assert key_change_remove.size() == QSize(
+        remove_change.sizeHint().height(),
+        remove_change.sizeHint().height(),
+    )
     assert inspector.no_key_changes_label.isHidden()
     assert inspector.hotspot_target_label.text() == "Go to"
     assert inspector.hotspot_summary.text() == (
-        "When Red key is present, remove Red key, then grant Door open, "
+        "When the runner has Red key, lose Red key, then gain Door open, "
         "then go to Castle."
     )
 
@@ -352,7 +374,7 @@ def test_hotspot_pipeline_edits_conditions_changes_and_navigation(
             if grant_key.itemData(index) == red_key.id
         )
     )
-    assert "both removed and granted" in inspector.hotspot_error.text()
+    assert "both gained and lost" in inspector.hotspot_error.text()
     assert not inspector.hotspot_error.isHidden()
     changed = controller.document.cards[0].active_revision.hotspot_set
     assert changed is not None

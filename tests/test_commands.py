@@ -179,7 +179,7 @@ def test_key_lifecycle_and_hotspot_behavior_are_typed_changes() -> None:
     changed = document.cards[0].active_revision.hotspot_set
     assert changed is not None
     assert document.keys == (KeyDefinition(id=key_id, name="Ruby key"),)
-    assert changed.interactions[0].label == "Grant Ruby key"
+    assert changed.interactions[0].label == "Gain Ruby key"
     assert changed.interactions[0].conditions.forbids == (key_id,)
     assert changed.interactions[0].key_changes.grant == (key_id,)
     with pytest.raises(CommandError, match="still used"):

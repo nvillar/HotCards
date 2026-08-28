@@ -161,11 +161,11 @@ class HotspotConditions(DomainModel):
     @model_validator(mode="after")
     def require_unambiguous_keys(self) -> HotspotConditions:
         if len(self.requires) != len(set(self.requires)):
-            raise ValueError("required keys must be unique")
+            raise ValueError("each key can appear in Has only once")
         if len(self.forbids) != len(set(self.forbids)):
-            raise ValueError("forbidden keys must be unique")
+            raise ValueError("each key can appear in Lacks only once")
         if set(self.requires) & set(self.forbids):
-            raise ValueError("a key cannot be both required and forbidden")
+            raise ValueError("the runner cannot both have and lack the same key")
         return self
 
 
@@ -178,11 +178,11 @@ class HotspotKeyChanges(DomainModel):
     @model_validator(mode="after")
     def require_unambiguous_changes(self) -> HotspotKeyChanges:
         if len(self.remove) != len(set(self.remove)):
-            raise ValueError("removed keys must be unique")
+            raise ValueError("each key can appear in Lose only once")
         if len(self.grant) != len(set(self.grant)):
-            raise ValueError("granted keys must be unique")
+            raise ValueError("each key can appear in Gain only once")
         if set(self.remove) & set(self.grant):
-            raise ValueError("a key cannot be both removed and granted")
+            raise ValueError("a key cannot be both gained and lost")
         return self
 
 
@@ -549,15 +549,15 @@ def _automatic_interaction_label(
     changes: list[str] = []
     if interaction.key_changes.remove:
         changes.append(
-            f"Remove {key_names[interaction.key_changes.remove[0]]}"
+            f"Lose {key_names[interaction.key_changes.remove[0]]}"
             if len(interaction.key_changes.remove) == 1
-            else "Remove keys"
+            else "Lose keys"
         )
     if interaction.key_changes.grant:
         changes.append(
-            f"Grant {key_names[interaction.key_changes.grant[0]]}"
+            f"Gain {key_names[interaction.key_changes.grant[0]]}"
             if len(interaction.key_changes.grant) == 1
-            else "Grant keys"
+            else "Gain keys"
         )
     destination: str | None = None
     action = interaction.action

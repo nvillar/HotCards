@@ -156,6 +156,7 @@ def _compact_text_button(
     object_name: str,
     accessible_name: str,
     tooltip: str,
+    prominent: bool = True,
 ) -> QToolButton:
     button = QToolButton()
     button.setObjectName(object_name)
@@ -163,10 +164,20 @@ def _compact_text_button(
     button.setAccessibleName(accessible_name)
     button.setToolTip(tooltip)
     font = button.font()
-    font.setPointSizeF(max(font.pointSizeF() + 4.0, 16.0))
+    if prominent:
+        font.setPointSizeF(max(font.pointSizeF() + 4.0, 16.0))
     font.setBold(True)
     button.setFont(font)
     return button
+
+
+def _centered_cell_widget(widget: QWidget) -> QWidget:
+    container = QWidget()
+    layout = QHBoxLayout(container)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(0)
+    layout.addWidget(widget, 0, Qt.AlignmentFlag.AlignCenter)
+    return container
 
 
 class Inspector(QWidget):
@@ -498,8 +509,8 @@ class Inspector(QWidget):
         self.condition_table.setObjectName("hotspotConditionTable")
         _configure_rule_table(
             self.condition_table,
-            ("Key", "State", ""),
-            stretch_column=0,
+            ("State", "Key", ""),
+            stretch_column=1,
         )
         when_layout.addWidget(self.condition_table)
         self.no_conditions_label = QLabel("No conditions (always activates)")
@@ -1299,10 +1310,10 @@ class Inspector(QWidget):
                     roles = tuple(
                         role
                         for role, key_ids in (
-                            ("Requires", interaction.conditions.requires),
-                            ("Forbids", interaction.conditions.forbids),
-                            ("Removes", interaction.key_changes.remove),
-                            ("Grants", interaction.key_changes.grant),
+                            ("Has", interaction.conditions.requires),
+                            ("Lacks", interaction.conditions.forbids),
+                            ("Loses", interaction.key_changes.remove),
+                            ("Gains", interaction.key_changes.grant),
                         )
                         if key_id in key_ids
                     )
@@ -1709,22 +1720,23 @@ class Inspector(QWidget):
             )
             return
         rows = (
-            *(("Present", key_id) for key_id in interaction.conditions.requires),
-            *(("Absent", key_id) for key_id in interaction.conditions.forbids),
+            *(("Has", key_id) for key_id in interaction.conditions.requires),
+            *(("Lacks", key_id) for key_id in interaction.conditions.forbids),
         )
         row_heights: list[int] = []
         for row, (state, key_id) in enumerate(rows):
             self.condition_table.insertRow(row)
             key_combo = self._key_combo(document, key_id)
             state_combo = QComboBox()
-            state_combo.addItem("Present", "requires")
-            state_combo.addItem("Absent", "forbids")
-            state_combo.setCurrentIndex(0 if state == "Present" else 1)
+            state_combo.addItem("Has", "requires")
+            state_combo.addItem("Lacks", "forbids")
+            state_combo.setCurrentIndex(0 if state == "Has" else 1)
             remove_button = _compact_text_button(
                 "−",
                 object_name=f"removeConditionButton{row}",
                 accessible_name="Remove condition",
                 tooltip="Remove condition",
+                prominent=False,
             )
             control_extent = max(
                 key_combo.sizeHint().height(),
@@ -1734,10 +1746,14 @@ class Inspector(QWidget):
             row_height = control_extent + 4
             self.condition_table.setRowHeight(row, row_height)
             row_heights.append(row_height)
-            self.condition_table.setCellWidget(row, 0, key_combo)
-            self.condition_table.setCellWidget(row, 1, state_combo)
-            self.condition_table.setCellWidget(row, 2, remove_button)
-            role = "requires" if state == "Present" else "forbids"
+            self.condition_table.setCellWidget(row, 0, state_combo)
+            self.condition_table.setCellWidget(row, 1, key_combo)
+            self.condition_table.setCellWidget(
+                row,
+                2,
+                _centered_cell_widget(remove_button),
+            )
+            role = "requires" if state == "Has" else "forbids"
             key_combo.currentIndexChanged.connect(
                 lambda _index, old_key_id=key_id, old_role=role, combo=key_combo: (
                     self._change_condition(
@@ -1783,22 +1799,23 @@ class Inspector(QWidget):
             )
             return
         rows = (
-            *(("Remove", key_id) for key_id in interaction.key_changes.remove),
-            *(("Grant", key_id) for key_id in interaction.key_changes.grant),
+            *(("Lose", key_id) for key_id in interaction.key_changes.remove),
+            *(("Gain", key_id) for key_id in interaction.key_changes.grant),
         )
         row_heights: list[int] = []
         for row, (change, key_id) in enumerate(rows):
             self.key_change_table.insertRow(row)
             change_combo = QComboBox()
-            change_combo.addItem("Remove", "remove")
-            change_combo.addItem("Grant", "grant")
-            change_combo.setCurrentIndex(0 if change == "Remove" else 1)
+            change_combo.addItem("Lose", "remove")
+            change_combo.addItem("Gain", "grant")
+            change_combo.setCurrentIndex(0 if change == "Lose" else 1)
             key_combo = self._key_combo(document, key_id)
             remove_button = _compact_text_button(
                 "−",
                 object_name=f"removeKeyChangeButton{row}",
                 accessible_name="Remove key change",
                 tooltip="Remove key change",
+                prominent=False,
             )
             control_extent = max(
                 change_combo.sizeHint().height(),
@@ -1810,8 +1827,12 @@ class Inspector(QWidget):
             row_heights.append(row_height)
             self.key_change_table.setCellWidget(row, 0, change_combo)
             self.key_change_table.setCellWidget(row, 1, key_combo)
-            self.key_change_table.setCellWidget(row, 2, remove_button)
-            role = "remove" if change == "Remove" else "grant"
+            self.key_change_table.setCellWidget(
+                row,
+                2,
+                _centered_cell_widget(remove_button),
+            )
+            role = "remove" if change == "Lose" else "grant"
             change_combo.currentIndexChanged.connect(
                 lambda _index, old_key_id=key_id, old_role=role, combo=change_combo: (
                     self._change_key_change(
@@ -1854,8 +1875,11 @@ class Inspector(QWidget):
         placeholder.setVisible(not has_rows)
         if not has_rows:
             return
-        control_extent = max(row_heights) - 4
-        table.setColumnWidth(2, control_extent + 4)
+        remove_width = max(
+            table.cellWidget(row, 2).findChild(QToolButton).width()
+            for row in range(table.rowCount())
+        )
+        table.setColumnWidth(2, remove_width + 4)
         visible_rows = min(len(row_heights), 3)
         content_height = (
             table.horizontalHeader().sizeHint().height() + sum(row_heights[:visible_rows]) + 2
@@ -1884,21 +1908,21 @@ class Inspector(QWidget):
             return ""
         condition_parts = [
             *(
-                f"{document.key_by_id(key_id).name} is present"
+                f"has {document.key_by_id(key_id).name}"
                 for key_id in interaction.conditions.requires
             ),
             *(
-                f"{document.key_by_id(key_id).name} is absent"
+                f"lacks {document.key_by_id(key_id).name}"
                 for key_id in interaction.conditions.forbids
             ),
         ]
         action_parts: list[str] = []
         action_parts.extend(
-            f"remove {document.key_by_id(key_id).name}"
+            f"lose {document.key_by_id(key_id).name}"
             for key_id in interaction.key_changes.remove
         )
         action_parts.extend(
-            f"grant {document.key_by_id(key_id).name}"
+            f"gain {document.key_by_id(key_id).name}"
             for key_id in interaction.key_changes.grant
         )
         if interaction.action is not None:
@@ -1915,7 +1939,7 @@ class Inspector(QWidget):
             )
             action_parts.append(f"go to {destination}")
         condition_text = (
-            f"When {' and '.join(condition_parts)}"
+            f"When the runner {' and '.join(condition_parts)}"
             if condition_parts
             else "Always"
         )

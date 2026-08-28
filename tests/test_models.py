@@ -317,7 +317,7 @@ def test_hotspot_labels_are_derived_from_actions() -> None:
     interactions = stack.cards[0].active_revision.hotspot_set
     assert interactions is not None
     assert [item.label for item in interactions.interactions] == [
-        "Remove Red key · Grant Door open → Castle Gate",
+        "Lose Red key · Gain Door open → Castle Gate",
         "Former room",
         "New Hotspot",
     ]
@@ -344,9 +344,9 @@ def test_hotspot_key_contract_is_closed_and_references_stack_keys() -> None:
 
     assert stack.keys[0].name == "Red key"
     assert stack.key_by_id(red_key.id) == red_key
-    with pytest.raises(ValidationError, match="both required and forbidden"):
+    with pytest.raises(ValidationError, match="both have and lack"):
         HotspotConditions(requires=(red_key.id,), forbids=(red_key.id,))
-    with pytest.raises(ValidationError, match="both removed and granted"):
+    with pytest.raises(ValidationError, match="both gained and lost"):
         HotspotKeyChanges(remove=(red_key.id,), grant=(red_key.id,))
     with pytest.raises(ValidationError, match="hotspot key references"):
         Stack(
