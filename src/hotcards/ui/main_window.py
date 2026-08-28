@@ -490,6 +490,19 @@ class MainWindow(QMainWindow):
             self.generation_progress_bar,
             1,
         )
+        self.generation_progress_layout.addSpacing(8)
+        self.cancel_generation_button = QPushButton("Cancel")
+        self.cancel_generation_button.setObjectName("cancelGenerationButton")
+        self.cancel_generation_button.setAccessibleName("Cancel generation")
+        self.cancel_generation_button.setToolTip(
+            "Cancel Image Prompt preparation or image generation"
+        )
+        self.cancel_generation_button.clicked.connect(
+            self._cancel_generation_activity
+        )
+        self.generation_progress_layout.addWidget(
+            self.cancel_generation_button
+        )
         self.generation_progress_container.hide()
         self.statusBar().addWidget(self.generation_progress_container, 1)
         self.statusBar().addPermanentWidget(self.llm_model_label)
@@ -1085,6 +1098,22 @@ class MainWindow(QMainWindow):
         if self.background_workflow is not None and self.background_workflow.busy:
             self.background_workflow.cancel()
 
+    def _cancel_generation_activity(self) -> None:
+        background_busy = (
+            self.background_workflow.busy
+            if self.background_workflow is not None
+            else False
+        )
+        image_prompt_busy = self.image_prompt_workflow.busy
+        if background_busy:
+            self._cancel_background_generation()
+        if image_prompt_busy:
+            self.image_prompt_workflow.cancel()
+            self._show_info(
+                "image-prompt-cancelled",
+                "Image Prompt preparation cancelled",
+            )
+
     def _document_replaced(self, _document: object) -> None:
         self._cancel_background_generation()
         self.image_prompt_workflow.cancel()
@@ -1194,6 +1223,7 @@ class MainWindow(QMainWindow):
         self.notification_bar.clear_notification("background-error")
         self.notification_bar.clear_notification("background-warning")
         self.notification_bar.clear_notification("background-cancelled")
+        self.notification_bar.clear_notification("image-prompt-cancelled")
         if not self._commit_authoring_metadata():
             return
         try:
@@ -1212,6 +1242,7 @@ class MainWindow(QMainWindow):
         if card_id is None or not self._commit_authoring_metadata():
             return
         self.notification_bar.clear_notification("image-prompt-error")
+        self.notification_bar.clear_notification("image-prompt-cancelled")
         try:
             self.image_prompt_workflow.start(card_id)
         except ImagePromptWorkflowError as error:

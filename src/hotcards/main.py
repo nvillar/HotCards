@@ -20,6 +20,7 @@ from hotcards.generation.ollama_client import (
     OllamaRuntime,
     OllamaSettings,
 )
+from hotcards.ui.branding import application_icon
 from hotcards.ui.main_window import AvailabilityChecksFactory, MainWindow
 from hotcards.ui.project_paths import default_project_directory
 from hotcards.ui.settings_dialog import SettingsStore, load_machine_settings
@@ -123,8 +124,7 @@ def build_main_window(
 def main() -> int:
     """Run the HotCards application."""
     application = QApplication.instance() or QApplication(sys.argv)
-    application.setOrganizationName("HotCards")
-    application.setApplicationName("HotCards")
+    configure_application(application)
     settings = QSettings()
     project_directory = default_project_directory()
     controller = DocumentController(Stack(name="Welcome"))
@@ -158,6 +158,13 @@ def main() -> int:
     )
     window.show()
     return application.exec()
+
+
+def configure_application(application: QApplication) -> None:
+    """Apply the persistent HotCards identity before constructing windows."""
+    application.setOrganizationName("HotCards")
+    application.setApplicationName("HotCards")
+    application.setWindowIcon(application_icon())
 
 
 def _apply_welcome_selection(

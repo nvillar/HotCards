@@ -15,7 +15,8 @@ authoring shell remains usable when either service is unavailable.
 
 Stacks are stored as self-contained `.hotcards` directory bundles and
 autosaved atomically after creation or opening. At startup, HotCards lists
-projects in `~/Documents/HotCards` and offers direct Open and Create actions.
+stacks in `~/Documents/HotCards` and offers Open, Create, and confirmed
+permanent Delete actions.
 Only the current schema is accepted; older and future schemas are rejected.
 
 Each card owns one or more numbered revisions. A revision contains its authored

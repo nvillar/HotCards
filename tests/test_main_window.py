@@ -359,6 +359,20 @@ def test_hotspot_rule_editor_scrolls_without_growing_the_window(
     margins = window.generation_progress_layout.contentsMargins()
     assert margins.left() == 8
     assert margins.right() == 8
+    assert window.generation_progress_layout.indexOf(
+        window.generation_progress_bar
+    ) < window.generation_progress_layout.indexOf(
+        window.cancel_generation_button
+    )
+    cancel_spacing = window.generation_progress_layout.itemAt(
+        window.generation_progress_layout.indexOf(
+            window.cancel_generation_button
+        )
+        - 1
+    ).spacerItem()
+    assert cancel_spacing is not None
+    assert cancel_spacing.sizeHint().width() == 8
+    assert window.cancel_generation_button.text() == "Cancel"
     central_layout = window.centralWidget().layout()
     assert central_layout is not None
     assert central_layout.indexOf(window.pane_splitter) < (
@@ -1525,6 +1539,43 @@ def test_generation_progress_bar_is_indeterminate_for_text_and_uses_image_steps(
     window.image_prompt_workflow.progress_changed.emit("Image Prompt prepared")
     assert progress_container.isHidden()
     assert window.generation_step_label.text() == ""
+
+
+def test_generation_cancel_button_cancels_the_active_process(
+    application: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window, _controller, _workers, background = _window()
+    prompt_cancellations: list[bool] = []
+    monkeypatch.setattr(
+        window.image_prompt_workflow,
+        "cancel",
+        lambda: prompt_cancellations.append(True),
+    )
+
+    window.image_prompt_workflow._busy = True
+    window.image_prompt_workflow.progress_changed.emit(
+        "Preparing Image Prompt..."
+    )
+    assert not window.cancel_generation_button.isHidden()
+
+    window.cancel_generation_button.click()
+
+    assert prompt_cancellations == [True]
+    assert background.cancel_calls == 0
+    assert (
+        window.notification_bar.message_label.text()
+        == "Image Prompt preparation cancelled"
+    )
+
+    window.image_prompt_workflow._busy = False
+    background.busy = True
+    background.progress_changed.emit("Generating image...")
+    window.cancel_generation_button.click()
+
+    assert prompt_cancellations == [True]
+    assert background.cancel_calls == 1
+    assert not background.busy
 
 
 def test_background_success_clears_previous_cancellation_notice(
