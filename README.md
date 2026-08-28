@@ -55,8 +55,11 @@ Reference-backed Image Prompts explicitly state which entity, setting, or
 treatment comes from `image 1` and how it changes. Definite continuity can
 retain stable visible identity, construction, and rendering treatment; an
 explicit target subject, state, style, palette, setting, viewpoint, or
-composition overrides the corresponding reference trait. A vague change may
-produce a plausible concrete proposal that the author can edit.
+composition overrides the corresponding reference trait. Preparation keeps
+the instruction concise, names only the stable properties needed for the
+requested continuity, and does not preserve or inventory Reference details
+that the Description changes or does not need. A vague change may produce a
+plausible concrete proposal that the author can edit.
 
 An Image Prompt is Current only while its source Description, exact Reference
 card/revision/background snapshot, selected Ollama model, and preparation

@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 from hypergen.generation.errors import ModelResponseError, ModelUnavailableError
 from hypergen.generation.image_prompt_preparation import (
+    IMAGE_PROMPT_PREPARATION_VERSION,
     ImagePromptPreparationRequest,
     OllamaImagePromptPreparer,
     build_image_prompt_preparation_prompt,
@@ -92,6 +93,11 @@ def test_prompt_defines_one_reviewable_result_without_clarification() -> None:
     assert '"reference picture"' in prompt
     assert "inside the vehicle shown in image 1" in prompt
     assert "direct FLUX.2 editing instruction for image 1" in prompt
+    assert "Include only the desired result, its relationship to image 1" in prompt
+    assert "state only the important stable identity" in prompt
+    assert "Never preserve a property that the authored Description changes" in prompt
+    assert "append blanket preservation" in prompt
+    assert "Aim for at most 100" in prompt
     assert "same visual style" in prompt
     assert "reference_generation_description" in prompt
     assert "primary semantic interpretation" in prompt
@@ -110,6 +116,7 @@ def test_prompt_defines_one_reviewable_result_without_clarification() -> None:
     assert prompt.index(
         "Black-and-white dithered graphics reminiscent of early Mac and HyperCard."
     ) < prompt.index("The screen of the computer has changed.")
+    assert IMAGE_PROMPT_PREPARATION_VERSION == "image-prompt-preparation-v9"
 
 
 def test_text_only_prompt_does_not_claim_an_attached_reference() -> None:
@@ -120,6 +127,7 @@ def test_text_only_prompt_does_not_claim_an_attached_reference() -> None:
     assert "NO REFERENCE" in prompt
     assert "Inspect the attached Reference image directly" not in prompt
     assert "direct FLUX.2 editing instruction for image 1" not in prompt
+    assert "append blanket preservation" not in prompt
     assert "positive, standalone description" in prompt
 
 
@@ -184,6 +192,12 @@ def test_preparer_repairs_missing_image_one_attribution(
     assert result.repair_applied
     assert client.call_count == 2
     assert "must identify the attached Reference as 'image 1'" in str(
+        client.messages[-1]["content"]
+    )
+    assert "name only the important stable properties" in str(
+        client.messages[-1]["content"]
+    )
+    assert "never preserve a property that the authored Description changes" in str(
         client.messages[-1]["content"]
     )
 

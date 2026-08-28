@@ -21,7 +21,7 @@ from hypergen.generation.ollama_client import (
 )
 from hypergen.generation.structured_output import structured_json_content
 
-IMAGE_PROMPT_PREPARATION_VERSION = "image-prompt-preparation-v8"
+IMAGE_PROMPT_PREPARATION_VERSION = "image-prompt-preparation-v9"
 
 
 class ImagePromptPreparationRequest(DomainModel):
@@ -168,6 +168,16 @@ NO REFERENCE
   entity, setting, or treatment comes from image 1 and how the target changes it.
 - Preserve authored continuity explicitly. For example, "inside the vehicle in the Reference"
   becomes "inside the vehicle shown in image 1", never merely "inside a vehicle".
+- Keep the instruction concise. Include only the desired result, its relationship to image 1,
+  and details needed for the requested change or continuity.
+- After the critical change, state only the important stable identity, construction,
+  proportions, materials, distinguishing components, or visual-treatment properties to
+  preserve from image 1.
+- Never preserve a property that the authored Description changes. In particular, do not
+  preserve old pose, action, object state, viewpoint, crop, framing, composition, setting,
+  weather, time, or lighting when the target overrides it.
+- Do not inventory unrelated visible details from image 1 or append blanket preservation
+  boilerplate unless the authored Description explicitly requests broad preservation.
 - Use concrete edit verbs and positive target details. Use remove, replace, or preservation
   language only to disambiguate a specific edit to image 1, not as a negative-prompt list.
 """
@@ -189,7 +199,8 @@ OUTPUT
   visual_treatment, target_overrides, image_prompt.
 - The first four fields are private deliberation. Each must be one scalar string or null.
 - image_prompt must be one non-empty natural-language paragraph with no headings or lists.
-- Use 30 to 100 words by default. Expand only when needed to preserve explicit detail.
+- Use the shortest wording that completely preserves authored intent. Aim for at most 100
+  words by default; expand only when needed to preserve explicit detail.
 
 AUTHORITY
 - Preserve every explicit authored subject, action, pose, object state, time, weather,
@@ -624,7 +635,10 @@ def build_image_prompt_repair_prompt(
 The repaired Image Prompt is a direct editing instruction that must call the attached
 Reference exactly "image 1" and explicitly preserve every authored relationship to it.
 Concrete remove, replace, same, and preservation language is allowed when it disambiguates
-the requested edit to image 1. Do not use "Reference", "reference image", "source image", or
+the requested edit to image 1. Keep it concise, name only the important stable properties
+that must carry over, and never preserve a property that the authored Description changes.
+Do not inventory unrelated Reference details or add blanket preservation boilerplate unless
+the Description requests it. Do not use "Reference", "reference image", "source image", or
 another alias in the repaired result."""
         if reference_backed_output
         else """\

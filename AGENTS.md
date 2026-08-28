@@ -119,7 +119,12 @@ for live Ollama and MFLUX runs.
   or required wording. For Reference-backed preparation, translate user-facing
   aliases such as Reference card, image, or picture into the canonical `image 1`
   label, preserve explicit entity relationships, and produce a direct editing
-  instruction rather than a standalone caption. Allow a plausible concrete
+  instruction rather than a standalone caption. Keep that instruction concise:
+  name only stable identity, construction, material, distinguishing-component,
+  or visual-treatment properties needed for continuity; do not preserve
+  target-overridden pose, action, state, viewpoint, crop, framing, composition,
+  setting, weather, time, or lighting, and do not inventory unrelated Reference
+  details or add unrequested blanket preservation. Allow a plausible concrete
   proposal for ambiguity rather than adding clarification state. Store only the
   final Image Prompt through one undoable command; private deliberation must not
   enter the stack. Track source Description, exact Reference provenance, Ollama
