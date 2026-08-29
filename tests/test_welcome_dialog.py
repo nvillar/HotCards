@@ -77,11 +77,11 @@ def test_welcome_empty_state_creates_default_directory(
     dialog = WelcomeDialog(projects)
 
     assert dialog.banner.objectName() == "welcomeBanner"
-    assert dialog.banner.accessibleName() == "Donkey eating figs"
+    assert dialog.banner.accessibleName() == "Spaceship"
     banner = dialog.banner.pixmap()
     assert not banner.isNull()
-    assert banner.width() == 128
-    assert banner.height() == 128
+    assert banner.deviceIndependentSize().width() == 128
+    assert banner.deviceIndependentSize().height() == 128
     assert banner.toImage().pixelColor(0, 0).alpha() == 0
     assert not dialog.windowIcon().isNull()
     dialog.show()

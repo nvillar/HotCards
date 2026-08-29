@@ -1,12 +1,13 @@
 """Packaged visual identity shared by HotCards windows."""
 
+from math import isfinite
 from pathlib import Path
 
 from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QIcon, QPainter, QPainterPath, QPixmap
 
 APPLICATION_ARTWORK_PATH = (
-    Path(__file__).resolve().parent.parent / "assets" / "donkeyfigs.png"
+    Path(__file__).resolve().parent.parent / "assets" / "spaceship.png"
 )
 APPLICATION_ICON_SIZES = (16, 32, 64, 128, 256, 512, 1024)
 
@@ -34,12 +35,17 @@ def application_icon_pixmap(
     size: int,
     *,
     artwork: QPixmap | None = None,
+    device_pixel_ratio: float = 1.0,
 ) -> QPixmap:
     """Render one padded, rounded icon tile at the requested square size."""
     if size <= 0:
         raise ValueError("application icon size must be positive")
+    if not isfinite(device_pixel_ratio) or device_pixel_ratio <= 0:
+        raise ValueError("device pixel ratio must be positive and finite")
     source = artwork if artwork is not None else application_artwork()
-    icon = QPixmap(size, size)
+    physical_size = round(size * device_pixel_ratio)
+    icon = QPixmap(physical_size, physical_size)
+    icon.setDevicePixelRatio(device_pixel_ratio)
     icon.fill(Qt.GlobalColor.transparent)
     inset = size * 0.06
     bounds = QRectF(inset, inset, size - (2 * inset), size - (2 * inset))

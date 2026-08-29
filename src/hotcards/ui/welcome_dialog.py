@@ -47,15 +47,21 @@ class WelcomeDialog(QDialog):
         self.project_directory = project_directory
         self.selection: WelcomeSelection | None = None
         self.setWindowTitle("HotCards")
-        self.setWindowIcon(application_icon())
+        icon = application_icon()
+        self.setWindowIcon(icon)
         self.setMinimumSize(560, 500)
 
         self.banner = QLabel()
         self.banner.setObjectName("welcomeBanner")
-        self.banner.setAccessibleName("Donkey eating figs")
+        self.banner.setAccessibleName("Spaceship")
         self.banner.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.banner.setFixedSize(128, 128)
-        self.banner.setPixmap(application_icon_pixmap(128))
+        self.banner.setPixmap(
+            application_icon_pixmap(
+                128,
+                device_pixel_ratio=self.devicePixelRatioF(),
+            )
+        )
 
         self.title = QLabel("HotCards")
         self.title.setObjectName("welcomeTitle")
