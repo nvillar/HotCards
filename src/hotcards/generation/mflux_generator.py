@@ -22,14 +22,17 @@ from pydantic import Field, FiniteFloat, model_validator
 from hotcards.domain.image_dimensions import (
     AspectRatio,
     ResolutionTier,
+    validate_exact_output_dimensions,
 )
 from hotcards.domain.models import (
     AcceptedEdit,
+    CurrentSourceSize,
     DirectGenerateProvenance,
     DomainModel,
     EditOutputSize,
     EditPreserveOptions,
     EditProvenance,
+    ExactOutputSize,
     GenerateInputs,
     GenerateOutputSize,
     ImageOperationSettings,
@@ -234,6 +237,12 @@ class _MfluxRequest(DomainModel):
         self,
         output_size: GenerateOutputSize | RefineOutputSize | EditOutputSize,
     ) -> None:
+        if isinstance(output_size, (CurrentSourceSize, ExactOutputSize)):
+            validate_exact_output_dimensions(
+                output_size.width,
+                output_size.height,
+                self.aspect_ratio,
+            )
         expected_dimensions = selected_output_dimensions(
             output_size,
             self.aspect_ratio,
@@ -311,11 +320,7 @@ class MfluxEditRequest(_MfluxRequest):
 
     @model_validator(mode="after")
     def require_edit_contract(self) -> MfluxEditRequest:
-        if (self.width, self.height) != selected_output_dimensions(
-            self.output_size,
-            self.aspect_ratio,
-        ):
-            raise ValueError("Edit dimensions must match the selected output size")
+        self.require_dimensions(self.output_size)
         if self.edit_lineage[-1] != self.accepted_edit:
             raise ValueError("Edit request lineage must end with the accepted current Edit")
         return self

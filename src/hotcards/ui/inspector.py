@@ -7,7 +7,7 @@ from uuid import UUID
 
 from pydantic import ValidationError
 from PySide6.QtCore import QSignalBlocker, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QFocusEvent
+from PySide6.QtGui import QFocusEvent, QStandardItemModel
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -58,6 +58,7 @@ from hotcards.domain.image_dimensions import (
     ResolutionTier,
     higher_output_tiers,
     output_dimensions,
+    validate_exact_output_dimensions,
 )
 from hotcards.domain.models import (
     Card,
@@ -72,7 +73,6 @@ from hotcards.domain.models import (
     HotspotKeyChanges,
     Interaction,
     PresetOutputSize,
-    RefineOutputSize,
     RefineTransformation,
     ResolvedCardReference,
     Stack,
@@ -224,6 +224,47 @@ def _sort_size_rows(
             row[0],
         ),
     )
+
+
+def _exact_size_error(
+    source_size: tuple[int, int] | None,
+    aspect_ratio: AspectRatio,
+) -> str | None:
+    if source_size is None:
+        return None
+    try:
+        validate_exact_output_dimensions(
+            source_size[0],
+            source_size[1],
+            aspect_ratio,
+        )
+    except ValueError as error:
+        return str(error)
+    return None
+
+
+def _disable_combo_item(
+    combo: QComboBox,
+    index: int,
+    tooltip: str,
+) -> None:
+    model = combo.model()
+    if isinstance(model, QStandardItemModel):
+        item = model.item(index)
+        if item is not None:
+            item.setEnabled(False)
+            item.setToolTip(tooltip)
+
+
+def _first_selectable_combo_index(combo: QComboBox) -> int:
+    model = combo.model()
+    if not isinstance(model, QStandardItemModel):
+        return 0 if combo.count() else -1
+    for index in range(combo.count()):
+        item = model.item(index)
+        if item is not None and item.isEnabled():
+            return index
+    return -1
 
 
 class Inspector(QWidget):
@@ -679,15 +720,11 @@ class Inspector(QWidget):
         self.refine_transformation_combo.currentIndexChanged.connect(
             lambda _index: self._render_inputs_changed()
         )
-        self.refine_resolution_combo.currentIndexChanged.connect(
-            lambda _index: self._render_inputs_changed()
-        )
+        self.refine_resolution_combo.currentIndexChanged.connect(self._refine_output_changed)
         self.edit_instruction_edit.textChanged.connect(self._edit_inputs_changed)
         for checkbox in self.edit_preserve_checkboxes.values():
             checkbox.toggled.connect(lambda _checked: self._edit_inputs_changed())
-        self.edit_resolution_combo.currentIndexChanged.connect(
-            lambda _index: self._edit_inputs_changed()
-        )
+        self.edit_resolution_combo.currentIndexChanged.connect(self._edit_output_changed)
         self.edit_background_button.clicked.connect(self._request_edit_background)
         self.style_combo.currentIndexChanged.connect(self._revision_style_changed)
         self.reference_combo.currentIndexChanged.connect(
@@ -717,6 +754,26 @@ class Inspector(QWidget):
         self._set_error(self.edit_output_error, "")
         self._render_edit_tooltip()
         self.render_inputs_changed.emit()
+
+    def _refine_output_changed(self, _index: int) -> None:
+        if self._rendering:
+            return
+        if self.refine_resolution_combo.currentData() is None:
+            fallback = _first_selectable_combo_index(self.refine_resolution_combo)
+            if fallback >= 0:
+                with QSignalBlocker(self.refine_resolution_combo):
+                    self.refine_resolution_combo.setCurrentIndex(fallback)
+        self._render_inputs_changed()
+
+    def _edit_output_changed(self, _index: int) -> None:
+        if self._rendering:
+            return
+        if self.edit_resolution_combo.currentData() is None:
+            fallback = _first_selectable_combo_index(self.edit_resolution_combo)
+            if fallback >= 0:
+                with QSignalBlocker(self.edit_resolution_combo):
+                    self.edit_resolution_combo.setCurrentIndex(fallback)
+        self._edit_inputs_changed()
 
     def _description_editing_finished(
         self,
@@ -1092,7 +1149,8 @@ class Inspector(QWidget):
         source_size: tuple[int, int] | None,
     ) -> None:
         current_tier = _current_tier(source_size, document.aspect_ratio)
-        rows: list[tuple[str, GenerateOutputSize, tuple[int, int]]] = []
+        current_error = _exact_size_error(source_size, document.aspect_ratio)
+        rows: list[tuple[str, object, tuple[int, int]]] = []
         for tier in ResolutionTier:
             dimensions = output_dimensions(tier, document.aspect_ratio)
             output_size: GenerateOutputSize = PresetOutputSize(tier=tier)
@@ -1124,7 +1182,7 @@ class Inspector(QWidget):
                     revision.generate_output_size.height,
                 )
             ] = (revision.generate_output_size, False)
-        if source_size is not None and current_tier is None:
+        if source_size is not None and current_tier is None and current_error is None:
             current_size = ExactOutputSize(
                 width=source_size[0],
                 height=source_size[1],
@@ -1142,16 +1200,38 @@ class Inspector(QWidget):
                     dimensions,
                 )
             )
+        if source_size is not None and current_tier is None and current_error is not None:
+            rows.append(
+                (
+                    f"Current size — {source_size[0]} × {source_size[1]} (Unavailable)",
+                    None,
+                    source_size,
+                )
+            )
         with QSignalBlocker(self.resolution_combo):
             self.resolution_combo.clear()
             for label, output_size, _dimensions in _sort_size_rows(rows):
                 self.resolution_combo.addItem(label, output_size)
-            self.resolution_combo.setCurrentIndex(
-                self._combo_index_for_data(
-                    self.resolution_combo,
-                    revision.generate_output_size,
-                )
+                if output_size is None:
+                    _disable_combo_item(
+                        self.resolution_combo,
+                        self.resolution_combo.count() - 1,
+                        f"Unavailable: {current_error}. Choose a named tier.",
+                    )
+            selected_index = self._combo_index_for_data(
+                self.resolution_combo,
+                revision.generate_output_size,
             )
+            self.resolution_combo.setCurrentIndex(
+                selected_index
+                if selected_index >= 0
+                else _first_selectable_combo_index(self.resolution_combo)
+            )
+        self.resolution_combo.setToolTip(
+            f"Current size unavailable: {current_error}. Choose a named tier."
+            if current_error is not None
+            else "Generate output tier or exact current-image size"
+        )
 
     def _revision_resolution_changed(self, index: int) -> None:
         if self._rendering or index < 0:
@@ -1185,6 +1265,7 @@ class Inspector(QWidget):
         previous_selection = self.refine_resolution_combo.currentData()
         self._refine_source_size = source_size
         error = ""
+        current_error = _exact_size_error(source_size, document.aspect_ratio)
         if revision.background is None:
             error = "Generate an image before refining."
         elif source_size is None:
@@ -1194,47 +1275,49 @@ class Inspector(QWidget):
             current_output_size = None
             current_tier = _current_tier(source_size, document.aspect_ratio)
             if source_size is not None:
-                current_output_size = CurrentSourceSize(
-                    width=source_size[0],
-                    height=source_size[1],
-                )
-                for tier in ResolutionTier:
-                    data: RefineOutputSize = PresetOutputSize(tier=tier)
-                    if tier == current_tier:
-                        data = current_output_size
-                    self.refine_resolution_combo.addItem(
-                        _tier_label(
-                            tier,
-                            document.aspect_ratio,
-                            current=tier == current_tier,
-                        ),
-                        data,
+                if current_error is None:
+                    current_output_size = CurrentSourceSize(
+                        width=source_size[0],
+                        height=source_size[1],
                     )
-                if current_tier is None:
-                    rows = [
-                        (
-                            self.refine_resolution_combo.itemText(index),
-                            self.refine_resolution_combo.itemData(index),
-                            selected_output_dimensions(
-                                self.refine_resolution_combo.itemData(index),
-                                document.aspect_ratio,
-                            ),
-                        )
-                        for index in range(self.refine_resolution_combo.count())
-                    ]
+                rows: list[tuple[str, object, tuple[int, int]]] = []
+                for tier in ResolutionTier:
+                    data: object = PresetOutputSize(tier=tier)
+                    if tier == current_tier and current_output_size is not None:
+                        data = current_output_size
                     rows.append(
                         (
-                            f"Current size — {source_size[0]} × {source_size[1]}",
+                            _tier_label(
+                                tier,
+                                document.aspect_ratio,
+                                current=tier == current_tier,
+                            ),
+                            data,
+                            output_dimensions(tier, document.aspect_ratio),
+                        ),
+                    )
+                if current_tier is None:
+                    rows.append(
+                        (
+                            (
+                                f"Current size — {source_size[0]} × "
+                                f"{source_size[1]}"
+                                + (" (Unavailable)" if current_output_size is None else "")
+                            ),
                             current_output_size,
                             source_size,
                         )
                     )
-                    self.refine_resolution_combo.clear()
-                    for label, data, _dimensions in _sort_size_rows(rows):
-                        self.refine_resolution_combo.addItem(label, data)
-            selection = (
-                current_output_size
-                if not isinstance(
+                for label, data, _dimensions in _sort_size_rows(rows):
+                    self.refine_resolution_combo.addItem(label, data)
+                    if data is None:
+                        _disable_combo_item(
+                            self.refine_resolution_combo,
+                            self.refine_resolution_combo.count() - 1,
+                            f"Unavailable: {current_error}. Choose a named tier.",
+                        )
+            use_current = current_output_size is not None and (
+                not isinstance(
                     previous_selection,
                     (PresetOutputSize, CurrentSourceSize),
                 )
@@ -1243,16 +1326,35 @@ class Inspector(QWidget):
                     isinstance(previous_selection, PresetOutputSize)
                     and previous_selection.tier == current_tier
                 )
-                else previous_selection
             )
-            selected_index = self._combo_index_for_data(
-                self.refine_resolution_combo,
-                selection,
+            selection = (
+                current_output_size
+                if use_current
+                else (
+                    previous_selection if isinstance(previous_selection, PresetOutputSize) else None
+                )
+            )
+            selected_index = (
+                self._combo_index_for_data(
+                    self.refine_resolution_combo,
+                    selection,
+                )
+                if selection is not None
+                else -1
             )
             self.refine_resolution_combo.setCurrentIndex(
-                selected_index if selected_index >= 0 else 0
+                selected_index
+                if selected_index >= 0
+                else _first_selectable_combo_index(self.refine_resolution_combo)
             )
-        self.refine_resolution_combo.setEnabled(source_size is not None)
+        self.refine_resolution_combo.setEnabled(
+            _first_selectable_combo_index(self.refine_resolution_combo) >= 0
+        )
+        self.refine_resolution_combo.setToolTip(
+            f"Current size unavailable: {current_error}. Choose a named tier."
+            if current_error is not None
+            else ""
+        )
         self._set_error(self.refine_error, error)
         output_size = self.refine_resolution_combo.currentData()
         try:
@@ -1320,6 +1422,7 @@ class Inspector(QWidget):
         previous_selection = self.edit_resolution_combo.currentData()
         self._edit_source_size = source_size
         error = ""
+        current_error = _exact_size_error(source_size, document.aspect_ratio)
         if revision.background is None:
             error = "Generate an image before editing."
         elif source_size is None:
@@ -1327,9 +1430,13 @@ class Inspector(QWidget):
         with QSignalBlocker(self.edit_resolution_combo):
             self.edit_resolution_combo.clear()
             if source_size is not None:
-                current_output_size = CurrentSourceSize(
-                    width=source_size[0],
-                    height=source_size[1],
+                current_output_size = (
+                    CurrentSourceSize(
+                        width=source_size[0],
+                        height=source_size[1],
+                    )
+                    if current_error is None
+                    else None
                 )
                 current_tier = _current_tier(
                     source_size,
@@ -1337,9 +1444,19 @@ class Inspector(QWidget):
                 )
                 if current_tier is None:
                     self.edit_resolution_combo.addItem(
-                        f"Current size — {source_size[0]} × {source_size[1]}",
+                        (
+                            f"Current size — {source_size[0]} × "
+                            f"{source_size[1]}"
+                            + (" (Unavailable)" if current_output_size is None else "")
+                        ),
                         current_output_size,
                     )
+                    if current_output_size is None:
+                        _disable_combo_item(
+                            self.edit_resolution_combo,
+                            self.edit_resolution_combo.count() - 1,
+                            f"Unavailable: {current_error}. Choose a higher named tier.",
+                        )
                 else:
                     self.edit_resolution_combo.addItem(
                         _tier_label(
@@ -1358,23 +1475,48 @@ class Inspector(QWidget):
                         _tier_label(tier, document.aspect_ratio),
                         PresetOutputSize(tier=tier),
                     )
-                selection = (
-                    current_output_size
-                    if not isinstance(
+                use_current = current_output_size is not None and (
+                    not isinstance(
                         previous_selection,
                         (PresetOutputSize, CurrentSourceSize),
                     )
                     or isinstance(previous_selection, CurrentSourceSize)
-                    else previous_selection
                 )
-                selected_index = self._combo_index_for_data(
-                    self.edit_resolution_combo,
-                    selection,
+                selection = (
+                    current_output_size
+                    if use_current
+                    else (
+                        previous_selection
+                        if isinstance(previous_selection, PresetOutputSize)
+                        else None
+                    )
                 )
+                selected_index = (
+                    self._combo_index_for_data(
+                        self.edit_resolution_combo,
+                        selection,
+                    )
+                    if selection is not None
+                    else -1
+                )
+                fallback_index = _first_selectable_combo_index(self.edit_resolution_combo)
                 self.edit_resolution_combo.setCurrentIndex(
-                    selected_index if selected_index >= 0 else 0
+                    selected_index
+                    if selected_index >= 0
+                    else (
+                        fallback_index
+                        if fallback_index >= 0
+                        else (0 if self.edit_resolution_combo.count() else -1)
+                    )
                 )
-        self.edit_resolution_combo.setEnabled(source_size is not None)
+        self.edit_resolution_combo.setEnabled(
+            _first_selectable_combo_index(self.edit_resolution_combo) >= 0
+        )
+        self.edit_resolution_combo.setToolTip(
+            (f"Current size unavailable: {current_error}. Choose a higher named tier.")
+            if current_error is not None
+            else ""
+        )
         self._set_error(self.edit_output_error, error)
         self._render_edit_tooltip(revision=revision)
 

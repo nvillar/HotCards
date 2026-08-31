@@ -23,6 +23,7 @@ from hotcards.domain.models import (
     AcceptedEdit,
     CurrentSourceSize,
     EditPreserveOptions,
+    ExactOutputSize,
     GenerateInputs,
     ImageReferenceSnapshot,
     ImageSourceSnapshot,
@@ -478,9 +479,9 @@ def test_edit_accepts_exact_current_source_dimensions(
     source_path = write_source(tmp_path / "source.png")
     request = edit_request(tmp_path / "current.png", source_path).model_copy(
         update={
-            "output_size": CurrentSourceSize(width=1008, height=784),
+            "output_size": CurrentSourceSize(width=1008, height=752),
             "width": 1008,
-            "height": 784,
+            "height": 752,
         }
     )
     model = FakeMfluxModel()
@@ -488,11 +489,43 @@ def test_edit_accepts_exact_current_source_dimensions(
     result = MfluxGenerator(edit_model_factory=lambda *_: model).edit(request)
 
     assert model.calls[0]["width"] == 1008
-    assert model.calls[0]["height"] == 784
+    assert model.calls[0]["height"] == 752
     assert result.provenance.output_size == CurrentSourceSize(
         width=1008,
-        height=784,
+        height=752,
     )
+
+
+def test_request_boundary_rejects_aspect_incompatible_exact_sizes(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError, match="4:3 stack aspect ratio"):
+        MfluxGenerateRequest(
+            inputs=GenerateInputs(
+                description="Invalid exact size",
+                output_size=ExactOutputSize(width=640, height=496),
+            ),
+            render_prompt="Invalid exact size",
+            output_path=tmp_path / "invalid-generate.png",
+            seed=1,
+            width=640,
+            height=496,
+        )
+
+    source_path = write_source(tmp_path / "source.png")
+    edit_payload = edit_request(
+        tmp_path / "invalid-edit.png",
+        source_path,
+    ).model_dump(mode="python")
+    edit_payload.update(
+        {
+            "output_size": CurrentSourceSize(width=1008, height=784),
+            "width": 1008,
+            "height": 784,
+        }
+    )
+    with pytest.raises(ValueError, match="4:3 stack aspect ratio"):
+        MfluxEditRequest.model_validate(edit_payload)
 
 
 @pytest.mark.parametrize(

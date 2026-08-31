@@ -8,6 +8,8 @@ from hotcards.domain.image_dimensions import (
     AspectRatio,
     ResolutionTier,
     output_dimensions,
+    validate_aligned_output_dimensions,
+    validate_exact_output_dimensions,
 )
 from hotcards.domain.models import (
     CURRENT_SCHEMA_VERSION,
@@ -104,5 +106,7 @@ __all__ = [
     "output_dimensions",
     "original_image_provenance",
     "selected_output_dimensions",
+    "validate_aligned_output_dimensions",
+    "validate_exact_output_dimensions",
     "require_unique_card_names",
 ]

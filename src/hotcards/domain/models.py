@@ -23,6 +23,8 @@ from hotcards.domain.image_dimensions import (
     AspectRatio,
     ResolutionTier,
     output_dimensions,
+    validate_aligned_output_dimensions,
+    validate_exact_output_dimensions,
 )
 
 CURRENT_SCHEMA_VERSION = 11
@@ -369,7 +371,7 @@ class CurrentSourceSize(DomainModel):
 
     @model_validator(mode="after")
     def require_aligned_dimensions(self) -> CurrentSourceSize:
-        _require_aligned_output_size(self.width, self.height)
+        validate_aligned_output_dimensions(self.width, self.height)
         return self
 
 
@@ -382,7 +384,7 @@ class ExactOutputSize(DomainModel):
 
     @model_validator(mode="after")
     def require_aligned_dimensions(self) -> ExactOutputSize:
-        _require_aligned_output_size(self.width, self.height)
+        validate_aligned_output_dimensions(self.width, self.height)
         return self
 
 
@@ -405,11 +407,6 @@ EditOutputSize = Annotated[
     CurrentSourceSize | PresetOutputSize,
     Field(discriminator="mode"),
 ]
-
-
-def _require_aligned_output_size(width: int, height: int) -> None:
-    if width % 16 != 0 or height % 16 != 0:
-        raise ValueError("exact output dimensions must be aligned to 16 pixels")
 
 
 def selected_output_dimensions(
@@ -793,19 +790,25 @@ class Stack(DomainModel):
                 if revision.style_id is not None and revision.style_id not in known_style_ids:
                     raise ValueError("revision style_id must identify a Style in this stack")
                 if isinstance(revision.generate_output_size, ExactOutputSize):
-                    ratio_width, ratio_height = self.aspect_ratio.components
-                    if (
-                        revision.generate_output_size.width * ratio_height
-                        != revision.generate_output_size.height * ratio_width
-                    ):
-                        raise ValueError(
-                            "exact Generate output size must match the stack aspect ratio"
-                        )
+                    validate_exact_output_dimensions(
+                        revision.generate_output_size.width,
+                        revision.generate_output_size.height,
+                        self.aspect_ratio,
+                    )
                 provenance = revision.provenance
                 original_provenance = (
                     original_image_provenance(provenance) if provenance is not None else None
                 )
                 if isinstance(original_provenance, DirectGenerateProvenance):
+                    if isinstance(
+                        original_provenance.inputs.output_size,
+                        ExactOutputSize,
+                    ):
+                        validate_exact_output_dimensions(
+                            original_provenance.inputs.output_size.width,
+                            original_provenance.inputs.output_size.height,
+                            self.aspect_ratio,
+                        )
                     expected_dimensions = selected_output_dimensions(
                         original_provenance.inputs.output_size,
                         self.aspect_ratio,
@@ -818,6 +821,15 @@ class Stack(DomainModel):
                             "direct Generate dimensions must match its selected output size"
                         )
                 elif isinstance(original_provenance, RefineProvenance):
+                    if isinstance(
+                        original_provenance.output_size,
+                        CurrentSourceSize,
+                    ):
+                        validate_exact_output_dimensions(
+                            original_provenance.output_size.width,
+                            original_provenance.output_size.height,
+                            self.aspect_ratio,
+                        )
                     expected_dimensions = selected_output_dimensions(
                         original_provenance.output_size,
                         self.aspect_ratio,
@@ -831,6 +843,15 @@ class Stack(DomainModel):
                             "its selected output size"
                         )
                 elif isinstance(original_provenance, EditProvenance):
+                    if isinstance(
+                        original_provenance.output_size,
+                        CurrentSourceSize,
+                    ):
+                        validate_exact_output_dimensions(
+                            original_provenance.output_size.width,
+                            original_provenance.output_size.height,
+                            self.aspect_ratio,
+                        )
                     expected_dimensions = selected_output_dimensions(
                         original_provenance.output_size,
                         self.aspect_ratio,
@@ -873,6 +894,22 @@ class Stack(DomainModel):
                             raise ValueError(
                                 "current-size derived output must match its source "
                                 "background dimensions"
+                            )
+                    if isinstance(
+                        provenance,
+                        EditProvenance,
+                    ) and isinstance(
+                        provenance.output_size,
+                        PresetOutputSize,
+                    ):
+                        source_settings = image_operation_settings(source_background.provenance)
+                        if (
+                            provenance.settings.width * provenance.settings.height
+                            <= source_settings.width * source_settings.height
+                        ):
+                            raise ValueError(
+                                "preset Edit output must have more pixels than "
+                                "its source background"
                             )
                     derived_sources[revision.id] = source.revision_id
                 resolved_reference_ids: list[UUID] = []

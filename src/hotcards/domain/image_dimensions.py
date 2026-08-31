@@ -65,6 +65,47 @@ def output_dimensions(
     return _nearest_16(tier_value * ratio_width / ratio_height), tier_value
 
 
+def validate_aligned_output_dimensions(
+    width: int,
+    height: int,
+) -> tuple[int, int]:
+    """Validate positive dimensions accepted by MFLUX output requests."""
+    if width <= 0 or height <= 0:
+        raise ValueError("output dimensions must be positive")
+    if width % 16 != 0 or height % 16 != 0:
+        raise ValueError("output dimensions must be aligned to 16 pixels")
+    return width, height
+
+
+def validate_exact_output_dimensions(
+    width: int,
+    height: int,
+    aspect_ratio: AspectRatio,
+) -> tuple[int, int]:
+    """Validate an aligned exact size against the stack aspect ratio."""
+    validate_aligned_output_dimensions(width, height)
+    if not isinstance(aspect_ratio, AspectRatio):
+        raise ValueError("aspect_ratio must be a supported AspectRatio")
+    ratio_width, ratio_height = aspect_ratio.components
+    if ratio_width == ratio_height:
+        expected = (width, width)
+    elif ratio_width > ratio_height:
+        expected = (
+            width,
+            _nearest_16(width * ratio_height / ratio_width),
+        )
+    else:
+        expected = (
+            _nearest_16(height * ratio_width / ratio_height),
+            height,
+        )
+    if (width, height) != expected:
+        raise ValueError(
+            f"output dimensions must match the {aspect_ratio.value} stack aspect ratio"
+        )
+    return width, height
+
+
 def higher_output_tiers(
     current_width: int,
     current_height: int,
@@ -87,4 +128,6 @@ __all__ = [
     "ResolutionTier",
     "higher_output_tiers",
     "output_dimensions",
+    "validate_aligned_output_dimensions",
+    "validate_exact_output_dimensions",
 ]

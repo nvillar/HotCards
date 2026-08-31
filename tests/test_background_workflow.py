@@ -840,27 +840,46 @@ def test_refine_offers_current_and_every_tier_including_lower_and_same(
     assert provenance.output_size == PresetOutputSize(tier=ResolutionTier.SMALL)
 
 
-def test_refine_rejects_unaligned_current_size_and_releases_snapshot(
+@pytest.mark.parametrize(
+    ("source_size", "edit_tiers"),
+    [
+        ((641, 480), (ResolutionTier.LARGE, ResolutionTier.FULL)),
+        ((1008, 784), ()),
+    ],
+)
+def test_invalid_current_size_keeps_named_workflow_outputs_available(
     tmp_path: Path,
+    source_size: tuple[int, int],
+    edit_tiers: tuple[ResolutionTier, ...],
 ) -> None:
     workflow, controller, session, workers, _model, card = _bound_workflow(tmp_path)
     workflow.generate(card.id)
     _complete_generation(workers)
     revision = controller.document.cards[0].active_revision
     assert revision.background is not None
-    Image.new("RGB", (641, 480), "navy").save(
+    Image.new("RGB", source_size, "navy").save(
         session.store.asset_path(revision.background.image_path)
     )
 
-    with pytest.raises(BackgroundWorkflowError, match="aligned to 16"):
-        workflow.refine(
-            card.id,
-            transformation=RefineTransformation.BALANCED,
-            output_size=PresetOutputSize(tier=ResolutionTier.MEDIUM),
-        )
+    assert workflow.available_refine_output_sizes(card.id) == tuple(
+        PresetOutputSize(tier=tier) for tier in ResolutionTier
+    )
+    assert workflow.available_edit_output_sizes(card.id) == tuple(
+        PresetOutputSize(tier=tier) for tier in edit_tiers
+    )
+
+    workflow.refine(
+        card.id,
+        transformation=RefineTransformation.BALANCED,
+        output_size=PresetOutputSize(tier=ResolutionTier.MEDIUM),
+    )
+    _complete_generation(workers)
 
     assert not workflow.busy
     assert not list((tmp_path / "temporary").glob(".refine-source-*.png"))
+    provenance = controller.document.cards[0].active_revision.provenance
+    assert isinstance(provenance, RefineProvenance)
+    assert provenance.output_size == PresetOutputSize(tier=ResolutionTier.MEDIUM)
 
 
 def test_refine_flattens_duplicate_source_settings(tmp_path: Path) -> None:

@@ -457,6 +457,71 @@ def test_exact_generate_output_size_is_aligned_and_matches_stack_ratio() -> None
         )
 
 
+@pytest.mark.parametrize("duplicate", (False, True))
+def test_direct_generate_exact_provenance_requires_stack_compatible_aspect(
+    duplicate: bool,
+) -> None:
+    direct = DirectGenerateProvenance(
+        inputs=GenerateInputs(
+            description="A courtyard",
+            output_size=ExactOutputSize(width=640, height=496),
+        ),
+        render_prompt="A courtyard",
+        settings=image_settings(width=640, height=496),
+    )
+    provenance = (
+        DuplicateProvenance(
+            source=ImageSourceSnapshot(
+                card_id=uuid4(),
+                revision_id=uuid4(),
+                background_id=uuid4(),
+            ),
+            original_provenance=direct,
+        )
+        if duplicate
+        else direct
+    )
+    background = GeneratedBackground(
+        image_path="assets/cards/card/image.png",
+        provenance=provenance,
+        created_at=datetime.now(UTC),
+    )
+
+    with pytest.raises(ValidationError, match="4:3 stack aspect ratio"):
+        Stack(
+            name="Invalid",
+            aspect_ratio=AspectRatio.LANDSCAPE,
+            cards=(
+                Card(
+                    name="Card",
+                    revisions=(CardRevision(background=background),),
+                ),
+            ),
+        )
+
+
+def test_direct_generate_exact_provenance_accepts_ratio_rounded_size() -> None:
+    direct = DirectGenerateProvenance(
+        inputs=GenerateInputs(
+            description="A courtyard",
+            output_size=ExactOutputSize(width=592, height=448),
+        ),
+        render_prompt="A courtyard",
+        settings=image_settings(width=592, height=448),
+    )
+    background = GeneratedBackground(
+        image_path="assets/cards/card/image.png",
+        provenance=direct,
+        created_at=datetime.now(UTC),
+    )
+
+    Stack(
+        name="Valid",
+        aspect_ratio=AspectRatio.LANDSCAPE,
+        cards=(Card(name="Card", revisions=(CardRevision(background=background),)),),
+    )
+
+
 @pytest.mark.parametrize("aspect_ratio", tuple(AspectRatio))
 @pytest.mark.parametrize("resolution", tuple(ResolutionTier))
 def test_stack_requires_generate_dimensions_for_every_schema_combination(
@@ -604,7 +669,7 @@ def test_duplicate_provenance_is_flattened_and_inherits_original_edit_lineage() 
         instruction=accepted_edit.instruction,
         preserve=accepted_edit.preserve,
         expanded_prompt=accepted_edit.expanded_prompt,
-        output_size=PresetOutputSize(tier=ResolutionTier.MEDIUM),
+        output_size=CurrentSourceSize(width=512, height=384),
         edit_lineage=(accepted_edit,),
         prompt_token_count=24,
         settings=image_settings(),
@@ -640,7 +705,7 @@ def test_derived_operation_inherits_lineage_from_independent_duplicate() -> None
         instruction=accepted_edit.instruction,
         preserve=accepted_edit.preserve,
         expanded_prompt=accepted_edit.expanded_prompt,
-        output_size=PresetOutputSize(tier=ResolutionTier.MEDIUM),
+        output_size=CurrentSourceSize(width=512, height=384),
         edit_lineage=(accepted_edit,),
         prompt_token_count=24,
         settings=image_settings(),
@@ -802,7 +867,7 @@ def test_edit_current_output_size_matches_exact_source_dimensions() -> None:
             image_path="assets/cards/card/legacy.png",
             provenance=LegacyGenerateProvenance(
                 render_prompt="Legacy source",
-                settings=image_settings(width=1008, height=784),
+                settings=image_settings(width=1008, height=752),
             ),
             created_at=datetime.now(UTC),
         )
@@ -839,7 +904,7 @@ def test_edit_current_output_size_matches_exact_source_dimensions() -> None:
             )
         )
 
-    matching = edited_revision(1008, 784)
+    matching = edited_revision(1008, 752)
     Stack(
         name="Valid",
         cards=(
@@ -852,7 +917,7 @@ def test_edit_current_output_size_matches_exact_source_dimensions() -> None:
         ),
     )
 
-    mismatched = edited_revision(992, 784)
+    mismatched = edited_revision(992, 752)
     with pytest.raises(ValidationError, match="current-size derived output"):
         Stack(
             name="Invalid",
@@ -865,6 +930,166 @@ def test_edit_current_output_size_matches_exact_source_dimensions() -> None:
                 ),
             ),
         )
+
+
+@pytest.mark.parametrize(
+    ("source_tier", "output_tier", "duplicate_source"),
+    [
+        (ResolutionTier.FULL, ResolutionTier.SMALL, False),
+        (ResolutionTier.FULL, ResolutionTier.MEDIUM, False),
+        (ResolutionTier.FULL, ResolutionTier.LARGE, True),
+        (ResolutionTier.FULL, ResolutionTier.FULL, False),
+        (ResolutionTier.MEDIUM, ResolutionTier.MEDIUM, True),
+    ],
+)
+def test_edit_preset_output_must_be_strictly_larger_than_source(
+    source_tier: ResolutionTier,
+    output_tier: ResolutionTier,
+    duplicate_source: bool,
+) -> None:
+    card_id = uuid4()
+    source_width, source_height = output_dimensions(
+        source_tier,
+        AspectRatio.LANDSCAPE,
+    )
+    direct = DirectGenerateProvenance(
+        inputs=GenerateInputs(
+            description="Source",
+            output_size=PresetOutputSize(tier=source_tier),
+        ),
+        render_prompt="Source",
+        settings=image_settings(width=source_width, height=source_height),
+    )
+    source_provenance = (
+        DuplicateProvenance(
+            source=ImageSourceSnapshot(
+                card_id=uuid4(),
+                revision_id=uuid4(),
+                background_id=uuid4(),
+            ),
+            original_provenance=direct,
+        )
+        if duplicate_source
+        else direct
+    )
+    source = CardRevision(
+        background=GeneratedBackground(
+            image_path="assets/cards/card/source.png",
+            provenance=source_provenance,
+            created_at=datetime.now(UTC),
+        )
+    )
+    assert source.background is not None
+    accepted = AcceptedEdit(
+        instruction="Open the gate.",
+        preserve=EditPreserveOptions(subject_identity=True),
+        expanded_prompt="Open the gate.",
+    )
+    output_width, output_height = output_dimensions(
+        output_tier,
+        AspectRatio.LANDSCAPE,
+    )
+    edited = CardRevision(
+        background=GeneratedBackground(
+            image_path="assets/cards/card/edited.png",
+            provenance=EditProvenance(
+                source=ImageSourceSnapshot(
+                    card_id=card_id,
+                    revision_id=source.id,
+                    background_id=source.background.id,
+                ),
+                instruction=accepted.instruction,
+                preserve=accepted.preserve,
+                expanded_prompt=accepted.expanded_prompt,
+                output_size=PresetOutputSize(tier=output_tier),
+                edit_lineage=(accepted,),
+                prompt_token_count=12,
+                settings=image_settings(
+                    width=output_width,
+                    height=output_height,
+                ),
+            ),
+            created_at=datetime.now(UTC),
+        )
+    )
+
+    with pytest.raises(ValidationError, match="more pixels"):
+        Stack(
+            name="Invalid",
+            cards=(
+                Card(
+                    id=card_id,
+                    name="Card",
+                    revisions=(source, edited),
+                    active_revision_id=edited.id,
+                ),
+            ),
+        )
+
+
+@pytest.mark.parametrize("duplicate_source", (False, True))
+def test_edit_preset_output_accepts_strictly_larger_source_area(
+    duplicate_source: bool,
+) -> None:
+    card_id = uuid4()
+    direct = image_provenance()
+    source_provenance = (
+        DuplicateProvenance(
+            source=ImageSourceSnapshot(
+                card_id=uuid4(),
+                revision_id=uuid4(),
+                background_id=uuid4(),
+            ),
+            original_provenance=direct,
+        )
+        if duplicate_source
+        else direct
+    )
+    source = CardRevision(
+        background=GeneratedBackground(
+            image_path="assets/cards/card/source.png",
+            provenance=source_provenance,
+            created_at=datetime.now(UTC),
+        )
+    )
+    assert source.background is not None
+    accepted = AcceptedEdit(
+        instruction="Open the gate.",
+        preserve=EditPreserveOptions(subject_identity=True),
+        expanded_prompt="Open the gate.",
+    )
+    edited = CardRevision(
+        background=GeneratedBackground(
+            image_path="assets/cards/card/edited.png",
+            provenance=EditProvenance(
+                source=ImageSourceSnapshot(
+                    card_id=card_id,
+                    revision_id=source.id,
+                    background_id=source.background.id,
+                ),
+                instruction=accepted.instruction,
+                preserve=accepted.preserve,
+                expanded_prompt=accepted.expanded_prompt,
+                output_size=PresetOutputSize(tier=ResolutionTier.LARGE),
+                edit_lineage=(accepted,),
+                prompt_token_count=12,
+                settings=image_settings(width=768, height=576),
+            ),
+            created_at=datetime.now(UTC),
+        )
+    )
+
+    Stack(
+        name="Valid",
+        cards=(
+            Card(
+                id=card_id,
+                name="Card",
+                revisions=(source, edited),
+                active_revision_id=edited.id,
+            ),
+        ),
+    )
 
 
 def test_derived_provenance_requires_a_source_revision_in_the_declared_card() -> None:
@@ -971,7 +1196,7 @@ def test_multistep_refine_and_edit_lineage_must_match_resolved_sources() -> None
                 instruction=edit_one.instruction,
                 preserve=edit_one.preserve,
                 expanded_prompt=edit_one.expanded_prompt,
-                output_size=PresetOutputSize(tier=ResolutionTier.MEDIUM),
+                output_size=CurrentSourceSize(width=512, height=384),
                 edit_lineage=(edit_one,),
                 prompt_token_count=24,
                 settings=image_settings(),
@@ -992,7 +1217,7 @@ def test_multistep_refine_and_edit_lineage_must_match_resolved_sources() -> None
                 instruction=edit_two.instruction,
                 preserve=edit_two.preserve,
                 expanded_prompt=edit_two.expanded_prompt,
-                output_size=PresetOutputSize(tier=ResolutionTier.MEDIUM),
+                output_size=CurrentSourceSize(width=512, height=384),
                 edit_lineage=(edit_one, edit_two),
                 prompt_token_count=24,
                 settings=image_settings(),
@@ -1034,7 +1259,7 @@ def test_multistep_refine_and_edit_lineage_must_match_resolved_sources() -> None
                 instruction=edit_three.instruction,
                 preserve=edit_three.preserve,
                 expanded_prompt=edit_three.expanded_prompt,
-                output_size=PresetOutputSize(tier=ResolutionTier.MEDIUM),
+                output_size=CurrentSourceSize(width=512, height=384),
                 edit_lineage=(edit_one, edit_two, edit_three),
                 prompt_token_count=24,
                 settings=image_settings(),

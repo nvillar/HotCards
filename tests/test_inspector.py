@@ -29,6 +29,7 @@ from hotcards.application.document_controller import DocumentController
 from hotcards.domain.image_dimensions import (
     AspectRatio,
     ResolutionTier,
+    higher_output_tiers,
     output_dimensions,
 )
 from hotcards.domain.models import (
@@ -761,7 +762,7 @@ def test_generate_output_size_inserts_selectable_exact_current_size(
     inspector.render(
         controller.document,
         card.id,
-        refine_source_size=(640, 480),
+        refine_source_size=(592, 448),
     )
 
     labels = [
@@ -771,14 +772,49 @@ def test_generate_output_size_inserts_selectable_exact_current_size(
     assert labels == [
         "Small — 256 × 192",
         "Medium — 512 × 384",
-        "Current size — 640 × 480",
+        "Current size — 592 × 448",
         "Large — 768 × 576",
         "Full — 1024 × 768",
     ]
-    exact_index = labels.index("Current size — 640 × 480")
+    exact_index = labels.index("Current size — 592 × 448")
     inspector.resolution_combo.setCurrentIndex(exact_index)
     assert controller.document.cards[0].active_revision.generate_output_size == (
-        ExactOutputSize(width=640, height=480)
+        ExactOutputSize(width=592, height=448)
+    )
+
+
+@pytest.mark.parametrize("source_size", ((641, 480), (1008, 784)))
+def test_generate_shows_invalid_current_size_without_selecting_or_persisting_it(
+    application: QApplication,
+    source_size: tuple[int, int],
+) -> None:
+    revision = CardRevision(background=_background())
+    card = Card(name="Card", revisions=(revision,))
+    controller = DocumentController(Stack(name="Demo", cards=(card,)))
+    inspector = Inspector(controller)
+    inspector.render(
+        controller.document,
+        card.id,
+        refine_source_size=source_size,
+    )
+
+    unavailable_label = f"Current size — {source_size[0]} × {source_size[1]} (Unavailable)"
+    labels = [
+        inspector.resolution_combo.itemText(index)
+        for index in range(inspector.resolution_combo.count())
+    ]
+    unavailable_index = labels.index(unavailable_label)
+    item = inspector.resolution_combo.model().item(unavailable_index)
+    assert item is not None
+    assert not item.isEnabled()
+    assert inspector.resolution_combo.currentData() == PresetOutputSize(tier=ResolutionTier.MEDIUM)
+    assert "Current size unavailable" in inspector.resolution_combo.toolTip()
+
+    inspector.resolution_combo.setCurrentIndex(unavailable_index)
+
+    assert inspector.resolution_combo.currentData() == PresetOutputSize(tier=ResolutionTier.MEDIUM)
+    assert controller.document.cards[0].active_revision.generate_output_size == (
+        PresetOutputSize(tier=ResolutionTier.MEDIUM)
     )
 
 
@@ -804,6 +840,70 @@ def test_edit_resolution_inserts_nonstandard_current_and_only_higher_tiers(
         "Large — 768 × 576",
         "Full — 1024 × 768",
     ]
+
+
+@pytest.mark.parametrize("source_size", ((641, 480), (1008, 784)))
+def test_refine_and_edit_show_invalid_current_size_as_unavailable(
+    application: QApplication,
+    source_size: tuple[int, int],
+) -> None:
+    revision = CardRevision(
+        description="A courtyard",
+        background=_background(),
+    )
+    card = Card(name="Card", revisions=(revision,))
+    controller = DocumentController(Stack(name="Demo", cards=(card,)))
+    inspector = Inspector(controller)
+    inspector.render(
+        controller.document,
+        card.id,
+        refine_source_size=source_size,
+    )
+    unavailable_label = f"Current size — {source_size[0]} × {source_size[1]} (Unavailable)"
+
+    refine_labels = [
+        inspector.refine_resolution_combo.itemText(index)
+        for index in range(inspector.refine_resolution_combo.count())
+    ]
+    refine_unavailable = refine_labels.index(unavailable_label)
+    refine_item = inspector.refine_resolution_combo.model().item(refine_unavailable)
+    assert refine_item is not None
+    assert not refine_item.isEnabled()
+    assert isinstance(
+        inspector.refine_resolution_combo.currentData(),
+        PresetOutputSize,
+    )
+    inspector.refine_resolution_combo.setCurrentIndex(refine_unavailable)
+    assert isinstance(
+        inspector.refine_resolution_combo.currentData(),
+        PresetOutputSize,
+    )
+
+    edit_labels = [
+        inspector.edit_resolution_combo.itemText(index)
+        for index in range(inspector.edit_resolution_combo.count())
+    ]
+    edit_unavailable = edit_labels.index(unavailable_label)
+    edit_item = inspector.edit_resolution_combo.model().item(edit_unavailable)
+    assert edit_item is not None
+    assert not edit_item.isEnabled()
+    higher_tiers = higher_output_tiers(
+        source_size[0],
+        source_size[1],
+        AspectRatio.LANDSCAPE,
+    )
+    if higher_tiers:
+        assert inspector.edit_resolution_combo.currentData() == (
+            PresetOutputSize(tier=higher_tiers[0])
+        )
+        inspector.edit_resolution_combo.setCurrentIndex(edit_unavailable)
+        assert inspector.edit_resolution_combo.currentData() == (
+            PresetOutputSize(tier=higher_tiers[0])
+        )
+        assert inspector.edit_resolution_combo.isEnabled()
+    else:
+        assert inspector.edit_resolution_combo.currentData() is None
+        assert not inspector.edit_resolution_combo.isEnabled()
 
 
 def test_reference_selector_assigns_one_card_with_undo(

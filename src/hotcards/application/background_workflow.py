@@ -47,6 +47,7 @@ from hotcards.domain.image_dimensions import (
     AspectRatio,
     ResolutionTier,
     higher_output_tiers,
+    validate_exact_output_dimensions,
 )
 from hotcards.domain.models import (
     AcceptedEdit,
@@ -102,13 +103,16 @@ class BackgroundWorkflowError(ValueError):
     """A background operation cannot proceed without losing user intent."""
 
 
-def _current_source_size(width: int, height: int) -> CurrentSourceSize:
+def _current_source_size(
+    width: int,
+    height: int,
+    aspect_ratio: AspectRatio,
+) -> CurrentSourceSize | None:
     try:
+        validate_exact_output_dimensions(width, height, aspect_ratio)
         return CurrentSourceSize(width=width, height=height)
-    except ValueError as error:
-        raise BackgroundWorkflowError(
-            "the current image dimensions must be positive and aligned to 16 pixels"
-        ) from error
+    except ValueError:
+        return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -374,8 +378,13 @@ class BackgroundWorkflow(QObject):
             raise BackgroundWorkflowError(
                 "the current image is unavailable or unreadable"
             ) from error
+        current_output_size = _current_source_size(
+            width,
+            height,
+            self.controller.document.aspect_ratio,
+        )
         return (
-            _current_source_size(width, height),
+            *((current_output_size,) if current_output_size is not None else ()),
             *(PresetOutputSize(tier=tier) for tier in ResolutionTier),
         )
 
@@ -421,16 +430,13 @@ class BackgroundWorkflow(QObject):
                     source_snapshot.snapshot_path,
                 )
             raise
-        try:
-            current_output_size = _current_source_size(
-                source_snapshot.width,
-                source_snapshot.height,
-            )
-        except BackgroundWorkflowError:
-            self._cleanup_source_snapshot_if_idle()
-            raise
+        current_output_size = _current_source_size(
+            source_snapshot.width,
+            source_snapshot.height,
+            document.aspect_ratio,
+        )
         available_output_sizes: tuple[RefineOutputSize, ...] = (
-            current_output_size,
+            *((current_output_size,) if current_output_size is not None else ()),
             *(PresetOutputSize(tier=tier) for tier in ResolutionTier),
         )
         if output_size not in available_output_sizes:
@@ -546,8 +552,13 @@ class BackgroundWorkflow(QObject):
             raise BackgroundWorkflowError(
                 "the current image is unavailable or unreadable"
             ) from error
+        current_output_size = _current_source_size(
+            width,
+            height,
+            document.aspect_ratio,
+        )
         return (
-            _current_source_size(width, height),
+            *((current_output_size,) if current_output_size is not None else ()),
             *(
                 PresetOutputSize(tier=tier)
                 for tier in higher_output_tiers(
@@ -602,16 +613,13 @@ class BackgroundWorkflow(QObject):
                     source_snapshot.snapshot_path,
                 )
             raise
-        try:
-            current_output_size = _current_source_size(
-                source_snapshot.width,
-                source_snapshot.height,
-            )
-        except BackgroundWorkflowError:
-            self._cleanup_source_snapshot_if_idle()
-            raise
+        current_output_size = _current_source_size(
+            source_snapshot.width,
+            source_snapshot.height,
+            document.aspect_ratio,
+        )
         available_output_sizes = (
-            current_output_size,
+            *((current_output_size,) if current_output_size is not None else ()),
             *(
                 PresetOutputSize(tier=tier)
                 for tier in higher_output_tiers(

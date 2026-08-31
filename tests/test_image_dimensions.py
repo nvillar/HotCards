@@ -7,6 +7,7 @@ from hotcards.domain.image_dimensions import (
     ResolutionTier,
     higher_output_tiers,
     output_dimensions,
+    validate_exact_output_dimensions,
 )
 
 
@@ -82,6 +83,49 @@ def test_resolution_tiers_expose_exact_user_facing_names() -> None:
         ("Large", 768),
         ("Full", 1024),
     ]
+
+
+@pytest.mark.parametrize(
+    ("aspect_ratio", "dimensions"),
+    [
+        (AspectRatio.SQUARE, (592, 592)),
+        (AspectRatio.LANDSCAPE, (592, 448)),
+        (AspectRatio.PORTRAIT, (448, 592)),
+        (AspectRatio.WIDESCREEN, (592, 336)),
+    ],
+)
+def test_exact_output_dimensions_accept_aligned_ratio_rounded_sizes(
+    aspect_ratio: AspectRatio,
+    dimensions: tuple[int, int],
+) -> None:
+    assert (
+        validate_exact_output_dimensions(
+            dimensions[0],
+            dimensions[1],
+            aspect_ratio,
+        )
+        == dimensions
+    )
+
+
+@pytest.mark.parametrize(
+    ("dimensions", "message"),
+    [
+        ((641, 480), "aligned to 16"),
+        ((1008, 784), "4:3 stack aspect ratio"),
+        ((640, 496), "4:3 stack aspect ratio"),
+    ],
+)
+def test_exact_output_dimensions_reject_unavailable_current_sizes(
+    dimensions: tuple[int, int],
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        validate_exact_output_dimensions(
+            dimensions[0],
+            dimensions[1],
+            AspectRatio.LANDSCAPE,
+        )
 
 
 def test_higher_output_tiers_rejects_invalid_source_dimensions() -> None:
