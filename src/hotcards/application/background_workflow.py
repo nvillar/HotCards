@@ -21,7 +21,10 @@ from hotcards.application.commands import (
     DuplicateRevisionCommand,
     ReplaceRevisionBackgroundCommand,
 )
-from hotcards.application.document_controller import DocumentController
+from hotcards.application.document_controller import (
+    DocumentController,
+    DocumentMutationBlockedError,
+)
 from hotcards.application.document_session import DocumentSession
 from hotcards.application.generated_revision_change import GeneratedRevisionChange
 from hotcards.application.image_files import (
@@ -368,7 +371,12 @@ class BackgroundWorkflow(QObject):
                 "Image generated",
                 generated=True,
             )
-        except (CommandError, StackStoreError, ValidationError) as error:
+        except (
+            CommandError,
+            DocumentMutationBlockedError,
+            StackStoreError,
+            ValidationError,
+        ) as error:
             if stored_image_path is not None:
                 try:
                     store.remove_image_asset_if_unreferenced(

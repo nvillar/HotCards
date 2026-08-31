@@ -27,13 +27,18 @@ from hotcards.application.background_workflow import (
 )
 from hotcards.application.commands import (
     ActivateRevisionCommand,
+    CreateCardCommand,
     DeleteRevisionCommand,
     DuplicateRevisionCommand,
     RenameCardCommand,
     ReplaceRevisionBackgroundCommand,
 )
 from hotcards.application.document_controller import DocumentController
-from hotcards.application.document_session import DocumentSession, DocumentSessionState
+from hotcards.application.document_session import (
+    DocumentSession,
+    DocumentSessionError,
+    DocumentSessionState,
+)
 from hotcards.application.generated_revision_change import GeneratedRevisionChange
 from hotcards.application.workers import (
     AdapterKind,
@@ -67,6 +72,11 @@ from hotcards.domain.models import (
 )
 from hotcards.generation.errors import ImageGenerationCancelled
 from hotcards.generation.mflux_generator import MfluxGenerator
+from hotcards.storage.stack_store import (
+    StackStore,
+    StackStoreError,
+    StackStoreTransactionError,
+)
 from hotcards.ui.card_sidebar import CardSidebar
 from hotcards.ui.main_window import MainWindow
 from hotcards.ui.new_stack_dialog import NewStackDialog
@@ -535,6 +545,96 @@ def test_duplicate_card_shortcut_is_author_only(
     assert window.card_sidebar.isHidden()
     window.duplicate_card_action.trigger()
     assert len(controller.document.cards) == 2
+    window.close()
+
+
+def test_pending_duplicate_durability_blocks_ui_until_save_retry(
+    application: QApplication,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = Card(name="Source")
+    stack = Stack(name="Demo", cards=(source,), start_card_id=source.id)
+    controller = DocumentController(stack)
+    session = DocumentSession(controller)
+    session.create(stack, tmp_path / "Demo.hotcards")
+    window = MainWindow(
+        controller,
+        FakeWorkers(),  # type: ignore[arg-type]
+        FakeSettings(),
+        availability_checks={AdapterKind.MFLUX: lambda: None},
+        document_session=session,
+        background_workflow=FakeBackgroundWorkflow(controller),  # type: ignore[arg-type]
+        start_diagnostics=False,
+    )
+
+    def fail_indeterminate(candidate: Stack) -> None:
+        raise StackStoreTransactionError(
+            RuntimeError("manifest directory fsync failed"),
+            observed_stack=candidate,
+            durability_indeterminate=True,
+        )
+
+    with pytest.raises(DocumentSessionError, match="durability remains indeterminate"):
+        session.execute_persisted(
+            CreateCardCommand(name="Source Copy"),
+            persist=fail_indeterminate,
+        )
+    window.render_document()
+
+    assert controller.mutation_blocked
+    assert session.state.mutation_blocked
+    assert session.state.dirty
+    assert window.notification_bar.message_label.text() == "Save required before editing"
+    assert not window.undo_action.isEnabled()
+    assert not window.redo_action.isEnabled()
+    assert not window.duplicate_card_action.isEnabled()
+    assert not window.card_sidebar.add_button.isEnabled()
+    assert not window.card_sidebar.delete_button.isEnabled()
+    assert not window.inspector.isEnabled()
+    assert window.canvas_card_name.isReadOnly()
+    assert not window.revision_combo.isEnabled()
+    assert not window.add_revision_button.isEnabled()
+    assert not window.clear_background_button.isEnabled()
+    assert not window.inspector.generate_background_button.isEnabled()
+    assert window.card_sidebar.card_list.isEnabled()
+    window.card_sidebar.card_list.setCurrentRow(1)
+    assert window.card_sidebar.selected_card_id == controller.document.cards[1].id
+
+    pending_document = controller.document
+    window.undo()
+    assert controller.document == pending_document
+    assert window.notification_bar.message_label.text() == "Save required before editing"
+
+    replacement_store = StackStore(tmp_path / "Replacement.hotcards")
+    replacement_store.create(Stack(name="Replacement"))
+    assert session.store is not None
+    real_save = session.store.save
+
+    def fail_save(_stack: Stack) -> None:
+        raise StackStoreError("retry storage unavailable")
+
+    monkeypatch.setattr(session.store, "save", fail_save)
+    with pytest.raises(DocumentSessionError, match="retry storage unavailable"):
+        session.open(replacement_store.bundle_path)
+    assert controller.document == pending_document
+    assert controller.mutation_blocked
+
+    monkeypatch.setattr(window, "_ask_retry_failed_close_save", lambda _message: False)
+    close_event = QCloseEvent()
+    window.closeEvent(close_event)
+    assert not close_event.isAccepted()
+    assert controller.mutation_blocked
+
+    monkeypatch.setattr(session.store, "save", real_save)
+    assert window.save_document()
+    assert not controller.mutation_blocked
+    assert not session.state.mutation_blocked
+    assert not session.state.dirty
+    assert window.undo_action.isEnabled()
+    assert window.duplicate_card_action.isEnabled()
+    assert window.inspector.isEnabled()
+    assert not window.canvas_card_name.isReadOnly()
     window.close()
 
 

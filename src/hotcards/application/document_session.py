@@ -36,6 +36,7 @@ class DocumentSessionState:
     bundle_path: Path | None
     dirty: bool
     error: str | None
+    mutation_blocked: bool = False
 
 
 class DocumentSession(QObject):
@@ -77,6 +78,7 @@ class DocumentSession(QObject):
             bundle_path=self._store.bundle_path if self._store is not None else None,
             dirty=self._dirty,
             error=self._error,
+            mutation_blocked=self.controller.mutation_blocked,
         )
 
     def create(self, stack: Stack, bundle_path: Path) -> Stack:

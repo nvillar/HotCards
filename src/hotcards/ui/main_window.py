@@ -52,7 +52,12 @@ from hotcards.application.commands import (
     ReplacePolygonCommand,
     SetRunOverlayModeCommand,
 )
-from hotcards.application.document_controller import DocumentController, UndoToken
+from hotcards.application.document_controller import (
+    PENDING_DURABILITY_MESSAGE,
+    DocumentController,
+    DocumentMutationBlockedError,
+    UndoToken,
+)
 from hotcards.application.document_session import (
     DocumentSession,
     DocumentSessionError,
@@ -678,6 +683,8 @@ class MainWindow(QMainWindow):
     def _commit_canvas_card_name(self, *, render_change: bool = True) -> bool:
         if self._rendering or self._selected_card_id is None or self._is_running:
             return True
+        if self.controller.mutation_blocked:
+            return True
         if self._card_name_commit_failed:
             self._card_name_commit_failed = False
             return False
@@ -696,7 +703,7 @@ class MainWindow(QMainWindow):
             return True
         try:
             changed = self.controller.execute(RenameCardCommand(card_id=card.id, name=name))
-        except (CommandError, ValidationError) as error:
+        except (CommandError, DocumentMutationBlockedError, ValidationError) as error:
             self._card_name_commit_failed = True
             self._set_canvas_card_name_error(str(error))
             self.canvas_card_name.setText(card.name)
@@ -716,6 +723,8 @@ class MainWindow(QMainWindow):
         self.canvas_card_name_error.setVisible(bool(message))
 
     def _commit_authoring_metadata(self) -> bool:
+        if self.controller.mutation_blocked:
+            return True
         if self._selected_card_id is None:
             return True
         if not self.inspector.commit_card_metadata(render_change=False):
@@ -849,7 +858,7 @@ class MainWindow(QMainWindow):
         )
         try:
             changed = self.controller.execute(command)
-        except (CommandError, ValidationError) as error:
+        except (CommandError, DocumentMutationBlockedError, ValidationError) as error:
             self._show_error(
                 "revision-error",
                 "Could not create a new version",
@@ -898,6 +907,13 @@ class MainWindow(QMainWindow):
                 kind=NotificationKind.ERROR,
                 detail=detail,
             ),
+        )
+
+    def _show_pending_durability_error(self, detail: str) -> None:
+        self._show_error(
+            "document-error",
+            "Save required before editing",
+            detail=detail,
         )
 
     def _show_warning(
@@ -1010,7 +1026,12 @@ class MainWindow(QMainWindow):
         if self.background_workflow is not None and self.background_workflow.busy:
             self._cancel_background_generation()
         token = self.controller.current_undo_token
-        if self.controller.undo():
+        try:
+            changed = self.controller.undo()
+        except DocumentMutationBlockedError as error:
+            self._show_pending_durability_error(str(error))
+            return
+        if changed:
             self._restore_card_selection(token, undoing=True)
             self.render_document()
 
@@ -1019,7 +1040,12 @@ class MainWindow(QMainWindow):
         if self.background_workflow is not None and self.background_workflow.busy:
             self._cancel_background_generation()
         token = self.controller.current_redo_token
-        if self.controller.redo():
+        try:
+            changed = self.controller.redo()
+        except DocumentMutationBlockedError as error:
+            self._show_pending_durability_error(str(error))
+            return
+        if changed:
             self._restore_card_selection(token, undoing=False)
             self.render_document()
 
@@ -1067,11 +1093,16 @@ class MainWindow(QMainWindow):
             change = self.card_duplication_workflow.duplicate(card_id)
         except CardDuplicationError as error:
             self.render_document()
-            self._show_error(
-                "card-error",
-                "Could not duplicate card",
-                detail=str(error),
-            )
+            if self.controller.mutation_blocked:
+                self._show_pending_durability_error(
+                    f"{PENDING_DURABILITY_MESSAGE}\n\n{error}"
+                )
+            else:
+                self._show_error(
+                    "card-error",
+                    "Could not duplicate card",
+                    detail=str(error),
+                )
             return
         self._selected_card_id = change.duplicate_card_id
         self._card_selection_history[change.token] = (
@@ -1109,7 +1140,7 @@ class MainWindow(QMainWindow):
         previous_token = self.controller.current_undo_token
         try:
             self.card_sidebar.delete_card(card.id)
-        except CommandError as error:
+        except (CommandError, DocumentMutationBlockedError) as error:
             self._show_error(
                 "card-error",
                 "Could not delete card",
@@ -1159,12 +1190,27 @@ class MainWindow(QMainWindow):
     def _session_state_changed(self, state: object) -> None:
         if not isinstance(state, DocumentSessionState):
             return
+        if (
+            state.mutation_blocked
+            and self.background_workflow is not None
+            and self.background_workflow.busy
+        ):
+            self._cancel_background_generation()
         if state.error is None:
             self.notification_bar.clear_notification("document-error")
         bound = state.bundle_path is not None
-        self.card_sidebar.set_document_editable(self.document_session is None or bound)
+        mutation_allowed = bound and not state.mutation_blocked
+        self.card_sidebar.set_document_editable(
+            self.document_session is None or mutation_allowed
+        )
         if self.document_session is not None and not bound:
             self.create_first_card_button.setText("Create New Stack")
+        elif state.mutation_blocked:
+            self.create_first_card_button.setText("Create Your First Card")
+            detail = PENDING_DURABILITY_MESSAGE
+            if state.error is not None:
+                detail = f"{detail}\n\n{state.error}"
+            self._show_pending_durability_error(detail)
         elif state.error is not None:
             self.create_first_card_button.setText("Create Your First Card")
             self._show_error(
@@ -1180,6 +1226,7 @@ class MainWindow(QMainWindow):
 
     def _update_document_actions(self) -> None:
         bound = self.document_session is None or self.document_session.store is not None
+        mutation_allowed = bound and not self.controller.mutation_blocked
         self.save_action.setEnabled(
             self.document_session is not None and self.document_session.store is not None
         )
@@ -1193,18 +1240,45 @@ class MainWindow(QMainWindow):
             and self.document_session is not None
             and self.document_session.store is not None
         )
-        self.undo_action.setEnabled(bound and not self._is_running and self.controller.can_undo)
-        self.redo_action.setEnabled(bound and not self._is_running and self.controller.can_redo)
+        self.undo_action.setEnabled(
+            mutation_allowed and not self._is_running and self.controller.can_undo
+        )
+        self.redo_action.setEnabled(
+            mutation_allowed and not self._is_running and self.controller.can_redo
+        )
         self.duplicate_card_action.setEnabled(
-            bound
+            mutation_allowed
             and not self._is_running
             and self._selected_card_id is not None
             and self.card_duplication_workflow is not None
         )
         self.advanced_settings_action.setEnabled(not self._is_running)
         self.mode_button.setEnabled(bound)
-        self.overlay_selector.setEnabled(bound and self._is_running)
-        self.card_sidebar.set_document_editable(bound and not self._is_running)
+        self.overlay_selector.setEnabled(mutation_allowed and self._is_running)
+        self.card_sidebar.set_document_editable(
+            mutation_allowed and not self._is_running
+        )
+        authoring_enabled = mutation_allowed and not self._is_running
+        self.inspector.setEnabled(authoring_enabled)
+        self.canvas_card_name.setReadOnly(not authoring_enabled)
+        self.revision_combo.setEnabled(authoring_enabled)
+        self.add_revision_button.setEnabled(
+            authoring_enabled and self._selected_card_id is not None
+        )
+        selected_card = next(
+            (
+                card
+                for card in self.controller.document.cards
+                if card.id == self._selected_card_id
+            ),
+            None,
+        )
+        self.delete_revision_button.setEnabled(
+            authoring_enabled
+            and selected_card is not None
+            and len(selected_card.revisions) > 1
+        )
+        self.create_first_card_button.setEnabled(mutation_allowed)
 
     def _update_window_title(self) -> None:
         dirty = self.document_session is not None and self.document_session.state.dirty
@@ -1460,10 +1534,11 @@ class MainWindow(QMainWindow):
 
     def _update_generation_actions(self) -> None:
         bound = self.document_session is None or self.document_session.store is not None
+        mutation_allowed = bound and not self.controller.mutation_blocked
         workflow_available = self.background_workflow is not None
         has_card = (
             workflow_available
-            and bound
+            and mutation_allowed
             and self._selected_card_id is not None
             and not self._is_running
         )
@@ -1483,7 +1558,9 @@ class MainWindow(QMainWindow):
         active_revision = selected_card.active_revision if selected_card is not None else None
         has_image = active_revision is not None and active_revision.background is not None
         generate_reason = "Ready to generate"
-        if not has_card:
+        if self.controller.mutation_blocked:
+            generate_reason = PENDING_DURABILITY_MESSAGE
+        elif not has_card:
             generate_reason = "Select a card in a saved stack"
         elif workflow_busy:
             generate_reason = (
@@ -1508,7 +1585,7 @@ class MainWindow(QMainWindow):
             generating=workflow_busy,
         )
         self.clear_background_button.setEnabled(
-            has_card and has_image and not workflow_busy
+            mutation_allowed and has_card and has_image and not workflow_busy
         )
         self.clear_background_button.setToolTip(
             "Clear the current image"
@@ -1611,7 +1688,10 @@ class MainWindow(QMainWindow):
         self.card_canvas.set_hotspots(
             revision.hotspot_set,
             self.inspector.selected_interaction_id,
-            editable=self.inspector.hotspots_active,
+            editable=(
+                self.inspector.hotspots_active
+                and not self.controller.mutation_blocked
+            ),
             context_id=revision.id,
         )
 
@@ -1778,7 +1858,7 @@ class MainWindow(QMainWindow):
         previous_undo_token = self.controller.current_undo_token
         try:
             changed = self.controller.execute(command)
-        except (CommandError, ValidationError) as error:
+        except (CommandError, DocumentMutationBlockedError, ValidationError) as error:
             self.inspector.set_hotspot_error(str(error))
             self.render_document()
             return
@@ -1842,7 +1922,13 @@ class MainWindow(QMainWindow):
             overlay_mode = RunOverlayMode(mode)
         except (TypeError, ValueError):
             return
-        changed = self.controller.execute(SetRunOverlayModeCommand(mode=overlay_mode))
+        try:
+            changed = self.controller.execute(
+                SetRunOverlayModeCommand(mode=overlay_mode)
+            )
+        except DocumentMutationBlockedError as error:
+            self._show_pending_durability_error(str(error))
+            return
         self.render_document(changed)
 
     def _toggle_mode(self) -> None:
@@ -1907,18 +1993,19 @@ class MainWindow(QMainWindow):
 
     def _apply_mode_chrome(self) -> None:
         authoring = not self._is_running
+        authoring_enabled = authoring and not self.controller.mutation_blocked
         self.mode_button.setText("Run" if authoring else "Author")
         self.mode_button.setToolTip(
             "Switch to Run mode" if authoring else "Switch to Author mode"
         )
-        self.canvas_card_name.setReadOnly(not authoring)
+        self.canvas_card_name.setReadOnly(not authoring_enabled)
         self.canvas_card_name.setVisible(authoring)
         self.canvas_card_name_error.setVisible(
             authoring and bool(self.canvas_card_name_error.text())
         )
         self.revision_label.setVisible(authoring)
         self.revision_combo.setVisible(authoring)
-        self.revision_combo.setEnabled(authoring)
+        self.revision_combo.setEnabled(authoring_enabled)
         self.add_revision_button.setVisible(authoring)
         self.delete_revision_button.setVisible(authoring)
         self.card_sidebar.setVisible(authoring)

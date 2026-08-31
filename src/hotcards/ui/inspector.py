@@ -54,7 +54,10 @@ from hotcards.application.commands import (
     SetRevisionStyleCommand,
     UpdateStyleCommand,
 )
-from hotcards.application.document_controller import DocumentController
+from hotcards.application.document_controller import (
+    DocumentController,
+    DocumentMutationBlockedError,
+)
 from hotcards.domain.image_dimensions import GenerateResolution, output_dimensions
 from hotcards.domain.models import (
     Card,
@@ -2235,7 +2238,7 @@ class Inspector(QWidget):
         previous_token = self.controller.current_undo_token
         try:
             changed = self.controller.execute(command)
-        except (CommandError, ValidationError) as error:
+        except (CommandError, DocumentMutationBlockedError, ValidationError) as error:
             self._set_error(target_error, str(error))
             if render_change:
                 self.render(self.controller.document, self.selected_card_id)

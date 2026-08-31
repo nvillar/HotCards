@@ -23,7 +23,10 @@ from hotcards.application.commands import (
     RenameCardCommand,
     ReplaceRevisionBackgroundCommand,
 )
-from hotcards.application.document_controller import DocumentController
+from hotcards.application.document_controller import (
+    DocumentController,
+    DocumentMutationBlockedError,
+)
 from hotcards.application.document_session import DocumentSession
 from hotcards.domain.models import (
     Card,
@@ -319,6 +322,7 @@ def test_indeterminate_observed_duplicate_becomes_history_only_after_retry(
         with_background=True,
     )
     assert session.store is not None
+    before = controller.document
     before_token = controller.current_undo_token
     real_write_manifest = stack_store_module._write_manifest_at
     injected = False
@@ -362,16 +366,48 @@ def test_indeterminate_observed_duplicate_becomes_history_only_after_retry(
     assert len(controller.document.cards) == 2
     assert session.store.load() == controller.document
     assert controller.current_undo_token == before_token
+    assert controller.mutation_blocked
+    assert session.state.mutation_blocked
     assert session.state.dirty
     assert "durability remains indeterminate" in (session.state.error or "")
     duplicate_background = controller.document.cards[1].active_revision.background
     assert duplicate_background is not None
     assert session.store.asset_path(duplicate_background.image_path).is_file()
 
+    pending_document = controller.document
+    blocked_operations = (
+        lambda: controller.execute(
+            RenameCardCommand(card_id=source.id, name="Blocked edit")
+        ),
+        controller.undo,
+        controller.redo,
+    )
+    for operation in blocked_operations:
+        with pytest.raises(
+            DocumentMutationBlockedError,
+            match="Save the stack to finish the pending duplicate",
+        ):
+            operation()
+        assert controller.document == pending_document
+        assert controller.current_undo_token == before_token
+        assert controller.mutation_blocked
+
     assert session.flush()
     assert not session.state.dirty
-    assert controller.current_undo_token != before_token
+    assert not session.state.mutation_blocked
+    duplicate_token = controller.current_undo_token
+    assert duplicate_token is not None
+    assert duplicate_token != before_token
     assert session.store.load() == controller.document
+
+    controller.execute(RenameCardCommand(card_id=source.id, name="After retry"))
+    edit_token = controller.current_undo_token
+    assert edit_token is not None
+    assert edit_token != duplicate_token
+    assert controller.undo()
+    assert controller.document == pending_document
+    assert controller.undo()
+    assert controller.document == before
 
 
 def test_duplicate_copy_failure_leaves_document_and_assets_unchanged(
@@ -833,6 +869,8 @@ def test_repeated_manifest_fsync_failure_stays_dirty_until_retry(
     assert failed_bundle_fsyncs == 3
     assert controller.document == before
     assert controller.current_undo_token == before_token
+    assert not controller.mutation_blocked
+    assert not session.state.mutation_blocked
     assert session.state.dirty
     assert "manifest durability remains indeterminate" in (session.state.error or "")
     assert session.store.stack_path.read_bytes() == previous_manifest

@@ -37,8 +37,10 @@ from hotcards.application.commands import (
     SetStartCardCommand,
 )
 from hotcards.application.document_controller import (
+    PENDING_DURABILITY_MESSAGE,
     AutosaveHook,
     DocumentController,
+    DocumentMutationBlockedError,
     OwnedImageAsset,
     UndoToken,
 )
@@ -79,6 +81,7 @@ __all__ = [
     "DeleteRevisionCommand",
     "DocumentCommand",
     "DocumentController",
+    "DocumentMutationBlockedError",
     "DocumentSession",
     "DocumentSessionError",
     "DocumentSessionState",
@@ -89,6 +92,7 @@ __all__ = [
     "GeneratedRevisionChange",
     "OperationStatus",
     "OwnedImageAsset",
+    "PENDING_DURABILITY_MESSAGE",
     "RenameCardCommand",
     "ReorderCardCommand",
     "ReorderHotspotCommand",

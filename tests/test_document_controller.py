@@ -1,5 +1,7 @@
 """Focused tests for authoritative document history and autosave signaling."""
 
+import pytest
+
 from hotcards.application.commands import (
     AddInteractionCommand,
     ChangeHotspotDestinationCommand,
@@ -10,7 +12,10 @@ from hotcards.application.commands import (
     RenameCardCommand,
     ReplaceHotspotSetCommand,
 )
-from hotcards.application.document_controller import DocumentController
+from hotcards.application.document_controller import (
+    DocumentController,
+    DocumentMutationBlockedError,
+)
 from hotcards.domain.models import (
     Card,
     CardRevision,
@@ -23,6 +28,7 @@ from hotcards.domain.models import (
     Stack,
     UnresolvedCardReference,
 )
+from hotcards.storage.stack_store import StackStoreTransactionError
 
 
 def interaction(target_name: str = "Retained destination") -> Interaction:
@@ -265,6 +271,90 @@ def test_autosave_hook_signals_execute_undo_and_redo_with_snapshots() -> None:
 
     assert [len(stack.cards) for stack in signals] == [1, 0, 1]
     assert signals[-1] is not controller.document
+
+
+def test_pending_persisted_change_blocks_mutations_until_confirmed() -> None:
+    card = Card(name="Original")
+    before = Stack(name="Stack", cards=(card,))
+    controller = DocumentController(before)
+    command = CreateCardCommand(name="Observed duplicate")
+    observed_after: Stack | None = None
+
+    def fail_indeterminate(candidate: Stack) -> None:
+        nonlocal observed_after
+        observed_after = candidate
+        raise StackStoreTransactionError(
+            RuntimeError("manifest fsync failed"),
+            observed_stack=candidate,
+            durability_indeterminate=True,
+        )
+
+    with pytest.raises(
+        StackStoreTransactionError,
+        match="durability remains indeterminate",
+    ):
+        controller.execute_persisted(command, fail_indeterminate)
+
+    assert observed_after is not None
+    assert controller.document == observed_after
+    assert controller.mutation_blocked
+    assert not controller.can_undo
+    assert not controller.can_redo
+
+    blocked_operations = (
+        lambda: controller.execute(
+            RenameCardCommand(card_id=card.id, name="Blocked")
+        ),
+        controller.undo,
+        controller.redo,
+        controller.clear_history,
+        lambda: controller.replace_document(Stack(name="Replacement")),
+    )
+    for operation in blocked_operations:
+        with pytest.raises(
+            DocumentMutationBlockedError,
+            match="Save the stack to finish the pending duplicate",
+        ):
+            operation()
+        assert controller.document == observed_after
+        assert controller.mutation_blocked
+
+    controller.confirm_persisted_document(observed_after)
+
+    assert not controller.mutation_blocked
+    assert controller.can_undo
+    assert controller.undo()
+    assert controller.document == before
+    assert not controller.undo()
+
+
+def test_observed_before_indeterminate_failure_does_not_block_mutations() -> None:
+    card = Card(name="Original")
+    before = Stack(name="Stack", cards=(card,))
+    controller = DocumentController(before)
+
+    def fail_indeterminate(_candidate: Stack) -> None:
+        raise StackStoreTransactionError(
+            RuntimeError("manifest fsync failed"),
+            observed_stack=before,
+            durability_indeterminate=True,
+        )
+
+    with pytest.raises(
+        StackStoreTransactionError,
+        match="durability remains indeterminate",
+    ):
+        controller.execute_persisted(
+            CreateCardCommand(name="Unobserved duplicate"),
+            fail_indeterminate,
+        )
+
+    assert controller.document == before
+    assert not controller.mutation_blocked
+    changed = controller.execute(
+        RenameCardCommand(card_id=card.id, name="Allowed")
+    )
+    assert changed.cards[0].name == "Allowed"
 
 
 def test_replace_document_clears_session_history_without_autosave() -> None:
