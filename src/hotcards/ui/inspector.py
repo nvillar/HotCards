@@ -651,6 +651,8 @@ class Inspector(QWidget):
         self.delete_style_button.clicked.connect(self._delete_style)
         self.style_name_edit.editing_finished.connect(self._style_editing_finished)
         self.style_prompt_edit.editing_finished.connect(self._style_editing_finished)
+        self.style_name_edit.textChanged.connect(self._style_draft_changed)
+        self.style_prompt_edit.textChanged.connect(self._style_draft_changed)
         self.hotspot_list.currentItemChanged.connect(self._hotspot_selection_changed)
         self.move_hotspot_up_button.clicked.connect(lambda: self._move_hotspot(-1))
         self.move_hotspot_down_button.clicked.connect(lambda: self._move_hotspot(1))
@@ -1023,6 +1025,13 @@ class Inspector(QWidget):
         self._commit_style(
             render_change=reason != Qt.FocusReason.MouseFocusReason
         )
+
+    def _style_draft_changed(self) -> None:
+        if (
+            self.style_name_edit.hasFocus()
+            or self.style_prompt_edit.hasFocus()
+        ):
+            self._render_inputs_changed()
 
     def _add_style(self) -> None:
         document = self.controller.document

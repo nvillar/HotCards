@@ -12,7 +12,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PIL import Image
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtWidgets import QApplication
 
 from hotcards.application.background_workflow import (
     BackgroundGenerationSettings,
@@ -55,6 +56,12 @@ from hotcards.domain.models import (
 from hotcards.generation.errors import ImageGenerationCancelled
 from hotcards.generation.mflux_generator import MfluxGenerator
 from hotcards.storage.stack_store import StackStore
+from hotcards.ui.inspector import Inspector
+
+
+@pytest.fixture(scope="module")
+def application() -> QApplication:
+    return QApplication.instance() or QApplication([])
 
 
 class FakeOperation(QObject):
@@ -495,6 +502,82 @@ def test_description_and_style_changes_suppress_in_flight_generation(
     assert controller.document.cards[0].active_revision.background is None
     assert all("changed before generation completed" in str(failure) for failure in failures)
     assert not list((tmp_path / "temporary").glob("generated-*.png"))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("name", "Updated Style"),
+        ("prompt", "Updated visual treatment."),
+    ),
+)
+def test_live_style_draft_cancels_generation_before_commit(
+    application: QApplication,
+    tmp_path: Path,
+    field: str,
+    value: str,
+) -> None:
+    workflow, controller, _session, workers, _model, card = _bound_workflow(
+        tmp_path
+    )
+    style = controller.document.styles[0]
+    controller.execute(
+        SetRevisionStyleCommand(
+            card_id=card.id,
+            revision_id=card.active_revision.id,
+            style_id=style.id,
+        )
+    )
+    inspector = Inspector(controller)
+    inspector.render(controller.document, card.id)
+    inspector.inspector_tabs.setCurrentIndex(inspector._styles_tab_index)
+    inspector.render_inputs_changed.connect(workflow.cancel)
+    inspector.show()
+    editor = (
+        inspector.style_name_edit
+        if field == "name"
+        else inspector.style_prompt_edit
+    )
+    editor.setFocus()
+    application.processEvents()
+
+    workflow.generate(card.id)
+    operation = workers.operations[-1]
+    work = workers.calls[-1]
+    if field == "name":
+        inspector.style_name_edit.setText(value)
+    else:
+        inspector.style_prompt_edit.setPlainText(value)
+
+    assert operation.was_cancelled
+    assert controller.document.style_by_id(style.id) == style
+    assert controller.document.cards[0].active_revision.background is None
+    assert callable(work)
+    with pytest.raises(ImageGenerationCancelled, match="cancelled"):
+        work()
+    assert controller.document.cards[0].active_revision.background is None
+
+    inspector._style_editing_finished(
+        None,
+        Qt.FocusReason.OtherFocusReason,
+    )
+    changed_style = controller.document.style_by_id(style.id)
+    assert changed_style is not None
+    expected_name = value if field == "name" else style.name
+    expected_prompt = value if field == "prompt" else style.prompt_text
+    assert changed_style.name == expected_name
+    assert changed_style.prompt_text == expected_prompt
+
+    workflow.generate(card.id)
+    _complete_generation(workers)
+
+    provenance = controller.document.cards[0].active_revision.provenance
+    assert provenance is not None
+    assert provenance.operation == "generate"
+    assert provenance.inputs.style is not None
+    assert provenance.inputs.style.name == expected_name
+    assert provenance.inputs.style.prompt_text == expected_prompt
+    inspector.close()
 
 
 def test_cancelled_generation_cannot_publish_or_leave_output(tmp_path: Path) -> None:

@@ -106,9 +106,11 @@ add a vertex, press Delete to remove the selected vertex or area, and press
 Escape to step back through the selection. Context menus expose the same
 geometry actions, and successful edits offer a dismissible Undo. Replacing a
 background preserves its hotspots so the author can review and adjust them
-manually. Backgrounds at different pixel resolutions are smoothly fitted to the
-stack's fixed logical card format without stretching, so normalized hotspot
-geometry remains aligned in Author and Run modes.
+manually. Complete backgrounds at different pixel resolutions are smoothly
+fitted and centered inside the stack's fixed logical card format without
+stretching or cropping; narrow rounding differences use letterboxing or
+pillarboxing. Normalized hotspot geometry follows the fitted image bounds in
+Author and Run modes.
 
 Run mode keeps its current keys only in the session. It starts empty, Back
 retains keys, Restart clears them, and leaving Run discards them. Condition-

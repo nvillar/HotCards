@@ -710,6 +710,49 @@ def test_styles_tab_edits_global_definition_and_deletes_with_undo(
     assert all(card.active_revision.style_id is None for card in controller.document.cards)
 
 
+@pytest.mark.parametrize("field", ("name", "prompt"))
+def test_live_style_drafts_signal_without_programmatic_render_noise(
+    application: QApplication,
+    field: str,
+) -> None:
+    style = StyleDefinition(name="Ink", prompt_text="Rendered in ink.")
+    revision = CardRevision(style_id=style.id)
+    card = Card(name="Card", revisions=(revision,))
+    controller = DocumentController(
+        Stack(
+            name="Demo",
+            styles=(style,),
+            new_card_style_id=style.id,
+            cards=(card,),
+        )
+    )
+    inspector = Inspector(controller)
+    inspector.render(controller.document, card.id)
+    inspector.inspector_tabs.setCurrentIndex(inspector._styles_tab_index)
+    changes: list[None] = []
+    inspector.render_inputs_changed.connect(lambda: changes.append(None))
+    inspector.show()
+    editor = (
+        inspector.style_name_edit
+        if field == "name"
+        else inspector.style_prompt_edit
+    )
+    editor.setFocus()
+    application.processEvents()
+
+    inspector.render(controller.document, card.id)
+    assert changes == []
+
+    if field == "name":
+        inspector.style_name_edit.setText("Etching")
+    else:
+        inspector.style_prompt_edit.setPlainText("Fine etched linework.")
+
+    assert changes == [None]
+    assert controller.document.style_by_id(style.id) == style
+    inspector.close()
+
+
 def test_deleted_reference_is_shown_as_unresolved(
     application: QApplication,
 ) -> None:

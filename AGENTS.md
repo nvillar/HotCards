@@ -110,9 +110,10 @@ for live MFLUX runs.
 - Create stacks with one native format selector containing exactly Square 1:1,
   Landscape 4:3, Portrait 3:4, and Widescreen 16:9, defaulting to Landscape.
   Do not expose arbitrary dimensions or a post-creation aspect-ratio setting.
-  Render every background into the stack's logical card geometry with
-  aspect-preserving scaling so mixed pixel resolutions never distort normalized
-  hotspots.
+  Fit and center every complete background inside the stack's logical card
+  geometry with aspect-preserving scaling and letterboxing or pillarboxing as
+  needed. Use the fitted image bounds for all normalized hotspot rendering,
+  gestures, and Run hit testing; bars are noninteractive.
 - Support generated backgrounds only; do not add image import. Apply Generate
   and Clear directly through document commands. Keep an existing image visible
   until replacement succeeds. After Description or image generation succeeds,
