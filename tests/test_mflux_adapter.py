@@ -48,9 +48,11 @@ from hotcards.generation.mflux_generator import (
 def reset_process_model_cache() -> Iterator[None]:
     mflux_module._CACHED_MODEL = None
     mflux_module._DEFERRED_RELEASES.clear()
+    mflux_module._CACHE_RELEASE_PENDING = False
     yield
     mflux_module._CACHED_MODEL = None
     mflux_module._DEFERRED_RELEASES.clear()
+    mflux_module._CACHE_RELEASE_PENDING = False
 
 
 class FakeGeneratedImage:
@@ -863,6 +865,60 @@ def test_release_defers_without_blocking_until_active_invocation_unwinds(
     assert isinstance(outcomes[0], MfluxGenerateResult)
     assert releases == [None]
     assert mflux_module._CACHED_MODEL is None
+    assert mflux_module._DEFERRED_RELEASES == []
+    assert mflux_module._PROCESS_EXECUTION_LOCK.acquire(blocking=False)
+    mflux_module._PROCESS_EXECUTION_LOCK.release()
+
+
+def test_deferred_release_failure_unlocks_and_retries_before_later_operation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entered = Event()
+    allow_finish = Event()
+    clear_attempts: list[str] = []
+
+    def clear_cache() -> None:
+        clear_attempts.append("clear")
+        if len(clear_attempts) == 1:
+            raise RuntimeError("injected cache-clear failure")
+
+    monkeypatch.setattr(mflux_module, "_release_model_cache", clear_cache)
+    generator = MfluxGenerator(
+        model_factory=lambda *_: BlockingMfluxModel(
+            entered=entered,
+            release=allow_finish,
+        )
+    )
+    thread, outcomes = run_in_thread(
+        lambda: generator.generate(
+            generate_request(tmp_path / "first.png")
+        )
+    )
+    assert entered.wait(0.5)
+
+    generator.release()
+    allow_finish.set()
+    thread.join(2)
+
+    assert not thread.is_alive()
+    assert isinstance(outcomes[0], RuntimeError)
+    assert str(outcomes[0]) == "injected cache-clear failure"
+    assert mflux_module._CACHE_RELEASE_PENDING
+    assert mflux_module._PROCESS_EXECUTION_LOCK.acquire(blocking=False)
+    mflux_module._PROCESS_EXECUTION_LOCK.release()
+
+    later_thread, later_outcomes = run_in_thread(
+        lambda: generator.generate(
+            generate_request(tmp_path / "later.png")
+        )
+    )
+    later_thread.join(2)
+
+    assert not later_thread.is_alive()
+    assert isinstance(later_outcomes[0], MfluxGenerateResult)
+    assert clear_attempts == ["clear", "clear"]
+    assert not mflux_module._CACHE_RELEASE_PENDING
     assert mflux_module._DEFERRED_RELEASES == []
 
 
