@@ -25,7 +25,6 @@ from hotcards.application.commands import (
     ReplaceInteractionPolygonsCommand,
     ReplacePolygonCommand,
     ReplaceRevisionBackgroundCommand,
-    SetRevisionImagePromptCommand,
     SetRevisionReferenceCommand,
     SetRunOverlayModeCommand,
     SetStartCardCommand,
@@ -41,10 +40,6 @@ from hotcards.application.document_session import (
     DocumentSessionState,
 )
 from hotcards.application.generated_revision_change import GeneratedRevisionChange
-from hotcards.application.image_prompt_workflow import (
-    ImagePromptWorkflow,
-    ImagePromptWorkflowError,
-)
 from hotcards.application.workers import (
     AdapterKind,
     AdapterWorkers,
@@ -80,7 +75,6 @@ __all__ = [
     "DuplicateRevisionCommand",
     "EditRevisionDescriptionCommand",
     "GeneratedRevisionChange",
-    "SetRevisionImagePromptCommand",
     "OperationStatus",
     "RenameCardCommand",
     "ReorderCardCommand",
@@ -92,8 +86,6 @@ __all__ = [
     "SetRunOverlayModeCommand",
     "SetRevisionReferenceCommand",
     "SetStartCardCommand",
-    "ImagePromptWorkflow",
-    "ImagePromptWorkflowError",
     "UndoToken",
     "WorkerFailure",
     "WorkerFailureKind",

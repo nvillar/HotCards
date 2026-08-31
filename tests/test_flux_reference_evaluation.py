@@ -80,7 +80,6 @@ def _card_with_image(
             generation_metadata=ImageGenerationMetadata(
                 inputs=ImageGenerationInputs(
                     description=description,
-                    image_prompt=description,
                 ),
                 render_prompt=description,
                 model_identifier="test",
@@ -103,15 +102,13 @@ def _card_with_image(
     )
 
 
-def _write_reference_stack(tmp_path: Path) -> tuple[Path, Path]:
+def _write_reference_stack(tmp_path: Path) -> Path:
     bundle = tmp_path / "References.hotcards"
     store = StackStore(bundle)
     map_source = tmp_path / "map.png"
     castle_source = tmp_path / "castle.png"
-    graphic_source = tmp_path / "graphic.png"
     _write_png(map_source, "lightblue")
     _write_png(castle_source, "gray")
-    _write_png(graphic_source, "gold")
     map_card = _card_with_image(
         store=store,
         source=map_source,
@@ -125,7 +122,7 @@ def _write_reference_stack(tmp_path: Path) -> tuple[Path, Path]:
         description="A pencil drawing of a castle.",
     )
     store.save(Stack(name="References", cards=(map_card, castle_card)))
-    return bundle, graphic_source
+    return bundle
 
 
 def test_reference_model_config_selects_every_supported_variant() -> None:
@@ -138,14 +135,13 @@ def test_reference_model_config_selects_every_supported_variant() -> None:
 def test_reference_suite_preserves_order_prompts_and_provenance(
     tmp_path: Path,
 ) -> None:
-    stack_path, graphic_style_path = _write_reference_stack(tmp_path)
+    stack_path = _write_reference_stack(tmp_path)
     requests: list[dict[str, object]] = []
     output_dir = tmp_path / "run"
 
     result_path = run_flux_reference_evaluation(
         output_dir=output_dir,
         stack_path=stack_path,
-        graphic_style_path=graphic_style_path,
         width=48,
         height=32,
         model_factory=lambda *_: FakeReferenceModel(requests),
@@ -155,7 +151,7 @@ def test_reference_suite_preserves_order_prompts_and_provenance(
 
     result = json.loads(result_path.read_text())
     assert result["status"] == "success"
-    assert len(requests) == 10
+    assert len(requests) == 8
     assert "image_paths" not in requests[0]
     combined = next(case for case in result["cases"] if case["case_id"] == "character-plus-style")
     assert combined["reference_keys"] == ["character_identity", "map_style"]
@@ -163,10 +159,8 @@ def test_reference_suite_preserves_order_prompts_and_provenance(
         "character_identity.png",
         "map_style.png",
     ]
-    assert str(combined["prompt"]).startswith(str(combined["scene"]))
-    assert combined["prompt"].index("Use image 1 as follows:") < combined[
-        "prompt"
-    ].index("Use image 2 as follows:")
+    assert combined["prompt"] == combined["scene"]
+    assert combined["prompt"].index("image 1") < combined["prompt"].index("image 2")
     assert "REFERENCE IMAGE" not in combined["prompt"]
     assert "SCENE\n" not in combined["prompt"]
     assert [
@@ -177,9 +171,9 @@ def test_reference_suite_preserves_order_prompts_and_provenance(
     assert result["sources"]["map_style"]["revision_id"]
     assert result["sources"]["map_style"]["description"] == ("A hand-drawn fantasy map.")
     assert (output_dir / "inputs" / "map_style.png").is_file()
-    assert len(list((output_dir / "outputs").glob("*.png"))) == 9
+    assert len(list((output_dir / "outputs").glob("*.png"))) == 7
     assert (output_dir / "contact-sheet.png").is_file()
-    assert len(list((output_dir / "comparisons").glob("*.png"))) == 9
+    assert len(list((output_dir / "comparisons").glob("*.png"))) == 7
     assert result["model_load"]["source"]["duration_seconds"] >= 0
     assert result["model_load"]["edit"]["duration_seconds"] >= 0
     manifest = json.loads((output_dir / "manifest.json").read_text())
@@ -190,14 +184,13 @@ def test_reference_suite_preserves_order_prompts_and_provenance(
 def test_reference_suite_isolates_failure_and_failed_dependency(
     tmp_path: Path,
 ) -> None:
-    stack_path, graphic_style_path = _write_reference_stack(tmp_path)
+    stack_path = _write_reference_stack(tmp_path)
     requests: list[dict[str, object]] = []
     output_dir = tmp_path / "run"
 
     result_path = run_flux_reference_evaluation(
         output_dir=output_dir,
         stack_path=stack_path,
-        graphic_style_path=graphic_style_path,
         width=48,
         height=32,
         model_factory=lambda *_: FakeReferenceModel(
@@ -221,8 +214,8 @@ def test_reference_suite_isolates_failure_and_failed_dependency(
         case for case in result["cases"] if case["case_id"] == "building-two-views"
     )
     assert failed_dependency["reference_paths"] == []
-    assert len(requests) == 9
-    assert (output_dir / "outputs" / "reference-count-4.png").is_file()
-    assert len(list((output_dir / "outputs").glob("*.png"))) == 7
+    assert len(requests) == 7
+    assert (output_dir / "outputs" / "reference-count-2.png").is_file()
+    assert len(list((output_dir / "outputs").glob("*.png"))) == 5
     manifest = json.loads((output_dir / "manifest.json").read_text())
     assert manifest["status"] == "completed_with_failures"

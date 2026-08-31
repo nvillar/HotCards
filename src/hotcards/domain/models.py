@@ -346,7 +346,10 @@ class ImageGenerationInputs(DomainModel):
     """Author-controlled inputs captured for a generated image."""
 
     description: str
-    image_prompt: NonEmptyString
+    image_prompt: NonEmptyString | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
     references: tuple[ImageReferenceSnapshot, ...] = Field(
         default_factory=tuple,
         max_length=2,
@@ -355,8 +358,9 @@ class ImageGenerationInputs(DomainModel):
 
     @property
     def effective_description(self) -> str:
-        """Return the prepared Image Prompt sent to image generation."""
-        return self.image_prompt
+        """Return the authored Description sent to image generation."""
+        return self.description
+
 
 class LegacyImageGenerationInputs(DomainModel):
     """Exact schema-v5 inputs retained in historical generation metadata."""
@@ -459,7 +463,7 @@ Background = GeneratedBackground
 
 
 class ImagePrompt(DomainModel):
-    """One prepared Image Prompt and the inputs that established its freshness."""
+    """Legacy serialized Image Prompt state retained until the next schema."""
 
     text: NonEmptyString
     source_description: str
@@ -469,22 +473,6 @@ class ImagePrompt(DomainModel):
     )
     model_identifier: NonEmptyString | None = None
     prompt_version: NonEmptyString | None = None
-
-    def is_current(
-        self,
-        *,
-        source_description: str,
-        references: tuple[ImageReferenceSnapshot, ...] = (),
-        model_identifier: str | None = None,
-        prompt_version: str | None = None,
-    ) -> bool:
-        """Return whether the derived text still matches its upstream inputs."""
-        return (
-            self.source_description == source_description
-            and self.references == references
-            and (model_identifier is None or self.model_identifier == model_identifier)
-            and (prompt_version is None or self.prompt_version == prompt_version)
-        )
 
 
 class CardRevision(DomainModel):

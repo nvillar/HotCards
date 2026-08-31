@@ -11,7 +11,6 @@ from PySide6.QtGui import QFocusEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
-    QButtonGroup,
     QComboBox,
     QFrame,
     QHBoxLayout,
@@ -23,7 +22,6 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QPlainTextEdit,
     QPushButton,
-    QRadioButton,
     QScrollArea,
     QStackedWidget,
     QStyle,
@@ -51,15 +49,11 @@ from hotcards.application.commands import (
     ReorderHotspotCommand,
     SetHotspotConditionsCommand,
     SetHotspotKeyChangesCommand,
-    SetRevisionImagePromptCommand,
     SetRevisionReferenceCommand,
     SetRevisionStyleCommand,
     UpdateStyleCommand,
 )
 from hotcards.application.document_controller import DocumentController
-from hotcards.application.image_prompt_workflow import (
-    image_prompt_reference_snapshots,
-)
 from hotcards.domain.models import (
     Card,
     CardRevision,
@@ -185,7 +179,6 @@ class Inspector(QWidget):
 
     document_changed = Signal(object)
     generate_background_requested = Signal()
-    prepare_image_prompt_requested = Signal()
     hotspot_selected = Signal(object)
     hotspot_usage_requested = Signal(object, object, object)
     change_applied = Signal(str, object)
@@ -204,16 +197,8 @@ class Inspector(QWidget):
         self._rendered_style_id: UUID | None = None
         self._selected_key_id: UUID | None = None
         self._rendered_key_id: UUID | None = None
-        self._description_mode = "description"
-        self._enrich_using_text = ""
         self._generate_using_text = ""
-        self._enrich_reason = ""
         self._generate_reason = ""
-        self._can_enrich = False
-        self._image_prompt_busy = False
-        self._image_prompt_current: bool | None = None
-        self._image_prompt_model_identifier: str | None = None
-        self._image_prompt_prompt_version: str | None = None
         self._rendering = False
         self.setObjectName("inspector")
         self.setMinimumWidth(300)
@@ -257,7 +242,10 @@ class Inspector(QWidget):
         layout.addWidget(self.description_label)
         self.description_edit = _CommitPlainTextEdit()
         self.description_edit.setObjectName("descriptionEdit")
-        self.description_edit.setPlaceholderText("Description")
+        self.description_edit.setPlaceholderText(
+            "Describe the image to generate. Refer to selected References as "
+            "image 1 and image 2."
+        )
         self.description_edit.setAccessibleName("Description")
         editor_height = round((self.description_edit.fontMetrics().lineSpacing() * 10 + 20) * 1.25)
         self.description_edit.setMinimumHeight(editor_height)
@@ -268,25 +256,6 @@ class Inspector(QWidget):
         self.description_error.setVisible(False)
         layout.addWidget(self.description_error)
 
-        self.description_toggle = QWidget()
-        self.description_toggle.setObjectName("descriptionToggle")
-        toggle_layout = QHBoxLayout(self.description_toggle)
-        toggle_layout.setContentsMargins(0, 0, 0, 0)
-        self.description_button = QRadioButton("Description")
-        self.description_button.setObjectName("descriptionButton")
-        self.description_button.setToolTip("Display and edit the authored Description")
-        self.image_prompt_button = QRadioButton("Image Prompt")
-        self.image_prompt_button.setObjectName("imagePromptButton")
-        self.image_prompt_button.setToolTip("Display and edit the prepared Image Prompt")
-        self.description_button_group = QButtonGroup(self)
-        self.description_button_group.setExclusive(True)
-        self.description_button_group.addButton(self.description_button)
-        self.description_button_group.addButton(self.image_prompt_button)
-        toggle_layout.addWidget(self.description_button)
-        toggle_layout.addWidget(self.image_prompt_button)
-        toggle_layout.addStretch(1)
-        layout.addWidget(self.description_toggle)
-
         layout.addSpacing(8)
         self.style_label = QLabel("Style")
         self.style_label.setObjectName("styleLabel")
@@ -295,7 +264,7 @@ class Inspector(QWidget):
         self.style_combo.setObjectName("styleCombo")
         self.style_combo.setAccessibleName("Style")
         self.style_combo.setToolTip(
-            "Rendering treatment appended to the Image Prompt during generation"
+            "Rendering treatment appended to the Description during generation"
         )
         layout.addWidget(self.style_combo)
 
@@ -336,18 +305,10 @@ class Inspector(QWidget):
         layout.addWidget(self.reference_panel)
 
         layout.addSpacing(8)
-        self.enrich_button = QPushButton("Prepare Image Prompt")
-        self.enrich_button.setObjectName("enrichButton")
-        layout.addWidget(self.enrich_button)
-
-        layout.addSpacing(8)
         self.generate_background_button = QPushButton("Generate Image")
         self.generate_background_button.setObjectName("generateBackgroundButton")
         layout.addWidget(self.generate_background_button)
         self._focus_commit_targets = {
-            self.description_button,
-            self.image_prompt_button,
-            self.enrich_button,
             self.generate_background_button,
         }
 
@@ -660,13 +621,6 @@ class Inspector(QWidget):
     def _connect_signals(self) -> None:
         self.description_edit.editing_finished.connect(self._description_editing_finished)
         self.description_edit.textChanged.connect(self._render_inputs_changed)
-        self.description_button.clicked.connect(
-            lambda: self._switch_description_mode("description")
-        )
-        self.image_prompt_button.clicked.connect(
-            lambda: self._switch_description_mode("image_prompt")
-        )
-        self.enrich_button.clicked.connect(self.prepare_image_prompt_requested)
         self.generate_background_button.clicked.connect(self.generate_background_requested)
         self.style_combo.currentIndexChanged.connect(self._revision_style_changed)
         self.reference_combo.currentIndexChanged.connect(
@@ -704,7 +658,6 @@ class Inspector(QWidget):
 
     def _render_inputs_changed(self) -> None:
         if not self._rendering:
-            self._update_image_prompt_freshness()
             self.render_inputs_changed.emit()
 
     def _description_editing_finished(
@@ -730,7 +683,6 @@ class Inspector(QWidget):
         preserve_key_name = self.key_name_edit.hasFocus()
         key_name_draft = self.key_name_edit.text()
         previous_key_id = self._rendered_key_id
-        previous_mode = self._description_mode
         self._rendering = True
         try:
             card = next(
@@ -747,9 +699,6 @@ class Inspector(QWidget):
                 self._set_error(self.key_error, "")
                 self.set_hotspot_error("")
                 self.description_edit.clear()
-                self.description_toggle.hide()
-                self._image_prompt_current = None
-                self._update_enrich_button()
                 self.hotspot_list.clear()
                 self._render_hotspot_properties(document, None)
                 return
@@ -761,17 +710,10 @@ class Inspector(QWidget):
                 self._set_error(self.reference_error, "")
                 self.set_hotspot_error("")
             self._rendered_revision_id = revision.id
-            if revision.image_prompt is None or not same_revision:
-                self._description_mode = "description"
-            else:
-                self._description_mode = previous_mode
-            displayed_value = (
-                revision.image_prompt.text
-                if (self._description_mode == "image_prompt" and revision.image_prompt is not None)
-                else revision.description
-            )
             self.description_edit.setPlainText(
-                description_draft if preserve_description and same_revision else displayed_value
+                description_draft
+                if preserve_description and same_revision
+                else revision.description
             )
             self._render_style_selector(document, revision)
             self._render_styles(
@@ -809,55 +751,17 @@ class Inspector(QWidget):
         if card is None:
             return False
         value = self.description_edit.toPlainText()
-        if self._description_mode == "description":
-            if value == card.active_revision.description:
-                return True
-            return self._execute(
-                EditRevisionDescriptionCommand(
-                    card_id=card.id,
-                    revision_id=card.active_revision.id,
-                    value=value,
-                ),
-                error_label=self.description_error,
-                render_change=render_change,
-            )
-        existing = card.active_revision.image_prompt
-        if existing is None or value.strip() == existing.text:
+        if value == card.active_revision.description:
             return True
-        if not value.strip():
-            return self._execute(
-                SetRevisionImagePromptCommand(
-                    card_id=card.id,
-                    revision_id=card.active_revision.id,
-                    value=None,
-                ),
-                error_label=self.description_error,
-                undo_message="Image Prompt removed",
-                render_change=render_change,
-            )
-        changed = self._execute(
-            SetRevisionImagePromptCommand(
+        return self._execute(
+            EditRevisionDescriptionCommand(
                 card_id=card.id,
                 revision_id=card.active_revision.id,
-                value=existing.model_copy(
-                    update={
-                        "text": value.strip(),
-                        "source_description": card.active_revision.description,
-                        "references": image_prompt_reference_snapshots(
-                            self.controller.document,
-                            card,
-                        ),
-                        "model_identifier": self._image_prompt_model_identifier,
-                        "prompt_version": self._image_prompt_prompt_version,
-                    }
-                ),
+                value=value,
             ),
             error_label=self.description_error,
             render_change=render_change,
         )
-        if changed and not render_change:
-            self._update_image_prompt_freshness()
-        return changed
 
     def commit_card_metadata(self) -> bool:
         """Commit every visible authoring draft before a context change or save."""
@@ -867,68 +771,11 @@ class Inspector(QWidget):
             return False
         return self.commit_revision_metadata()
 
-    def has_current_image_prompt(self) -> bool:
-        card = self._selected_card()
-        if card is None:
-            return False
-        visible_value = self.description_edit.toPlainText().strip()
-        image_prompt = (
-            visible_value
-            if self._description_mode == "image_prompt"
-            else (
-                card.active_revision.image_prompt.text
-                if card.active_revision.image_prompt is not None
-                else ""
-            )
-        )
-        return (
-            bool(card.active_revision.description.strip())
-            and bool(image_prompt)
-            and self._image_prompt_current is True
-        )
-
     def has_description_input(self) -> bool:
         card = self._selected_card()
         if card is None:
             return False
-        if self._description_mode == "description":
-            return bool(self.description_edit.toPlainText().strip())
-        return bool(card.active_revision.description.strip())
-
-    def show_image_prompt(
-        self,
-        card_id: UUID,
-        revision_id: UUID,
-    ) -> None:
-        """Display a newly prepared prompt when its revision is still active."""
-        card = self._selected_card()
-        if (
-            card is None
-            or card.id != card_id
-            or card.active_revision.id != revision_id
-            or card.active_revision.image_prompt is None
-        ):
-            return
-        self._description_mode = "image_prompt"
-        self.render(self.controller.document, self.selected_card_id)
-        image_prompt = card.active_revision.image_prompt
-        assert image_prompt is not None
-        with QSignalBlocker(self.description_edit):
-            self.description_edit.setPlainText(image_prompt.text)
-
-    def _switch_description_mode(self, mode: str) -> None:
-        if self._rendering or mode == self._description_mode:
-            return
-        card = self._selected_card()
-        if (
-            card is None
-            or (mode == "image_prompt" and card.active_revision.image_prompt is None)
-            or not self.commit_revision_metadata()
-        ):
-            self.render(self.controller.document, self.selected_card_id)
-            return
-        self._description_mode = mode
-        self.render(self.controller.document, self.selected_card_id)
+        return bool(self.description_edit.toPlainText().strip())
 
     def _render_description_workflow(
         self,
@@ -945,21 +792,7 @@ class Inspector(QWidget):
             else ""
         )
         style_suffix = " + Style" if revision.style_id is not None else ""
-        self._enrich_using_text = f"Using: Description{reference_suffix}"
-        image_prompt = revision.image_prompt
-        self._image_prompt_current = self._current_image_prompt_state(
-            document,
-            card,
-        )
-        self.description_toggle.setVisible(image_prompt is not None)
-        self.description_button.setChecked(self._description_mode == "description")
-        self.image_prompt_button.setChecked(self._description_mode == "image_prompt")
-        label = "Image Prompt" if self._description_mode == "image_prompt" else "Description"
-        self.description_label.setText(label)
-        self.description_edit.setAccessibleName(label)
-        self.description_edit.setPlaceholderText(label)
-        self._generate_using_text = f"Using: Image Prompt{style_suffix}{reference_suffix}"
-        self._update_enrich_button()
+        self._generate_using_text = f"Using: Description{style_suffix}{reference_suffix}"
         self._refresh_generation_tooltips()
 
     def set_background_capabilities(
@@ -980,109 +813,13 @@ class Inspector(QWidget):
         )
         self._refresh_generation_tooltips()
 
-    def set_image_prompt_capabilities(
-        self,
-        *,
-        can_enrich: bool,
-        reason: str,
-        busy: bool,
-        model_identifier: str | None = None,
-        prompt_version: str | None = None,
-    ) -> None:
-        self._enrich_reason = reason
-        self._can_enrich = can_enrich
-        self._image_prompt_busy = busy
-        self._image_prompt_model_identifier = model_identifier
-        self._image_prompt_prompt_version = prompt_version
-        self._update_image_prompt_freshness()
-
-    def _update_image_prompt_freshness(self) -> None:
-        card = self._selected_card()
-        self._image_prompt_current = (
-            None
-            if card is None
-            else self._current_image_prompt_state(
-                self.controller.document,
-                card,
-            )
-        )
-        self._update_enrich_button()
-        self._refresh_generation_tooltips()
-
-    def _current_image_prompt_state(
-        self,
-        document: Stack,
-        card: Card,
-    ) -> bool | None:
-        image_prompt = card.active_revision.image_prompt
-        if image_prompt is None:
-            return None
-        source_description = (
-            self.description_edit.toPlainText()
-            if self._description_mode == "description"
-            else card.active_revision.description
-        )
-        reference_snapshots = image_prompt_reference_snapshots(document, card)
-        reference_is_usable = (
-            len(reference_snapshots) == len(card.active_revision.references)
-        )
-        visible_prompt = self.description_edit.toPlainText().strip()
-        has_manual_update = (
-            self._description_mode == "image_prompt"
-            and bool(visible_prompt)
-            and visible_prompt != image_prompt.text
-        )
-        return reference_is_usable and (
-            has_manual_update
-            or image_prompt.is_current(
-                source_description=source_description,
-                references=reference_snapshots,
-                model_identifier=self._image_prompt_model_identifier,
-                prompt_version=self._image_prompt_prompt_version,
-            )
-        )
-
-    def _update_enrich_button(self) -> None:
-        card = self._selected_card()
-        has_image_prompt = card is not None and card.active_revision.image_prompt is not None
-        if self._image_prompt_busy:
-            text = "Preparing Image Prompt…"
-            enabled = False
-        elif self._image_prompt_current is True:
-            text = "Image Prompt Current"
-            enabled = False
-        else:
-            text = "Update Image Prompt" if has_image_prompt else "Prepare Image Prompt"
-            enabled = self._can_enrich
-        self.enrich_button.setText(text)
-        self.enrich_button.setEnabled(enabled)
-        self.enrich_button.setAccessibleDescription(self._enrich_state_reason())
-
     def _refresh_generation_tooltips(self) -> None:
-        self.enrich_button.setToolTip(
-            self._tooltip_with_using(
-                self._enrich_state_reason(),
-                self._enrich_using_text,
-            )
-        )
         self.generate_background_button.setToolTip(
             self._tooltip_with_using(
                 self._generate_reason,
                 self._generate_using_text,
             )
         )
-
-    def _enrich_state_reason(self) -> str:
-        if self._image_prompt_busy:
-            return "Image Prompt preparation is running"
-        if self._image_prompt_current is True:
-            return "Current"
-        if self._image_prompt_current is False:
-            return self._tooltip_with_using(
-                "Out of date",
-                self._enrich_reason,
-            )
-        return self._enrich_reason
 
     @staticmethod
     def _tooltip_with_using(reason: str, using: str) -> str:

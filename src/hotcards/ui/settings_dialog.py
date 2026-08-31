@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Protocol
-from urllib.parse import urlsplit
 
 from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import (
@@ -14,16 +13,11 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QFormLayout,
     QLabel,
-    QLineEdit,
     QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
-from hotcards.generation.ollama_client import DEFAULT_OLLAMA_MODEL
-
-OLLAMA_ENDPOINT_KEY = "services/ollama_endpoint"
-OLLAMA_MODEL_KEY = "services/ollama_model"
 MFLUX_MODEL_KEY = "generation/mflux_model"
 STEP_COUNT_KEY = "generation/step_count"
 QUANTIZATION_KEY = "generation/quantization"
@@ -49,8 +43,6 @@ class SettingsStore(Protocol):
 class MachineSettings:
     """Non-portable generation configuration stored outside stack documents."""
 
-    ollama_endpoint: str = "http://localhost:11434"
-    ollama_model: str = DEFAULT_OLLAMA_MODEL
     mflux_model: str = "flux2-klein-4b"
     step_count: int = 4
     quantization: int | None = None
@@ -83,9 +75,6 @@ def load_machine_settings(settings: SettingsStore) -> MachineSettings:
     defaults = MachineSettings()
     quantization_value = settings.value(QUANTIZATION_KEY, "")
     quantization = _int_value(quantization_value, 0) if str(quantization_value).strip() else None
-    ollama_model = str(
-        settings.value(OLLAMA_MODEL_KEY, defaults.ollama_model)
-    ).strip() or defaults.ollama_model
     mflux_model = str(
         settings.value(MFLUX_MODEL_KEY, defaults.mflux_model)
     ).strip()
@@ -95,8 +84,6 @@ def load_machine_settings(settings: SettingsStore) -> MachineSettings:
     if mflux_model not in supported_mflux_models:
         mflux_model = defaults.mflux_model
     return MachineSettings(
-        ollama_endpoint=str(settings.value(OLLAMA_ENDPOINT_KEY, defaults.ollama_endpoint)).strip(),
-        ollama_model=ollama_model,
         mflux_model=mflux_model,
         step_count=max(
             1,
@@ -131,9 +118,6 @@ class SettingsDialog(QDialog):
         self.setObjectName("advancedSettingsDialog")
         self.setMinimumWidth(440)
 
-        self.ollama_endpoint_edit = QLineEdit()
-        self.ollama_endpoint_edit.setObjectName("ollamaEndpointEdit")
-
         self.step_count_spin = QSpinBox()
         self.step_count_spin.setObjectName("stepCountSpin")
         self.step_count_spin.setRange(1, 100)
@@ -153,7 +137,6 @@ class SettingsDialog(QDialog):
         )
 
         form = QFormLayout()
-        form.addRow("Ollama endpoint", self.ollama_endpoint_edit)
         form.addRow("Inference steps", self.step_count_spin)
         form.addRow("Quantization", self.quantization_combo)
         form.addRow("Seed behavior", self.random_seed_check)
@@ -186,7 +169,6 @@ class SettingsDialog(QDialog):
     def load(self) -> MachineSettings:
         """Load persisted values into the controls."""
         values = load_machine_settings(self.settings)
-        self.ollama_endpoint_edit.setText(values.ollama_endpoint)
         self.step_count_spin.setValue(values.step_count)
         quantization_index = self.quantization_combo.findData(values.quantization)
         self.quantization_combo.setCurrentIndex(max(0, quantization_index))
@@ -199,8 +181,6 @@ class SettingsDialog(QDialog):
         """Return the values currently displayed by the dialog."""
         current = load_machine_settings(self.settings)
         return MachineSettings(
-            ollama_endpoint=_validated_ollama_endpoint(self.ollama_endpoint_edit.text().strip()),
-            ollama_model=current.ollama_model,
             mflux_model=current.mflux_model,
             step_count=self.step_count_spin.value(),
             quantization=self.quantization_combo.currentData(),
@@ -211,7 +191,6 @@ class SettingsDialog(QDialog):
     def save(self) -> MachineSettings:
         """Persist non-sensitive values to the injected QSettings-compatible store."""
         values = self.machine_settings()
-        self.settings.setValue(OLLAMA_ENDPOINT_KEY, values.ollama_endpoint)
         self.settings.setValue(STEP_COUNT_KEY, values.step_count)
         self.settings.setValue(
             QUANTIZATION_KEY,
@@ -234,30 +213,11 @@ class SettingsDialog(QDialog):
         super().accept()
 
 
-def _validated_ollama_endpoint(value: str) -> str:
-    parsed = urlsplit(value)
-    if (
-        parsed.scheme not in {"http", "https"}
-        or parsed.hostname is None
-        or parsed.username is not None
-        or parsed.password is not None
-        or parsed.query
-        or parsed.fragment
-    ):
-        raise ValueError(
-            "Ollama endpoint must be an HTTP(S) service URL without credentials, "
-            "query parameters, or fragments."
-        )
-    return value
-
-
 __all__ = [
     "FIXED_SEED_KEY",
     "MFLUX_MODEL_KEY",
     "MFLUX_MODEL_OPTIONS",
     "MachineSettings",
-    "OLLAMA_ENDPOINT_KEY",
-    "OLLAMA_MODEL_KEY",
     "QUANTIZATION_KEY",
     "RANDOM_SEED_KEY",
     "STEP_COUNT_KEY",

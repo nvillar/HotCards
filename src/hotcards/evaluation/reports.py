@@ -33,35 +33,6 @@ def _write_json(path: Path, value: object) -> None:
     )
 
 
-def annotate_hotspots(
-    source_path: Path,
-    output_path: Path,
-    proposals: Sequence[Mapping[str, object]],
-) -> Path:
-    """Draw normalized production hotspot polygons and labels."""
-    with Image.open(source_path) as source:
-        image = source.convert("RGB")
-    draw = ImageDraw.Draw(image)
-    colors = ("#ff3b30", "#34c759", "#007aff", "#ff9500", "#af52de")
-    for index, proposal in enumerate(proposals):
-        color = colors[index % len(colors)]
-        label = str(proposal.get("label", f"Hotspot {index + 1}"))
-        for polygon in proposal.get("polygons", []):  # type: ignore[union-attr]
-            points = [
-                (
-                    round(float(point["x"]) * image.width),
-                    round(float(point["y"]) * image.height),
-                )
-                for point in polygon["points"]
-            ]
-            if len(points) >= 2:
-                draw.line(points + [points[0]], fill=color, width=max(2, image.width // 300))
-                draw.text((points[0][0] + 3, points[0][1] + 3), label, fill=color)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    image.save(output_path, format="PNG")
-    return output_path
-
-
 def create_contact_sheet(
     entries: Sequence[tuple[Path, str]],
     output_path: Path,
@@ -99,7 +70,6 @@ def _phase_row(
     suite: str,
     axis: str,
     case_id: object = "",
-    ollama_model: object = "",
     mflux_model: object = "",
     phase: str = "",
     record: Mapping[str, object],
@@ -137,7 +107,6 @@ def _phase_row(
         "suite": suite,
         "axis": axis,
         "case_id": case_id,
-        "ollama_model": ollama_model,
         "mflux_model": mflux_model,
         "phase": phase,
         "status": record.get("status", "success"),
@@ -164,33 +133,6 @@ def _summary_rows(result: Mapping[str, object]) -> list[dict[str, object]]:
     version = str(result.get("result_version", ""))
     rows: list[dict[str, object]] = []
     if version.startswith("image-result"):
-        for item in result.get("prompt_axis", []):  # type: ignore[union-attr]
-            for phase in ("cold", "warm"):
-                record = dict(item[phase])
-                record["metrics"] = item[f"{phase}_metrics"]
-                record["rubric"] = item.get("rubric")
-                rows.append(
-                    _phase_row(
-                        suite="images",
-                        axis="ollama_prompt",
-                        case_id=item["case_id"],
-                        ollama_model=item["model"],
-                        phase=phase,
-                        record=record,
-                    )
-                )
-        for item in result.get("prompt_downstream_axis", []):  # type: ignore[union-attr]
-            rows.append(
-                _phase_row(
-                    suite="images",
-                    axis="prompt_downstream",
-                    case_id=item["case_id"],
-                    ollama_model=item["ollama_model"],
-                    mflux_model=item["mflux_model"],
-                    phase="generation",
-                    record={**item["generation"], "rubric": item.get("rubric")},
-                )
-            )
         for item in result.get("mflux_axis", []):  # type: ignore[union-attr]
             for phase in ("cold", "warm"):
                 rows.append(
@@ -207,71 +149,6 @@ def _summary_rows(result: Mapping[str, object]) -> list[dict[str, object]]:
                         },
                     )
                 )
-    elif version.startswith("hotspot-result"):
-        for item in result.get("models", []):  # type: ignore[union-attr]
-            for phase in ("cold", "warm"):
-                rows.append(
-                    _phase_row(
-                        suite="hotspots",
-                        axis="ollama_hotspot",
-                        case_id=item["case_id"],
-                        ollama_model=item["model"],
-                        phase=phase,
-                        record=item[phase],
-                    )
-                )
-        for item in result.get("ablations", []):  # type: ignore[union-attr]
-            rows.append(
-                _phase_row(
-                    suite="hotspots",
-                    axis=f"ablation:{item['name']}",
-                    ollama_model=item["model"],
-                    phase=str(item["name"]),
-                    record=item["result"],
-                )
-            )
-        for item in result.get("recorded_regressions", []):  # type: ignore[union-attr]
-            rows.append(
-                _phase_row(
-                    suite="hotspots",
-                    axis="recorded_regression",
-                    phase=str(item["name"]),
-                    record=item,
-                )
-            )
-    elif version.startswith("e2e-result"):
-        for item in result.get("candidates", []):  # type: ignore[union-attr]
-            for stage in item.get("stages", []):
-                rows.append(
-                    _phase_row(
-                        suite="e2e",
-                        axis=str(stage["name"]),
-                        case_id=item["case_id"],
-                        ollama_model=item["ollama_model"],
-                        mflux_model=item["mflux_model"],
-                        phase=str(stage["name"]),
-                        record={
-                            **stage,
-                            "render_prompt": item.get("render_prompt"),
-                        },
-                    )
-                )
-    elif version.startswith("image-prompt-benchmark-result"):
-        for item in result.get("results", []):  # type: ignore[union-attr]
-            rows.append(
-                _phase_row(
-                    suite="image_prompts",
-                    axis="image_prompt_preparation",
-                    case_id=item["case_id"],
-                    ollama_model=item["model"],
-                    phase=f"repetition-{item['repetition']}",
-                    record={
-                        **item,
-                        "render_prompt": item.get("image_prompt"),
-                        "rubric": item.get("rubric"),
-                    },
-                )
-            )
     elif version.startswith("smoke-result"):
         for stage_name, stage in result.get("stages", {}).items():  # type: ignore[union-attr]
             if isinstance(stage, Mapping) and ("cold" in stage or "warm" in stage):
@@ -281,7 +158,6 @@ def _summary_rows(result: Mapping[str, object]) -> list[dict[str, object]]:
                             _phase_row(
                                 suite="smoke",
                                 axis=str(stage_name),
-                                ollama_model=result.get("ollama_model", ""),
                                 mflux_model=result.get("mflux_model", ""),
                                 phase=phase,
                                 record=stage[phase],
@@ -307,65 +183,12 @@ def _artifact_entries(
     entries: list[tuple[Path, str]] = []
     version = str(result.get("result_version", ""))
     if version.startswith("image-result"):
-        for item in result.get("prompt_downstream_axis", []):  # type: ignore[union-attr]
-            path_value = item["generation"].get("artifact_path")
-            if path_value:
-                path = safe_run_path(run_dir, path_value)
-                entries.append((path, f"{item['case_id']}: {item['ollama_model']}"))
         for item in result.get("mflux_axis", []):  # type: ignore[union-attr]
             for phase in ("cold", "warm"):
                 path_value = item[phase].get("artifact_path")
                 if path_value:
                     path = safe_run_path(run_dir, path_value)
                     entries.append((path, f"{item['case_id']}: {item['model']} {phase}"))
-    elif version.startswith("e2e-result"):
-        for item in result.get("candidates", []):  # type: ignore[union-attr]
-            path_value = item.get("artifact_path")
-            if path_value:
-                entries.append(
-                    (
-                        safe_run_path(run_dir, path_value),
-                        f"{item['case_id']}: {item['ollama_model']}",
-                    )
-                )
-    return entries
-
-
-def _render_annotations(
-    run_dir: Path,
-    result: Mapping[str, object],
-) -> list[tuple[Path, str]]:
-    entries: list[tuple[Path, str]] = []
-    version = str(result.get("result_version", ""))
-    if version.startswith("hotspot-result"):
-        cases = {item["case_id"]: item for item in result.get("cases", [])}  # type: ignore[union-attr]
-        for item in result.get("models", []):  # type: ignore[union-attr]
-            source = safe_run_path(run_dir, cases[item["case_id"]]["artifact_image_path"])
-            for phase in ("cold", "warm"):
-                record = item[phase]
-                if record.get("status") != "success":
-                    continue
-                relative = (
-                    Path("annotations")
-                    / str(item["case_id"])
-                    / f"{str(item['model']).replace(':', '-')}-{phase}.png"
-                )
-                output = safe_run_path(run_dir, relative)
-                annotate_hotspots(source, output, record["result"]["proposals"])
-                entries.append((output, f"{item['case_id']}: {item['model']} {phase}"))
-    elif version.startswith("e2e-result"):
-        for item in result.get("candidates", []):  # type: ignore[union-attr]
-            if not item.get("artifact_path") or not item.get("hotspot_proposals"):
-                continue
-            source = safe_run_path(run_dir, item["artifact_path"])
-            relative = (
-                Path("annotations")
-                / str(item["case_id"])
-                / f"{str(item['ollama_model']).replace(':', '-')}.png"
-            )
-            output = safe_run_path(run_dir, relative)
-            annotate_hotspots(source, output, item["hotspot_proposals"])
-            entries.append((output, f"{item['case_id']}: {item['ollama_model']}"))
     return entries
 
 
@@ -423,9 +246,8 @@ def render_reports(result_path: Path) -> dict[str, Path]:
     run_dir = result_path.parent
     result = json.loads(result_path.read_text(encoding="utf-8"))
     rows = _summary_rows(result)
-    annotations = _render_annotations(run_dir, result)
     artifacts = _artifact_entries(run_dir, result)
-    sheet_entries = _visual_entries(artifacts, annotations)
+    sheet_entries = _visual_entries(artifacts, ())
     contact_sheet_path = run_dir / "contact-sheet.png"
     contact_sheet = create_contact_sheet(sheet_entries, contact_sheet_path)
     stage_metrics: list[dict[str, object]] = []
@@ -464,7 +286,6 @@ def render_reports(result_path: Path) -> dict[str, Path]:
             "suite",
             "axis",
             "case_id",
-            "ollama_model",
             "mflux_model",
             "phase",
             "status",

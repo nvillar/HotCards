@@ -24,7 +24,6 @@ from hotcards.application.commands import (
     DuplicateRevisionCommand,
     RenameCardCommand,
     ReplaceRevisionBackgroundCommand,
-    SetRevisionImagePromptCommand,
 )
 from hotcards.application.document_controller import DocumentController
 from hotcards.application.document_session import DocumentSession, DocumentSessionState
@@ -40,7 +39,6 @@ from hotcards.domain.models import (
     HotspotSet,
     ImageGenerationInputs,
     ImageGenerationMetadata,
-    ImagePrompt,
     Interaction,
     KeyDefinition,
     NavigateAction,
@@ -91,20 +89,8 @@ class FakeWorkers(QObject):
 
     def __init__(self) -> None:
         super().__init__()
-        self.ollama_operations: list[FakeOperation] = []
         self.mflux_operations: list[FakeOperation] = []
         self.shutdown_calls = 0
-
-    def check_ollama(
-        self,
-        _check: object,
-        *,
-        emit_diagnostic: bool = True,
-    ) -> FakeOperation:
-        assert not emit_diagnostic
-        operation = FakeOperation()
-        self.ollama_operations.append(operation)
-        return operation
 
     def check_mflux(
         self,
@@ -116,10 +102,6 @@ class FakeWorkers(QObject):
         operation = FakeOperation()
         self.mflux_operations.append(operation)
         return operation
-
-    def run_ollama(self, _work: object, *, stage: str) -> FakeOperation:
-        assert stage == "preparing Image Prompt"
-        return FakeOperation()
 
     def shutdown(self, *, wait_milliseconds: int = 0) -> None:
         self.shutdown_calls += 1
@@ -198,14 +180,8 @@ def application() -> QApplication:
 
 
 def _stack() -> Stack:
-    first = CardRevision(
-        description="First",
-        image_prompt=ImagePrompt(text="First prompt", source_description="First"),
-    )
-    second = CardRevision(
-        description="Second",
-        image_prompt=ImagePrompt(text="Second prompt", source_description="Second"),
-    )
+    first = CardRevision(description="First")
+    second = CardRevision(description="Second")
     card = Card(
         name="Foyer",
         revisions=(first, second),
@@ -227,7 +203,6 @@ def _generated_background(
         generation_metadata=ImageGenerationMetadata(
             inputs=ImageGenerationInputs(
                 description=description,
-                image_prompt=description,
             ),
             render_prompt=description,
             model_identifier="test",
@@ -254,7 +229,6 @@ def _window(
         workers,  # type: ignore[arg-type]
         FakeSettings(),
         availability_checks={
-            AdapterKind.OLLAMA: lambda: None,
             AdapterKind.MFLUX: lambda: None,
         },
         background_workflow=background,  # type: ignore[arg-type]
@@ -694,17 +668,9 @@ def test_successful_save_as_cancels_generation_and_expires_undo(
             "HotCards Stack (*.hotcards)",
         ),
     )
-    prompt_cancellations: list[bool] = []
-    monkeypatch.setattr(
-        window.image_prompt_workflow,
-        "cancel",
-        lambda: prompt_cancellations.append(True),
-    )
-
     window.save_as()
 
     assert background.cancel_calls == 1
-    assert prompt_cancellations == [True]
     assert window.notification_bar.current_key != "undo"
     assert not controller.can_undo
 
@@ -789,8 +755,8 @@ def test_author_and_run_modes_apply_consistent_read_only_chrome(
     assert window.overlay_label_action.isVisible()
     assert window.overlay_selector_action.isVisible()
     assert not window.overlay_selector.isHidden()
-    assert window.llm_model_label.isHidden()
-    assert window.llm_model_combo.isHidden()
+    assert not hasattr(window, "llm_model_label")
+    assert not hasattr(window, "llm_model_combo")
     assert window.image_model_label.isHidden()
     assert window.image_model_combo.isHidden()
 
@@ -804,8 +770,6 @@ def test_author_and_run_modes_apply_consistent_read_only_chrome(
     assert not window.revision_combo.isHidden()
     assert window.revision_combo.isEnabled()
     assert not window.add_revision_button.isHidden()
-    assert not window.llm_model_label.isHidden()
-    assert not window.llm_model_combo.isHidden()
     assert not window.image_model_label.isHidden()
     assert not window.image_model_combo.isHidden()
     assert not window.run_controls_separator.isVisible()
@@ -828,23 +792,16 @@ def test_status_bar_is_passive_and_ai_recovery_uses_notification_bar(
     window, controller, _workers, _background = _window()
     window.apply_availability_diagnostic(
         AvailabilityDiagnostic(
-            adapter=AdapterKind.OLLAMA,
-            available=False,
-            message="Ollama is unavailable",
-        )
-    )
-    window.apply_availability_diagnostic(
-        AvailabilityDiagnostic(
             adapter=AdapterKind.MFLUX,
-            available=True,
-            message="MFLUX is available",
+            available=False,
+            message="MFLUX is unavailable",
         )
     )
 
     assert not hasattr(window, "check_services_button")
     assert not hasattr(window, "review_settings_button")
     assert not hasattr(window, "service_status_label")
-    assert "Ollama is unavailable" in window.llm_model_combo.toolTip()
+    assert "MFLUX is unavailable" in window.image_model_combo.toolTip()
     assert window.notification_bar.current_key == "ai-services"
     assert window.notification_bar.primary_button.text() == "Settings"
     assert window.notification_bar.secondary_button.text() == "Check Again"
@@ -852,16 +809,16 @@ def test_status_bar_is_passive_and_ai_recovery_uses_notification_bar(
     window.notification_bar.dismiss_current()
     window.apply_availability_diagnostic(
         AvailabilityDiagnostic(
-            adapter=AdapterKind.OLLAMA,
+            adapter=AdapterKind.MFLUX,
             available=True,
-            message="Ollama is available",
+            message="MFLUX is available",
         )
     )
     window.apply_availability_diagnostic(
         AvailabilityDiagnostic(
-            adapter=AdapterKind.OLLAMA,
+            adapter=AdapterKind.MFLUX,
             available=False,
-            message="Ollama is unavailable again",
+            message="MFLUX is unavailable again",
         )
     )
     assert window.notification_bar.current_key == "ai-services"
@@ -882,80 +839,31 @@ def test_bottom_model_selectors_persist_and_follow_operation_state(
     settings = window.settings
     assert isinstance(settings, FakeSettings)
 
-    window._availability_check_succeeded(
-        AdapterKind.OLLAMA,
-        window._diagnostic_generation,
-        ("llama3.2:latest", "qwen3.5:9b-mlx"),
-    )
-    assert [
-        window.llm_model_combo.itemData(index)
-        for index in range(window.llm_model_combo.count())
-    ] == ["llama3.2:latest", "qwen3.5:9b-mlx"]
-    window.llm_model_combo.setCurrentIndex(
-        window.llm_model_combo.findData("llama3.2:latest")
-    )
-    assert settings.values["services/ollama_model"] == "llama3.2:latest"
-
     window.image_model_combo.setCurrentIndex(
         window.image_model_combo.findData("flux2-klein-9b-kv")
     )
     assert settings.values["generation/mflux_model"] == "flux2-klein-9b-kv"
     assert window.image_model_combo.currentText() == "FLUX.2 Klein 9B KV"
-    assert window.image_model_combo.toolTip() == window.llm_model_combo.toolTip()
 
     background.busy = True
-    window.image_prompt_workflow._busy = False
     window._update_generation_actions()
-    assert not window.llm_model_combo.isEnabled()
     assert not window.image_model_combo.isEnabled()
-
-    window._availability_check_succeeded(
-        AdapterKind.OLLAMA,
-        window._diagnostic_generation,
-        ("qwen3.5:9b-mlx",),
-    )
-    assert background.cancel_calls == 1
-    assert settings.values["services/ollama_model"] == "qwen3.5:9b-mlx"
-
-    window._availability_check_succeeded(
-        AdapterKind.OLLAMA,
-        window._diagnostic_generation,
-        ("llama3.2:latest", "qwen3.5:9b-mlx"),
-    )
-    background.busy = True
-    window._llm_model_changed(
-        window.llm_model_combo.findData("llama3.2:latest")
-    )
-    assert background.cancel_calls == 2
-    assert settings.values["services/ollama_model"] == "llama3.2:latest"
 
     background.busy = False
-    window.image_prompt_workflow._busy = False
     window.mode_button.click()
-    assert not window.llm_model_combo.isEnabled()
     assert not window.image_model_combo.isEnabled()
 
 
-def test_generation_failure_keeps_current_image_prompt_reusable(
+def test_generation_failure_keeps_description_reusable(
     application: QApplication,
 ) -> None:
-    revision = CardRevision(
-        description="A courtyard",
-        image_prompt=ImagePrompt(
-            text="A prepared courtyard",
-            source_description="A courtyard",
-            model_identifier="qwen3.5:9b-mlx",
-            prompt_version=main_window_module.IMAGE_PROMPT_PREPARATION_VERSION,
-        ),
-    )
+    revision = CardRevision(description="A courtyard")
     card = Card(name="Card", revisions=(revision,))
     window, _controller, _workers, background = _window(
         Stack(name="Demo", cards=(card,))
     )
-    window._availability[AdapterKind.OLLAMA] = True
     window._availability[AdapterKind.MFLUX] = True
     window._update_generation_actions()
-    assert window.inspector.has_current_image_prompt()
     assert window.inspector.generate_background_button.isEnabled()
 
     background.busy = True
@@ -963,114 +871,8 @@ def test_generation_failure_keeps_current_image_prompt_reusable(
     background.busy = False
     background.failed.emit(RuntimeError("transient MFLUX failure"))
 
-    assert window.inspector.has_current_image_prompt()
-    assert window.inspector.enrich_button.text() == "Image Prompt Current"
+    assert window.inspector.description_edit.toPlainText() == "A courtyard"
     assert window.inspector.generate_background_button.isEnabled()
-
-
-def test_manual_image_prompt_edit_reenables_generation_after_description_change(
-    application: QApplication,
-) -> None:
-    revision = CardRevision(
-        description="A courtyard",
-        image_prompt=ImagePrompt(
-            text="A prepared courtyard",
-            source_description="A courtyard",
-            model_identifier="qwen3.5:9b-mlx",
-            prompt_version=main_window_module.IMAGE_PROMPT_PREPARATION_VERSION,
-        ),
-    )
-    card = Card(name="Card", revisions=(revision,))
-    window, controller, _workers, background = _window(Stack(name="Demo", cards=(card,)))
-    window._availability[AdapterKind.OLLAMA] = True
-    window._availability[AdapterKind.MFLUX] = True
-    window._update_generation_actions()
-
-    window.inspector.description_edit.setPlainText("A moonlit courtyard")
-    assert window.inspector.commit_revision_metadata()
-    assert not window.inspector.generate_background_button.isEnabled()
-
-    window.inspector.image_prompt_button.click()
-    window.inspector.description_edit.setPlainText("A manually revised moonlit courtyard")
-
-    assert window.inspector.generate_background_button.isEnabled()
-    window._generate_background()
-
-    assert background.generate_calls == [card.id]
-    image_prompt = controller.document.cards[0].active_revision.image_prompt
-    assert image_prompt is not None
-    assert image_prompt.text == "A manually revised moonlit courtyard"
-    assert image_prompt.source_description == "A moonlit courtyard"
-    assert image_prompt.model_identifier == "qwen3.5:9b-mlx"
-    assert image_prompt.prompt_version == (main_window_module.IMAGE_PROMPT_PREPARATION_VERSION)
-    window.close()
-
-
-def test_ollama_selector_disables_when_no_vision_model_is_installed(
-    application: QApplication,
-) -> None:
-    window, _controller, _workers, _background = _window()
-
-    window._availability_check_succeeded(
-        AdapterKind.OLLAMA,
-        window._diagnostic_generation,
-        (),
-    )
-
-    assert window.llm_model_combo.count() == 1
-    assert window.llm_model_combo.currentData() is None
-    assert window.llm_model_combo.currentText() == (
-        "No vision-capable models installed"
-    )
-    assert not window.llm_model_combo.isEnabled()
-    assert not window.inspector.enrich_button.isEnabled()
-
-
-def test_changing_llm_model_re_enables_image_prompt_preparation(
-    application: QApplication,
-) -> None:
-    revision = CardRevision(
-        description="A courtyard",
-        image_prompt=ImagePrompt(
-            text="A richly detailed courtyard",
-            source_description="A courtyard",
-            model_identifier="qwen3.5:9b-mlx",
-            prompt_version=main_window_module.IMAGE_PROMPT_PREPARATION_VERSION,
-        ),
-    )
-    card = Card(name="Card", revisions=(revision,))
-    window, _controller, _workers, _background = _window(
-        Stack(name="Demo", cards=(card,))
-    )
-    models = ("llama3.2:latest", "qwen3.5:9b-mlx")
-    window._availability_check_succeeded(
-        AdapterKind.OLLAMA,
-        window._diagnostic_generation,
-        models,
-    )
-    assert window.inspector.enrich_button.text() == (
-        "Image Prompt Current"
-    )
-    assert not window.inspector.enrich_button.isEnabled()
-
-    window.llm_model_combo.setCurrentIndex(
-        window.llm_model_combo.findData("llama3.2:latest")
-    )
-    assert window.inspector.enrich_button.text() == (
-        "Update Image Prompt"
-    )
-    assert not window.inspector.enrich_button.isEnabled()
-
-    window._availability_check_succeeded(
-        AdapterKind.OLLAMA,
-        window._diagnostic_generation,
-        models,
-    )
-
-    assert window.inspector.enrich_button.text() == (
-        "Update Image Prompt"
-    )
-    assert window.inspector.enrich_button.isEnabled()
 
 
 def test_generate_replacement_starts_without_a_second_confirmation(
@@ -1112,15 +914,10 @@ def test_generate_replacement_starts_without_a_second_confirmation(
     assert background.generate_calls == [card_id, card_id]
 
 
-def test_generate_is_disabled_without_description_even_with_image_prompt(
+def test_generate_is_disabled_without_description(
     application: QApplication,
 ) -> None:
-    revision = CardRevision(
-        image_prompt=ImagePrompt(
-            text="A richly detailed courtyard",
-            source_description="",
-        ),
-    )
+    revision = CardRevision()
     card = Card(name="Card", revisions=(revision,))
     window, _controller, _workers, background = _window(
         Stack(name="Demo", cards=(card,))
@@ -1150,74 +947,17 @@ def test_notification_undo_expires_after_another_command(
     assert controller.document.cards[0].name == "Second"
 
 
-def test_re_enrich_click_is_not_consumed_by_description_commit(
-    application: QApplication,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    revision = CardRevision(
-        description="A courtyard",
-        image_prompt=ImagePrompt(
-            text="A richly detailed courtyard",
-            source_description="A courtyard",
-        ),
-    )
-    card = Card(name="Card", revisions=(revision,))
-    window, _controller, _workers, _background = _window(
-        Stack(name="Demo", cards=(card,))
-    )
-    window.show()
-    window._availability[AdapterKind.OLLAMA] = True
-    window._update_generation_actions()
-    window.inspector.description_button.click()
-    window.inspector.description_edit.setPlainText("A changed courtyard")
-    window.inspector.description_edit.setFocus()
-    application.processEvents()
-    starts: list[object] = []
-    monkeypatch.setattr(
-        window.image_prompt_workflow,
-        "start",
-        starts.append,
-    )
-
-    QTest.mousePress(
-        window.inspector.enrich_button,
-        Qt.MouseButton.LeftButton,
-    )
-    application.processEvents()
-    assert starts == []
-    assert _controller.document.cards[0].active_revision.description == (
-        "A changed courtyard"
-    )
-    QTest.mouseRelease(
-        window.inspector.enrich_button,
-        Qt.MouseButton.LeftButton,
-    )
-
-    assert starts == [card.id]
-    window.close()
-
-
-@pytest.mark.parametrize("mode", ["description", "image_prompt"])
 def test_mouse_focus_commit_does_not_render_before_button_release(
     application: QApplication,
     monkeypatch: pytest.MonkeyPatch,
-    mode: str,
 ) -> None:
-    revision = CardRevision(
-        description="A courtyard",
-        image_prompt=ImagePrompt(
-            text="A detailed courtyard",
-            source_description="A courtyard",
-        ),
-    )
+    revision = CardRevision(description="A courtyard")
     card = Card(name="Card", revisions=(revision,))
     window, controller, _workers, _background = _window(
         Stack(name="Demo", cards=(card,))
     )
     window.show()
-    if mode == "image_prompt":
-        window.inspector.image_prompt_button.click()
-    draft = f"A changed {mode}"
+    draft = "A changed courtyard"
     window.inspector.description_edit.setPlainText(draft)
     window.inspector.description_edit.setFocus()
     application.processEvents()
@@ -1234,11 +974,7 @@ def test_mouse_focus_commit_does_not_render_before_button_release(
     )
 
     changed_revision = controller.document.cards[0].active_revision
-    if mode == "description":
-        assert changed_revision.description == draft
-    else:
-        assert changed_revision.image_prompt is not None
-        assert changed_revision.image_prompt.text == draft
+    assert changed_revision.description == draft
     assert renders == []
     window.close()
 
@@ -1262,14 +998,16 @@ def test_generated_result_can_move_to_a_new_complete_version(
     window, controller, _workers, _background = _window(
         Stack(name="Demo", cards=(card,))
     )
+    background = _generated_background(
+        asset_id=uuid4(),
+        image_path=f"assets/cards/{card.id}/generated.png",
+        description=original.description,
+    )
     changed = controller.execute(
-        SetRevisionImagePromptCommand(
+        ReplaceRevisionBackgroundCommand(
             card_id=card.id,
             revision_id=original.id,
-            value=ImagePrompt(
-                text="A richly detailed courtyard",
-                source_description=original.description,
-            ),
+            background=background,
         )
     )
     window.render_document(changed)
@@ -1277,7 +1015,7 @@ def test_generated_result_can_move_to_a_new_complete_version(
     assert token is not None
     window._show_generated_revision_notification(
         GeneratedRevisionChange(
-            message="Image Prompt prepared",
+            message="Image generated",
             token=token,
             card_id=card.id,
             revision_id=original.id,
@@ -1286,7 +1024,7 @@ def test_generated_result_can_move_to_a_new_complete_version(
     )
 
     assert window.notification_bar.message_label.text() == (
-        "Image Prompt prepared on the current version"
+        "Image generated on the current version"
     )
     assert window.notification_bar.primary_button.text() == "Create New Version"
     assert window.notification_bar.secondary_button.text() == "Undo"
@@ -1296,15 +1034,12 @@ def test_generated_result_can_move_to_a_new_complete_version(
     changed_card = controller.document.cards[0]
     assert len(changed_card.revisions) == 2
     assert changed_card.revisions[0].id == original.id
-    assert changed_card.revisions[0].image_prompt is None
+    assert changed_card.revisions[0].background is None
     assert changed_card.revisions[0].hotspot_set == original.hotspot_set
     assert changed_card.active_revision.id != original.id
     assert changed_card.active_revision.description == original.description
     assert changed_card.active_revision.hotspot_set == original.hotspot_set
-    assert changed_card.active_revision.image_prompt is not None
-    assert changed_card.active_revision.image_prompt.text == (
-        "A richly detailed courtyard"
-    )
+    assert changed_card.active_revision.background == background
     assert window.notification_bar.message_label.text() == "New version created"
     assert window.notification_bar.primary_button.text() == "Undo"
     assert window.notification_bar.secondary_button.isHidden()
@@ -1313,63 +1048,7 @@ def test_generated_result_can_move_to_a_new_complete_version(
     restored_card = controller.document.cards[0]
     assert len(restored_card.revisions) == 1
     assert restored_card.active_revision.id == original.id
-    assert restored_card.active_revision.image_prompt is not None
-    assert restored_card.active_revision.image_prompt.text == (
-        "A richly detailed courtyard"
-    )
-
-
-def test_preparation_completion_selects_image_prompt(
-    application: QApplication,
-) -> None:
-    previous = CardRevision(
-        description="A changed courtyard",
-        image_prompt=ImagePrompt(
-            text="An older Image Prompt",
-            source_description="A courtyard",
-        ),
-    )
-    card = Card(name="Card", revisions=(previous,))
-    window, controller, _workers, _background = _window(
-        Stack(name="Demo", cards=(card,))
-    )
-    window.inspector.description_button.click()
-    assert window.inspector.description_button.isChecked()
-    changed = controller.execute(
-        SetRevisionImagePromptCommand(
-            card_id=card.id,
-            revision_id=previous.id,
-            value=ImagePrompt(
-                text="A newly prepared courtyard",
-                source_description=previous.description,
-            ),
-        )
-    )
-    window.render_document(changed)
-    assert window.inspector.description_button.isChecked()
-    window.inspector.description_edit.setFocus()
-    application.processEvents()
-    token = controller.current_undo_token
-    assert token is not None
-
-    window.image_prompt_workflow.generation_applied.emit(
-        GeneratedRevisionChange(
-            message="Image Prompt prepared",
-            token=token,
-            card_id=card.id,
-            revision_id=previous.id,
-            previous_revision=previous,
-        )
-    )
-
-    assert window.inspector.image_prompt_button.isChecked()
-    assert window.inspector.description_edit.toPlainText() == (
-        "A newly prepared courtyard"
-    )
-    assert window.notification_bar.message_label.text() == (
-        "Image Prompt prepared on the current version"
-    )
-    window.close()
+    assert restored_card.active_revision.background == background
 
 
 def test_dismissing_generated_result_keeps_it_on_current_version(
@@ -1380,14 +1059,16 @@ def test_dismissing_generated_result_keeps_it_on_current_version(
     window, controller, _workers, _background = _window(
         Stack(name="Demo", cards=(card,))
     )
+    background = _generated_background(
+        asset_id=uuid4(),
+        image_path=f"assets/cards/{card.id}/generated.png",
+        description=original.description,
+    )
     changed = controller.execute(
-        SetRevisionImagePromptCommand(
+        ReplaceRevisionBackgroundCommand(
             card_id=card.id,
             revision_id=original.id,
-            value=ImagePrompt(
-                text="A richly detailed courtyard",
-                source_description=original.description,
-            ),
+            background=background,
         )
     )
     window.render_document(changed)
@@ -1395,7 +1076,7 @@ def test_dismissing_generated_result_keeps_it_on_current_version(
     assert token is not None
     window._show_generated_revision_notification(
         GeneratedRevisionChange(
-            message="Image Prompt prepared",
+            message="Image generated",
             token=token,
             card_id=card.id,
             revision_id=original.id,
@@ -1407,37 +1088,9 @@ def test_dismissing_generated_result_keeps_it_on_current_version(
 
     revision = controller.document.cards[0].active_revision
     assert revision.id == original.id
-    assert revision.image_prompt is not None
-    assert revision.image_prompt.text == "A richly detailed courtyard"
+    assert revision.background == background
     assert controller.current_undo_token == token
     assert window._generated_revision_change is None
-
-
-def test_description_edits_and_notification_undo_cancel_preparation(
-    application: QApplication,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    window, controller, _workers, _background = _window()
-    cancellations: list[bool] = []
-    monkeypatch.setattr(
-        window.image_prompt_workflow,
-        "cancel",
-        lambda: cancellations.append(True),
-    )
-
-    window.inspector.description_edit.setPlainText("Edited draft")
-    assert cancellations == [True]
-
-    card = controller.document.cards[0]
-    changed = controller.execute(RenameCardCommand(card_id=card.id, name="Renamed"))
-    window.render_document(changed)
-    token = controller.current_undo_token
-    assert token is not None
-    window._show_undo_notification("Renamed", token)
-    window._undo_notification()
-
-    assert cancellations == [True, True]
-    assert controller.document.cards[0].name == "Foyer"
 
 
 def test_notification_undo_cannot_mutate_document_in_run_mode(
@@ -1460,13 +1113,14 @@ def test_notification_undo_cannot_mutate_document_in_run_mode(
 def test_new_workflow_progress_clears_stale_failure_notification(
     application: QApplication,
 ) -> None:
-    window, controller, _workers, _background = _window()
+    window, controller, _workers, background = _window()
     window._show_error(
-        "image-prompt-error",
-        "Image Prompt preparation failed",
+        "background-error",
+        "Image generation failed",
         detail="Old failure",
     )
-    window._image_prompt_progress_changed("Preparing Image Prompt…")
+    background.busy = True
+    background.progress_changed.emit("Generating image…")
 
     card = controller.document.cards[0]
     controller.execute(RenameCardCommand(card_id=card.id, name="Renamed"))
@@ -1476,28 +1130,12 @@ def test_new_workflow_progress_clears_stale_failure_notification(
     assert window.notification_bar.current_key == "undo"
 
 
-def test_generation_progress_bar_is_indeterminate_for_text_and_uses_image_steps(
+def test_generation_progress_bar_uses_image_steps(
     application: QApplication,
 ) -> None:
     window, _controller, _workers, background = _window()
     progress_container = window.generation_progress_container
     progress = window.generation_progress_bar
-
-    window.image_prompt_workflow._busy = True
-    window.image_prompt_workflow.progress_changed.emit(
-        "Preparing Image Prompt..."
-    )
-    assert not progress_container.isHidden()
-    assert progress.minimum() == 0
-    assert progress.maximum() == 0
-    assert not progress.isTextVisible()
-    assert window.generation_step_label.text() == (
-        "Preparing Image Prompt..."
-    )
-
-    window.image_prompt_workflow._busy = False
-    window.image_prompt_workflow.progress_changed.emit("Image Prompt prepared")
-    assert progress_container.isHidden()
 
     background.busy = True
     background.progress_changed.emit("Generating image...")
@@ -1508,14 +1146,6 @@ def test_generation_progress_bar_is_indeterminate_for_text_and_uses_image_steps(
 
     background.generation_progress_changed.emit(1, 4)
     assert progress.minimum() == 0
-    assert progress.maximum() == 4
-    assert progress.value() == 1
-
-    window.image_prompt_workflow._busy = True
-    window.image_prompt_workflow.progress_changed.emit(
-        "Preparing Image Prompt..."
-    )
-    assert window.generation_step_label.text() == "Generating image..."
     assert progress.maximum() == 4
     assert progress.value() == 1
 
@@ -1531,49 +1161,18 @@ def test_generation_progress_bar_is_indeterminate_for_text_and_uses_image_steps(
 
     background.busy = False
     background.progress_changed.emit("Image generated")
-    assert not progress_container.isHidden()
-    assert progress.minimum() == 0
-    assert progress.maximum() == 0
-
-    window.image_prompt_workflow._busy = False
-    window.image_prompt_workflow.progress_changed.emit("Image Prompt prepared")
     assert progress_container.isHidden()
     assert window.generation_step_label.text() == ""
 
 
 def test_generation_cancel_button_cancels_the_active_process(
     application: QApplication,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     window, _controller, _workers, background = _window()
-    prompt_cancellations: list[bool] = []
-    monkeypatch.setattr(
-        window.image_prompt_workflow,
-        "cancel",
-        lambda: prompt_cancellations.append(True),
-    )
-
-    window.image_prompt_workflow._busy = True
-    window.image_prompt_workflow.progress_changed.emit(
-        "Preparing Image Prompt..."
-    )
-    assert not window.cancel_generation_button.isHidden()
-
-    window.cancel_generation_button.click()
-
-    assert prompt_cancellations == [True]
-    assert background.cancel_calls == 0
-    assert (
-        window.notification_bar.message_label.text()
-        == "Image Prompt preparation cancelled"
-    )
-
-    window.image_prompt_workflow._busy = False
     background.busy = True
     background.progress_changed.emit("Generating image...")
     window.cancel_generation_button.click()
 
-    assert prompt_cancellations == [True]
     assert background.cancel_calls == 1
     assert not background.busy
 
@@ -1595,8 +1194,8 @@ def test_document_replacement_clears_document_specific_notifications(
     window, _controller, _workers, background = _window()
     background.busy = True
     window._show_error(
-        "image-prompt-error",
-        "Image Prompt preparation failed",
+        "background-error",
+        "Image generation failed",
     )
     window._set_canvas_card_name_error("Invalid card name")
     window.inspector.set_hotspot_error("Invalid hotspot")

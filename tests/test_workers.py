@@ -1,11 +1,11 @@
-"""Qt event-loop-safe tests for bounded generation workers."""
+"""Qt event-loop-safe tests for serialized MFLUX workers."""
 
 from __future__ import annotations
 
 import os
 from collections.abc import Iterator
 from threading import Event, Lock, get_ident
-from time import monotonic, sleep
+from time import sleep
 
 import pytest
 
@@ -18,10 +18,9 @@ from hotcards.application.workers import (
     AdapterKind,
     AdapterWorkers,
     OperationStatus,
-    WorkerFailure,
     WorkerFailureKind,
 )
-from hotcards.generation.errors import ModelResponseError, ServiceUnavailableError
+from hotcards.generation.errors import ModelUnavailableError
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -46,46 +45,23 @@ def spin_event_loop(milliseconds: int) -> None:
     loop.exec()
 
 
-def test_ollama_success_runs_off_the_main_thread() -> None:
-    workers = AdapterWorkers(ollama_timeout_seconds=0.5)
+def test_mflux_success_runs_off_the_main_thread() -> None:
+    workers = AdapterWorkers(mflux_timeout_seconds=0.5)
     main_thread = get_ident()
-    operation = workers.run_ollama(
+    operation = workers.run_mflux(
         lambda: (get_ident(), "result"),
-        stage="generating hotspots",
+        stage="generating image",
     )
-    delivered: list[tuple[int, str]] = []
-    operation.succeeded.connect(delivered.append)
 
     wait_for(operation)
 
     assert operation.status is OperationStatus.SUCCEEDED
     assert operation.result[0] != main_thread
-    assert delivered == [operation.result]
-    workers.shutdown(wait_milliseconds=500)
-
-
-def test_typed_adapter_failure_preserves_stage_context() -> None:
-    workers = AdapterWorkers(ollama_timeout_seconds=0.5)
-
-    def fail() -> None:
-        raise ModelResponseError("invalid structured response")
-
-    operation = workers.run_ollama(fail, stage="validating hotspot response")
-    delivered: list[WorkerFailure] = []
-    operation.failed.connect(delivered.append)
-
-    wait_for(operation)
-
-    assert operation.status is OperationStatus.FAILED
-    assert operation.failure == delivered[0]
-    assert delivered[0].kind is WorkerFailureKind.MODEL_RESPONSE
-    assert delivered[0].stage == "validating hotspot response"
-    assert "validating hotspot response" in delivered[0].message
     workers.shutdown(wait_milliseconds=500)
 
 
 def test_cancellation_discards_a_late_success() -> None:
-    workers = AdapterWorkers(ollama_timeout_seconds=0.5)
+    workers = AdapterWorkers(mflux_timeout_seconds=0.5)
     entered = Event()
     release = Event()
 
@@ -94,7 +70,7 @@ def test_cancellation_discards_a_late_success() -> None:
         release.wait()
         return "must be discarded"
 
-    operation = workers.run_ollama(delayed, stage="generating hotspots")
+    operation = workers.run_mflux(delayed, stage="generating image")
     results: list[object] = []
     failures: list[object] = []
     operation.succeeded.connect(results.append)
@@ -108,48 +84,6 @@ def test_cancellation_discards_a_late_success() -> None:
     assert operation.status is OperationStatus.CANCELLED
     assert results == []
     assert failures == []
-    workers.shutdown(wait_milliseconds=500)
-
-
-def test_timeout_releases_capacity_while_stalled_daemon_is_ignored() -> None:
-    workers = AdapterWorkers(
-        ollama_timeout_seconds=0.05,
-        ollama_max_concurrency=1,
-    )
-    stalled = Event()
-    operation = workers.run_ollama(
-        lambda: stalled.wait(),
-        stage="contacting Ollama",
-    )
-    started = monotonic()
-
-    wait_for(operation, timeout_seconds=0.5)
-
-    assert monotonic() - started < 0.3
-    assert operation.failure is not None
-    assert operation.failure.kind is WorkerFailureKind.TIMEOUT
-    assert operation.failure.timeout_seconds == 0.05
-    assert "contacting Ollama" in operation.failure.message
-
-    retry_entered = Event()
-    bounded_retry = workers.run_ollama(
-        lambda: retry_entered.set(),
-        stage="retrying stalled Ollama",
-        timeout_seconds=0.05,
-    )
-    wait_for(bounded_retry)
-    assert bounded_retry.failure is not None
-    assert bounded_retry.failure.kind is WorkerFailureKind.TIMEOUT
-    assert not retry_entered.is_set()
-
-    stalled.set()
-    follow_up = workers.run_ollama(
-        lambda: "worker remains usable",
-        stage="retrying recovered Ollama",
-        timeout_seconds=0.5,
-    )
-    wait_for(follow_up)
-    assert follow_up.result == "worker remains usable"
     workers.shutdown(wait_milliseconds=500)
 
 
@@ -213,44 +147,15 @@ def test_mflux_stays_serialized_after_ui_timeout() -> None:
     workers.shutdown(wait_milliseconds=500)
 
 
-def test_shutdown_prevents_queued_adapter_call_from_starting() -> None:
-    workers = AdapterWorkers(
-        ollama_timeout_seconds=0.05,
-        ollama_max_concurrency=1,
-    )
-    release_first = Event()
-    first = workers.run_ollama(
-        lambda: release_first.wait(),
-        stage="stalled call",
-    )
-    wait_for(first)
-
-    queued_entered = Event()
-    workers.run_ollama(
-        lambda: queued_entered.set(),
-        stage="queued call",
-        timeout_seconds=0.5,
-    )
-    spin_event_loop(50)
-    workers.shutdown(wait_milliseconds=100)
-    release_first.set()
-    spin_event_loop(100)
-
-    assert not queued_entered.is_set()
-
-
 def test_shutdown_rejects_reentrant_and_later_submissions() -> None:
-    workers = AdapterWorkers(ollama_timeout_seconds=0.5)
+    workers = AdapterWorkers(mflux_timeout_seconds=0.5)
     release = Event()
-    operation = workers.run_ollama(
-        lambda: release.wait(),
-        stage="active call",
-    )
+    operation = workers.run_mflux(lambda: release.wait(), stage="active image")
     rejected: list[str] = []
 
     def submit_during_shutdown() -> None:
         try:
-            workers.run_ollama(lambda: None, stage="reentrant call")
+            workers.run_mflux(lambda: None, stage="reentrant image")
         except RuntimeError as error:
             rejected.append(str(error))
 
@@ -260,39 +165,39 @@ def test_shutdown_rejects_reentrant_and_later_submissions() -> None:
 
     assert rejected == ["adapter workers are shut down"]
     with pytest.raises(RuntimeError, match="shut down"):
-        workers.run_ollama(lambda: None, stage="late call")
+        workers.run_mflux(lambda: None, stage="late image")
 
 
 def test_availability_diagnostics_are_deduplicated_and_report_recovery() -> None:
-    workers = AdapterWorkers(ollama_timeout_seconds=0.5)
+    workers = AdapterWorkers(mflux_timeout_seconds=0.5)
     diagnostics: list[object] = []
     workers.availability_changed.connect(diagnostics.append)
 
     def unavailable() -> None:
-        raise ServiceUnavailableError("Start Ollama and verify its endpoint.")
+        raise ModelUnavailableError("MFLUX model is not cached.")
 
-    first = workers.check_ollama(unavailable)
+    first = workers.check_mflux(unavailable)
     wait_for(first)
-    repeated = workers.check_ollama(unavailable)
+    repeated = workers.check_mflux(unavailable)
     wait_for(repeated)
-    recovered = workers.check_ollama(lambda: None)
+    recovered = workers.check_mflux(lambda: None)
     wait_for(recovered)
-    unavailable_again = workers.check_ollama(unavailable)
+    unavailable_again = workers.check_mflux(unavailable)
     wait_for(unavailable_again)
 
     assert [diagnostic.available for diagnostic in diagnostics] == [False, True, False]
-    assert all(diagnostic.adapter is AdapterKind.OLLAMA for diagnostic in diagnostics)
-    assert "Start Ollama" in diagnostics[0].message
+    assert all(diagnostic.adapter is AdapterKind.MFLUX for diagnostic in diagnostics)
+    assert "not cached" in diagnostics[0].message
     assert "available again" in diagnostics[1].message
     workers.shutdown(wait_milliseconds=500)
 
 
-def test_availability_check_can_use_operation_result_without_global_diagnostic() -> None:
-    workers = AdapterWorkers(ollama_timeout_seconds=0.5)
+def test_availability_check_can_skip_global_diagnostic() -> None:
+    workers = AdapterWorkers(mflux_timeout_seconds=0.5)
     diagnostics: list[object] = []
     workers.availability_changed.connect(diagnostics.append)
 
-    operation = workers.check_ollama(lambda: None, emit_diagnostic=False)
+    operation = workers.check_mflux(lambda: None, emit_diagnostic=False)
     wait_for(operation)
 
     assert operation.status is OperationStatus.SUCCEEDED

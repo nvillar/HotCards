@@ -28,7 +28,10 @@ from hotcards.evaluation.manifest import (
     default_environment,
 )
 from hotcards.evaluation.reports import render_reports, render_reports_checked
-from hotcards.generation.image_prompts import IMAGE_PROMPT_VERSION, compose_image_prompt
+from hotcards.generation.image_generation import (
+    DIRECT_GENERATION_PROMPT_VERSION,
+    compose_generation_prompt,
+)
 from hotcards.generation.mflux_generator import (
     MfluxGenerationRequest,
     MfluxGenerationResult,
@@ -182,7 +185,7 @@ def _execute_image_evaluation(
     _write_result(settings.output_dir, result)
 
     for case in cases:
-        render_prompt = compose_image_prompt(case.inputs)
+        render_prompt = compose_generation_prompt(case.inputs)
         for model in settings.mflux_models:
             stage = f"mflux_axis:{case.case_id}:{model}"
             lifecycle.set_stage(stage)
@@ -214,7 +217,7 @@ def _execute_image_evaluation(
                 {
                     "case_id": case.case_id,
                     "model": model,
-                    "prompt_version": IMAGE_PROMPT_VERSION,
+                    "prompt_version": DIRECT_GENERATION_PROMPT_VERSION,
                     "render_prompt": render_prompt,
                     "required_visual_elements": case.required_visual_elements,
                     "unwanted_artifacts": case.unwanted_artifacts,
@@ -254,11 +257,11 @@ def run_image_evaluation(
         settings=settings.model_dump(mode="json"),
         models={"mflux_candidates": list(settings.mflux_models)},
         contracts={
-            "image_prompt": {
-                "version": IMAGE_PROMPT_VERSION,
+            "generation_prompt": {
+                "version": DIRECT_GENERATION_PROMPT_VERSION,
                 "sha256": contract_digest(
-                    IMAGE_PROMPT_VERSION,
-                    inspect.getsource(compose_image_prompt),
+                    DIRECT_GENERATION_PROMPT_VERSION,
+                    inspect.getsource(compose_generation_prompt),
                 ),
             },
             "image_case": {"version": IMAGE_CASE_VERSION},

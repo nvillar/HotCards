@@ -23,7 +23,10 @@ from hotcards.evaluation.reports import (
     render_reports_checked,
 )
 from hotcards.generation.errors import GenerationError
-from hotcards.generation.image_prompts import IMAGE_PROMPT_VERSION, compose_image_prompt
+from hotcards.generation.image_generation import (
+    DIRECT_GENERATION_PROMPT_VERSION,
+    compose_generation_prompt,
+)
 from hotcards.generation.mflux_generator import (
     MfluxGenerationRequest,
     MfluxGenerator,
@@ -76,11 +79,11 @@ def run_smoke(
         settings=settings.model_dump(mode="json"),
         models={"mflux": settings.mflux_model},
         contracts={
-            "image_prompt": {
-                "version": IMAGE_PROMPT_VERSION,
+            "generation_prompt": {
+                "version": DIRECT_GENERATION_PROMPT_VERSION,
                 "sha256": contract_digest(
-                    IMAGE_PROMPT_VERSION,
-                    inspect.getsource(compose_image_prompt),
+                    DIRECT_GENERATION_PROMPT_VERSION,
+                    inspect.getsource(compose_generation_prompt),
                 ),
             },
         },
@@ -107,9 +110,8 @@ def run_smoke(
         )
         inputs = ImageGenerationInputs(
             description=prompt,
-            image_prompt=prompt,
         )
-        render_prompt = compose_image_prompt(inputs)
+        render_prompt = compose_generation_prompt(inputs)
         result["render_prompt"] = render_prompt
         for phase in ("cold", "warm"):
             stage = f"image_generation_{phase}"

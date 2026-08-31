@@ -55,14 +55,6 @@ from hotcards.application.document_session import (
     DocumentSessionState,
 )
 from hotcards.application.generated_revision_change import GeneratedRevisionChange
-from hotcards.application.image_prompt_workflow import (
-    IMAGE_PROMPT_PREPARATION_VERSION as IMAGE_PROMPT_PREPARATION_VERSION,
-)
-from hotcards.application.image_prompt_workflow import (
-    ImagePromptWorkflow,
-    ImagePromptWorkflowError,
-    image_prompt_preparation_version,
-)
 from hotcards.application.run_session import RunSession, RunSessionState
 from hotcards.application.workers import (
     AdapterKind,
@@ -80,7 +72,6 @@ from hotcards.domain.models import (
     RunOverlayMode,
     Stack,
 )
-from hotcards.generation.ollama_client import OllamaSettings
 from hotcards.storage.stack_store import StackStoreError
 from hotcards.ui.card_canvas import CardCanvas
 from hotcards.ui.card_sidebar import CardSidebar
@@ -96,7 +87,6 @@ from hotcards.ui.project_paths import bundle_path, default_project_directory
 from hotcards.ui.settings_dialog import (
     MFLUX_MODEL_KEY,
     MFLUX_MODEL_OPTIONS,
-    OLLAMA_MODEL_KEY,
     SettingsDialog,
     SettingsStore,
     load_machine_settings,
@@ -121,7 +111,6 @@ class MainWindow(QMainWindow):
         settings_dialog_factory: SettingsDialogFactory = SettingsDialog,
         document_session: DocumentSession | None = None,
         background_workflow: BackgroundWorkflow | None = None,
-        image_prompt_workflow: ImagePromptWorkflow | None = None,
         project_directory: Path | None = None,
         start_diagnostics: bool = True,
         owns_workers: bool = False,
@@ -132,7 +121,6 @@ class MainWindow(QMainWindow):
         self.settings = settings if settings is not None else QSettings()
         self.document_session = document_session
         self.background_workflow = background_workflow
-        self.image_prompt_workflow = image_prompt_workflow
         self.project_directory = project_directory or default_project_directory()
         self._availability_checks = dict(availability_checks or {})
         self._availability_checks_factory = availability_checks_factory
@@ -143,7 +131,6 @@ class MainWindow(QMainWindow):
         )
         self._rendered_card_id: UUID | None = None
         self._availability: dict[AdapterKind, bool | None] = {
-            AdapterKind.OLLAMA: None,
             AdapterKind.MFLUX: None,
         }
         self._diagnostic_messages: dict[AdapterKind, str] = {}
@@ -156,7 +143,6 @@ class MainWindow(QMainWindow):
         self._rendering = False
         self._is_running = False
         self._background_step_progress: tuple[int, int] | None = None
-        self._image_prompt_progress_message = ""
         self._background_progress_message = ""
         self._run_session = RunSession()
         if self.background_workflow is None and self.document_session is not None:
@@ -165,14 +151,6 @@ class MainWindow(QMainWindow):
                 self.document_session,
                 workers,
                 self._background_generation_settings,
-                parent=self,
-            )
-        if self.image_prompt_workflow is None:
-            self.image_prompt_workflow = ImagePromptWorkflow(
-                controller,
-                workers,
-                self._ollama_settings,
-                reference_image_resolver=self._reference_image_path,
                 parent=self,
             )
         self.setWindowTitle(f"HotCards — {controller.document.name}")
@@ -387,9 +365,6 @@ class MainWindow(QMainWindow):
         self.inspector.inspector_tabs.currentChanged.connect(
             self._inspector_tab_changed
         )
-        self.inspector.prepare_image_prompt_requested.connect(
-            self._prepare_image_prompt
-        )
         self.inspector.generate_background_requested.connect(self._generate_background)
         self.inspector.change_applied.connect(self._show_undo_notification)
         self.inspector.hotspot_selected.connect(self.card_canvas.select_interaction)
@@ -416,18 +391,6 @@ class MainWindow(QMainWindow):
             self.background_workflow.generation_applied.connect(
                 self._show_generated_revision_notification
             )
-        self.image_prompt_workflow.busy_changed.connect(
-            lambda _busy: self._update_generation_actions()
-        )
-        self.image_prompt_workflow.progress_changed.connect(
-            self._image_prompt_progress_changed
-        )
-        self.image_prompt_workflow.failed.connect(self._image_prompt_failed)
-        self.image_prompt_workflow.document_changed.connect(self.render_document)
-        self.image_prompt_workflow.change_applied.connect(self._show_undo_notification)
-        self.image_prompt_workflow.generation_applied.connect(
-            self._image_prompt_applied
-        )
         self.pane_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.pane_splitter.setObjectName("threePaneSplitter")
         self.pane_splitter.addWidget(self.card_sidebar)
@@ -450,11 +413,6 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central_widget)
 
         values = load_machine_settings(self.settings)
-        self.llm_model_label = QLabel("LLM")
-        self.llm_model_combo = QComboBox()
-        self.llm_model_combo.setObjectName("llmModelCombo")
-        self.llm_model_combo.setAccessibleName("LLM model")
-        self.llm_model_combo.addItem(values.ollama_model, values.ollama_model)
         self.image_model_label = QLabel("Image")
         self.image_model_combo = QComboBox()
         self.image_model_combo.setObjectName("imageModelCombo")
@@ -495,7 +453,7 @@ class MainWindow(QMainWindow):
         self.cancel_generation_button.setObjectName("cancelGenerationButton")
         self.cancel_generation_button.setAccessibleName("Cancel generation")
         self.cancel_generation_button.setToolTip(
-            "Cancel Image Prompt preparation or image generation"
+            "Cancel image generation"
         )
         self.cancel_generation_button.clicked.connect(
             self._cancel_generation_activity
@@ -505,17 +463,12 @@ class MainWindow(QMainWindow):
         )
         self.generation_progress_container.hide()
         self.statusBar().addWidget(self.generation_progress_container, 1)
-        self.statusBar().addPermanentWidget(self.llm_model_label)
-        self.statusBar().addPermanentWidget(self.llm_model_combo)
         self.statusBar().addPermanentWidget(self.image_model_label)
         self.statusBar().addPermanentWidget(self.image_model_combo)
-        self.llm_model_combo.currentIndexChanged.connect(
-            self._llm_model_changed
-        )
         self.image_model_combo.currentIndexChanged.connect(
             self._image_model_changed
         )
-        self._service_status_detail = "Local AI availability checks pending"
+        self._service_status_detail = "MFLUX availability check pending"
         self.create_first_card_button.clicked.connect(self._primary_empty_action)
 
     def _build_menu(self) -> None:
@@ -645,8 +598,6 @@ class MainWindow(QMainWindow):
         if self._is_running:
             return
         selected_card_id = card_id if isinstance(card_id, UUID) else None
-        if selected_card_id != self._selected_card_id:
-            self.image_prompt_workflow.cancel()
         self._selected_card_id = selected_card_id
         if self.card_sidebar.selected_card_id != self._selected_card_id:
             self.card_sidebar.select_card(self._selected_card_id)
@@ -761,7 +712,6 @@ class MainWindow(QMainWindow):
         ):
             return
         self.notification_bar.clear_notification("background-error")
-        self.image_prompt_workflow.cancel()
         try:
             workflow.duplicate_revision(card_id, revision_id)
         except (BackgroundWorkflowError, CommandError, ValidationError) as error:
@@ -811,20 +761,9 @@ class MainWindow(QMainWindow):
             ),
         )
 
-    def _image_prompt_applied(self, change: object) -> None:
-        if self._is_running:
-            return
-        if isinstance(change, GeneratedRevisionChange):
-            self.inspector.show_image_prompt(
-                change.card_id,
-                change.revision_id,
-            )
-        self._show_generated_revision_notification(change)
-
     def _undo_notification(self) -> None:
         if self._is_running:
             return
-        self.image_prompt_workflow.cancel()
         token = self._undo_notification_token
         self._clear_undo_notification()
         if token is not None and self.controller.undo_if_current(token):
@@ -863,7 +802,6 @@ class MainWindow(QMainWindow):
         if revision is None:
             self._clear_undo_notification()
             return
-        self.image_prompt_workflow.cancel()
         self._clear_undo_notification()
         command = CreateGeneratedRevisionCommand(
             card_id=change.card_id,
@@ -1025,24 +963,20 @@ class MainWindow(QMainWindow):
             self._show_document_error("Could Not Save Stack As", str(error))
             return
         self._cancel_background_generation()
-        self.image_prompt_workflow.cancel()
         self._clear_undo_notification()
         self._update_document_actions()
 
     def undo(self) -> None:
-        self.image_prompt_workflow.cancel()
         self._clear_undo_notification()
         if self.controller.undo():
             self.render_document()
 
     def redo(self) -> None:
-        self.image_prompt_workflow.cancel()
         self._clear_undo_notification()
         if self.controller.redo():
             self.render_document()
 
     def _authoring_inputs_changed(self) -> None:
-        self.image_prompt_workflow.cancel()
         self._update_generation_actions()
 
     def _primary_empty_action(self) -> None:
@@ -1079,7 +1013,6 @@ class MainWindow(QMainWindow):
         ):
             self._cancel_background_generation()
         previous_token = self.controller.current_undo_token
-        self.image_prompt_workflow.cancel()
         self.card_sidebar.delete_card(card.id)
         consequences: list[str] = []
         if inbound_link_count:
@@ -1099,24 +1032,11 @@ class MainWindow(QMainWindow):
             self.background_workflow.cancel()
 
     def _cancel_generation_activity(self) -> None:
-        background_busy = (
-            self.background_workflow.busy
-            if self.background_workflow is not None
-            else False
-        )
-        image_prompt_busy = self.image_prompt_workflow.busy
-        if background_busy:
+        if self.background_workflow is not None and self.background_workflow.busy:
             self._cancel_background_generation()
-        if image_prompt_busy:
-            self.image_prompt_workflow.cancel()
-            self._show_info(
-                "image-prompt-cancelled",
-                "Image Prompt preparation cancelled",
-            )
 
     def _document_replaced(self, _document: object) -> None:
         self._cancel_background_generation()
-        self.image_prompt_workflow.cancel()
         self._clear_undo_notification()
         self._rendered_card_id = None
         self._card_name_commit_failed = False
@@ -1202,10 +1122,9 @@ class MainWindow(QMainWindow):
         for adapter, check in checks.items():
             self._availability[adapter] = None
             self._diagnostic_messages.pop(adapter, None)
-            operation = (
-                self.workers.check_ollama(check, emit_diagnostic=False)
-                if adapter is AdapterKind.OLLAMA
-                else self.workers.check_mflux(check, emit_diagnostic=False)
+            operation = self.workers.check_mflux(
+                check,
+                emit_diagnostic=False,
             )
             self._diagnostic_operations.append(operation)
             operation.succeeded.connect(
@@ -1223,7 +1142,6 @@ class MainWindow(QMainWindow):
         self.notification_bar.clear_notification("background-error")
         self.notification_bar.clear_notification("background-warning")
         self.notification_bar.clear_notification("background-cancelled")
-        self.notification_bar.clear_notification("image-prompt-cancelled")
         if not self._commit_authoring_metadata():
             return
         try:
@@ -1237,45 +1155,12 @@ class MainWindow(QMainWindow):
         self.render_document()
         self._update_generation_actions()
 
-    def _prepare_image_prompt(self) -> None:
-        card_id = self._selected_card_id
-        if card_id is None or not self._commit_authoring_metadata():
-            return
-        self.notification_bar.clear_notification("image-prompt-error")
-        self.notification_bar.clear_notification("image-prompt-cancelled")
-        try:
-            self.image_prompt_workflow.start(card_id)
-        except ImagePromptWorkflowError as error:
-            self._show_error(
-                "image-prompt-error",
-                "Could not prepare Image Prompt",
-                detail=str(error),
-            )
-        self.render_document()
-        self._update_generation_actions()
-
-    def _image_prompt_progress_changed(self, message: str) -> None:
-        self.notification_bar.clear_notification("image-prompt-error")
-        self._image_prompt_progress_message = message
-        self._update_generation_progress()
-        self._update_generation_actions()
-
-    def _image_prompt_failed(self, failure: object) -> None:
-        detail = failure.message if isinstance(failure, WorkerFailure) else str(failure)
-        self._show_error(
-            "image-prompt-error",
-            "Image Prompt preparation failed",
-            detail=detail,
-        )
-        self._update_generation_actions()
-
     def _clear_background(self) -> None:
         workflow = self.background_workflow
         card_id = self._selected_card_id
         if workflow is None or card_id is None:
             return
         self.notification_bar.clear_notification("background-error")
-        self.image_prompt_workflow.cancel()
         try:
             workflow.clear_background(card_id)
         except (
@@ -1297,7 +1182,6 @@ class MainWindow(QMainWindow):
         ):
             return
         self.notification_bar.clear_notification("background-error")
-        self.image_prompt_workflow.cancel()
         try:
             self.background_workflow.activate_revision(
                 self._selected_card_id,
@@ -1319,7 +1203,6 @@ class MainWindow(QMainWindow):
             return
         was_generating = self.background_workflow.is_generating_for(self._selected_card_id)
         self.notification_bar.clear_notification("background-error")
-        self.image_prompt_workflow.cancel()
         try:
             self.background_workflow.delete_revision(
                 self._selected_card_id,
@@ -1367,20 +1250,13 @@ class MainWindow(QMainWindow):
             if self.background_workflow is not None
             else False
         )
-        if not (background_busy or self.image_prompt_workflow.busy):
+        if not background_busy:
             self.generation_progress_container.hide()
             self.generation_step_label.clear()
             return
         self.generation_step_label.setText(
-            (
-                self._background_progress_message
-                or "Generating image..."
-            )
-            if background_busy
-            else (
-                self._image_prompt_progress_message
-                or "Preparing Image Prompt..."
-            )
+            self._background_progress_message
+            or "Generating image..."
         )
         if background_busy and self._background_step_progress is not None:
             completed_steps, total_steps = self._background_step_progress
@@ -1413,23 +1289,6 @@ class MainWindow(QMainWindow):
     ) -> None:
         if generation != self._diagnostic_generation:
             return
-        if adapter is AdapterKind.OLLAMA and isinstance(result, (list, tuple)):
-            models = tuple(
-                model for model in result if isinstance(model, str) and model
-            )
-            self._set_installed_ollama_models(models)
-            if not models:
-                self.apply_availability_diagnostic(
-                    AvailabilityDiagnostic(
-                        adapter=adapter,
-                        available=False,
-                        message=(
-                            "No installed Ollama model advertises vision support. "
-                            "Install a vision-capable model, then check services again."
-                        ),
-                    )
-                )
-                return
         self.apply_availability_diagnostic(
             AvailabilityDiagnostic(
                 adapter=adapter,
@@ -1483,24 +1342,7 @@ class MainWindow(QMainWindow):
             and not self._is_running
         )
         mflux_available = self._availability[AdapterKind.MFLUX] is True
-        ollama_available = self._availability[AdapterKind.OLLAMA] is True
-        image_prompt_busy = self.image_prompt_workflow.busy
         has_description_input = self.inspector.has_description_input()
-        can_enrich = (
-            has_card
-            and has_description_input
-            and ollama_available
-            and not image_prompt_busy
-        )
-        enrich_reason = "Ready to prepare Image Prompt"
-        if not has_card:
-            enrich_reason = "Select a card in a saved stack"
-        elif not has_description_input:
-            enrich_reason = "Enter a Description before preparing an Image Prompt"
-        elif image_prompt_busy:
-            enrich_reason = "Image Prompt preparation is running"
-        elif not ollama_available:
-            enrich_reason = self._action_diagnostic(AdapterKind.OLLAMA)
         selected_card = next(
             (
                 card
@@ -1509,19 +1351,6 @@ class MainWindow(QMainWindow):
             ),
             None,
         )
-        reference_count = (
-            len(selected_card.active_revision.references)
-            if selected_card is not None
-            else 0
-        )
-        self.inspector.set_image_prompt_capabilities(
-            can_enrich=can_enrich,
-            reason=enrich_reason,
-            busy=image_prompt_busy,
-            model_identifier=load_machine_settings(self.settings).ollama_model,
-            prompt_version=image_prompt_preparation_version(reference_count),
-        )
-        has_render_prompt = self.inspector.has_current_image_prompt()
         workflow_busy = (
             self.background_workflow.busy if self.background_workflow is not None else False
         )
@@ -1541,12 +1370,12 @@ class MainWindow(QMainWindow):
                     "MFLUX runs one job at a time"
                 )
             )
-        elif not has_render_prompt:
-            generate_reason = "Prepare a current Image Prompt before generating"
+        elif not has_description_input:
+            generate_reason = "Enter a Description before generating"
         elif not mflux_available:
             generate_reason = self._action_diagnostic(AdapterKind.MFLUX)
         self.inspector.set_background_capabilities(
-            can_generate=(has_card and has_render_prompt and mflux_available),
+            can_generate=(has_card and has_description_input and mflux_available),
             generate_reason=generate_reason,
             has_image=has_image,
             busy=workflow_busy,
@@ -1561,17 +1390,6 @@ class MainWindow(QMainWindow):
             else "This revision has no image"
         )
         authoring = not self._is_running
-        has_ollama_model = any(
-            isinstance(self.llm_model_combo.itemData(index), str)
-            and bool(self.llm_model_combo.itemData(index))
-            for index in range(self.llm_model_combo.count())
-        )
-        self.llm_model_combo.setEnabled(
-            authoring
-            and not image_prompt_busy
-            and not workflow_busy
-            and has_ollama_model
-        )
         self.image_model_combo.setEnabled(authoring and not workflow_busy)
         pending = [
             adapter for adapter, available in self._availability.items() if available is None
@@ -1585,12 +1403,7 @@ class MainWindow(QMainWindow):
         elif pending:
             summary = "AI services not checked"
         elif unavailable:
-            labels = {
-                AdapterKind.OLLAMA: "Ollama",
-                AdapterKind.MFLUX: "MFLUX",
-            }
-            names = " and ".join(labels[adapter] for adapter in unavailable)
-            summary = f"{names} unavailable"
+            summary = "MFLUX unavailable"
         else:
             summary = "Local AI services ready"
         self._service_status_detail = "\n".join(
@@ -1600,7 +1413,6 @@ class MainWindow(QMainWindow):
             )
             for adapter in AdapterKind
         )
-        self.llm_model_combo.setToolTip(self._service_status_detail)
         self.image_model_combo.setToolTip(self._service_status_detail)
         if (
             unavailable
@@ -1629,38 +1441,6 @@ class MainWindow(QMainWindow):
             self.notification_bar.clear_notification("ai-services")
         elif self._is_running:
             self.notification_bar.clear_notification("ai-services")
-
-    def _set_installed_ollama_models(self, models: tuple[str, ...]) -> None:
-        selected = load_machine_settings(self.settings).ollama_model
-        with QSignalBlocker(self.llm_model_combo):
-            self.llm_model_combo.clear()
-            for model in models:
-                self.llm_model_combo.addItem(model, model)
-            if not models:
-                self.llm_model_combo.addItem(
-                    "No vision-capable models installed",
-                    None,
-                )
-                return
-            if selected not in models:
-                selected = models[0]
-                self._cancel_background_generation()
-                self.image_prompt_workflow.cancel()
-                self.settings.setValue(OLLAMA_MODEL_KEY, selected)
-                self.settings.sync()
-            self.llm_model_combo.setCurrentIndex(self.llm_model_combo.findData(selected))
-
-    def _llm_model_changed(self, index: int) -> None:
-        model = self.llm_model_combo.itemData(index)
-        if not isinstance(model, str) or not model:
-            return
-        if model == load_machine_settings(self.settings).ollama_model:
-            return
-        self._cancel_background_generation()
-        self.image_prompt_workflow.cancel()
-        self.settings.setValue(OLLAMA_MODEL_KEY, model)
-        self.settings.sync()
-        self._restart_availability_checks()
 
     def _image_model_changed(self, index: int) -> None:
         model = self.image_model_combo.itemData(index)
@@ -1723,8 +1503,8 @@ class MainWindow(QMainWindow):
 
     def _reference_image_path(self, image_path: str) -> Path:
         if self.document_session is None or self.document_session.store is None:
-            raise ImagePromptWorkflowError(
-                "save the stack before using a Reference image"
+            raise BackgroundWorkflowError(
+                "save the stack before generating with a Reference image"
             )
         return self.document_session.store.asset_path(image_path)
 
@@ -1918,14 +1698,6 @@ class MainWindow(QMainWindow):
             quantization=values.quantization,
             random_seed=values.random_seed,
             fixed_seed=values.fixed_seed,
-            ollama_model=values.ollama_model,
-        )
-
-    def _ollama_settings(self) -> OllamaSettings:
-        values = load_machine_settings(self.settings)
-        return OllamaSettings(
-            endpoint=values.ollama_endpoint,
-            model=values.ollama_model,
         )
 
     def _action_diagnostic(self, adapter: AdapterKind) -> str:
@@ -2028,8 +1800,6 @@ class MainWindow(QMainWindow):
         self.fit_canvas_button.setVisible(authoring)
         self.clear_background_button.setVisible(authoring)
         self.create_first_card_button.setVisible(authoring)
-        self.llm_model_label.setVisible(authoring)
-        self.llm_model_combo.setVisible(authoring)
         self.image_model_label.setVisible(authoring)
         self.image_model_combo.setVisible(authoring)
         self.empty_canvas_title.setText(
@@ -2074,7 +1844,6 @@ class MainWindow(QMainWindow):
 
     def _cancel_ai_activity_for_run(self) -> None:
         self._cancel_diagnostics()
-        self.image_prompt_workflow.cancel()
         if self.background_workflow is not None and self.background_workflow.busy:
             self.background_workflow.cancel()
 
@@ -2130,7 +1899,6 @@ class MainWindow(QMainWindow):
         self._cancel_background_generation()
         if self.background_workflow is not None:
             self.background_workflow.close()
-        self.image_prompt_workflow.close()
         if self._owns_workers:
             self.workers.shutdown(wait_milliseconds=100)
         super().closeEvent(event)

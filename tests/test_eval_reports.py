@@ -15,21 +15,19 @@ def _image_result(run_dir: Path, artifact_path: str) -> Path:
         "result_version": "image-result-v1",
         "suite": "images",
         "status": "success",
-        "prompt_axis": [],
-        "prompt_downstream_axis": [
+        "mflux_axis": [
             {
                 "case_id": "<script>alert(1)</script>",
-                "ollama_model": "qwen3.5:4b",
-                "mflux_model": "flux2-klein-4b",
-                "generation": {
+                "model": "flux2-klein-4b",
+                "cold": {
                     "status": "success",
                     "artifact_path": artifact_path,
                     "inference_duration_seconds": 1.5,
                 },
+                "warm": {"status": "failed", "failure": {"classification": "test"}},
                 "rubric": {"scene_fidelity": None},
             }
         ],
-        "mflux_axis": [],
     }
     path = run_dir / "image-results.json"
     path.write_text(json.dumps(result))
@@ -48,7 +46,6 @@ def test_reports_are_offline_structured_escaped_and_include_contact_sheet(
 
     summary = json.loads(paths["json"].read_text())
     assert summary["human_quality"]["primary_assessment"] is True
-    assert summary["rows"][0]["ollama_model"] == "qwen3.5:4b"
     assert summary["rows"][0]["mflux_model"] == "flux2-klein-4b"
     with paths["csv"].open(newline="") as stream:
         assert next(csv.DictReader(stream))["human_rubric"] == '{"scene_fidelity": null}'

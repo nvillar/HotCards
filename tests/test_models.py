@@ -34,16 +34,12 @@ from hotcards.domain.models import (
     StyleSnapshot,
     UnresolvedCardReference,
 )
-from hotcards.generation.image_prompt_preparation import (
-    IMAGE_PROMPT_PREPARATION_VERSION,
-)
 
 
 def image_metadata() -> ImageGenerationMetadata:
     return ImageGenerationMetadata(
         inputs=ImageGenerationInputs(
             description="A moonlit courtyard",
-            image_prompt="A moonlit courtyard",
         ),
         render_prompt="A moonlit courtyard",
         model_identifier="flux2-klein-4b",
@@ -116,7 +112,7 @@ def test_stack_style_references_use_stable_ids_and_unique_names() -> None:
         )
 
 
-def test_revision_uses_current_image_prompt_when_available() -> None:
+def test_legacy_image_prompt_serializes_but_generation_uses_description() -> None:
     reference = ImageReferenceSnapshot(
         card_id=uuid4(),
         revision_id=uuid4(),
@@ -127,7 +123,7 @@ def test_revision_uses_current_image_prompt_when_available() -> None:
         source_description="A courtyard",
         references=(reference,),
         model_identifier="qwen3.5:9b-mlx",
-        prompt_version=IMAGE_PROMPT_PREPARATION_VERSION,
+        prompt_version="legacy-image-prompt-v1",
     )
     revision = CardRevision(
         description="A courtyard",
@@ -139,50 +135,17 @@ def test_revision_uses_current_image_prompt_when_available() -> None:
         image_prompt=image_prompt.text,
         references=(reference,),
     )
-    assert inputs.effective_description == "A richer courtyard"
-    assert image_prompt.is_current(
-        source_description="A courtyard",
-        references=(reference,),
-        model_identifier="qwen3.5:9b-mlx",
-        prompt_version=IMAGE_PROMPT_PREPARATION_VERSION,
-    )
-    assert not image_prompt.is_current(
-        source_description="A courtyard",
-        references=(reference,),
-        model_identifier="llama3.2:latest",
-        prompt_version=IMAGE_PROMPT_PREPARATION_VERSION,
-    )
-    assert not image_prompt.is_current(
-        source_description="A changed courtyard",
-        references=(reference,),
-        prompt_version=IMAGE_PROMPT_PREPARATION_VERSION,
-    )
-    assert not image_prompt.is_current(
-        source_description="A courtyard",
-        references=(reference,),
-        model_identifier="qwen3.5:9b-mlx",
-        prompt_version="image-prompt-preparation-v0",
-    )
-    assert not image_prompt.is_current(
-        source_description="A courtyard",
-        references=(),
-        model_identifier="qwen3.5:9b-mlx",
-        prompt_version=IMAGE_PROMPT_PREPARATION_VERSION,
-    )
-    assert not ImagePrompt(
-        text="A legacy prompt",
-        source_description="A courtyard",
-    ).is_current(
-        source_description="A courtyard",
-        model_identifier="qwen3.5:9b-mlx",
-        prompt_version=IMAGE_PROMPT_PREPARATION_VERSION,
-    )
-    assert not image_prompt.is_current(
-        source_description="A courtyard",
-        references=(reference,),
-        model_identifier="qwen3.5:9b-mlx",
-        prompt_version="image-prompt-preparation-v6",
-    )
+    assert inputs.effective_description == "A courtyard"
+    assert revision.image_prompt == image_prompt
+    assert CardRevision.model_validate(
+        revision.model_dump(mode="python")
+    ).image_prompt == image_prompt
+
+
+def test_new_generation_inputs_do_not_serialize_legacy_image_prompt() -> None:
+    inputs = ImageGenerationInputs(description="A courtyard")
+
+    assert "image_prompt" not in inputs.model_dump(mode="json")
 
 
 def test_stack_serializes_ordered_references() -> None:
@@ -431,7 +394,6 @@ def test_generation_inputs_capture_exact_reference_source_state() -> None:
     )
     inputs = ImageGenerationInputs(
         description="Portrait at dusk",
-        image_prompt="Portrait at dusk",
         references=(snapshot,),
     )
 
@@ -446,7 +408,6 @@ def test_generation_inputs_capture_exact_style_snapshot() -> None:
     )
     inputs = ImageGenerationInputs(
         description="Portrait at dusk",
-        image_prompt="Portrait at dusk",
         style=style,
     )
 

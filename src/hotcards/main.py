@@ -15,11 +15,6 @@ from hotcards.application.document_session import DocumentSession, DocumentSessi
 from hotcards.application.workers import AdapterKind, AdapterWorkers
 from hotcards.domain.models import Stack
 from hotcards.generation.errors import ModelUnavailableError
-from hotcards.generation.ollama_client import (
-    VISION_CAPABILITY,
-    OllamaRuntime,
-    OllamaSettings,
-)
 from hotcards.ui.branding import application_icon
 from hotcards.ui.main_window import AvailabilityChecksFactory, MainWindow
 from hotcards.ui.project_paths import default_project_directory
@@ -32,17 +27,6 @@ def build_availability_checks(
 ) -> Mapping[AdapterKind, Callable[[], Any]]:
     """Build lazy checks whose adapter objects are constructed only on worker threads."""
     values = load_machine_settings(settings)
-
-    def check_ollama() -> tuple[str, ...]:
-        runtime = OllamaRuntime(
-            OllamaSettings(
-                endpoint=values.ollama_endpoint,
-                model=values.ollama_model,
-            )
-        )
-        return runtime.installed_models(
-            capabilities=frozenset({VISION_CAPABILITY})
-        )
 
     def check_mflux() -> None:
         from huggingface_hub import snapshot_download
@@ -81,7 +65,6 @@ def build_availability_checks(
                 ) from error
 
     return {
-        AdapterKind.OLLAMA: check_ollama,
         AdapterKind.MFLUX: check_mflux,
     }
 

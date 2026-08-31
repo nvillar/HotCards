@@ -40,7 +40,6 @@ def _generated_background(asset_id: UUID, image_path: str) -> GeneratedBackgroun
         generation_metadata=ImageGenerationMetadata(
             inputs=ImageGenerationInputs(
                 description="A courtyard",
-                image_prompt="A courtyard",
             ),
             render_prompt="A courtyard",
             model_identifier="test",

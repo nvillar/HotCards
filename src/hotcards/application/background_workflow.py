@@ -33,17 +33,13 @@ from hotcards.domain.models import (
     CardRevision,
     GeneratedBackground,
     ImageGenerationInputs,
-    ImagePrompt,
     ImageReferenceSnapshot,
     ResolvedCardReference,
     Stack,
     StyleSnapshot,
     UnresolvedCardReference,
 )
-from hotcards.generation.image_prompt_preparation import (
-    image_prompt_preparation_version,
-)
-from hotcards.generation.image_prompts import compose_image_prompt
+from hotcards.generation.image_generation import compose_generation_prompt
 from hotcards.generation.mflux_generator import (
     MfluxGenerationRequest,
     MfluxGenerationResult,
@@ -65,7 +61,6 @@ class BackgroundGenerationSettings:
     quantization: int | None
     random_seed: bool
     fixed_seed: int
-    ollama_model: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,8 +68,7 @@ class _GenerationTarget:
     stack_id: UUID
     card_id: UUID
     revision_id: UUID
-    image_prompt: ImagePrompt
-    image_prompt_model_identifier: str
+    description: str
     background_id: UUID | None
     bundle_path: Path
     references: tuple[_GenerationReferenceTarget, ...]
@@ -161,35 +155,19 @@ class BackgroundWorkflow(QObject):
             for reference in references
         )
         settings = self._settings_provider()
-        image_prompt = revision.image_prompt
-        if image_prompt is None:
-            raise BackgroundWorkflowError("prepare an Image Prompt before generating")
-        if not image_prompt.is_current(
-            source_description=revision.description,
-            references=reference_snapshots,
-            model_identifier=settings.ollama_model,
-            prompt_version=image_prompt_preparation_version(len(references)),
-        ):
-            raise BackgroundWorkflowError("prepare a current Image Prompt before generating")
         inputs = ImageGenerationInputs(
             description=revision.description,
-            image_prompt=image_prompt.text,
             references=reference_snapshots,
             style=self._style_snapshot(document, revision),
         )
-        render_prompt = compose_image_prompt(inputs)
+        render_prompt = compose_generation_prompt(inputs)
         reference_image_paths = tuple(
             self._reference_asset_path(reference, position)
             for position, reference in enumerate(references, start=1)
         )
         request_id = uuid4()
         asset_id = uuid4()
-        target = self._target(
-            document,
-            card,
-            references,
-            settings.ollama_model,
-        )
+        target = self._target(document, card, references)
         self._request_id = request_id
         self._request_target = target
         output_path = self._temporary_directory / f"generated-{asset_id}.png"
@@ -452,19 +430,16 @@ class BackgroundWorkflow(QObject):
         document: Stack,
         card: Card,
         references: tuple[_GenerationReferenceTarget, ...],
-        image_prompt_model_identifier: str,
     ) -> _GenerationTarget:
         bundle_path = self.session.state.bundle_path
         if bundle_path is None:
             raise BackgroundWorkflowError("save the stack before changing an image")
         revision = card.active_revision
-        assert revision.image_prompt is not None
         return _GenerationTarget(
             stack_id=document.id,
             card_id=card.id,
             revision_id=revision.id,
-            image_prompt=revision.image_prompt,
-            image_prompt_model_identifier=image_prompt_model_identifier,
+            description=revision.description,
             background_id=(revision.background.id if revision.background is not None else None),
             bundle_path=bundle_path.resolve(),
             references=references,
@@ -486,9 +461,7 @@ class BackgroundWorkflow(QObject):
             return False
         revision = card.active_revision
         if not (
-            revision.image_prompt == target.image_prompt
-            and revision.description == target.image_prompt.source_description
-            and self._settings_provider().ollama_model == target.image_prompt_model_identifier
+            revision.description == target.description
             and (revision.background.id if revision.background is not None else None)
             == target.background_id
             and self._style_snapshot(document, revision) == target.style

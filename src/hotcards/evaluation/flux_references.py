@@ -1,4 +1,4 @@
-"""Experimental FLUX.2 Klein multi-reference feasibility suite."""
+"""FLUX.2 Klein ordered-Reference behavior suite."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from typing import Protocol
 
 from PIL import Image
 
+from hotcards.domain.models import ImageGenerationInputs
 from hotcards.evaluation.manifest import (
     EnvironmentProvider,
     RunLifecycle,
@@ -23,7 +24,7 @@ from hotcards.evaluation.manifest import (
     default_environment,
 )
 from hotcards.evaluation.reports import create_contact_sheet
-from hotcards.generation.image_prompts import compose_reference_prompt
+from hotcards.generation.image_generation import compose_generation_prompt
 from hotcards.storage.stack_store import StackStore
 
 REFERENCE_RESULT_VERSION = "flux-reference-result-v1"
@@ -199,47 +200,15 @@ def _stack_references(
     return references
 
 
-def _fixture_reference(
-    source: Path,
-    inputs_dir: Path,
-) -> dict[str, object]:
-    if not source.is_file():
-        raise ValueError(f"fixture reference does not exist: {source}")
-    copied = _copy_reference(source, inputs_dir / f"graphic_style{source.suffix}")
-    return {
-        "path": copied,
-        "source_path": source,
-        "description": (
-            "A flat cut-paper-like graphic scene using simple geometric forms, "
-            "deep indigo, muted blue, ochre, and tan."
-        ),
-    }
-
-
-def _reference_prompt(
-    *,
-    scene: str,
-    instructions: Sequence[str],
-) -> str:
-    numbered = tuple(
-        f"Use image {index} as follows: {instruction}"
-        for index, instruction in enumerate(instructions, start=1)
-    )
-    return compose_reference_prompt(scene, numbered)
-
-
 def _case_specs() -> tuple[dict[str, object], ...]:
     return (
         {
             "case_id": "character-identity",
             "reference_keys": ("character_identity",),
-            "instructions": (
-                "Preserve the same clockwork knight's helmet silhouette, "
-                "blackened armor, teal enamel, brass trim, and red sash. "
-                "Construct the environment from the scene instruction.",
-            ),
             "scene": (
-                "A full-body view of the same clockwork knight standing before "
+                "Use image 1 for the clockwork knight's helmet silhouette, "
+                "blackened armor, teal enamel, brass trim, and red sash. "
+                "Show a full-body view of the same knight standing before "
                 "the gates of a majestic medieval castle beneath a moody "
                 "overcast sky, cinematic storybook illustration."
             ),
@@ -252,15 +221,12 @@ def _case_specs() -> tuple[dict[str, object], ...]:
         {
             "case_id": "style-only",
             "reference_keys": ("map_style",),
-            "instructions": (
-                "Apply the hand-drawn ink linework, restrained watercolor "
-                "washes, pale blue accents, white paper, and cross-hatched "
-                "shading to the described workshop. Preserve the workshop's "
-                "subjects and composition.",
-            ),
             "scene": (
                 "An intimate clockmaker's workshop interior with a tall blue "
-                "cabinet, brass gears on a workbench, and a round window showing rain."
+                "cabinet, brass gears on a workbench, and a round window showing "
+                "rain. Use image 1 for its hand-drawn ink linework, restrained "
+                "watercolor washes, pale blue accents, white paper, and "
+                "cross-hatched shading, without copying its subjects."
             ),
             "rubric": (
                 "map rendering treatment transferred",
@@ -271,18 +237,14 @@ def _case_specs() -> tuple[dict[str, object], ...]:
         {
             "case_id": "character-plus-style",
             "reference_keys": ("character_identity", "map_style"),
-            "instructions": (
-                "Preserve the same clockwork knight's helmet silhouette, "
-                "blackened armor, teal enamel, brass trim, and red sash. "
-                "Construct the environment from the scene instruction.",
-                "Apply the hand-drawn ink linework, restrained watercolor "
-                "washes, pale blue accents, white paper, and cross-hatched "
-                "shading to the described courtyard and preserve its subjects "
-                "and composition.",
-            ),
             "scene": (
-                "The same clockwork knight explores a moonlit stone courtyard "
-                "with an arched wooden gate and a leafy tree, full-body view."
+                "Use image 1 for the clockwork knight's helmet silhouette, "
+                "blackened armor, teal enamel, brass trim, and red sash. The "
+                "same knight explores a moonlit stone courtyard with an arched "
+                "wooden gate and a leafy tree, full-body view. Use image 2 for "
+                "hand-drawn ink linework, restrained watercolor washes, pale "
+                "blue accents, white paper, and cross-hatched shading, without "
+                "copying its subjects."
             ),
             "rubric": (
                 "knight identity preserved",
@@ -293,14 +255,12 @@ def _case_specs() -> tuple[dict[str, object], ...]:
         {
             "case_id": "building-new-view",
             "reference_keys": ("castle_identity",),
-            "instructions": (
-                "Preserve the castle's recognizable cylindrical corner towers, "
-                "conical roofs, central gable, crenellated walls, proportions, "
-                "and pencil-sketch appearance. Show a genuinely different viewpoint.",
-            ),
             "scene": (
-                "The same castle seen from its rear garden at ground level, "
-                "looking toward a servants' entrance and the backs of the towers."
+                "Use image 1 for the castle's recognizable cylindrical corner "
+                "towers, conical roofs, central gable, crenellated walls, "
+                "proportions, and pencil-sketch appearance. Show the same castle "
+                "from its rear garden at ground level, looking toward a servants' "
+                "entrance and the backs of the towers."
             ),
             "rubric": (
                 "recognizable castle identity",
@@ -311,15 +271,12 @@ def _case_specs() -> tuple[dict[str, object], ...]:
         {
             "case_id": "building-two-views",
             "reference_keys": ("castle_identity", "building_new_view"),
-            "instructions": (
-                "Use this as the authoritative frontal view of the castle and "
-                "preserve its towers, roofs, gable, and crenellated walls.",
-                "Use this as a second view of the same castle to infer its rear "
-                "layout. Preserve shared architectural identity while changing viewpoint.",
-            ),
             "scene": (
-                "An elevated three-quarter side view of the same castle at dawn, "
-                "showing both the front bridge and part of the rear garden."
+                "Use image 1 as the authoritative frontal view of the castle and "
+                "image 2 as a second view of the same castle. Reconcile their "
+                "shared towers, roofs, gable, crenellated walls, and rear layout "
+                "in an elevated three-quarter side view at dawn that shows both "
+                "the front bridge and part of the rear garden."
             ),
             "rubric": (
                 "both views reconciled",
@@ -330,67 +287,22 @@ def _case_specs() -> tuple[dict[str, object], ...]:
         {
             "case_id": "reference-count-1",
             "reference_keys": ("character_identity",),
-            "instructions": ("Preserve the clockwork knight as the central foreground character.",),
             "scene": (
-                "A storybook market square with the referenced knight in the "
-                "foreground and original stalls, townspeople, and architecture."
+                "A storybook market square with the clockwork knight from image 1 "
+                "in the foreground and original stalls, townspeople, and architecture."
             ),
             "rubric": ("one reference used",),
         },
         {
             "case_id": "reference-count-2",
             "reference_keys": ("character_identity", "map_style"),
-            "instructions": (
-                "Preserve the clockwork knight as the central foreground character.",
-                "Apply the ink-and-watercolor rendering treatment to the "
-                "described market square and preserve its content.",
-            ),
             "scene": (
-                "A storybook market square with the referenced knight in the "
-                "foreground and original stalls, townspeople, and architecture."
+                "A storybook market square with the clockwork knight from image 1 "
+                "in the foreground and original stalls, townspeople, and "
+                "architecture. Use image 2 for ink-and-watercolor rendering "
+                "treatment without copying its subjects."
             ),
             "rubric": ("two references used",),
-        },
-        {
-            "case_id": "reference-count-3",
-            "reference_keys": (
-                "character_identity",
-                "map_style",
-                "castle_identity",
-            ),
-            "instructions": (
-                "Preserve the clockwork knight as the central foreground character.",
-                "Apply the ink-and-watercolor rendering treatment to the "
-                "described market square and preserve its content.",
-                "Use the castle's recognizable architecture as the distant market backdrop.",
-            ),
-            "scene": (
-                "A market square outside the referenced castle with the referenced "
-                "knight in the foreground and original stalls and townspeople."
-            ),
-            "rubric": ("three references used",),
-        },
-        {
-            "case_id": "reference-count-4",
-            "reference_keys": (
-                "character_identity",
-                "map_style",
-                "castle_identity",
-                "graphic_style",
-            ),
-            "instructions": (
-                "Preserve the clockwork knight as the central foreground character.",
-                "Apply the delicate ink outlines and pale watercolor washes to "
-                "the described market square and preserve its content.",
-                "Use the castle's recognizable architecture as the distant market backdrop.",
-                "Apply the bold indigo, ochre, blue, and tan palette from this "
-                "graphic reference to the described market square.",
-            ),
-            "scene": (
-                "A market square outside the referenced castle with the referenced "
-                "knight in the foreground and original stalls and townspeople."
-            ),
-            "rubric": ("four references used",),
         },
     )
 
@@ -522,7 +434,6 @@ def run_flux_reference_evaluation(
     *,
     output_dir: Path,
     stack_path: Path,
-    graphic_style_path: Path = Path("evals/cases/references/workshop.png"),
     model_identifier: str = "flux2-klein-4b",
     quantization: int | None = None,
     seed: int = 42,
@@ -534,10 +445,9 @@ def run_flux_reference_evaluation(
     source_model_factory: SourceModelFactory = _default_source_model_factory,
     environment_provider: EnvironmentProvider = default_environment,
 ) -> Path:
-    """Run reference-role and count experiments with auditable local inputs."""
+    """Run supported one- and two-Reference experiments with auditable inputs."""
     settings = {
         "stack_path": str(stack_path),
-        "graphic_style_path": str(graphic_style_path),
         "model_identifier": model_identifier,
         "quantization": quantization,
         "seed": seed,
@@ -576,10 +486,6 @@ def run_flux_reference_evaluation(
     try:
         lifecycle.set_stage("resolve-inputs")
         references = _stack_references(stack_path, inputs_dir)
-        references["graphic_style"] = _fixture_reference(
-            graphic_style_path,
-            inputs_dir,
-        )
         lifecycle.complete_stage("resolve-inputs")
 
         character_prompt = (
@@ -667,9 +573,8 @@ def run_flux_reference_evaluation(
         for case in _case_specs():
             case_id = str(case["case_id"])
             reference_keys = tuple(case["reference_keys"])
-            prompt = _reference_prompt(
-                scene=str(case["scene"]),
-                instructions=case["instructions"],  # type: ignore[arg-type]
+            prompt = compose_generation_prompt(
+                ImageGenerationInputs(description=str(case["scene"]))
             )
             stage = f"case:{case_id}"
             lifecycle.set_stage(stage)
@@ -680,7 +585,6 @@ def run_flux_reference_evaluation(
                 "reference_paths": [],
                 "prompt": prompt,
                 "scene": case["scene"],
-                "instructions": case["instructions"],
                 "rubric": case["rubric"],
             }
             output_path = outputs_dir / f"{case_id}.png"

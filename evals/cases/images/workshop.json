@@ -2,8 +2,7 @@
   "case_version": "image-case-v3",
   "case_id": "workshop",
   "inputs": {
-    "description": "A clockmaker's workshop with brass gears, a tall blue cabinet, and a round window showing rain. Detailed cut-paper storybook collage with amber lamplight and deep indigo shadows.",
-    "image_prompt": "A clockmaker's workshop with brass gears, a tall blue cabinet, and a round window showing rain. Detailed cut-paper storybook collage with amber lamplight and deep indigo shadows."
+    "description": "A clockmaker's workshop with brass gears, a tall blue cabinet, and a round window showing rain. Detailed cut-paper storybook collage with amber lamplight and deep indigo shadows."
   },
   "required_visual_elements": [
     "clockmaker workshop",

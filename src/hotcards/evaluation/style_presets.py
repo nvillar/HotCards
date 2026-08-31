@@ -31,7 +31,7 @@ from hotcards.evaluation.manifest import (
 )
 from hotcards.evaluation.reports import create_contact_sheet
 from hotcards.generation.errors import ImageGenerationError, ModelLoadError
-from hotcards.generation.image_prompts import compose_image_prompt
+from hotcards.generation.image_generation import compose_generation_prompt
 from hotcards.generation.mflux_generator import (
     MfluxGenerationRequest,
     MfluxGenerationResult,
@@ -143,11 +143,10 @@ def load_style_preset_experiment(
 
 
 def compose_style_preset_prompt(description: str, prompt_text: str | None) -> str:
-    """Append one Style treatment without changing the accepted Image Prompt."""
-    return compose_image_prompt(
+    """Append one Style treatment without changing the authored Description."""
+    return compose_generation_prompt(
         ImageGenerationInputs(
             description=description,
-            image_prompt=description,
             style=(
                 StyleSnapshot(
                     style_id=uuid5(
@@ -362,7 +361,6 @@ def _execute_style_preset_evaluation(
                 request = MfluxGenerationRequest(
                     inputs=ImageGenerationInputs(
                         description=scene.description,
-                        image_prompt=scene.description,
                         style=style_snapshot,
                     ),
                     render_prompt=render_prompt,

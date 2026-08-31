@@ -34,7 +34,6 @@ from hotcards.application.commands import (
     ReplaceRevisionBackgroundCommand,
     SetHotspotConditionsCommand,
     SetHotspotKeyChangesCommand,
-    SetRevisionImagePromptCommand,
     SetRevisionReferenceCommand,
     SetRevisionStyleCommand,
     SetStartCardCommand,
@@ -50,7 +49,6 @@ from hotcards.domain.models import (
     HotspotSet,
     ImageGenerationInputs,
     ImageGenerationMetadata,
-    ImagePrompt,
     Interaction,
     KeyDefinition,
     NavigateAction,
@@ -265,32 +263,6 @@ def test_revision_description_and_reference_edits_are_typed_changes() -> None:
     assert changed.references == (
         ResolvedCardReference(target_card_id=reference.id),
     )
-
-
-def test_image_prompt_is_set_and_cleared_independently() -> None:
-    revision = CardRevision(description="A courtyard")
-    card = Card(name="Card", revisions=(revision,))
-    document = Stack(name="Stack", cards=(card,))
-    image_prompt = ImagePrompt(
-        text="A richer courtyard",
-        source_description="A courtyard",
-    )
-
-    changed = SetRevisionImagePromptCommand(
-        card_id=card.id,
-        revision_id=revision.id,
-        value=image_prompt,
-    ).apply(document)
-
-    assert changed.cards[0].active_revision.description == "A courtyard"
-    assert changed.cards[0].active_revision.image_prompt == image_prompt
-
-    cleared = SetRevisionImagePromptCommand(
-        card_id=card.id,
-        revision_id=revision.id,
-        value=None,
-    ).apply(changed)
-    assert cleared.cards[0].active_revision.image_prompt is None
 
 
 def test_revision_activation_and_complete_hotspot_replacement() -> None:
@@ -570,7 +542,6 @@ def test_reference_assignment_and_background_replacement_are_guarded() -> None:
         generation_metadata=ImageGenerationMetadata(
             inputs=ImageGenerationInputs(
                 description="A card",
-                image_prompt="A card",
             ),
             render_prompt="A card",
             model_identifier="test",

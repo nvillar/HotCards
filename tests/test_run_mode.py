@@ -360,7 +360,6 @@ def build_run_window(
                 generation_metadata=ImageGenerationMetadata(
                     inputs=ImageGenerationInputs(
                         description=name,
-                        image_prompt=name,
                     ),
                     render_prompt=name,
                     model_identifier="test",

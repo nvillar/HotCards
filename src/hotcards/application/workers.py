@@ -18,16 +18,13 @@ from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Signal, Slot
 from hotcards.generation.errors import (
     ImageGenerationError,
     ModelLoadError,
-    ModelResponseError,
     ModelUnavailableError,
-    ServiceUnavailableError,
 )
 
 
 class AdapterKind(StrEnum):
     """Production adapter families supported by the worker boundary."""
 
-    OLLAMA = "ollama"
     MFLUX = "mflux"
 
 
@@ -35,9 +32,7 @@ class WorkerFailureKind(StrEnum):
     """Stable failure categories suitable for UI decisions."""
 
     TIMEOUT = "timeout"
-    SERVICE_UNAVAILABLE = "service_unavailable"
     MODEL_UNAVAILABLE = "model_unavailable"
-    MODEL_RESPONSE = "model_response"
     MODEL_LOAD = "model_load"
     IMAGE_GENERATION = "image_generation"
     ADAPTER_ERROR = "adapter_error"
@@ -265,34 +260,22 @@ class _BoundedRunnable(QRunnable):
 
 
 class AdapterWorkers(QObject):
-    """Run bounded Ollama and serialized MFLUX operations away from the UI thread."""
+    """Run serialized MFLUX operations away from the UI thread."""
 
     availability_changed = Signal(object)
 
     def __init__(
         self,
         *,
-        ollama_timeout_seconds: float = 300.0,
         mflux_timeout_seconds: float = 600.0,
-        ollama_max_concurrency: int = 4,
     ) -> None:
         super().__init__()
         self._timeouts = {
-            AdapterKind.OLLAMA: _validate_timeout(ollama_timeout_seconds),
             AdapterKind.MFLUX: _validate_timeout(mflux_timeout_seconds),
         }
-        if (
-            not isinstance(ollama_max_concurrency, int)
-            or isinstance(ollama_max_concurrency, bool)
-            or ollama_max_concurrency <= 0
-        ):
-            raise ValueError("Ollama worker concurrency must be a positive integer")
-        self._ollama_pool = QThreadPool(self)
-        self._ollama_pool.setMaxThreadCount(ollama_max_concurrency)
         self._mflux_pool = QThreadPool(self)
         self._mflux_pool.setMaxThreadCount(1)
         self._invocation_slots = {
-            AdapterKind.OLLAMA: BoundedSemaphore(ollama_max_concurrency),
             AdapterKind.MFLUX: BoundedSemaphore(1),
         }
         self._dispatcher = _CompletionDispatcher(self)
@@ -304,26 +287,8 @@ class AdapterWorkers(QObject):
         self._closed = False
         self._records: dict[UUID, _OperationRecord] = {}
         self._availability: dict[AdapterKind, bool | None] = {
-            AdapterKind.OLLAMA: None,
             AdapterKind.MFLUX: None,
         }
-
-    def run_ollama(
-        self,
-        operation: Callable[[], Any],
-        *,
-        stage: str,
-        timeout_seconds: float | None = None,
-    ) -> WorkerOperation:
-        """Submit any synchronous Ollama adapter operation."""
-        return self._submit(
-            AdapterKind.OLLAMA,
-            operation,
-            stage=stage,
-            timeout_seconds=timeout_seconds,
-            availability_check=False,
-            emit_availability=True,
-        )
 
     def run_mflux(
         self,
@@ -340,24 +305,6 @@ class AdapterWorkers(QObject):
             timeout_seconds=timeout_seconds,
             availability_check=False,
             emit_availability=True,
-        )
-
-    def check_ollama(
-        self,
-        check: Callable[[], Any],
-        *,
-        stage: str = "checking Ollama model availability",
-        timeout_seconds: float | None = None,
-        emit_diagnostic: bool = True,
-    ) -> WorkerOperation:
-        """Run a bounded list/show-style Ollama availability check."""
-        return self._submit(
-            AdapterKind.OLLAMA,
-            check,
-            stage=stage,
-            timeout_seconds=timeout_seconds,
-            availability_check=True,
-            emit_availability=emit_diagnostic,
         )
 
     def check_mflux(
@@ -385,12 +332,10 @@ class AdapterWorkers(QObject):
             records = tuple(self._records.values())
         for record in records:
             record.handle.cancel()
-        self._ollama_pool.clear()
         self._mflux_pool.clear()
         self._records.clear()
         self._deadline_timer.stop()
         if wait_milliseconds > 0:
-            self._ollama_pool.waitForDone(wait_milliseconds)
             self._mflux_pool.waitForDone(wait_milliseconds)
 
     def _submit(
@@ -442,8 +387,7 @@ class AdapterWorkers(QObject):
                 invocation_slots=self._invocation_slots[adapter],
                 dispatcher=self._dispatcher,
             )
-            pool = self._mflux_pool if adapter is AdapterKind.MFLUX else self._ollama_pool
-            pool.start(runnable)
+            self._mflux_pool.start(runnable)
         self._schedule_deadline()
         return handle
 
@@ -466,7 +410,6 @@ class AdapterWorkers(QObject):
             record.availability_check
             or failure.kind
             in {
-                WorkerFailureKind.SERVICE_UNAVAILABLE,
                 WorkerFailureKind.MODEL_UNAVAILABLE,
                 WorkerFailureKind.MODEL_LOAD,
             }
@@ -547,7 +490,7 @@ def _validate_timeout(timeout_seconds: float) -> float:
 
 
 def _adapter_name(adapter: AdapterKind) -> str:
-    return "Ollama" if adapter is AdapterKind.OLLAMA else "MFLUX"
+    return "MFLUX"
 
 
 def _failure_for(record: _OperationRecord, outcome: object) -> WorkerFailure:
@@ -569,9 +512,7 @@ def _failure_for(record: _OperationRecord, outcome: object) -> WorkerFailure:
     assert isinstance(outcome, _Error)
     error = outcome.error
     kinds = (
-        (ServiceUnavailableError, WorkerFailureKind.SERVICE_UNAVAILABLE),
         (ModelUnavailableError, WorkerFailureKind.MODEL_UNAVAILABLE),
-        (ModelResponseError, WorkerFailureKind.MODEL_RESPONSE),
         (ModelLoadError, WorkerFailureKind.MODEL_LOAD),
         (ImageGenerationError, WorkerFailureKind.IMAGE_GENERATION),
     )

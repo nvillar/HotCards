@@ -14,7 +14,6 @@ from PySide6.QtWidgets import (
     QFrame,
     QInputDialog,
     QLabel,
-    QRadioButton,
     QStyle,
     QToolButton,
 )
@@ -27,7 +26,6 @@ from hotcards.domain.models import (
     HotspotConditions,
     HotspotKeyChanges,
     HotspotSet,
-    ImagePrompt,
     Interaction,
     KeyDefinition,
     NavigateAction,
@@ -35,9 +33,6 @@ from hotcards.domain.models import (
     Stack,
     StyleDefinition,
     UnresolvedCardReference,
-)
-from hotcards.generation.image_prompt_preparation import (
-    IMAGE_PROMPT_PREPARATION_VERSION,
 )
 from hotcards.ui.inspector import Inspector
 
@@ -86,25 +81,21 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     assert root_layout.contentsMargins().left() == inspector.style().pixelMetric(
         QStyle.PixelMetric.PM_LayoutLeftMargin
     )
-    assert inspector.description_edit.placeholderText() == "Description"
+    assert "image 1 and image 2" in inspector.description_edit.placeholderText()
     assert inspector.description_edit.minimumHeight() == round(
         (inspector.description_edit.fontMetrics().lineSpacing() * 10 + 20) * 1.25
     )
     assert inspector.description_edit.maximumHeight() > (inspector.description_edit.minimumHeight())
-    assert inspector.enrich_button.text() == "Prepare Image Prompt"
     assert inspector.generate_background_button.text() == "Generate Image"
-    assert inspector.description_toggle.isHidden()
-    assert isinstance(inspector.description_button, QRadioButton)
-    assert isinstance(inspector.image_prompt_button, QRadioButton)
+    assert not hasattr(inspector, "enrich_button")
+    assert not hasattr(inspector, "description_toggle")
+    assert not hasattr(inspector, "image_prompt_button")
     assert not isinstance(inspector.reference_panel, QFrame)
     assert inspector.reference_panel.layout().contentsMargins().isNull()
     content_layout = inspector.reference_panel.parentWidget().layout()
     assert content_layout is not None
     assert content_layout.stretch(content_layout.indexOf(inspector.description_edit)) == 1
     assert content_layout.indexOf(inspector.description_edit) < (
-        content_layout.indexOf(inspector.description_toggle)
-    )
-    assert content_layout.indexOf(inspector.description_toggle) < (
         content_layout.indexOf(inspector.style_label)
     )
     assert content_layout.indexOf(inspector.style_label) < (
@@ -117,9 +108,6 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
         content_layout.indexOf(inspector.reference_panel)
     )
     assert content_layout.indexOf(inspector.reference_panel) < (
-        content_layout.indexOf(inspector.enrich_button)
-    )
-    assert content_layout.indexOf(inspector.enrich_button) < (
         content_layout.indexOf(inspector.generate_background_button)
     )
     assert inspector.style_combo.currentText() == "No Style"
@@ -669,196 +657,49 @@ def test_render_preserves_focused_description_draft(
     inspector.close()
 
 
-def test_image_prompt_status_and_generation_source(
+def test_legacy_image_prompt_state_is_not_rendered_or_edited(
     application: QApplication,
 ) -> None:
-    revision = CardRevision(
-        description="A courtyard",
-        image_prompt=ImagePrompt(
-            text="A richly detailed courtyard",
-            source_description="A courtyard",
-        ),
+    revision = CardRevision.model_validate(
+        {
+            "description": "A courtyard",
+            "image_prompt": {
+                "text": "Legacy prepared prompt",
+                "source_description": "A courtyard",
+            },
+        }
     )
     card = Card(name="Card", revisions=(revision,))
     controller = DocumentController(Stack(name="Demo", cards=(card,)))
     inspector = Inspector(controller)
     inspector.render(controller.document, card.id)
 
-    assert not inspector.description_toggle.isHidden()
-    assert inspector.description_button.isChecked()
-    assert inspector.description_edit.toPlainText() == ("A courtyard")
-    assert "Using: Description" in inspector.enrich_button.toolTip()
-    assert "Using: Image Prompt" in inspector.generate_background_button.toolTip()
-    assert inspector.enrich_button.text() == "Image Prompt Current"
-    assert not inspector.enrich_button.isEnabled()
-    assert "Current" in inspector.enrich_button.toolTip()
-    inspector.set_image_prompt_capabilities(
-        can_enrich=True,
-        reason="Ready to prepare Image Prompt",
-        busy=False,
-    )
-
+    assert inspector.description_edit.toPlainText() == "A courtyard"
+    assert "Using: Description" in inspector.generate_background_button.toolTip()
     inspector.description_edit.setPlainText("A changed courtyard")
-    assert inspector.enrich_button.text() == "Update Image Prompt"
-    assert inspector.enrich_button.isEnabled()
-    assert "Out of date" in inspector.enrich_button.toolTip()
     assert inspector.commit_revision_metadata()
-
     current = controller.document.cards[0].active_revision
-    assert current.image_prompt is not None
-    assert current.image_prompt.text == "A richly detailed courtyard"
-
-    inspector.image_prompt_button.click()
-    inspector.description_edit.setPlainText("A manually revised courtyard")
-    assert inspector.commit_revision_metadata()
-
-    inspector.description_edit.clear()
-    assert inspector.commit_revision_metadata()
-    assert controller.document.cards[0].active_revision.image_prompt is None
-    assert inspector.description_toggle.isHidden()
-    assert inspector.description_edit.toPlainText() == "A changed courtyard"
-    assert "Using: Image Prompt" in inspector.generate_background_button.toolTip()
-    assert controller.undo()
-    assert controller.document.cards[0].active_revision.image_prompt is not None
+    assert current.description == "A changed courtyard"
+    assert current.image_prompt == revision.image_prompt
 
 
-def test_manual_image_prompt_edit_refreshes_changed_description(
-    application: QApplication,
-) -> None:
-    revision = CardRevision(
-        description="A courtyard",
-        image_prompt=ImagePrompt(
-            text="A richly detailed courtyard",
-            source_description="A courtyard",
-            model_identifier="qwen3.5:9b-mlx",
-            prompt_version=IMAGE_PROMPT_PREPARATION_VERSION,
-        ),
-    )
-    card = Card(name="Card", revisions=(revision,))
-    controller = DocumentController(Stack(name="Demo", cards=(card,)))
-    inspector = Inspector(controller)
-    inspector.render(controller.document, card.id)
-    inspector.set_image_prompt_capabilities(
-        can_enrich=True,
-        reason="Ready to prepare Image Prompt",
-        busy=False,
-        model_identifier="qwen3.5:9b-mlx",
-        prompt_version=IMAGE_PROMPT_PREPARATION_VERSION,
-    )
-
-    inspector.description_edit.setPlainText("A moonlit courtyard")
-    assert inspector.commit_revision_metadata()
-    assert not inspector.has_current_image_prompt()
-
-    inspector.image_prompt_button.click()
-    inspector.description_edit.setPlainText("A manually revised moonlit courtyard")
-
-    assert inspector.has_current_image_prompt()
-    assert inspector.enrich_button.text() == "Image Prompt Current"
-    inspector.show()
-    inspector.description_edit.setFocus()
-    application.processEvents()
-    assert inspector.description_edit.hasFocus()
-    inspector.render(controller.document, card.id)
-    assert (
-        inspector.description_edit.toPlainText()
-        == "A manually revised moonlit courtyard"
-    )
-    assert inspector.has_current_image_prompt()
-    assert inspector.commit_revision_metadata(render_change=False)
-
-    image_prompt = controller.document.cards[0].active_revision.image_prompt
-    assert image_prompt is not None
-    assert image_prompt.text == "A manually revised moonlit courtyard"
-    assert image_prompt.source_description == "A moonlit courtyard"
-    assert image_prompt.model_identifier == "qwen3.5:9b-mlx"
-    assert image_prompt.prompt_version == IMAGE_PROMPT_PREPARATION_VERSION
-    assert inspector.has_current_image_prompt()
-
-
-def test_switching_cards_defaults_to_description(
+def test_switching_cards_shows_each_description(
     application: QApplication,
 ) -> None:
     first = Card(
         name="First",
-        revisions=(
-            CardRevision(
-                description="First description",
-                image_prompt=ImagePrompt(
-                    text="First prompt",
-                    source_description="First description",
-                ),
-            ),
-        ),
+        revisions=(CardRevision(description="First description"),),
     )
     second = Card(
         name="Second",
-        revisions=(
-            CardRevision(
-                description="Second description",
-                image_prompt=ImagePrompt(
-                    text="Second prompt",
-                    source_description="Second description",
-                ),
-            ),
-        ),
+        revisions=(CardRevision(description="Second description"),),
     )
     controller = DocumentController(Stack(name="Demo", cards=(first, second)))
     inspector = Inspector(controller)
     inspector.render(controller.document, first.id)
-    inspector.image_prompt_button.click()
-    assert inspector.image_prompt_button.isChecked()
-
     inspector.render(controller.document, second.id)
 
-    assert inspector.description_button.isChecked()
     assert inspector.description_edit.toPlainText() == "Second description"
-
-
-def test_changing_model_marks_image_prompt_out_of_date(
-    application: QApplication,
-) -> None:
-    revision = CardRevision(
-        description="A courtyard",
-        image_prompt=ImagePrompt(
-            text="A richly detailed courtyard",
-            source_description="A courtyard",
-            model_identifier="qwen3.5:9b-mlx",
-        ),
-    )
-    card = Card(name="Card", revisions=(revision,))
-    controller = DocumentController(Stack(name="Demo", cards=(card,)))
-    inspector = Inspector(controller)
-    inspector.render(controller.document, card.id)
-
-    inspector.set_image_prompt_capabilities(
-        can_enrich=True,
-        reason="Ready to prepare Image Prompt",
-        busy=False,
-        model_identifier="qwen3.5:9b-mlx",
-    )
-    assert inspector.enrich_button.text() == "Image Prompt Current"
-    assert not inspector.enrich_button.isEnabled()
-
-    inspector.set_image_prompt_capabilities(
-        can_enrich=True,
-        reason="Ready to prepare Image Prompt",
-        busy=False,
-        model_identifier="llama3.2:latest",
-    )
-
-    assert inspector.enrich_button.text() == "Update Image Prompt"
-    assert inspector.enrich_button.isEnabled()
-    assert "Out of date" in inspector.enrich_button.toolTip()
-
-    inspector.set_image_prompt_capabilities(
-        can_enrich=True,
-        reason="Ready to prepare Image Prompt",
-        busy=False,
-        model_identifier="qwen3.5:9b-mlx",
-    )
-    assert inspector.enrich_button.text() == "Image Prompt Current"
-    assert not inspector.enrich_button.isEnabled()
 
 
 def test_using_labels_name_single_reference(
@@ -879,33 +720,8 @@ def test_using_labels_name_single_reference(
     inspector.render(controller.document, source.id)
 
     assert inspector.reference_label.text() == "References"
-    assert "Using: Description + Reference" in inspector.enrich_button.toolTip()
-    assert "Using: Image Prompt + Reference" in inspector.generate_background_button.toolTip()
-
-
-def test_generate_requires_a_current_non_empty_image_prompt(
-    application: QApplication,
-) -> None:
-    revision = CardRevision(
-        description="A courtyard",
-        image_prompt=ImagePrompt(
-            text="A richly detailed courtyard",
-            source_description="A courtyard",
-        ),
-    )
-    card = Card(name="Card", revisions=(revision,))
-    controller = DocumentController(Stack(name="Demo", cards=(card,)))
-    inspector = Inspector(controller)
-    inspector.render(controller.document, card.id)
-
-    assert inspector.has_current_image_prompt()
-    assert inspector.has_description_input()
-
-    inspector.image_prompt_button.click()
-    inspector.description_edit.clear()
-    assert not inspector.has_current_image_prompt()
-    assert inspector.commit_revision_metadata()
-    assert controller.document.cards[0].active_revision.image_prompt is None
+    assert "Using: Description + Reference" in inspector.generate_background_button.toolTip()
+    assert "image 1" in inspector.reference_combo.toolTip()
 
 
 def test_add_hotspot_persists_and_selects_area_less_entry(
@@ -976,7 +792,7 @@ def test_hotspot_properties_reorder_and_delete_use_commands(
     assert controller.undo_if_current(applied[0][1])  # type: ignore[arg-type]
 
 
-def test_ai_activity_is_reflected_on_the_initiating_buttons(
+def test_generation_activity_is_reflected_on_the_initiating_button(
     application: QApplication,
 ) -> None:
     inspector = Inspector(DocumentController(Stack(name="Demo")))
@@ -987,21 +803,15 @@ def test_ai_activity_is_reflected_on_the_initiating_buttons(
         busy=True,
         generating=True,
     )
-    inspector.set_image_prompt_capabilities(
-        can_enrich=False,
-        reason="Preparing Image Prompt",
-        busy=True,
-    )
 
     assert inspector.generate_background_button.text() == "Generating…"
-    assert inspector.enrich_button.text() == "Preparing Image Prompt…"
 
 
-def test_image_prompt_has_no_separate_proposal_editor(
+def test_image_prompt_controls_are_absent(
     application: QApplication,
 ) -> None:
     inspector = Inspector(DocumentController(Stack(name="Demo")))
 
-    assert not hasattr(inspector, "image_prompt_review")
-    assert not hasattr(inspector, "apply_image_prompt_button")
-    assert not hasattr(inspector, "discard_image_prompt_button")
+    assert not hasattr(inspector, "image_prompt_button")
+    assert not hasattr(inspector, "enrich_button")
+    assert not hasattr(inspector, "prepare_image_prompt_requested")

@@ -65,7 +65,6 @@ def request(output_path: Path) -> MfluxGenerationRequest:
     return MfluxGenerationRequest(
         inputs=ImageGenerationInputs(
             description="A storybook watercolor courtyard",
-            image_prompt="A storybook watercolor courtyard",
         ),
         render_prompt="A storybook watercolor courtyard",
         output_path=output_path,
@@ -141,7 +140,6 @@ def test_reference_generation_uses_edit_model_and_kv_cache(
         update={
             "inputs": ImageGenerationInputs(
                 description="A referenced portrait",
-                image_prompt="A referenced portrait",
                 references=(snapshot,),
             ),
             "render_prompt": "REFERENCE IMAGE 1\nIDENTITY\nPreserve identity",
@@ -174,7 +172,6 @@ def test_reference_paths_must_match_snapshot_count(tmp_path: Path) -> None:
         MfluxGenerationRequest(
             inputs=ImageGenerationInputs(
                 description="Missing snapshot",
-                image_prompt="Missing snapshot",
             ),
             render_prompt="Missing snapshot",
             output_path=tmp_path / "invalid.png",
@@ -195,7 +192,6 @@ def test_one_reference_snapshot_requires_one_image_path(
     generation_request = MfluxGenerationRequest(
         inputs=ImageGenerationInputs(
             description="Same castle",
-            image_prompt="Same castle",
             references=(snapshot,),
         ),
         render_prompt="Same castle",
@@ -224,8 +220,7 @@ def test_two_reference_snapshots_require_two_ordered_image_paths(
 
     generation_request = MfluxGenerationRequest(
         inputs=ImageGenerationInputs(
-            description="Combine two references",
-            image_prompt="Use image 1 in image 2.",
+            description="Use image 1 in image 2.",
             references=snapshots,
         ),
         render_prompt="Use image 1 in image 2.",
@@ -274,7 +269,6 @@ def test_switching_generation_modes_evicts_the_previous_model(
         MfluxGenerationRequest(
             inputs=ImageGenerationInputs(
                 description="Referenced scene",
-                image_prompt="Referenced scene",
                 references=(snapshot,),
             ),
             render_prompt="Referenced scene",
