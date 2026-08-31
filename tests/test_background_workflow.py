@@ -42,18 +42,23 @@ from hotcards.application.generated_revision_change import GeneratedRevisionChan
 from hotcards.domain.image_dimensions import (
     AspectRatio,
     GenerateResolution,
+    higher_output_resolutions,
     output_dimensions,
 )
 from hotcards.domain.models import (
     Card,
     CardRevision,
+    CurrentSourceSize,
     DuplicateProvenance,
+    EditPreserveOptions,
+    EditProvenance,
     GeneratedBackground,
     HotspotSet,
     ImageReferenceSnapshot,
     ImageSourceSnapshot,
     Interaction,
     NavigateAction,
+    PresetOutputSize,
     RefineProvenance,
     RefineTransformation,
     ResolvedCardReference,
@@ -117,6 +122,7 @@ class FakeWorkers:
         assert stage in {
             "generating background image",
             "refining background image",
+            "editing background image",
         }
 
         def wrapped_operation() -> object:
@@ -159,10 +165,27 @@ class FakeMfluxModel:
         self.callbacks = FakeCallbackRegistry()
         self.calls: list[dict[str, object]] = []
         self.consumed_source_pixels: list[object] = []
+        self.tokenizers = {
+            "qwen3": SimpleNamespace(
+                tokenizer=lambda _prompt, **_kwargs: {
+                    "input_ids": list(range(24))
+                },
+                template=None,
+                use_chat_template=False,
+                add_special_tokens=True,
+            )
+        }
 
     def generate_image(self, **kwargs: object) -> FakeMfluxImage:
         self.calls.append(kwargs)
         image_path = kwargs.get("image_path")
+        image_paths = kwargs.get("image_paths")
+        if (
+            image_path is None
+            and isinstance(image_paths, list)
+            and len(image_paths) == 1
+        ):
+            image_path = image_paths[0]
         if isinstance(image_path, Path):
             with Image.open(image_path) as image:
                 self.consumed_source_pixels.append(image.getpixel((0, 0)))
@@ -418,6 +441,366 @@ def test_refine_uses_current_image_seed_and_creates_complete_version(
     controller.execute(RenameCardCommand(card_id=card.id, name="Garden renamed"))
     assert session.flush()
     assert not refined_path.exists()
+
+
+@pytest.mark.parametrize("hotspot_set", (None, HotspotSet()))
+def test_edit_uses_only_secure_current_image_and_creates_complete_version(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    hotspot_set: HotspotSet | None,
+) -> None:
+    workflow, controller, session, workers, model, card = _bound_workflow(tmp_path)
+    controller.execute(
+        ReplaceHotspotSetCommand(
+            card_id=card.id,
+            revision_id=card.active_revision.id,
+            hotspot_set=hotspot_set,
+        )
+    )
+    workflow.generate(card.id)
+    _complete_generation(workers)
+    source = controller.document.cards[0].active_revision
+    assert source.background is not None
+    source_path = session.store.asset_path(source.background.image_path)
+    reference = _create_generated_source(
+        workflow,
+        controller,
+        workers,
+        name="Reference",
+    )
+    controller.execute(
+        SetRevisionReferenceCommand(
+            card_id=card.id,
+            revision_id=source.id,
+            reference=ResolvedCardReference(target_card_id=reference.id),
+        )
+    )
+    source = controller.document.cards[0].active_revision
+    style = controller.document.styles[0]
+    controller.execute(
+        SetRevisionStyleCommand(
+            card_id=card.id,
+            revision_id=source.id,
+            style_id=style.id,
+        )
+    )
+    source = controller.document.cards[0].active_revision
+    monkeypatch.setattr(
+        "hotcards.application.background_workflow.secrets.randbelow",
+        lambda _limit: 8675309,
+    )
+    applied: list[tuple[str, UndoToken]] = []
+    cleared: list[None] = []
+    workflow.change_applied.connect(
+        lambda message, token: applied.append((message, token))
+    )
+    workflow.edit_instruction_clear_requested.connect(
+        lambda: cleared.append(None)
+    )
+    options = workflow.available_edit_output_sizes(card.id)
+    assert options[0] == CurrentSourceSize(width=592, height=448)
+
+    workflow.edit(
+        card.id,
+        instruction="  Open the garden gate.  ",
+        preserve=EditPreserveOptions(
+            subject_identity=True,
+            composition_and_framing=True,
+        ),
+        output_size=options[0],
+    )
+    snapshot_path = next(
+        (tmp_path / "temporary").glob(".refine-source-*.png")
+    )
+    _complete_generation(workers)
+
+    changed_card = controller.document.cards[0]
+    edited = changed_card.active_revision
+    assert changed_card.revisions[0] == source
+    assert edited.id != source.id
+    assert edited.description == source.description
+    assert edited.style_id == source.style_id
+    assert edited.references == source.references
+    assert edited.hotspot_set == hotspot_set
+    assert edited.generate_resolution == source.generate_resolution
+    assert edited.background is not None
+    provenance = edited.background.provenance
+    assert isinstance(provenance, EditProvenance)
+    assert provenance.source == ImageSourceSnapshot(
+        card_id=card.id,
+        revision_id=source.id,
+        background_id=source.background.id,
+    )
+    assert provenance.instruction == "Open the garden gate."
+    assert provenance.output_size == CurrentSourceSize(
+        width=592,
+        height=448,
+    )
+    assert provenance.settings.seed == 8675309
+    assert provenance.prompt_token_count == 24
+    assert model.calls[-1]["image_paths"] == [snapshot_path]
+    assert "image_path" not in model.calls[-1]
+    assert "image_strength" not in model.calls[-1]
+    assert "description" not in model.calls[-1]
+    assert "style" not in model.calls[-1]
+    assert "references" not in model.calls[-1]
+    assert snapshot_path != source_path
+    assert not snapshot_path.exists()
+    assert applied[-1][0] == "Image edited"
+    assert cleared == [None]
+
+    token = applied[-1][1]
+    edited_path = session.store.asset_path(edited.background.image_path)
+    assert controller.undo_if_current(token)
+    assert session.flush()
+    assert controller.document.cards[0].active_revision == source
+    assert edited_path.is_file()
+    assert controller.redo()
+    assert session.flush()
+    assert controller.document.cards[0].active_revision == edited
+    with pytest.raises(CommandError, match="cannot delete this source revision"):
+        controller.execute(
+            DeleteRevisionCommand(
+                card_id=card.id,
+                revision_id=source.id,
+            )
+        )
+
+    assert controller.undo()
+    assert session.flush()
+    controller.execute(RenameCardCommand(card_id=card.id, name="Garden renamed"))
+    assert session.flush()
+    assert not edited_path.exists()
+
+
+def test_sequential_edits_append_lineage_and_use_fresh_seeds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow, controller, _session, workers, _model, card = _bound_workflow(
+        tmp_path
+    )
+    workflow.generate(card.id)
+    _complete_generation(workers)
+    seeds = iter((101, 202))
+    monkeypatch.setattr(
+        "hotcards.application.background_workflow.secrets.randbelow",
+        lambda _limit: next(seeds),
+    )
+
+    for instruction in ("Open the gate.", "Add ivy."):
+        current_size = workflow.available_edit_output_sizes(card.id)[0]
+        workflow.edit(
+            card.id,
+            instruction=instruction,
+            preserve=EditPreserveOptions(subject_identity=True),
+            output_size=current_size,
+        )
+        _complete_generation(workers)
+
+    provenance = controller.document.cards[0].active_revision.provenance
+    assert isinstance(provenance, EditProvenance)
+    assert tuple(edit.instruction for edit in provenance.edit_lineage) == (
+        "Open the gate.",
+        "Add ivy.",
+    )
+    assert [
+        revision.background.provenance.settings.seed
+        for revision in controller.document.cards[0].revisions[1:]
+        if revision.background is not None
+    ] == [101, 202]
+
+
+def test_edit_flattens_duplicate_and_refine_preserves_accepted_edit(
+    tmp_path: Path,
+) -> None:
+    workflow, controller, _session, workers, model, card = _bound_workflow(
+        tmp_path
+    )
+    workflow.generate(card.id)
+    _complete_generation(workers)
+    source = controller.document.cards[0].active_revision
+    assert source.background is not None
+    duplicate_background = source.background.model_copy(
+        update={
+            "provenance": DuplicateProvenance(
+                source=ImageSourceSnapshot(
+                    card_id=uuid4(),
+                    revision_id=uuid4(),
+                    background_id=uuid4(),
+                ),
+                original_provenance=source.background.provenance,
+            )
+        }
+    )
+    controller.execute(
+        ReplaceRevisionBackgroundCommand(
+            card_id=card.id,
+            revision_id=source.id,
+            background=duplicate_background,
+        )
+    )
+
+    workflow.edit(
+        card.id,
+        instruction="Open the gate.",
+        preserve=EditPreserveOptions(subject_identity=True),
+        output_size=workflow.available_edit_output_sizes(card.id)[0],
+    )
+    _complete_generation(workers)
+    edited = controller.document.cards[0].active_revision
+    assert isinstance(edited.provenance, EditProvenance)
+    assert tuple(
+        edit.instruction for edit in edited.provenance.edit_lineage
+    ) == ("Open the gate.",)
+
+    workflow.refine(
+        card.id,
+        transformation=RefineTransformation.BALANCED,
+        resolution=GenerateResolution.RESOLUTION_768,
+    )
+    _complete_generation(workers)
+    refined = controller.document.cards[0].active_revision
+    assert isinstance(refined.provenance, RefineProvenance)
+    assert refined.provenance.edit_lineage == edited.provenance.edit_lineage
+    assert (
+        "The current Description is authoritative."
+        in refined.provenance.render_prompt
+    )
+    assert "1. Open the gate." in refined.provenance.render_prompt
+    assert model.calls[-1]["image_strength"] == 0.50
+
+
+@pytest.mark.parametrize("aspect_ratio", tuple(AspectRatio))
+@pytest.mark.parametrize("resolution", tuple(GenerateResolution))
+def test_edit_output_sizes_include_exact_current_then_only_higher_presets(
+    tmp_path: Path,
+    aspect_ratio: AspectRatio,
+    resolution: GenerateResolution,
+) -> None:
+    workflow, _controller, _session, workers, _model, card = _bound_workflow(
+        tmp_path / aspect_ratio.name / str(resolution.value),
+        aspect_ratio=aspect_ratio,
+        resolution=resolution,
+    )
+    workflow.generate(card.id)
+    _complete_generation(workers)
+    width, height = output_dimensions(resolution, aspect_ratio)
+
+    assert workflow.available_edit_output_sizes(card.id) == (
+        CurrentSourceSize(width=width, height=height),
+        *(
+            PresetOutputSize(resolution=candidate)
+            for candidate in higher_output_resolutions(
+                width,
+                height,
+                aspect_ratio,
+            )
+        ),
+    )
+
+
+def test_edit_rejects_replaced_source_and_failed_model_without_new_version(
+    tmp_path: Path,
+) -> None:
+    workflow, controller, session, workers, model, card = _bound_workflow(
+        tmp_path
+    )
+    workflow.generate(card.id)
+    _complete_generation(workers)
+    source = controller.document.cards[0].active_revision
+    assert source.background is not None
+    source_path = session.store.asset_path(source.background.image_path)
+    failures: list[object] = []
+    workflow.failed.connect(failures.append)
+
+    workflow.edit(
+        card.id,
+        instruction="Open the gate.",
+        preserve=EditPreserveOptions(),
+        output_size=workflow.available_edit_output_sizes(card.id)[0],
+    )
+    snapshot_path = next(
+        (tmp_path / "temporary").glob(".refine-source-*.png")
+    )
+    Image.new("RGB", (592, 448), "gold").save(source_path, format="PNG")
+    _complete_generation(workers)
+
+    assert model.consumed_source_pixels[-1] == (0, 0, 128)
+    assert model.calls[-1]["image_paths"] == [snapshot_path]
+    assert controller.document.cards[0].revisions == (source,)
+    assert "changed while Edit was running" in str(failures[-1])
+    assert not snapshot_path.exists()
+
+    workflow.edit(
+        card.id,
+        instruction="Add ivy.",
+        preserve=EditPreserveOptions(),
+        output_size=workflow.available_edit_output_sizes(card.id)[0],
+    )
+    workers.operations[-1].failed.emit(RuntimeError("model failed"))
+    assert controller.document.cards[0].revisions == (source,)
+    assert "model failed" in str(failures[-1])
+    assert not workflow.busy
+
+
+def test_edit_allows_empty_description_but_suppresses_complete_revision_changes(
+    tmp_path: Path,
+) -> None:
+    workflow, controller, _session, workers, _model, card = _bound_workflow(
+        tmp_path
+    )
+    workflow.generate(card.id)
+    _complete_generation(workers)
+    source = controller.document.cards[0].active_revision
+    controller.execute(
+        EditRevisionDescriptionCommand(
+            card_id=card.id,
+            revision_id=source.id,
+            value="",
+        )
+    )
+    empty_description_source = controller.document.cards[0].active_revision
+    workflow.edit(
+        card.id,
+        instruction="Open the gate.",
+        preserve=EditPreserveOptions(),
+        output_size=workflow.available_edit_output_sizes(card.id)[0],
+    )
+    _complete_generation(workers)
+    assert controller.document.cards[0].active_revision.description == ""
+
+    edited = controller.document.cards[0].active_revision
+    style = controller.document.styles[0]
+    controller.execute(
+        SetRevisionStyleCommand(
+            card_id=card.id,
+            revision_id=edited.id,
+            style_id=style.id,
+        )
+    )
+    styled = controller.document.cards[0].active_revision
+    failures: list[object] = []
+    workflow.failed.connect(failures.append)
+    workflow.edit(
+        card.id,
+        instruction="Add ivy.",
+        preserve=EditPreserveOptions(),
+        output_size=workflow.available_edit_output_sizes(card.id)[0],
+    )
+    controller.execute(
+        UpdateStyleCommand(
+            style_id=style.id,
+            name=style.name,
+            prompt_text=style.prompt_text + " More contrast.",
+        )
+    )
+    _complete_generation(workers)
+
+    assert controller.document.cards[0].active_revision == styled
+    assert len(controller.document.cards[0].revisions) == 2
+    assert "changed before Edit completed" in str(failures[-1])
+    assert empty_description_source.description == ""
 
 
 @pytest.mark.parametrize("hotspot_set", (None, HotspotSet()))
@@ -827,6 +1210,94 @@ def test_refine_indeterminate_observed_after_renders_and_promotes_one_history_en
     assert controller.undo()
     assert session.flush()
     assert controller.document == pending
+    assert controller.undo()
+    assert session.flush()
+    assert controller.document == source
+
+
+def test_edit_indeterminate_observed_after_keeps_instruction_and_promotes_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow, controller, session, workers, _model, card = _bound_workflow(
+        tmp_path
+    )
+    workflow.generate(card.id)
+    _complete_generation(workers)
+    source = controller.document
+    previous_token = controller.current_undo_token
+    changed_documents: list[Stack] = []
+    cleared: list[None] = []
+    applied: list[tuple[str, UndoToken]] = []
+    failures: list[object] = []
+    workflow.document_changed.connect(changed_documents.append)
+    workflow.change_applied.connect(
+        lambda message, token: applied.append((message, token))
+    )
+    workflow.edit_instruction_clear_requested.connect(
+        lambda: cleared.append(None)
+    )
+    workflow.failed.connect(failures.append)
+    assert session.store is not None
+    real_store = session.store.store_image_asset_and_save
+
+    def fail_indeterminate(
+        source_file_path: Path,
+        *,
+        destination_card_id: object,
+        destination_asset_id: object,
+        changed_stack: Stack,
+        **_kwargs: object,
+    ) -> object:
+        relative_path = session.store.store_image_asset(
+            source_file_path,
+            card_id=destination_card_id,  # type: ignore[arg-type]
+            asset_id=destination_asset_id,  # type: ignore[arg-type]
+        )
+        stored = session.store.stored_image_asset(
+            relative_path,
+            card_id=destination_card_id,  # type: ignore[arg-type]
+            asset_id=destination_asset_id,  # type: ignore[arg-type]
+        )
+        raise StackStoreTransactionError(
+            RuntimeError("manifest directory fsync failed"),
+            observed_stack=changed_stack,
+            durability_indeterminate=True,
+            owned_asset=stored,
+        )
+
+    monkeypatch.setattr(
+        session.store,
+        "store_image_asset_and_save",
+        fail_indeterminate,
+    )
+    workflow.edit(
+        card.id,
+        instruction="Open the gate.",
+        preserve=EditPreserveOptions(),
+        output_size=workflow.available_edit_output_sizes(card.id)[0],
+    )
+    _complete_generation(workers)
+
+    pending = controller.document
+    assert len(pending.cards[0].revisions) == 2
+    assert changed_documents[-1] == pending
+    assert controller.mutation_blocked
+    assert session.state.dirty
+    assert cleared == []
+    assert "durability remains indeterminate" in str(failures[-1])
+
+    monkeypatch.setattr(
+        session.store,
+        "store_image_asset_and_save",
+        real_store,
+    )
+    assert session.flush()
+    assert not controller.mutation_blocked
+    assert controller.current_undo_token != previous_token
+    assert cleared == [None]
+    assert applied == [("Image edited", controller.current_undo_token)]
+    assert changed_documents[-1] == pending
     assert controller.undo()
     assert session.flush()
     assert controller.document == source

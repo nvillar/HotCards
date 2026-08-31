@@ -11,6 +11,7 @@ from PySide6.QtGui import QFocusEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QCheckBox,
     QComboBox,
     QFrame,
     QHBoxLayout,
@@ -66,16 +67,26 @@ from hotcards.domain.image_dimensions import (
 from hotcards.domain.models import (
     Card,
     CardRevision,
+    CurrentSourceSize,
+    EditOutputSize,
+    EditPreserveOptions,
+    EditProvenance,
     HotspotConditions,
     HotspotKeyChanges,
     Interaction,
     KeyDefinition,
+    PresetOutputSize,
     RefineTransformation,
     ResolvedCardReference,
     Stack,
     StyleDefinition,
     UnresolvedCardReference,
     image_edit_lineage,
+    original_image_provenance,
+)
+from hotcards.generation.image_generation import (
+    EDIT_PROMPT_TOKEN_BUDGET,
+    compose_edit_prompt,
 )
 
 
@@ -191,6 +202,7 @@ class Inspector(QWidget):
     document_changed = Signal(object)
     generate_background_requested = Signal()
     refine_background_requested = Signal(object, object)
+    edit_background_requested = Signal(str, object, object)
     hotspot_selected = Signal(object)
     hotspot_usage_requested = Signal(object, object, object)
     change_applied = Signal(str, object)
@@ -214,6 +226,9 @@ class Inspector(QWidget):
         self._refine_using_text = ""
         self._refine_reason = ""
         self._refine_source_size: tuple[int, int] | None = None
+        self._edit_using_text = ""
+        self._edit_reason = ""
+        self._edit_source_size: tuple[int, int] | None = None
         self._rendering = False
         self.setObjectName("inspector")
         self.setMinimumWidth(300)
@@ -239,6 +254,7 @@ class Inspector(QWidget):
 
         self._build_background_tab()
         self._build_refine_tab()
+        self._build_edit_tab()
         self._build_styles_tab()
         self._build_hotspots_tab()
         self._build_keys_tab()
@@ -399,6 +415,86 @@ class Inspector(QWidget):
 
         scroll.setWidget(page)
         self._refine_tab_index = self.inspector_tabs.addTab(scroll, "Refine")
+
+    def _build_edit_tab(self) -> None:
+        scroll = QScrollArea()
+        scroll.setObjectName("editInspectorTab")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        page = QWidget()
+        page.setObjectName("editInspectorContent")
+        layout = QVBoxLayout(page)
+
+        self.edit_instruction_label = QLabel("Edit Instruction")
+        layout.addWidget(self.edit_instruction_label)
+        self.edit_instruction_edit = QPlainTextEdit()
+        self.edit_instruction_edit.setObjectName("editInstructionEdit")
+        self.edit_instruction_edit.setAccessibleName("Edit Instruction")
+        self.edit_instruction_edit.setPlaceholderText(
+            "Describe only the change to make"
+        )
+        self.edit_instruction_edit.setMaximumHeight(110)
+        layout.addWidget(self.edit_instruction_edit)
+        self.edit_instruction_error = QLabel()
+        self.edit_instruction_error.setObjectName(
+            "editInstructionValidationError"
+        )
+        self.edit_instruction_error.setWordWrap(True)
+        self.edit_instruction_error.setVisible(False)
+        layout.addWidget(self.edit_instruction_error)
+
+        layout.addSpacing(8)
+        self.edit_preserve_label = QLabel("Preserve")
+        layout.addWidget(self.edit_preserve_label)
+        preserve_fields = (
+            ("subject_identity", "Subject identity", True),
+            ("pose_and_expression", "Pose and expression", True),
+            (
+                "composition_and_framing",
+                "Composition and framing",
+                True,
+            ),
+            ("background", "Background", False),
+            ("lighting_and_color", "Lighting and color", False),
+            (
+                "existing_text_and_logos",
+                "Existing text and logos",
+                False,
+            ),
+        )
+        self.edit_preserve_checkboxes: dict[str, QCheckBox] = {}
+        for field_name, label, selected in preserve_fields:
+            checkbox = QCheckBox(label)
+            checkbox.setObjectName(
+                "editPreserve"
+                + "".join(part.title() for part in field_name.split("_"))
+            )
+            checkbox.setChecked(selected)
+            self.edit_preserve_checkboxes[field_name] = checkbox
+            layout.addWidget(checkbox)
+
+        layout.addSpacing(8)
+        self.edit_resolution_label = QLabel("Output Resolution")
+        layout.addWidget(self.edit_resolution_label)
+        self.edit_resolution_combo = QComboBox()
+        self.edit_resolution_combo.setObjectName("editResolutionCombo")
+        self.edit_resolution_combo.setAccessibleName("Edit output resolution")
+        layout.addWidget(self.edit_resolution_combo)
+        self.edit_output_error = QLabel()
+        self.edit_output_error.setObjectName("editOutputValidationError")
+        self.edit_output_error.setWordWrap(True)
+        self.edit_output_error.setVisible(False)
+        layout.addWidget(self.edit_output_error)
+
+        layout.addSpacing(8)
+        self.edit_background_button = QPushButton("Edit")
+        self.edit_background_button.setObjectName("editBackgroundButton")
+        layout.addWidget(self.edit_background_button)
+        self._focus_commit_targets.add(self.edit_background_button)
+        layout.addStretch(1)
+
+        scroll.setWidget(page)
+        self._edit_tab_index = self.inspector_tabs.addTab(scroll, "Edit")
 
     def _build_styles_tab(self) -> None:
         page = QWidget()
@@ -716,6 +812,19 @@ class Inspector(QWidget):
         self.refine_resolution_combo.currentIndexChanged.connect(
             lambda _index: self._render_inputs_changed()
         )
+        self.edit_instruction_edit.textChanged.connect(
+            self._edit_inputs_changed
+        )
+        for checkbox in self.edit_preserve_checkboxes.values():
+            checkbox.toggled.connect(
+                lambda _checked: self._edit_inputs_changed()
+            )
+        self.edit_resolution_combo.currentIndexChanged.connect(
+            lambda _index: self._edit_inputs_changed()
+        )
+        self.edit_background_button.clicked.connect(
+            self._request_edit_background
+        )
         self.style_combo.currentIndexChanged.connect(self._revision_style_changed)
         self.reference_combo.currentIndexChanged.connect(
             lambda index: self._reference_changed(1, index)
@@ -759,6 +868,14 @@ class Inspector(QWidget):
         if not self._rendering:
             self.render_inputs_changed.emit()
 
+    def _edit_inputs_changed(self) -> None:
+        if self._rendering:
+            return
+        self._set_error(self.edit_instruction_error, "")
+        self._set_error(self.edit_output_error, "")
+        self._render_edit_tooltip()
+        self.render_inputs_changed.emit()
+
     def _description_editing_finished(
         self,
         next_focus: object,
@@ -801,6 +918,10 @@ class Inspector(QWidget):
                 self._set_error(self.description_error, "")
                 self._set_error(self.reference_error, "")
                 self._set_error(self.refine_error, "")
+                self._set_error(self.edit_instruction_error, "")
+                self._set_error(self.edit_output_error, "")
+                self._set_error(self.edit_instruction_error, "")
+                self._set_error(self.edit_output_error, "")
                 self._set_error(self.style_error, "")
                 self._set_error(self.key_error, "")
                 self.set_hotspot_error("")
@@ -840,6 +961,11 @@ class Inspector(QWidget):
             self._render_resolution(document, revision)
             self._render_description_workflow(document, card, revision)
             self._render_refine(
+                document,
+                revision,
+                source_size=refine_source_size,
+            )
+            self._render_edit(
                 document,
                 revision,
                 source_size=refine_source_size,
@@ -894,6 +1020,12 @@ class Inspector(QWidget):
         if card is None:
             return False
         return bool(self.description_edit.toPlainText().strip())
+
+    def has_edit_instruction_input(self) -> bool:
+        return bool(self.edit_instruction_edit.toPlainText().strip())
+
+    def selected_edit_output_size(self) -> EditOutputSize | None:
+        return self._selected_edit_output_size()
 
     def _render_description_workflow(
         self,
@@ -954,6 +1086,30 @@ class Inspector(QWidget):
         )
         self._refresh_generation_tooltips()
 
+    def set_edit_capabilities(
+        self,
+        *,
+        can_edit: bool,
+        edit_reason: str,
+        busy: bool,
+        editing: bool,
+    ) -> None:
+        self._edit_reason = edit_reason
+        self.edit_background_button.setEnabled(can_edit and not busy)
+        self.edit_background_button.setText(
+            "Editing…" if editing else "Edit"
+        )
+        self._refresh_generation_tooltips()
+
+    def set_edit_error(self, message: str) -> None:
+        self._set_error(self.edit_instruction_error, message)
+
+    def clear_edit_instruction(self) -> None:
+        with QSignalBlocker(self.edit_instruction_edit):
+            self.edit_instruction_edit.clear()
+        self._set_error(self.edit_instruction_error, "")
+        self._render_edit_tooltip()
+
     def _refresh_generation_tooltips(self) -> None:
         self.generate_background_button.setToolTip(
             self._tooltip_with_using(
@@ -965,6 +1121,12 @@ class Inspector(QWidget):
             self._tooltip_with_using(
                 self._refine_reason,
                 self._refine_using_text,
+            )
+        )
+        self.edit_background_button.setToolTip(
+            self._tooltip_with_using(
+                self._edit_reason,
+                self._edit_using_text,
             )
         )
 
@@ -1687,6 +1849,168 @@ class Inspector(QWidget):
                 )
             return
         self.refine_background_requested.emit(transformation, resolution)
+
+    def _render_edit(
+        self,
+        document: Stack,
+        revision: CardRevision,
+        *,
+        source_size: tuple[int, int] | None,
+    ) -> None:
+        previous_selection = self.edit_resolution_combo.currentData()
+        self._edit_source_size = source_size
+        error = ""
+        available_presets: tuple[GenerateResolution, ...] = ()
+        if revision.background is None:
+            error = "Generate an image before editing."
+        elif source_size is None:
+            error = "The current image is unavailable or unreadable."
+        else:
+            available_presets = higher_output_resolutions(
+                source_size[0],
+                source_size[1],
+                document.aspect_ratio,
+            )
+        with QSignalBlocker(self.edit_resolution_combo):
+            self.edit_resolution_combo.clear()
+            if source_size is not None:
+                self.edit_resolution_combo.addItem(
+                    f"Current ({source_size[0]} x {source_size[1]})",
+                    "current",
+                )
+                for resolution in available_presets:
+                    width, height = output_dimensions(
+                        resolution,
+                        document.aspect_ratio,
+                    )
+                    self.edit_resolution_combo.addItem(
+                        f"{resolution.value} ({width} x {height})",
+                        resolution,
+                    )
+                selected_index = self._combo_index_for_data(
+                    self.edit_resolution_combo,
+                    previous_selection,
+                )
+                self.edit_resolution_combo.setCurrentIndex(
+                    selected_index if selected_index >= 0 else 0
+                )
+        self.edit_resolution_combo.setEnabled(source_size is not None)
+        self._set_error(self.edit_output_error, error)
+        self._render_edit_tooltip(revision=revision)
+
+    def _selected_edit_preserve(self) -> EditPreserveOptions:
+        return EditPreserveOptions(
+            **{
+                field_name: checkbox.isChecked()
+                for field_name, checkbox
+                in self.edit_preserve_checkboxes.items()
+            }
+        )
+
+    def _selected_edit_output_size(self) -> EditOutputSize | None:
+        selection = self.edit_resolution_combo.currentData()
+        if selection == "current" and self._edit_source_size is not None:
+            return CurrentSourceSize(
+                width=self._edit_source_size[0],
+                height=self._edit_source_size[1],
+            )
+        try:
+            return PresetOutputSize(
+                resolution=GenerateResolution(selection)
+            )
+        except (TypeError, ValueError):
+            return None
+
+    def _render_edit_tooltip(
+        self,
+        *,
+        revision: CardRevision | None = None,
+    ) -> None:
+        instruction = self.edit_instruction_edit.toPlainText().strip()
+        preserve = self._selected_edit_preserve()
+        output_size = self._selected_edit_output_size()
+        using = ["Using: Current image only"]
+        if instruction:
+            try:
+                expanded_prompt = compose_edit_prompt(
+                    instruction,
+                    preserve,
+                )
+            except ValueError:
+                expanded_prompt = ""
+            if expanded_prompt:
+                using.append(f"Expanded prompt:\n{expanded_prompt}")
+        selected_labels = [
+            checkbox.text()
+            for checkbox in self.edit_preserve_checkboxes.values()
+            if checkbox.isChecked()
+        ]
+        using.append(
+            "Preserve: "
+            + (", ".join(selected_labels) if selected_labels else "None")
+        )
+        if output_size is not None:
+            if isinstance(output_size, CurrentSourceSize):
+                width, height = output_size.width, output_size.height
+                using.append(f"Resolution: Current ({width} x {height})")
+            else:
+                width, height = output_dimensions(
+                    output_size.resolution,
+                    self.controller.document.aspect_ratio,
+                )
+                using.append(
+                    f"Resolution: {output_size.resolution.value} "
+                    f"square-equivalent ({width} x {height})"
+                )
+        using.append(f"Token budget: {EDIT_PROMPT_TOKEN_BUDGET}")
+        active_revision = revision
+        if active_revision is None:
+            card = self._selected_card()
+            active_revision = (
+                card.active_revision
+                if card is not None
+                else None
+            )
+        provenance = (
+            active_revision.background.provenance
+            if active_revision is not None
+            and active_revision.background is not None
+            else None
+        )
+        if provenance is not None:
+            provenance = original_image_provenance(provenance)
+        if isinstance(provenance, EditProvenance):
+            using.append(
+                "Last accepted Edit tokens: "
+                f"{provenance.prompt_token_count}/"
+                f"{provenance.prompt_token_budget}"
+            )
+        self._edit_using_text = "\n".join(using)
+        self._refresh_generation_tooltips()
+
+    def _request_edit_background(self) -> None:
+        instruction = self.edit_instruction_edit.toPlainText().strip()
+        if not instruction:
+            self._set_error(
+                self.edit_instruction_error,
+                "Enter an Edit Instruction.",
+            )
+            return
+        output_size = self._selected_edit_output_size()
+        if output_size is None:
+            self._set_error(
+                self.edit_output_error,
+                "Select the current size or a higher Edit resolution.",
+            )
+            return
+        preserve = self._selected_edit_preserve()
+        self._set_error(self.edit_instruction_error, "")
+        self._set_error(self.edit_output_error, "")
+        self.edit_background_requested.emit(
+            instruction,
+            preserve,
+            output_size,
+        )
 
     def _render_hotspots(
         self,

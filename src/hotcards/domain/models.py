@@ -379,6 +379,37 @@ class EditPreserveOptions(DomainModel):
     existing_text_and_logos: bool = False
 
 
+class CurrentSourceSize(DomainModel):
+    """Use the source image's exact decoded dimensions for Edit output."""
+
+    mode: Literal["current"] = "current"
+    width: PositiveInt
+    height: PositiveInt
+
+
+class PresetOutputSize(DomainModel):
+    """Use one square-equivalent output preset at the stack aspect ratio."""
+
+    mode: Literal["preset"] = "preset"
+    resolution: GenerateResolution
+
+
+EditOutputSize = Annotated[
+    CurrentSourceSize | PresetOutputSize,
+    Field(discriminator="mode"),
+]
+
+
+def edit_output_dimensions(
+    output_size: EditOutputSize,
+    aspect_ratio: AspectRatio,
+) -> tuple[int, int]:
+    """Resolve exact Edit output pixels from one strict size selection."""
+    if isinstance(output_size, CurrentSourceSize):
+        return output_size.width, output_size.height
+    return output_dimensions(output_size.resolution, aspect_ratio)
+
+
 class AcceptedEdit(DomainModel):
     """One accepted Edit instruction retained in chronological order."""
 
@@ -454,8 +485,10 @@ class EditProvenance(DomainModel):
     instruction: NonEmptyString
     preserve: EditPreserveOptions
     expanded_prompt: NonEmptyString
-    resolution: GenerateResolution
+    output_size: EditOutputSize
     edit_lineage: tuple[AcceptedEdit, ...] = Field(min_length=1)
+    prompt_token_count: PositiveInt
+    prompt_token_budget: Literal[512] = 512
     settings: ImageOperationSettings
 
     @property
@@ -471,6 +504,8 @@ class EditProvenance(DomainModel):
     def require_current_edit_at_lineage_end(self) -> EditProvenance:
         if self.edit_lineage[-1] != self.accepted_edit:
             raise ValueError("Edit lineage must end with the accepted current Edit")
+        if self.prompt_token_count > self.prompt_token_budget:
+            raise ValueError("Edit prompt token count exceeds its 512-token budget")
         return self
 
 
@@ -752,10 +787,7 @@ class Stack(DomainModel):
                             "direct Generate dimensions must match its resolution "
                             "and stack aspect ratio"
                         )
-                elif isinstance(
-                    original_provenance,
-                    (RefineProvenance, EditProvenance),
-                ):
+                elif isinstance(original_provenance, RefineProvenance):
                     expected_dimensions = output_dimensions(
                         original_provenance.resolution,
                         self.aspect_ratio,
@@ -767,6 +799,18 @@ class Stack(DomainModel):
                         raise ValueError(
                             f"{original_provenance.operation.title()} dimensions must match "
                             "its resolution and stack aspect ratio"
+                        )
+                elif isinstance(original_provenance, EditProvenance):
+                    expected_dimensions = edit_output_dimensions(
+                        original_provenance.output_size,
+                        self.aspect_ratio,
+                    )
+                    if (
+                        original_provenance.settings.width,
+                        original_provenance.settings.height,
+                    ) != expected_dimensions:
+                        raise ValueError(
+                            "Edit dimensions must match its selected output size"
                         )
                 if isinstance(provenance, (RefineProvenance, EditProvenance)):
                     source = provenance.source
@@ -789,6 +833,27 @@ class Stack(DomainModel):
                             "derived image source background must match the source "
                             "revision"
                         )
+                    if (
+                        isinstance(provenance, EditProvenance)
+                        and isinstance(
+                            provenance.output_size,
+                            CurrentSourceSize,
+                        )
+                    ):
+                        source_settings = image_operation_settings(
+                            source_background.provenance
+                        )
+                        if (
+                            provenance.output_size.width,
+                            provenance.output_size.height,
+                        ) != (
+                            source_settings.width,
+                            source_settings.height,
+                        ):
+                            raise ValueError(
+                                "current-size Edit output must match its source "
+                                "background dimensions"
+                            )
                     derived_sources[revision.id] = source.revision_id
                 resolved_reference_ids: list[UUID] = []
                 for reference in revision.references:

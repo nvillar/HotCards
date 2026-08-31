@@ -75,9 +75,12 @@ from hotcards.application.workers import (
 from hotcards.domain.image_dimensions import GenerateResolution
 from hotcards.domain.models import (
     Card,
+    CurrentSourceSize,
+    EditPreserveOptions,
     HotspotSet,
     Interaction,
     Polygon,
+    PresetOutputSize,
     RefineTransformation,
     ResolvedCardReference,
     RunOverlayMode,
@@ -389,6 +392,7 @@ class MainWindow(QMainWindow):
         self.inspector.inspector_tabs.currentChanged.connect(self._inspector_tab_changed)
         self.inspector.generate_background_requested.connect(self._generate_background)
         self.inspector.refine_background_requested.connect(self._refine_background)
+        self.inspector.edit_background_requested.connect(self._edit_background)
         self.inspector.change_applied.connect(self._show_undo_notification)
         self.inspector.hotspot_selected.connect(self.card_canvas.select_interaction)
         self.inspector.hotspot_usage_requested.connect(self._show_hotspot_usage)
@@ -419,6 +423,15 @@ class MainWindow(QMainWindow):
             self.background_workflow.generation_applied.connect(
                 self._show_generated_revision_notification
             )
+            edit_instruction_clear_requested = getattr(
+                self.background_workflow,
+                "edit_instruction_clear_requested",
+                None,
+            )
+            if edit_instruction_clear_requested is not None:
+                edit_instruction_clear_requested.connect(
+                    self.inspector.clear_edit_instruction
+                )
         self.pane_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.pane_splitter.setObjectName("threePaneSplitter")
         self.pane_splitter.addWidget(self.card_sidebar)
@@ -1368,6 +1381,47 @@ class MainWindow(QMainWindow):
         self.render_document()
         self._update_generation_actions()
 
+    def _edit_background(
+        self,
+        instruction: object,
+        preserve: object,
+        output_size: object,
+    ) -> None:
+        workflow = self.background_workflow
+        card_id = self._selected_card_id
+        if (
+            workflow is None
+            or card_id is None
+            or not isinstance(instruction, str)
+            or not isinstance(preserve, EditPreserveOptions)
+            or not isinstance(
+                output_size,
+                (CurrentSourceSize, PresetOutputSize),
+            )
+        ):
+            return
+        self.notification_bar.clear_notification("background-error")
+        self.notification_bar.clear_notification("background-warning")
+        self.notification_bar.clear_notification("background-cancelled")
+        if not self._commit_authoring_metadata():
+            return
+        try:
+            workflow.edit(
+                card_id,
+                instruction=instruction,
+                preserve=preserve,
+                output_size=output_size,
+            )
+        except (BackgroundWorkflowError, ValidationError) as error:
+            self.inspector.set_edit_error(str(error))
+            self._show_error(
+                "background-error",
+                "Could not edit image",
+                detail=str(error),
+            )
+        self.render_document()
+        self._update_generation_actions()
+
     def _clear_background(self) -> None:
         workflow = self.background_workflow
         card_id = self._selected_card_id
@@ -1444,7 +1498,11 @@ class MainWindow(QMainWindow):
     def _background_progress_changed(self, message: str) -> None:
         self.notification_bar.clear_notification("background-error")
         self.notification_bar.clear_notification("background-warning")
-        if message in {"Generation cancelled", "Refine cancelled"}:
+        if message in {
+            "Generation cancelled",
+            "Refine cancelled",
+            "Edit cancelled",
+        }:
             self._show_info("background-cancelled", message)
         else:
             self.notification_bar.clear_notification("background-cancelled")
@@ -1487,22 +1545,26 @@ class MainWindow(QMainWindow):
         self.generation_progress_container.show()
 
     def _background_failed(self, failure: object) -> None:
-        title = (
-            "Image refinement failed"
-            if self._background_progress_message == "Image refinement failed"
-            else "Image generation failed"
-        )
+        if self._background_progress_message == "Image refinement failed":
+            title = "Image refinement failed"
+        elif self._background_progress_message == "Image editing failed":
+            title = "Image editing failed"
+        else:
+            title = "Image generation failed"
+        detail = failure.message if isinstance(failure, WorkerFailure) else str(failure)
+        if title == "Image editing failed":
+            self.inspector.set_edit_error(detail)
         if isinstance(failure, WorkerFailure):
             self._show_error(
                 "background-error",
                 title,
-                detail=failure.message,
+                detail=detail,
             )
         else:
             self._show_error(
                 "background-error",
                 title,
-                detail=str(failure),
+                detail=detail,
             )
         self._update_generation_actions()
 
@@ -1649,6 +1711,50 @@ class MainWindow(QMainWindow):
             refine_reason=refine_reason,
             busy=workflow_busy,
             refining=workflow_busy and active_operation == "refine",
+        )
+        has_edit_instruction = self.inspector.has_edit_instruction_input()
+        has_edit_output_size = (
+            self.inspector.selected_edit_output_size() is not None
+        )
+        edit_reason = "Ready to edit"
+        if self.controller.mutation_blocked:
+            edit_reason = PENDING_DURABILITY_MESSAGE
+        elif not has_card:
+            edit_reason = "Select a card in a saved stack"
+        elif workflow_busy:
+            edit_reason = (
+                "Edit is running for this card"
+                if self.background_workflow is not None
+                and self._selected_card_id is not None
+                and getattr(
+                    self.background_workflow,
+                    "is_editing_for",
+                    lambda _card_id: False,
+                )(self._selected_card_id)
+                else "An image operation is running; MFLUX runs one job at a time"
+            )
+        elif not has_image:
+            edit_reason = "Generate an image before editing"
+        elif not has_edit_instruction:
+            edit_reason = "Enter an Edit Instruction"
+        elif not has_edit_output_size:
+            edit_reason = (
+                self.inspector.edit_output_error.text()
+                or "Select the current size or a higher Edit resolution"
+            )
+        elif not mflux_available:
+            edit_reason = self._action_diagnostic(AdapterKind.MFLUX)
+        self.inspector.set_edit_capabilities(
+            can_edit=(
+                has_card
+                and has_image
+                and has_edit_instruction
+                and has_edit_output_size
+                and mflux_available
+            ),
+            edit_reason=edit_reason,
+            busy=workflow_busy,
+            editing=workflow_busy and active_operation == "edit",
         )
         self.clear_background_button.setEnabled(
             mutation_allowed and has_card and has_image and not workflow_busy

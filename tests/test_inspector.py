@@ -31,6 +31,7 @@ from hotcards.domain.models import (
     Card,
     CardRevision,
     DirectGenerateProvenance,
+    EditPreserveOptions,
     GeneratedBackground,
     GenerateInputs,
     HotspotConditions,
@@ -101,12 +102,28 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     inspector = Inspector(controller)
     inspector.render(controller.document, card.id)
 
-    assert inspector.inspector_tabs.count() == 5
+    assert inspector.inspector_tabs.count() == 6
     assert inspector.inspector_tabs.tabText(0) == "Generate"
     assert inspector.inspector_tabs.tabText(1) == "Refine"
-    assert inspector.inspector_tabs.tabText(2) == "Styles"
-    assert inspector.inspector_tabs.tabText(3) == "Hotspots"
-    assert inspector.inspector_tabs.tabText(4) == "Keys"
+    assert inspector.inspector_tabs.tabText(2) == "Edit"
+    assert inspector.inspector_tabs.tabText(3) == "Styles"
+    assert inspector.inspector_tabs.tabText(4) == "Hotspots"
+    assert inspector.inspector_tabs.tabText(5) == "Keys"
+    assert [
+        checkbox.text()
+        for checkbox in inspector.edit_preserve_checkboxes.values()
+    ] == [
+        "Subject identity",
+        "Pose and expression",
+        "Composition and framing",
+        "Background",
+        "Lighting and color",
+        "Existing text and logos",
+    ]
+    assert [
+        checkbox.isChecked()
+        for checkbox in inspector.edit_preserve_checkboxes.values()
+    ] == [True, True, True, False, False, False]
     assert all(
         label.text() != "Keys are global to this stack."
         for label in inspector.findChildren(QLabel)
@@ -150,6 +167,8 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     assert content_layout.indexOf(inspector.resolution_label) < (
         content_layout.indexOf(inspector.resolution_combo)
     )
+
+
     assert content_layout.indexOf(inspector.resolution_combo) < (
         content_layout.indexOf(inspector.generate_background_button)
     )
@@ -240,6 +259,54 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
         "Generate Hotspots",
     ):
         assert obsolete not in visible_copy
+
+
+def test_edit_tab_uses_current_or_higher_size_and_emits_exact_inputs(
+    application: QApplication,
+) -> None:
+    revision = CardRevision(
+        description="A legacy courtyard",
+        background=_background(),
+    )
+    card = Card(name="Courtyard", revisions=(revision,))
+    controller = DocumentController(Stack(name="Demo", cards=(card,)))
+    inspector = Inspector(controller)
+    requests: list[tuple[object, object, object]] = []
+    inspector.edit_background_requested.connect(
+        lambda instruction, preserve, output: requests.append(
+            (instruction, preserve, output)
+        )
+    )
+
+    inspector.render(
+        controller.document,
+        card.id,
+        refine_source_size=(1024, 768),
+    )
+
+    assert inspector.edit_resolution_combo.count() == 2
+    assert inspector.edit_resolution_combo.itemText(0) == (
+        "Current (1024 x 768)"
+    )
+    assert inspector.edit_resolution_combo.itemData(0) == "current"
+    assert inspector.edit_resolution_combo.itemText(1) == (
+        "1024 (1184 x 880)"
+    )
+    inspector.edit_instruction_edit.setPlainText("  Open the gate.  ")
+    inspector.edit_background_button.click()
+
+    assert len(requests) == 1
+    instruction, preserve, output = requests[0]
+    assert instruction == "Open the gate."
+    assert preserve == EditPreserveOptions(
+        subject_identity=True,
+        pose_and_expression=True,
+        composition_and_framing=True,
+    )
+    assert output.mode == "current"
+    assert (output.width, output.height) == (1024, 768)
+    assert "Expanded prompt:" in inspector.edit_background_button.toolTip()
+    assert "Token budget: 512" in inspector.edit_background_button.toolTip()
 
 
 def test_refine_tab_has_transformation_resolution_and_action_only(

@@ -45,7 +45,7 @@ bundle transaction. Undo/Redo history retains the independent bytes only while
 needed to restore the duplicate, and discarding that history reclaims the
 unreferenced duplicate-owned asset without collecting unrelated bundle files.
 
-The inspector tabs are Generate, Refine, Styles, Hotspots, and Keys. Generate
+The inspector tabs are Generate, Refine, Edit, Styles, Hotspots, and Keys. Generate
 follows the authoring sequence Description, Style, optional References,
 Resolution, then Generate Image. Resolution labels show the exact output width
 and height for the stack format. Generate requires a nonempty Description and
@@ -77,7 +77,7 @@ the regular model family, and Reference-backed Generate and Edit through the
 Edit family. Model loading and inference share one process-local serialized
 boundary with at most one compatible cached family/configuration. Cancellation
 discards candidate output, and changing the selected model releases the prior
-configuration. Edit execution is not yet exposed as an authoring workflow.
+configuration.
 
 Refine is exposed as an automatic-version workflow for the current canvas
 image. It uses regular Flux2Klein img2img with Reimagine 0.25, Balanced 0.50,
@@ -91,6 +91,17 @@ Success preserves the source and automatically appends and activates one
 complete derived revision. The new image and manifest commit as one
 rollback-safe transaction, and Undo/Redo retain its owned asset only while
 needed.
+
+Edit is also an automatic-version workflow for the current canvas image. It
+sends that image alone to Flux2KleinEdit with the authored Edit Instruction and
+six explicit Preserve choices; Description, Style, and Generate References are
+copied into the new revision but are not model inputs. The expanded prompt is
+deterministic and must fit the model's 512-token budget without truncation.
+Output defaults to the current image's exact decoded dimensions, including
+legacy non-preset sizes, and also offers strictly higher-area presets. Each Edit
+uses a fresh seed and appends its accepted instruction to ordered provenance
+lineage. Later Refine operations preserve that lineage unless it conflicts with
+the current authoritative Description; Generate ignores it.
 
 Generated images are the only supported background source. Generate and image
 removal apply to the active revision through document commands. Completed

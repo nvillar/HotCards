@@ -313,7 +313,7 @@ def test_pending_persisted_change_blocks_mutations_until_confirmed() -> None:
     for operation in blocked_operations:
         with pytest.raises(
             DocumentMutationBlockedError,
-            match="Save the stack to finish the pending duplicate",
+            match="Save the stack to finish the pending image change",
         ):
             operation()
         assert controller.document == observed_after

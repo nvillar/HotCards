@@ -20,6 +20,7 @@ from hotcards.domain.models import (
     CanvasSize,
     Card,
     CardRevision,
+    CurrentSourceSize,
     DirectGenerateProvenance,
     DuplicateProvenance,
     EditPreserveOptions,
@@ -39,6 +40,7 @@ from hotcards.domain.models import (
     NavigateAction,
     Point,
     Polygon,
+    PresetOutputSize,
     RefineProvenance,
     RefineTransformation,
     ResolvedCardReference,
@@ -540,8 +542,11 @@ def test_image_provenance_union_is_discriminated_strict_and_round_trips() -> Non
             instruction=accepted_edit.instruction,
             preserve=accepted_edit.preserve,
             expanded_prompt=accepted_edit.expanded_prompt,
-            resolution=GenerateResolution.RESOLUTION_1024,
+            output_size=PresetOutputSize(
+                resolution=GenerateResolution.RESOLUTION_1024
+            ),
             edit_lineage=(accepted_edit,),
+            prompt_token_count=24,
             settings=image_settings(width=1184, height=880),
         ),
         DuplicateProvenance(
@@ -587,8 +592,11 @@ def test_duplicate_provenance_is_flattened_and_inherits_original_edit_lineage() 
         instruction=accepted_edit.instruction,
         preserve=accepted_edit.preserve,
         expanded_prompt=accepted_edit.expanded_prompt,
-        resolution=GenerateResolution.RESOLUTION_512,
+        output_size=PresetOutputSize(
+            resolution=GenerateResolution.RESOLUTION_512
+        ),
         edit_lineage=(accepted_edit,),
+        prompt_token_count=24,
         settings=image_settings(),
     )
     duplicate = DuplicateProvenance(
@@ -622,8 +630,11 @@ def test_derived_operation_inherits_lineage_from_independent_duplicate() -> None
         instruction=accepted_edit.instruction,
         preserve=accepted_edit.preserve,
         expanded_prompt=accepted_edit.expanded_prompt,
-        resolution=GenerateResolution.RESOLUTION_512,
+        output_size=PresetOutputSize(
+            resolution=GenerateResolution.RESOLUTION_512
+        ),
         edit_lineage=(accepted_edit,),
+        prompt_token_count=24,
         settings=image_settings(),
     )
     duplicate_card_id = uuid4()
@@ -758,9 +769,97 @@ def test_refine_and_edit_provenance_enforce_operation_invariants() -> None:
             instruction="Close the gate.",
             preserve=preserve,
             expanded_prompt="Close the gate. Preserve subject identity.",
-            resolution=GenerateResolution.RESOLUTION_768,
+            output_size=PresetOutputSize(
+                resolution=GenerateResolution.RESOLUTION_768
+            ),
             edit_lineage=(accepted,),
+            prompt_token_count=24,
             settings=image_settings(width=880, height=672),
+        )
+    with pytest.raises(ValidationError, match="512-token budget"):
+        EditProvenance(
+            source=source,
+            instruction=accepted.instruction,
+            preserve=accepted.preserve,
+            expanded_prompt=accepted.expanded_prompt,
+            output_size=PresetOutputSize(
+                resolution=GenerateResolution.RESOLUTION_512
+            ),
+            edit_lineage=(accepted,),
+            prompt_token_count=513,
+            settings=image_settings(),
+        )
+
+
+def test_edit_current_output_size_matches_exact_source_dimensions() -> None:
+    card_id = uuid4()
+    source = CardRevision(
+        background=GeneratedBackground(
+            image_path="assets/cards/card/legacy.png",
+            provenance=LegacyGenerateProvenance(
+                render_prompt="Legacy source",
+                settings=image_settings(width=1001, height=777),
+            ),
+            created_at=datetime.now(UTC),
+        )
+    )
+    assert source.background is not None
+    accepted = AcceptedEdit(
+        instruction="Open the gate.",
+        preserve=EditPreserveOptions(subject_identity=True),
+        expanded_prompt="Open the gate.",
+    )
+
+    def edited_revision(width: int, height: int) -> CardRevision:
+        return CardRevision(
+            background=GeneratedBackground(
+                image_path="assets/cards/card/edited.png",
+                provenance=EditProvenance(
+                    source=ImageSourceSnapshot(
+                        card_id=card_id,
+                        revision_id=source.id,
+                        background_id=source.background.id,
+                    ),
+                    instruction=accepted.instruction,
+                    preserve=accepted.preserve,
+                    expanded_prompt=accepted.expanded_prompt,
+                    output_size=CurrentSourceSize(
+                        width=width,
+                        height=height,
+                    ),
+                    edit_lineage=(accepted,),
+                    prompt_token_count=12,
+                    settings=image_settings(width=width, height=height),
+                ),
+                created_at=datetime.now(UTC),
+            )
+        )
+
+    matching = edited_revision(1001, 777)
+    Stack(
+        name="Valid",
+        cards=(
+            Card(
+                id=card_id,
+                name="Card",
+                revisions=(source, matching),
+                active_revision_id=matching.id,
+            ),
+        ),
+    )
+
+    mismatched = edited_revision(1000, 777)
+    with pytest.raises(ValidationError, match="current-size Edit output"):
+        Stack(
+            name="Invalid",
+            cards=(
+                Card(
+                    id=card_id,
+                    name="Card",
+                    revisions=(source, mismatched),
+                    active_revision_id=mismatched.id,
+                ),
+            ),
         )
 
 
@@ -878,8 +977,11 @@ def test_multistep_refine_and_edit_lineage_must_match_resolved_sources() -> None
                 instruction=edit_one.instruction,
                 preserve=edit_one.preserve,
                 expanded_prompt=edit_one.expanded_prompt,
-                resolution=GenerateResolution.RESOLUTION_512,
+                output_size=PresetOutputSize(
+                    resolution=GenerateResolution.RESOLUTION_512
+                ),
                 edit_lineage=(edit_one,),
+                prompt_token_count=24,
                 settings=image_settings(),
             ),
             created_at=datetime.now(UTC),
@@ -898,8 +1000,11 @@ def test_multistep_refine_and_edit_lineage_must_match_resolved_sources() -> None
                 instruction=edit_two.instruction,
                 preserve=edit_two.preserve,
                 expanded_prompt=edit_two.expanded_prompt,
-                resolution=GenerateResolution.RESOLUTION_512,
+                output_size=PresetOutputSize(
+                    resolution=GenerateResolution.RESOLUTION_512
+                ),
                 edit_lineage=(edit_one, edit_two),
+                prompt_token_count=24,
                 settings=image_settings(),
             ),
             created_at=datetime.now(UTC),
@@ -939,8 +1044,11 @@ def test_multistep_refine_and_edit_lineage_must_match_resolved_sources() -> None
                 instruction=edit_three.instruction,
                 preserve=edit_three.preserve,
                 expanded_prompt=edit_three.expanded_prompt,
-                resolution=GenerateResolution.RESOLUTION_512,
+                output_size=PresetOutputSize(
+                    resolution=GenerateResolution.RESOLUTION_512
+                ),
                 edit_lineage=(edit_one, edit_two, edit_three),
+                prompt_token_count=24,
                 settings=image_settings(),
             ),
             created_at=datetime.now(UTC),

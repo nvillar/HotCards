@@ -105,6 +105,20 @@ for live MFLUX runs.
   Description authoritative. On success atomically store the image and append
   and activate one complete copied revision through one Undo boundary; do not
   expose Keep/Create New Version for Refine.
+- Edit only the readable current background through Flux2KleinEdit with one
+  direct authored Edit Instruction and the six ordered Preserve choices:
+  Subject identity, Pose and expression, Composition and framing, Background,
+  Lighting and color, and Existing text and logos. Default the first three on.
+  Compose the expanded prompt deterministically with REM-compatible clauses,
+  validate it against the FLUX Edit tokenizer's hard 512-token budget without
+  rewriting or truncation, use a fresh random seed, and never send Description,
+  Style, or Generate References. Default output to the source image's exact
+  decoded dimensions and additionally offer only higher-area presets. Pass
+  MFLUX a private immutable no-follow source snapshot and reject replacement
+  races before acceptance. Append the accepted Edit to inherited flattened
+  lineage, atomically store the image, and append and activate one complete
+  copied revision through one Undo boundary. Clear the instruction only after
+  definitive durable success; do not expose Keep/Create New Version for Edit.
 - Persist generated backgrounds with a strict discriminated provenance union
   for direct Generate, externally patched legacy Generate, Refine, Edit, and
   independent card duplication.
@@ -112,9 +126,11 @@ for live MFLUX runs.
   nullable fields. Refine and Edit identify their exact source revision and
   background. A Refine inherits its source revision's accepted Edit lineage
   unchanged; an Edit appends exactly its accepted current Edit to that source
-  lineage. Current Generate, Refine, and Edit dimensions must match their typed
-  resolution and the stack aspect ratio. Legacy Generate preserves its exact
-  historical prompt and dimensions without imposing a modern preset. Block
+  lineage. Current Generate and Refine dimensions must match their typed
+  resolution and the stack aspect ratio. Edit dimensions must match either its
+  exact current-source size or its typed preset and stack aspect ratio. Legacy
+  Generate preserves its exact historical prompt and dimensions without
+  imposing a modern preset. Block
   source revision deletion or background replacement while any retained
   revision derives from it. Whole card deletion may remove dependencies wholly
   contained in that card, but must reject dependencies from retained cards.
@@ -129,9 +145,11 @@ for live MFLUX runs.
   selector above References, place revision-local Resolution after References
   and before Generate, show exact output dimensions and positional Reference
   guidance, and keep generation provenance in button tooltips. Keep inspector
-  tabs ordered Generate, Refine, Styles, Hotspots, Keys. Keep the Refine tab
-  limited to Transformation, Output Resolution, and Refine; the current
-  canvas/header is its implicit source. Keep Styles and Keys as
+  tabs ordered Generate, Refine, Edit, Styles, Hotspots, Keys. Keep the Refine
+  tab limited to Transformation, Output Resolution, and Refine. Keep the Edit
+  tab limited to Edit Instruction, the six Preserve controls, Output
+  Resolution, and Edit. The current canvas/header is the implicit source for
+  both. Keep Styles and Keys as
   stack-global list managers with compact remove/add controls and vertically
   stacked full-width fields. Require a nonempty Description for image
   generation.

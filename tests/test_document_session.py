@@ -35,6 +35,7 @@ from hotcards.domain.models import (
     ImageOperationSettings,
     ImageSourceSnapshot,
     LegacyGenerateProvenance,
+    PresetOutputSize,
     RefineProvenance,
     RefineTransformation,
     Stack,
@@ -208,8 +209,11 @@ def _owned_bundle(
             instruction=accepted.instruction,
             preserve=accepted.preserve,
             expanded_prompt=accepted.expanded_prompt,
-            resolution=GenerateResolution.RESOLUTION_768,
+            output_size=PresetOutputSize(
+                resolution=GenerateResolution.RESOLUTION_768
+            ),
             edit_lineage=(accepted,),
+            prompt_token_count=20,
             settings=settings,
         )
     elif operation == "duplicate":

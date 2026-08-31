@@ -338,6 +338,7 @@ def _require_image_asset_unchanged_at(
     *,
     card_id: UUID,
     asset_id: UUID,
+    operation: str = "Refine",
 ) -> None:
     source_path = _relative_asset_path(snapshot.relative_path)
     expected_path = _image_asset_path(card_id, asset_id)
@@ -381,7 +382,7 @@ def _require_image_asset_unchanged_at(
             snapshot.source_sha256,
         ):
             raise StackStoreError(
-                "the current image changed while Refine was running"
+                f"the current image changed while {operation} was running"
             )
         current_fd = os.open(
             source_path.name,
@@ -402,7 +403,7 @@ def _require_image_asset_unchanged_at(
             snapshot.source_sha256,
         ):
             raise StackStoreError(
-                "the current image changed while Refine was running"
+                f"the current image changed while {operation} was running"
             )
 
 
@@ -1300,6 +1301,7 @@ class StackStore:
         expected_source_snapshot: StoredImageSnapshot | None = None,
         expected_source_card_id: UUID | None = None,
         expected_source_asset_id: UUID | None = None,
+        expected_source_operation: str = "Refine",
     ) -> StoredImageAsset:
         """Atomically import one PNG and commit the manifest that references it."""
         return self._store_image_asset_and_save(
@@ -1314,6 +1316,7 @@ class StackStore:
             expected_source_snapshot=expected_source_snapshot,
             expected_source_card_id=expected_source_card_id,
             expected_source_asset_id=expected_source_asset_id,
+            expected_source_operation=expected_source_operation,
         )
 
     @_serialized_bundle_mutation
@@ -1331,6 +1334,7 @@ class StackStore:
         expected_source_snapshot: StoredImageSnapshot | None = None,
         expected_source_card_id: UUID | None = None,
         expected_source_asset_id: UUID | None = None,
+        expected_source_operation: str = "Refine",
     ) -> StoredImageAsset:
         if (source_relative_path is None) == (source_file_path is None):
             raise StackStoreError("exactly one image source must be provided")
@@ -1343,7 +1347,8 @@ class StackStore:
             value is None for value in expected_source_values
         ):
             raise StackStoreError(
-                "expected Refine source snapshot and IDs must be provided together"
+                "expected image-operation source snapshot and IDs must be "
+                "provided together"
             )
         source_path: PurePosixPath | None = None
         if source_relative_path is not None:
@@ -1544,6 +1549,7 @@ class StackStore:
                     expected_source_snapshot,
                     card_id=expected_source_card_id,
                     asset_id=expected_source_asset_id,
+                    operation=expected_source_operation,
                 )
 
             try:

@@ -12,6 +12,7 @@ from hotcards.domain.models import (
     StyleSnapshot,
 )
 from hotcards.generation.image_generation import (
+    compose_edit_prompt,
     compose_generation_prompt,
     compose_refine_prompt,
 )
@@ -140,3 +141,50 @@ def test_refine_prompt_preserves_ordered_authored_edit_lineage() -> None:
 def test_refine_prompt_requires_current_description(value: str) -> None:
     with pytest.raises(ValueError, match="Description"):
         compose_refine_prompt(value, None, ())
+
+
+def test_edit_prompt_trims_instruction_and_omits_preserve_section_when_empty() -> None:
+    assert compose_edit_prompt(
+        "  Replace the closed door with an open arch.  ",
+        EditPreserveOptions(),
+    ) == (
+        "Edit the provided image according to this instruction:\n\n"
+        "Replace the closed door with an open arch.\n\n"
+        "Make only the changes required by the edit instruction. "
+        "Preserve all other details."
+    )
+
+
+def test_edit_prompt_uses_all_preserve_clauses_in_canonical_order() -> None:
+    prompt = compose_edit_prompt(
+        "Add a brass lantern.",
+        EditPreserveOptions(
+            subject_identity=True,
+            pose_and_expression=True,
+            composition_and_framing=True,
+            background=True,
+            lighting_and_color=True,
+            existing_text_and_logos=True,
+        ),
+    )
+
+    assert prompt == (
+        "Edit the provided image according to this instruction:\n\n"
+        "Add a brass lantern.\n\n"
+        "Preserve the following properties except where changing them is "
+        "explicitly required by the edit instruction:\n"
+        "- Preserve the recognizable identity and appearance of existing subjects.\n"
+        "- Preserve poses, gestures, gaze, and facial expressions.\n"
+        "- Preserve viewpoint, perspective, placement, crop, and framing.\n"
+        "- Preserve the existing background and environment.\n"
+        "- Preserve lighting, shadows, contrast, and overall color treatment.\n"
+        "- Preserve visible text, lettering, symbols, and logos.\n\n"
+        "Make only the changes required by the edit instruction. "
+        "Preserve all other details."
+    )
+
+
+@pytest.mark.parametrize("value", ("", "   "))
+def test_edit_prompt_requires_instruction(value: str) -> None:
+    with pytest.raises(ValueError, match="Edit Instruction"):
+        compose_edit_prompt(value, EditPreserveOptions())

@@ -13,7 +13,7 @@ from hotcards.domain.models import Stack
 AutosaveHook = Callable[[Stack], None]
 PersistenceHook = Callable[[Stack], None]
 PENDING_DURABILITY_MESSAGE = (
-    "Save the stack to finish the pending duplicate before making another change."
+    "Save the stack to finish the pending image change before making another change."
 )
 
 

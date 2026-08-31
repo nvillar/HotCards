@@ -52,7 +52,9 @@ from hotcards.domain.models import (
     HYPERCARD_STYLE_ID,
     Card,
     CardRevision,
+    CurrentSourceSize,
     DirectGenerateProvenance,
+    EditPreserveOptions,
     GeneratedBackground,
     GenerateInputs,
     HotspotConditions,
@@ -148,6 +150,7 @@ class FakeBackgroundWorkflow(QObject):
     document_changed = Signal(object)
     change_applied = Signal(str, object)
     generation_applied = Signal(object)
+    edit_instruction_clear_requested = Signal()
 
     def __init__(self, controller: DocumentController) -> None:
         super().__init__()
@@ -157,6 +160,7 @@ class FakeBackgroundWorkflow(QObject):
         self.active_operation: str | None = None
         self.generate_calls: list[object] = []
         self.refine_calls: list[tuple[object, object, object]] = []
+        self.edit_calls: list[tuple[object, object, object, object]] = []
         self.clear_calls: list[object] = []
         self.cancel_calls = 0
         self.closed = False
@@ -172,6 +176,18 @@ class FakeBackgroundWorkflow(QObject):
         resolution: object,
     ) -> None:
         self.refine_calls.append((card_id, transformation, resolution))
+
+    def edit(
+        self,
+        card_id: object,
+        *,
+        instruction: object,
+        preserve: object,
+        output_size: object,
+    ) -> None:
+        self.edit_calls.append(
+            (card_id, instruction, preserve, output_size)
+        )
 
     def clear_background(self, card_id: object) -> None:
         self.clear_calls.append(card_id)
@@ -213,6 +229,9 @@ class FakeBackgroundWorkflow(QObject):
 
     def is_refining_for(self, _card_id: object) -> bool:
         return self.busy and self.active_operation == "refine"
+
+    def is_editing_for(self, _card_id: object) -> bool:
+        return self.busy and self.active_operation == "edit"
 
     def cancel(self) -> None:
         self.cancel_calls += 1
@@ -1731,6 +1750,92 @@ def test_refine_tab_wires_current_image_options_and_cancels_live_changes(
     window.mode_button.click()
     assert background.cancel_calls == 2
     assert not window.inspector.isVisible()
+
+
+def test_edit_tab_wires_current_image_defaults_errors_and_cancellation(
+    application: QApplication,
+    tmp_path: Path,
+) -> None:
+    bundle = tmp_path / "Edit.hotcards"
+    store = StackStore(bundle)
+    card = Card(name="Card")
+    asset_id = uuid4()
+    source = tmp_path / "source.png"
+    Image.new("RGB", (1024, 768), "navy").save(source)
+    image_path = store.store_image_asset(
+        source,
+        card_id=card.id,
+        asset_id=asset_id,
+    )
+    revision = CardRevision(
+        description="A courtyard",
+        background=_generated_background(
+            asset_id=asset_id,
+            image_path=image_path,
+            description="A courtyard",
+        ),
+    )
+    card = card.model_copy(
+        update={
+            "revisions": (revision,),
+            "active_revision_id": revision.id,
+        }
+    )
+    stack = Stack(name="Demo", cards=(card,), start_card_id=card.id)
+    store.save(stack)
+    controller = DocumentController(Stack(name="Welcome"))
+    session = DocumentSession(controller)
+    session.open(bundle)
+    background = FakeBackgroundWorkflow(controller)
+    window = MainWindow(
+        controller,
+        FakeWorkers(),  # type: ignore[arg-type]
+        FakeSettings(),
+        document_session=session,
+        background_workflow=background,  # type: ignore[arg-type]
+        start_diagnostics=False,
+    )
+    window._availability[AdapterKind.MFLUX] = True
+    window._update_generation_actions()
+
+    assert window.inspector.inspector_tabs.tabText(2) == "Edit"
+    assert not window.inspector.edit_background_button.isEnabled()
+    assert window.inspector.edit_resolution_combo.itemText(0) == (
+        "Current (1024 x 768)"
+    )
+    assert window.inspector.edit_resolution_combo.itemText(1) == (
+        "1024 (1184 x 880)"
+    )
+    window.inspector.edit_instruction_edit.setPlainText("Open the gate.")
+    assert window.inspector.edit_background_button.isEnabled()
+    window.inspector.edit_background_button.click()
+
+    assert len(background.edit_calls) == 1
+    card_id, instruction, preserve, output_size = background.edit_calls[0]
+    assert card_id == card.id
+    assert instruction == "Open the gate."
+    assert preserve == EditPreserveOptions(
+        subject_identity=True,
+        pose_and_expression=True,
+        composition_and_framing=True,
+    )
+    assert output_size == CurrentSourceSize(width=1024, height=768)
+
+    background.busy = True
+    background.active_operation = "edit"
+    window._update_generation_actions()
+    assert window.inspector.edit_background_button.text() == "Editing…"
+    assert not window.inspector.generate_background_button.isEnabled()
+    window.inspector.edit_preserve_checkboxes["background"].click()
+    assert background.cancel_calls == 1
+
+    window.inspector.edit_instruction_edit.setPlainText("Keep this draft.")
+    background.edit_instruction_clear_requested.emit()
+    assert window.inspector.edit_instruction_edit.toPlainText() == ""
+
+    window._background_progress_changed("Image editing failed")
+    window._background_failed(RuntimeError("513 model tokens; the limit is 512"))
+    assert "513 model tokens" in window.inspector.edit_instruction_error.text()
 
 
 def test_notification_undo_expires_after_another_command(

@@ -21,10 +21,12 @@ from hotcards.domain.image_dimensions import (
 )
 from hotcards.domain.models import (
     AcceptedEdit,
+    CurrentSourceSize,
     EditPreserveOptions,
     GenerateInputs,
     ImageReferenceSnapshot,
     ImageSourceSnapshot,
+    PresetOutputSize,
     RefineTransformation,
 )
 from hotcards.generation.errors import (
@@ -111,6 +113,21 @@ class FakeCallbackRegistry:
     def register(self, callback: object) -> None:
         self.registered.append(callback)
 
+class FakeRawTokenizer:
+    def __init__(self, token_count: int = 24) -> None:
+        self.token_count = token_count
+
+    def __call__(self, _prompt: str, **_kwargs: object) -> dict[str, list[int]]:
+        return {"input_ids": list(range(self.token_count))}
+
+
+class FakeTokenizerWrapper:
+    def __init__(self, token_count: int = 24) -> None:
+        self.tokenizer = FakeRawTokenizer(token_count)
+        self.template = None
+        self.use_chat_template = False
+        self.add_special_tokens = True
+
 
 class FakeMfluxModel:
     def __init__(
@@ -118,9 +135,11 @@ class FakeMfluxModel:
         *,
         fail: Exception | None = None,
         corrupt: bool = False,
+        token_count: int = 24,
     ) -> None:
         self.calls: list[dict[str, object]] = []
         self.callbacks = FakeCallbackRegistry()
+        self.tokenizers = {"qwen3": FakeTokenizerWrapper(token_count)}
         self.fail = fail
         self.corrupt = corrupt
 
@@ -295,7 +314,9 @@ def edit_request(
         instruction=edit.instruction,
         preserve=edit.preserve,
         expanded_prompt=edit.expanded_prompt,
-        resolution=GenerateResolution.RESOLUTION_512,
+        output_size=PresetOutputSize(
+            resolution=GenerateResolution.RESOLUTION_512
+        ),
         edit_lineage=(edit,),
         seed=991,
     )
@@ -451,8 +472,64 @@ def test_edit_routes_one_source_and_expanded_prompt_with_fresh_seed(
     assert result.provenance.instruction == request.instruction
     assert result.provenance.preserve == request.preserve
     assert result.provenance.edit_lineage == request.edit_lineage
+    assert result.provenance.output_size == request.output_size
+    assert result.provenance.prompt_token_count == 24
+    assert result.provenance.prompt_token_budget == 512
     assert result.provenance.settings.seed == 991
     assert source_path.is_file()
+
+
+def test_edit_accepts_exact_current_source_dimensions(
+    tmp_path: Path,
+) -> None:
+    source_path = write_source(tmp_path / "source.png")
+    request = edit_request(tmp_path / "current.png", source_path).model_copy(
+        update={
+            "output_size": CurrentSourceSize(width=1001, height=777),
+            "width": 1001,
+            "height": 777,
+        }
+    )
+    model = FakeMfluxModel()
+
+    result = MfluxGenerator(edit_model_factory=lambda *_: model).edit(request)
+
+    assert model.calls[0]["width"] == 1001
+    assert model.calls[0]["height"] == 777
+    assert result.provenance.output_size == CurrentSourceSize(
+        width=1001,
+        height=777,
+    )
+
+
+@pytest.mark.parametrize(
+    ("token_count", "succeeds"),
+    ((512, True), (513, False)),
+)
+def test_edit_enforces_exact_token_budget_before_inference(
+    tmp_path: Path,
+    token_count: int,
+    succeeds: bool,
+) -> None:
+    source_path = write_source(tmp_path / f"source-{token_count}.png")
+    model = FakeMfluxModel(token_count=token_count)
+    generator = MfluxGenerator(edit_model_factory=lambda *_: model)
+
+    if succeeds:
+        result = generator.edit(
+            edit_request(tmp_path / f"edit-{token_count}.png", source_path)
+        )
+        assert result.provenance.prompt_token_count == token_count
+        assert len(model.calls) == 1
+    else:
+        with pytest.raises(ImageGenerationError, match="513 model tokens"):
+            generator.edit(
+                edit_request(
+                    tmp_path / f"edit-{token_count}.png",
+                    source_path,
+                )
+            )
+        assert model.calls == []
 
 
 @pytest.mark.parametrize("aspect_ratio", tuple(AspectRatio))

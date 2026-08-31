@@ -6,7 +6,7 @@ import gc
 import os
 import shutil
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -14,7 +14,7 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from threading import Event, Lock
 from time import perf_counter
-from typing import Literal, Protocol
+from typing import Literal, Protocol, cast
 
 from PIL import Image, UnidentifiedImageError
 from pydantic import Field, FiniteFloat, model_validator
@@ -28,6 +28,7 @@ from hotcards.domain.models import (
     AcceptedEdit,
     DirectGenerateProvenance,
     DomainModel,
+    EditOutputSize,
     EditPreserveOptions,
     EditProvenance,
     GenerateInputs,
@@ -38,12 +39,14 @@ from hotcards.domain.models import (
     RefineProvenance,
     RefineTransformation,
     StyleSnapshot,
+    edit_output_dimensions,
 )
 from hotcards.generation.errors import (
     ImageGenerationCancelled,
     ImageGenerationError,
     ModelLoadError,
 )
+from hotcards.generation.image_generation import EDIT_PROMPT_TOKEN_BUDGET
 
 
 class MfluxCallbackRegistryProtocol(Protocol):
@@ -76,6 +79,7 @@ class MfluxEditModelProtocol(Protocol):
     """Subset of Flux2KleinEdit used by Reference Generate and Edit."""
 
     callbacks: MfluxCallbackRegistryProtocol
+    tokenizers: Mapping[str, object]
 
     def generate_image(
         self,
@@ -297,7 +301,7 @@ class MfluxEditRequest(_MfluxRequest):
     instruction: NonEmptyString
     preserve: EditPreserveOptions
     expanded_prompt: NonEmptyString
-    resolution: GenerateResolution
+    output_size: EditOutputSize
     edit_lineage: tuple[AcceptedEdit, ...] = Field(min_length=1)
     seed: int
 
@@ -311,7 +315,13 @@ class MfluxEditRequest(_MfluxRequest):
 
     @model_validator(mode="after")
     def require_edit_contract(self) -> MfluxEditRequest:
-        self.require_dimensions(self.resolution)
+        if (self.width, self.height) != edit_output_dimensions(
+            self.output_size,
+            self.aspect_ratio,
+        ):
+            raise ValueError(
+                "Edit dimensions must match the selected output size"
+            )
         if self.edit_lineage[-1] != self.accepted_edit:
             raise ValueError(
                 "Edit request lineage must end with the accepted current Edit"
@@ -729,6 +739,7 @@ class MfluxGenerator:
         image: GeneratedImageProtocol | None = None
         owned_output: _OwnedOutput | None = None
         output_ownership: MfluxOutputOwnership | None = None
+        prompt_token_count: int | None = None
         try:
             _process_deferred_release_requests_locked()
             token.raise_if_cancelled(operation)
@@ -737,6 +748,18 @@ class MfluxGenerator:
             model, family = self._model_for(request)
             load_duration_seconds = perf_counter() - load_started
             token.raise_if_cancelled(operation)
+            if isinstance(request, MfluxEditRequest):
+                prompt_token_count = self._formatted_edit_token_count(
+                    model,
+                    request.expanded_prompt,
+                )
+                if prompt_token_count > EDIT_PROMPT_TOKEN_BUDGET:
+                    raise ImageGenerationError(
+                        "Edit Instruction expands to "
+                        f"{prompt_token_count} model tokens; the limit is "
+                        f"{EDIT_PROMPT_TOKEN_BUDGET}. Shorten the instruction "
+                        "or select fewer Preserve options."
+                    )
             try:
                 progress_callback = self._progress_callback_for(
                     model,
@@ -817,6 +840,7 @@ class MfluxGenerator:
                 load_duration_seconds=load_duration_seconds,
                 generation_duration_seconds=generation_duration_seconds,
                 serialization_duration_seconds=serialization_duration_seconds,
+                prompt_token_count=prompt_token_count,
             )
         except ImageGenerationCancelled as error:
             error.__traceback__ = None
@@ -964,6 +988,51 @@ class MfluxGenerator:
         return arguments
 
     @staticmethod
+    def _formatted_edit_token_count(
+        model: MfluxRegularModelProtocol | MfluxEditModelProtocol,
+        prompt: str,
+    ) -> int:
+        try:
+            tokenizer = cast(MfluxEditModelProtocol, model).tokenizers["qwen3"]
+            raw_tokenizer = tokenizer.tokenizer
+            formatted_prompt = prompt
+            template = getattr(tokenizer, "template", None)
+            use_chat_template = getattr(
+                tokenizer,
+                "use_chat_template",
+                False,
+            )
+            if template:
+                formatted_prompt = template.format(prompt)
+            elif use_chat_template:
+                formatted_prompt = raw_tokenizer.apply_chat_template(
+                    [{"role": "user", "content": prompt}],
+                    tokenize=False,
+                    add_generation_prompt=True,
+                    **getattr(tokenizer, "chat_template_kwargs", {}),
+                )
+            tokens = raw_tokenizer(
+                formatted_prompt,
+                padding=False,
+                truncation=False,
+                add_special_tokens=tokenizer.add_special_tokens,
+                return_attention_mask=False,
+            )
+            input_ids = tokens["input_ids"]
+            if input_ids and isinstance(input_ids[0], list):
+                input_ids = input_ids[0]
+            count = len(input_ids)
+        except (AttributeError, KeyError, TypeError, ValueError) as error:
+            raise ImageGenerationError(
+                f"Could not validate the Edit prompt token count: {error}"
+            ) from error
+        if count <= 0:
+            raise ImageGenerationError(
+                "Could not validate the Edit prompt token count"
+            )
+        return count
+
+    @staticmethod
     def _prompt(request: MfluxOperationRequest) -> str:
         return (
             request.expanded_prompt
@@ -1028,6 +1097,7 @@ class MfluxGenerator:
         load_duration_seconds: float,
         generation_duration_seconds: float,
         serialization_duration_seconds: float,
+        prompt_token_count: int | None,
     ) -> MfluxOperationResult:
         timing = {
             "output_path": request.output_path,
@@ -1053,6 +1123,10 @@ class MfluxGenerator:
                 ),
             )
         if isinstance(request, MfluxEditRequest):
+            if prompt_token_count is None:
+                raise ImageGenerationError(
+                    "MFLUX Edit completed without a validated prompt token count"
+                )
             return MfluxEditResult(
                 **timing,
                 provenance=EditProvenance(
@@ -1060,8 +1134,10 @@ class MfluxGenerator:
                     instruction=request.instruction,
                     preserve=request.preserve,
                     expanded_prompt=request.expanded_prompt,
-                    resolution=request.resolution,
+                    output_size=request.output_size,
                     edit_lineage=request.edit_lineage,
+                    prompt_token_count=prompt_token_count,
+                    prompt_token_budget=EDIT_PROMPT_TOKEN_BUDGET,
                     settings=settings,
                 ),
             )
