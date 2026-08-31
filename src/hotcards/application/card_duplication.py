@@ -12,10 +12,14 @@ from hotcards.application.commands import (
     DuplicateCardCommand,
     next_duplicate_card_name,
 )
-from hotcards.application.document_controller import DocumentController, UndoToken
+from hotcards.application.document_controller import (
+    DocumentController,
+    OwnedImageAsset,
+    UndoToken,
+)
 from hotcards.application.document_session import DocumentSession, DocumentSessionError
 from hotcards.domain.models import Stack
-from hotcards.storage.stack_store import StackStoreError
+from hotcards.storage.stack_store import StackStoreTransactionError
 
 
 class CardDuplicationError(ValueError):
@@ -57,6 +61,14 @@ class CardDuplicationWorkflow:
             raise CardDuplicationError(
                 "save the stack before duplicating a card"
             )
+        if not self.session.flush():
+            raise CardDuplicationError(
+                self.session.state.error or "the current stack could not be saved"
+            )
+        document = self.controller.document
+        source_card = next(
+            card for card in document.cards if card.id == source_card_id
+        )
 
         source_revision = source_card.active_revision
         source_background = source_revision.background
@@ -90,41 +102,66 @@ class CardDuplicationWorkflow:
         except (CommandError, ValidationError) as error:
             raise CardDuplicationError(str(error)) from error
 
-        stored_image_path: str | None = None
         try:
             if source_background is not None:
                 assert duplicate_background_id is not None
-                stored_image_path = store.copy_image_asset(
-                    source_background.image_path,
-                    source_card_id=source_card.id,
-                    source_asset_id=source_background.id,
-                    card_id=duplicate_card_id,
-                    asset_id=duplicate_background_id,
-                )
-                if stored_image_path != duplicate_image_path:
-                    raise CardDuplicationError(
-                        "duplicate image asset path did not match its reserved path"
+                assert duplicate_image_path is not None
+                owned_assets: list[OwnedImageAsset] = []
+
+                def persist_duplicate(candidate: Stack) -> None:
+                    try:
+                        stored_asset = store.copy_image_asset_and_save(
+                            source_background.image_path,
+                            source_card_id=source_card.id,
+                            source_asset_id=source_background.id,
+                            destination_card_id=duplicate_card_id,
+                            destination_asset_id=duplicate_background_id,
+                            previous_stack=document,
+                            changed_stack=candidate,
+                        )
+                    except StackStoreTransactionError as error:
+                        if error.owned_asset is not None:
+                            owned_assets.append(
+                                OwnedImageAsset(
+                                    bundle_path=store.bundle_path,
+                                    relative_path=error.owned_asset.relative_path,
+                                    card_id=duplicate_card_id,
+                                    asset_id=duplicate_background_id,
+                                    device=error.owned_asset.device,
+                                    inode=error.owned_asset.inode,
+                                )
+                            )
+                        raise
+                    owned_assets.append(
+                        OwnedImageAsset(
+                            bundle_path=store.bundle_path,
+                            relative_path=stored_asset.relative_path,
+                            card_id=duplicate_card_id,
+                            asset_id=duplicate_background_id,
+                            device=stored_asset.device,
+                            inode=stored_asset.inode,
+                        )
                     )
-            changed = self.session.execute_persisted(command)
+
+                changed = self.session.execute_persisted(
+                    command,
+                    persist=persist_duplicate,
+                    owned_assets=owned_assets,
+                )
+            else:
+                changed = self.session.execute_persisted(
+                    command,
+                    persist=lambda candidate: store.save_stack_transaction(
+                        document,
+                        candidate,
+                    ),
+                )
         except (
             CardDuplicationError,
             CommandError,
             DocumentSessionError,
-            StackStoreError,
             ValidationError,
         ) as error:
-            if stored_image_path is not None and duplicate_background_id is not None:
-                try:
-                    store.remove_image_asset_if_unreferenced(
-                        stored_image_path,
-                        card_id=duplicate_card_id,
-                        asset_id=duplicate_background_id,
-                        stack=self.controller.document,
-                    )
-                except StackStoreError as cleanup_error:
-                    raise CardDuplicationError(
-                        f"{error}; could not roll back duplicate asset: {cleanup_error}"
-                    ) from error
             if isinstance(error, CardDuplicationError):
                 raise
             raise CardDuplicationError(str(error)) from error

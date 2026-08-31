@@ -39,6 +39,7 @@ from hotcards.application.commands import (
 from hotcards.application.document_controller import (
     AutosaveHook,
     DocumentController,
+    OwnedImageAsset,
     UndoToken,
 )
 from hotcards.application.document_session import (
@@ -87,6 +88,7 @@ __all__ = [
     "EditRevisionDescriptionCommand",
     "GeneratedRevisionChange",
     "OperationStatus",
+    "OwnedImageAsset",
     "RenameCardCommand",
     "ReorderCardCommand",
     "ReorderHotspotCommand",

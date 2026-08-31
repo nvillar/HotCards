@@ -40,7 +40,10 @@ bytes are copied into the duplicate card's own asset namespace, so either card
 can be deleted independently. Self-navigation is remapped to the duplicate;
 other destinations, References, Keys, Style selection, and Generate resolution
 are preserved. The duplicate is one undoable change and is named `Name Copy`,
-then `Name Copy 2`, and so on.
+then `Name Copy 2`, and so on. The asset and manifest commit as one rollback-safe
+bundle transaction. Undo/Redo history retains the independent bytes only while
+needed to restore the duplicate, and discarding that history reclaims the
+unreferenced duplicate-owned asset without collecting unrelated bundle files.
 
 The inspector tabs are Generate, Styles, Hotspots, and Keys. Generate follows
 the authoring sequence Description, Style, optional References, Resolution,

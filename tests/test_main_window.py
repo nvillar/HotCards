@@ -538,6 +538,38 @@ def test_duplicate_card_shortcut_is_author_only(
     window.close()
 
 
+def test_close_reports_owned_asset_cleanup_failure_without_blocking(
+    application: QApplication,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = Card(name="Source")
+    stack = Stack(name="Demo", cards=(source,), start_card_id=source.id)
+    controller = DocumentController(stack)
+    session = DocumentSession(controller)
+    session.create(stack, tmp_path / "Demo.hotcards")
+    background = FakeBackgroundWorkflow(controller)
+    window = MainWindow(
+        controller,
+        FakeWorkers(),  # type: ignore[arg-type]
+        FakeSettings(),
+        availability_checks={AdapterKind.MFLUX: lambda: None},
+        document_session=session,
+        background_workflow=background,  # type: ignore[arg-type]
+        start_diagnostics=False,
+    )
+    monkeypatch.setattr(session, "close_history", lambda: False)
+    event = QCloseEvent()
+
+    window.closeEvent(event)
+
+    assert event.isAccepted()
+    assert background.closed
+    assert window.notification_bar.message_label.text() == (
+        "Could Not Clean Up Stack"
+    )
+
+
 def test_selecting_scrolled_card_survives_focus_out_render(
     application: QApplication,
 ) -> None:

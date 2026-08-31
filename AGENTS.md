@@ -67,9 +67,13 @@ for live MFLUX runs.
   revision, background, and Interaction IDs; remap self-navigation to the new
   card and preserve other destinations, References, Keys, Style selection, and
   Generate resolution. Copy exact background bytes into the duplicate card's
-  own validated asset namespace. Flatten duplicate provenance to the original
-  non-duplicate operation while recording the immediate source informationally,
-  so deleting the source never invalidates the duplicate.
+  own validated asset namespace through one rollback-safe asset/manifest
+  transaction. Bind copy and cleanup to securely opened bundle objects and the
+  owned file identity; never follow asset symlinks. Retain duplicate-owned bytes
+  while reachable from the current document or Undo/Redo history, then reclaim
+  them when that history is discarded. Flatten duplicate provenance to the
+  original non-duplicate operation while recording the immediate source
+  informationally, so deleting the source never invalidates the duplicate.
 - Keep an ordered collection of at most two optional Reference cards per
   revision and reject self-references and duplicates. Display slots as `1.` and
   `2.` under one References section; clearing slot 1 promotes slot 2. Resolve

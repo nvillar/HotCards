@@ -1066,6 +1066,7 @@ class MainWindow(QMainWindow):
         try:
             change = self.card_duplication_workflow.duplicate(card_id)
         except CardDuplicationError as error:
+            self.render_document()
             self._show_error(
                 "card-error",
                 "Could not duplicate card",
@@ -2021,6 +2022,15 @@ class MainWindow(QMainWindow):
             else:
                 event.ignore()
                 return
+        if (
+            self.document_session is not None
+            and not self.document_session.close_history()
+        ):
+            self._show_document_error(
+                "Could Not Clean Up Stack",
+                self.document_session.state.error
+                or "Duplicate-owned assets could not be cleaned up.",
+            )
         if self.background_workflow is not None:
             self.background_workflow.close()
         if self._owns_workers:

@@ -2,19 +2,31 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QTimer, Signal, Slot
 
 from hotcards.application.commands import DocumentCommand
-from hotcards.application.document_controller import DocumentController
-from hotcards.domain.models import Stack
-from hotcards.storage.stack_store import StackStore, StackStoreError
+from hotcards.application.document_controller import (
+    DocumentController,
+    OwnedImageAsset,
+)
+from hotcards.domain.models import DuplicateProvenance, Stack
+from hotcards.storage.stack_store import (
+    StackStore,
+    StackStoreError,
+    StoredImageAsset,
+)
 
 
 class DocumentSessionError(ValueError):
     """A document lifecycle operation could not complete safely."""
+
+    def __init__(self, message: str, *, committed: bool = False) -> None:
+        super().__init__(message)
+        self.committed = committed
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,11 +59,13 @@ class DocumentSession(QObject):
         self._pending_snapshot: Stack | None = None
         self._dirty = False
         self._error: str | None = None
+        self._released_assets: dict[tuple[Path, str], OwnedImageAsset] = {}
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.setInterval(debounce_milliseconds)
         self._timer.timeout.connect(self.flush)
         controller.set_autosave_hook(self.schedule_autosave)
+        controller.set_owned_asset_release_hook(self._queue_owned_asset_cleanup)
 
     @property
     def store(self) -> StackStore | None:
@@ -122,21 +136,40 @@ class DocumentSession(QObject):
         self.controller.clear_history()
         return self._bind(store, stack, replace_document=False)
 
-    def execute_persisted(self, command: DocumentCommand) -> Stack:
+    def execute_persisted(
+        self,
+        command: DocumentCommand,
+        *,
+        persist: Callable[[Stack], None] | None = None,
+        owned_assets: Collection[OwnedImageAsset] = (),
+    ) -> Stack:
         """Apply one command only after its complete snapshot is durably saved."""
         if self._store is None:
             raise DocumentSessionError("Document is not bound to a .hotcards bundle")
         self._timer.stop()
+        before = self.controller.document
         try:
-            document = self.controller.execute_persisted(command, self._store.save)
+            document = self.controller.execute_persisted(
+                command,
+                persist or self._store.save,
+                owned_assets=owned_assets,
+            )
         except StackStoreError as error:
+            persisted_stack = getattr(error, "persisted_stack", None)
+            committed = (
+                self.controller.document != before
+                and persisted_stack == self.controller.document
+            )
+            if committed:
+                self._pending_snapshot = None
             self._error = str(error)
-            self._dirty = self._pending_snapshot is not None
+            self._dirty = not committed and self._pending_snapshot is not None
             self._emit_state()
-            raise DocumentSessionError(str(error)) from error
+            raise DocumentSessionError(str(error), committed=committed) from error
         self._pending_snapshot = None
         self._dirty = False
         self._error = None
+        self._cleanup_released_assets()
         self._emit_state()
         return document
 
@@ -159,6 +192,8 @@ class DocumentSession(QObject):
         """Synchronously persist the latest pending snapshot, if any."""
         self._timer.stop()
         if self._pending_snapshot is None:
+            self._cleanup_released_assets()
+            self._emit_state()
             return not self._dirty
         if self._store is None:
             self._error = "Document is not bound to a .hotcards bundle"
@@ -174,8 +209,19 @@ class DocumentSession(QObject):
         self._pending_snapshot = None
         self._dirty = False
         self._error = None
+        self._cleanup_released_assets()
         self._emit_state()
         return True
+
+    def close_history(self) -> bool:
+        """Discard session history and reclaim any now-unreachable owned assets."""
+        self.controller.detach_owned_assets()
+        self._cleanup_released_assets()
+        cleaned = not self._released_assets
+        if not cleaned:
+            self._released_assets.clear()
+        self._emit_state()
+        return cleaned
 
     def _bind(
         self,
@@ -185,6 +231,13 @@ class DocumentSession(QObject):
         replace_document: bool,
     ) -> Stack:
         self._timer.stop()
+        self.controller.detach_owned_assets()
+        self._cleanup_released_assets()
+        if self._released_assets:
+            self._released_assets.clear()
+            raise DocumentSessionError(
+                self._error or "duplicate-owned assets could not be cleaned up"
+            )
         self._store = store
         self._pending_snapshot = None
         self._dirty = False
@@ -194,6 +247,9 @@ class DocumentSession(QObject):
             if replace_document
             else self.controller.document
         )
+        self.controller.register_owned_assets(
+            self._duplicate_owned_assets(store, document)
+        )
         if replace_document:
             self.document_replaced.emit(document)
         self._emit_state()
@@ -201,6 +257,72 @@ class DocumentSession(QObject):
 
     def _emit_state(self) -> None:
         self.state_changed.emit(self.state)
+
+    def _queue_owned_asset_cleanup(
+        self,
+        assets: tuple[OwnedImageAsset, ...],
+    ) -> None:
+        for asset in assets:
+            self._released_assets[(asset.bundle_path, asset.relative_path)] = asset
+        if self._pending_snapshot is None:
+            self._cleanup_released_assets()
+            self._emit_state()
+
+    def _cleanup_released_assets(self) -> None:
+        had_released_assets = bool(self._released_assets)
+        cleanup_error: str | None = None
+        for key, asset in tuple(self._released_assets.items()):
+            store = StackStore(asset.bundle_path)
+            try:
+                store.remove_owned_image_asset_if_unreferenced(
+                    StoredImageAsset(
+                        relative_path=asset.relative_path,
+                        device=asset.device,
+                        inode=asset.inode,
+                    ),
+                    card_id=asset.card_id,
+                    asset_id=asset.asset_id,
+                    stack=Stack(name="Owned asset cleanup"),
+                )
+            except StackStoreError as error:
+                cleanup_error = str(error)
+                continue
+            self._released_assets.pop(key, None)
+        if cleanup_error is not None:
+            self._error = cleanup_error
+        elif had_released_assets and not self._released_assets:
+            self._error = None
+
+    @staticmethod
+    def _duplicate_owned_assets(
+        store: StackStore,
+        document: Stack,
+    ) -> tuple[OwnedImageAsset, ...]:
+        assets: list[OwnedImageAsset] = []
+        for card in document.cards:
+            for revision in card.revisions:
+                background = revision.background
+                if background is None or not isinstance(
+                    background.provenance,
+                    DuplicateProvenance,
+                ):
+                    continue
+                stored = store.stored_image_asset(
+                    background.image_path,
+                    card_id=card.id,
+                    asset_id=background.id,
+                )
+                assets.append(
+                    OwnedImageAsset(
+                        bundle_path=store.bundle_path,
+                        relative_path=stored.relative_path,
+                        card_id=card.id,
+                        asset_id=background.id,
+                        device=stored.device,
+                        inode=stored.inode,
+                    )
+                )
+        return tuple(assets)
 
 
 __all__ = [
