@@ -99,13 +99,20 @@ for live MFLUX runs.
   one compatible family/model/quantization configuration, and release it when
   switching configuration. Cancellation while queued or running must publish
   no output; interrupted active models must not be reused.
-- Keep one Description editor in the Background inspector. Place the Style
-  selector above References and before Generate, show positional Reference
+- Keep one Description editor in the Generate inspector. Place the Style
+  selector above References, place revision-local Resolution after References
+  and before Generate, show exact output dimensions and positional Reference
   guidance, and keep generation provenance in button tooltips. Keep inspector
-  tabs ordered Image, Styles, Hotspots, Keys. Keep Styles and Keys as
+  tabs ordered Generate, Styles, Hotspots, Keys. Keep Styles and Keys as
   stack-global list managers with compact remove/add controls and vertically
   stacked full-width fields. Require a nonempty Description for image
   generation.
+- Create stacks with one native format selector containing exactly Square 1:1,
+  Landscape 4:3, Portrait 3:4, and Widescreen 16:9, defaulting to Landscape.
+  Do not expose arbitrary dimensions or a post-creation aspect-ratio setting.
+  Render every background into the stack's logical card geometry with
+  aspect-preserving scaling so mixed pixel resolutions never distort normalized
+  hotspots.
 - Support generated backgrounds only; do not add image import. Apply Generate
   and Clear directly through document commands. Keep an existing image visible
   until replacement succeeds. After Description or image generation succeeds,

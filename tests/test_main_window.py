@@ -60,7 +60,9 @@ from hotcards.domain.models import (
     Polygon,
     RefineProvenance,
     RefineTransformation,
+    ResolvedCardReference,
     Stack,
+    StyleDefinition,
     UnresolvedCardReference,
 )
 from hotcards.generation.errors import ImageGenerationCancelled
@@ -371,7 +373,7 @@ def test_hotspot_rule_editor_scrolls_without_growing_the_window(
     assert central_layout.indexOf(window.pane_splitter) < (
         central_layout.indexOf(window.notification_bar)
     )
-    assert window.inspector.inspector_tabs.tabText(0) == "Image"
+    assert window.inspector.inspector_tabs.tabText(0) == "Generate"
     assert window.fit_canvas_button.size() == window.clear_background_button.size()
 
 
@@ -594,6 +596,68 @@ def test_revision_selection_duplicate_delete_and_undo(
     assert card.id == controller.document.cards[0].id
 
 
+def test_revision_selection_synchronizes_generate_resolution(
+    application: QApplication,
+) -> None:
+    first = CardRevision(
+        generate_resolution=GenerateResolution.RESOLUTION_256
+    )
+    second = CardRevision(
+        generate_resolution=GenerateResolution.RESOLUTION_1024
+    )
+    card = Card(
+        name="Card",
+        revisions=(first, second),
+        active_revision_id=first.id,
+    )
+    window, controller, _workers, _background = _window(
+        Stack(name="Demo", cards=(card,))
+    )
+
+    assert (
+        window.inspector.resolution_combo.currentData()
+        == GenerateResolution.RESOLUTION_256
+    )
+    window.revision_combo.setCurrentIndex(1)
+
+    assert controller.document.cards[0].active_revision_id == second.id
+    assert (
+        window.inspector.resolution_combo.currentData()
+        == GenerateResolution.RESOLUTION_1024
+    )
+
+
+def test_revision_copy_and_notification_mutations_cancel_generation(
+    application: QApplication,
+) -> None:
+    window, controller, _workers, background = _window()
+
+    background.busy = True
+    window.add_revision_button.click()
+    assert background.cancel_calls == 1
+
+    original_resolution = (
+        controller.document.cards[0].active_revision.generate_resolution
+    )
+    window.inspector.resolution_combo.setCurrentIndex(
+        window.inspector._combo_index_for_data(
+            window.inspector.resolution_combo,
+            GenerateResolution.RESOLUTION_1024,
+        )
+    )
+    token = controller.current_undo_token
+    assert token is not None
+    window._show_undo_notification("Generate resolution changed", token)
+    background.busy = True
+    window._undo_notification()
+
+    assert background.cancel_calls == 2
+    assert (
+        controller.document.cards[0].active_revision.generate_resolution
+        is original_resolution
+    )
+
+
 def test_final_revision_cannot_be_deleted(
     application: QApplication,
 ) -> None:
@@ -694,6 +758,97 @@ def test_context_change_cancels_background_generation_without_prompt(
     window._cancel_background_generation()
     assert background.cancel_calls == 1
     assert not background.busy
+
+
+def test_resolution_change_cancels_in_flight_generation(
+    application: QApplication,
+) -> None:
+    window, controller, _workers, background = _window()
+    background.busy = True
+
+    window.inspector.resolution_combo.setCurrentIndex(
+        window.inspector._combo_index_for_data(
+            window.inspector.resolution_combo,
+            GenerateResolution.RESOLUTION_1024,
+        )
+    )
+
+    assert background.cancel_calls == 1
+    assert not background.busy
+    assert (
+        controller.document.cards[0].active_revision.generate_resolution
+        is GenerateResolution.RESOLUTION_1024
+    )
+    assert isinstance(window.settings, FakeSettings)
+    assert all(
+        "resolution" not in key
+        for key in window.settings.values
+    )
+
+
+def test_description_style_and_reference_changes_cancel_in_flight_generation(
+    application: QApplication,
+) -> None:
+    style = StyleDefinition(name="Ink", prompt_text="Rendered in ink.")
+    source = Card(name="Source")
+    reference = Card(name="Reference")
+    window, controller, _workers, background = _window(
+        Stack(
+            name="Demo",
+            styles=(style,),
+            new_card_style_id=None,
+            cards=(source, reference),
+        )
+    )
+
+    background.busy = True
+    window.inspector.description_edit.setPlainText("Changed")
+    background.busy = True
+    window.inspector.style_combo.setCurrentIndex(
+        window.inspector._combo_index_for_data(
+            window.inspector.style_combo,
+            style.id,
+        )
+    )
+    background.busy = True
+    window.inspector.reference_combo.setCurrentIndex(
+        window.inspector._combo_index_for_data(
+            window.inspector.reference_combo,
+            reference.id,
+        )
+    )
+
+    revision = controller.document.cards[0].active_revision
+    assert background.cancel_calls == 3
+    assert revision.style_id == style.id
+    assert revision.references == (
+        ResolvedCardReference(target_card_id=reference.id),
+    )
+
+
+def test_card_and_revision_changes_cancel_in_flight_generation(
+    application: QApplication,
+) -> None:
+    first = Card(
+        name="First",
+        revisions=(CardRevision(), CardRevision()),
+    )
+    second = Card(name="Second")
+    window, _controller, _workers, background = _window(
+        Stack(name="Demo", cards=(first, second))
+    )
+    background.busy = True
+
+    window.select_card(second.id)
+
+    assert background.cancel_calls == 1
+    background.busy = True
+    window.select_card(first.id)
+    revision_id = first.revisions[1].id
+    background.busy = True
+    window._activate_revision(revision_id)
+
+    assert background.cancel_calls == 3
 
 
 def test_successful_save_as_cancels_generation_and_expires_undo(
@@ -1212,7 +1367,7 @@ def test_generated_result_can_move_to_a_new_complete_version(
         hotspot_set=hotspot_set,
     )
     card = Card(name="Card", revisions=(original,))
-    window, controller, _workers, _background = _window(
+    window, controller, _workers, background_workflow = _window(
         Stack(name="Demo", cards=(card,))
     )
     background = _generated_background(
@@ -1246,8 +1401,10 @@ def test_generated_result_can_move_to_a_new_complete_version(
     assert window.notification_bar.primary_button.text() == "Create New Version"
     assert window.notification_bar.secondary_button.text() == "Undo"
     assert window.notification_bar.dismiss_button.text() == "Keep"
+    background_workflow.busy = True
     window.notification_bar.primary_button.click()
 
+    assert background_workflow.cancel_calls == 1
     changed_card = controller.document.cards[0]
     assert len(changed_card.revisions) == 2
     assert changed_card.revisions[0].id == original.id
@@ -1559,12 +1716,27 @@ def test_new_stack_dialog_creates_one_blank_revision(
     assert not hasattr(dialog, "global_style_edit")
     assert not hasattr(dialog, "width_spin")
     assert not hasattr(dialog, "height_spin")
+    assert [
+        dialog.format_combo.itemText(index)
+        for index in range(dialog.format_combo.count())
+    ] == [
+        "Square 1:1",
+        "Landscape 4:3",
+        "Portrait 3:4",
+        "Widescreen 16:9",
+    ]
     stack = dialog.stack()
     assert stack.aspect_ratio is AspectRatio.LANDSCAPE
     assert len(stack.cards) == 1
     assert len(stack.cards[0].revisions) == 1
     assert stack.cards[0].active_revision.style_id == HYPERCARD_STYLE_ID
     assert stack.new_card_style_id == HYPERCARD_STYLE_ID
+
+    for aspect_ratio in AspectRatio:
+        dialog.format_combo.setCurrentIndex(
+            dialog.format_combo.findData(aspect_ratio)
+        )
+        assert dialog.stack().aspect_ratio is aspect_ratio
 
 
 def test_empty_stack_has_clear_first_card_path(

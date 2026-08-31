@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from PySide6.QtWidgets import (
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -11,6 +12,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from hotcards.domain.image_dimensions import AspectRatio
 from hotcards.domain.models import (
     HYPERCARD_STYLE_ID,
     Card,
@@ -32,6 +34,20 @@ class NewStackDialog(QDialog):
 
         form = QFormLayout()
         form.addRow("Name", self.name_edit)
+        self.format_combo = QComboBox()
+        self.format_combo.setObjectName("newStackFormatCombo")
+        self.format_combo.setAccessibleName("Stack format")
+        for label, aspect_ratio in (
+            ("Square 1:1", AspectRatio.SQUARE),
+            ("Landscape 4:3", AspectRatio.LANDSCAPE),
+            ("Portrait 3:4", AspectRatio.PORTRAIT),
+            ("Widescreen 16:9", AspectRatio.WIDESCREEN),
+        ):
+            self.format_combo.addItem(label, aspect_ratio)
+        self.format_combo.setCurrentIndex(
+            self.format_combo.findData(AspectRatio.LANDSCAPE)
+        )
+        form.addRow("Format", self.format_combo)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Ok
@@ -45,6 +61,7 @@ class NewStackDialog(QDialog):
 
     def stack(self) -> Stack:
         """Build the initial saved document with one selected start card."""
+        aspect_ratio = AspectRatio(self.format_combo.currentData())
         first_revision = CardRevision(style_id=HYPERCARD_STYLE_ID)
         first_card = Card(
             name="Card 1",
@@ -53,6 +70,7 @@ class NewStackDialog(QDialog):
         )
         return Stack(
             name=self.name_edit.text(),
+            aspect_ratio=aspect_ratio,
             cards=(first_card,),
             start_card_id=first_card.id,
         )
@@ -60,8 +78,11 @@ class NewStackDialog(QDialog):
     def _accept_if_valid(self) -> None:
         try:
             self.stack()
-        except ValueError:
-            self.name_edit.setFocus()
+        except (TypeError, ValueError):
+            if not self.name_edit.text().strip():
+                self.name_edit.setFocus()
+            else:
+                self.format_combo.setFocus()
             return
         self.accept()
 

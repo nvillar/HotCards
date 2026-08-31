@@ -20,6 +20,11 @@ from PySide6.QtWidgets import (
 
 from hotcards.application.commands import DeleteCardCommand, RenameCardCommand
 from hotcards.application.document_controller import DocumentController
+from hotcards.domain.image_dimensions import (
+    AspectRatio,
+    GenerateResolution,
+    output_dimensions,
+)
 from hotcards.domain.models import (
     Card,
     CardRevision,
@@ -66,7 +71,7 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     inspector.render(controller.document, card.id)
 
     assert inspector.inspector_tabs.count() == 4
-    assert inspector.inspector_tabs.tabText(0) == "Image"
+    assert inspector.inspector_tabs.tabText(0) == "Generate"
     assert inspector.inspector_tabs.tabText(1) == "Styles"
     assert inspector.inspector_tabs.tabText(2) == "Hotspots"
     assert inspector.inspector_tabs.tabText(3) == "Keys"
@@ -108,6 +113,12 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
         content_layout.indexOf(inspector.reference_panel)
     )
     assert content_layout.indexOf(inspector.reference_panel) < (
+        content_layout.indexOf(inspector.resolution_label)
+    )
+    assert content_layout.indexOf(inspector.resolution_label) < (
+        content_layout.indexOf(inspector.resolution_combo)
+    )
+    assert content_layout.indexOf(inspector.resolution_combo) < (
         content_layout.indexOf(inspector.generate_background_button)
     )
     assert inspector.style_combo.currentText() == "No Style"
@@ -445,6 +456,94 @@ def test_description_edits_target_active_revision(
     assert revision.description == "New description"
     assert controller.undo()
     assert controller.document.cards[0].active_revision.description == "Old"
+
+
+@pytest.mark.parametrize("aspect_ratio", tuple(AspectRatio))
+def test_resolution_selector_shows_actual_dimensions_for_every_preset(
+    application: QApplication,
+    aspect_ratio: AspectRatio,
+) -> None:
+    card = Card(name="Card")
+    controller = DocumentController(
+        Stack(name="Demo", aspect_ratio=aspect_ratio, cards=(card,))
+    )
+    inspector = Inspector(controller)
+    inspector.render(controller.document, card.id)
+
+    assert [
+        inspector.resolution_combo.itemText(index)
+        for index in range(inspector.resolution_combo.count())
+    ] == [
+        f"{resolution.value} "
+        f"({output_dimensions(resolution, aspect_ratio)[0]} x "
+        f"{output_dimensions(resolution, aspect_ratio)[1]})"
+        for resolution in GenerateResolution
+    ]
+    assert (
+        inspector.resolution_combo.currentData()
+        == GenerateResolution.RESOLUTION_512
+    )
+    width, height = output_dimensions(
+        GenerateResolution.RESOLUTION_512,
+        aspect_ratio,
+    )
+    assert (
+        f"Resolution: 512 square-equivalent ({width} x {height})"
+        in inspector.generate_background_button.toolTip()
+    )
+
+
+def test_resolution_selector_is_revision_local_and_undoable(
+    application: QApplication,
+) -> None:
+    first = CardRevision()
+    second = CardRevision(
+        generate_resolution=GenerateResolution.RESOLUTION_256
+    )
+    card = Card(
+        name="Card",
+        revisions=(first, second),
+        active_revision_id=first.id,
+    )
+    autosaves: list[Stack] = []
+    controller = DocumentController(
+        Stack(name="Demo", cards=(card,)),
+        autosave_hook=autosaves.append,
+    )
+    inspector = Inspector(controller)
+    inspector.render(controller.document, card.id)
+    applied: list[tuple[str, object]] = []
+    inspector.change_applied.connect(
+        lambda message, token: applied.append((message, token))
+    )
+
+    inspector.resolution_combo.setCurrentIndex(
+        inspector._combo_index_for_data(
+            inspector.resolution_combo,
+            GenerateResolution.RESOLUTION_1024,
+        )
+    )
+
+    revisions = controller.document.cards[0].revisions
+    assert revisions[0].generate_resolution is GenerateResolution.RESOLUTION_1024
+    assert revisions[1].generate_resolution is GenerateResolution.RESOLUTION_256
+    assert (
+        autosaves[-1].cards[0].active_revision.generate_resolution
+        is GenerateResolution.RESOLUTION_1024
+    )
+    assert applied[-1][0] == "Generate resolution changed"
+    assert controller.undo_if_current(applied[-1][1])  # type: ignore[arg-type]
+    inspector.render(controller.document, card.id)
+    assert (
+        inspector.resolution_combo.currentData()
+        == GenerateResolution.RESOLUTION_512
+    )
+    assert controller.redo()
+    inspector.render(controller.document, card.id)
+    assert (
+        inspector.resolution_combo.currentData()
+        == GenerateResolution.RESOLUTION_1024
+    )
 
 
 def test_reference_selector_assigns_one_card_with_undo(

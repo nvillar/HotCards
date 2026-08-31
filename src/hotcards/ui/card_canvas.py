@@ -118,10 +118,18 @@ class CardCanvas(QGraphicsView):
         scaled = pixmap.scaled(
             self._canvas_size.width,
             self._canvas_size.height,
-            Qt.AspectRatioMode.IgnoreAspectRatio,
+            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
             Qt.TransformationMode.SmoothTransformation,
         )
-        self._image_item = self.scene().addPixmap(scaled)
+        crop_x = max(0, (scaled.width() - self._canvas_size.width) // 2)
+        crop_y = max(0, (scaled.height() - self._canvas_size.height) // 2)
+        fitted = scaled.copy(
+            crop_x,
+            crop_y,
+            self._canvas_size.width,
+            self._canvas_size.height,
+        )
+        self._image_item = self.scene().addPixmap(fitted)
         self._image_item.setZValue(0)
         self._current_image = image_key
         self._current_message = None

@@ -49,11 +49,13 @@ from hotcards.application.commands import (
     ReorderHotspotCommand,
     SetHotspotConditionsCommand,
     SetHotspotKeyChangesCommand,
+    SetRevisionGenerateResolutionCommand,
     SetRevisionReferenceCommand,
     SetRevisionStyleCommand,
     UpdateStyleCommand,
 )
 from hotcards.application.document_controller import DocumentController
+from hotcards.domain.image_dimensions import GenerateResolution, output_dimensions
 from hotcards.domain.models import (
     Card,
     CardRevision,
@@ -305,6 +307,18 @@ class Inspector(QWidget):
         layout.addWidget(self.reference_panel)
 
         layout.addSpacing(8)
+        self.resolution_label = QLabel("Resolution")
+        self.resolution_label.setObjectName("resolutionLabel")
+        layout.addWidget(self.resolution_label)
+        self.resolution_combo = QComboBox()
+        self.resolution_combo.setObjectName("resolutionCombo")
+        self.resolution_combo.setAccessibleName("Generate resolution")
+        self.resolution_combo.setToolTip(
+            "Square-equivalent Generate resolution and actual output dimensions"
+        )
+        layout.addWidget(self.resolution_combo)
+
+        layout.addSpacing(8)
         self.generate_background_button = QPushButton("Generate Image")
         self.generate_background_button.setObjectName("generateBackgroundButton")
         layout.addWidget(self.generate_background_button)
@@ -313,7 +327,7 @@ class Inspector(QWidget):
         }
 
         scroll.setWidget(page)
-        self.inspector_tabs.addTab(scroll, "Image")
+        self.inspector_tabs.addTab(scroll, "Generate")
 
     def _build_styles_tab(self) -> None:
         page = QWidget()
@@ -629,6 +643,9 @@ class Inspector(QWidget):
         self.additional_reference_combo.currentIndexChanged.connect(
             lambda index: self._reference_changed(2, index)
         )
+        self.resolution_combo.currentIndexChanged.connect(
+            self._revision_resolution_changed
+        )
         self.style_list.currentItemChanged.connect(self._style_selection_changed)
         self.add_style_button.clicked.connect(self._add_style)
         self.delete_style_button.clicked.connect(self._delete_style)
@@ -731,6 +748,7 @@ class Inspector(QWidget):
                 ),
             )
             self._render_reference(document, card, revision)
+            self._render_resolution(document, revision)
             self._render_description_workflow(document, card, revision)
             self._render_hotspots(document, revision)
             self._render_keys(
@@ -792,7 +810,15 @@ class Inspector(QWidget):
             else ""
         )
         style_suffix = " + Style" if revision.style_id is not None else ""
-        self._generate_using_text = f"Using: Description{style_suffix}{reference_suffix}"
+        width, height = output_dimensions(
+            revision.generate_resolution,
+            document.aspect_ratio,
+        )
+        self._generate_using_text = (
+            f"Using: Description{style_suffix}{reference_suffix}\n"
+            f"Resolution: {revision.generate_resolution.value} "
+            f"square-equivalent ({width} x {height})"
+        )
         self._refresh_generation_tooltips()
 
     def set_background_capabilities(
@@ -886,6 +912,7 @@ class Inspector(QWidget):
             style_id = None
         if style_id == card.active_revision.style_id:
             return
+        self._render_inputs_changed()
         self._execute(
             SetRevisionStyleCommand(
                 card_id=card.id,
@@ -1021,6 +1048,7 @@ class Inspector(QWidget):
         if style_id is None:
             return
         self._selected_style_id = None
+        self._render_inputs_changed()
         self._execute(
             DeleteStyleCommand(style_id=style_id),
             error_label=self.style_error,
@@ -1037,6 +1065,7 @@ class Inspector(QWidget):
         prompt_text = self.style_prompt_edit.toPlainText()
         if name == style.name and prompt_text.strip() == style.prompt_text:
             return True
+        self._render_inputs_changed()
         return self._execute(
             UpdateStyleCommand(
                 style_id=style.id,
@@ -1362,6 +1391,7 @@ class Inspector(QWidget):
         )
         if reference == current:
             return
+        self._render_inputs_changed()
         self._execute(
             SetRevisionReferenceCommand(
                 card_id=card.id,
@@ -1371,6 +1401,54 @@ class Inspector(QWidget):
             ),
             error_label=self.reference_error,
             undo_message="Reference changed",
+        )
+
+    def _render_resolution(
+        self,
+        document: Stack,
+        revision: CardRevision,
+    ) -> None:
+        with QSignalBlocker(self.resolution_combo):
+            self.resolution_combo.clear()
+            for resolution in GenerateResolution:
+                width, height = output_dimensions(
+                    resolution,
+                    document.aspect_ratio,
+                )
+                self.resolution_combo.addItem(
+                    f"{resolution.value} ({width} x {height})",
+                    resolution,
+                )
+            self.resolution_combo.setCurrentIndex(
+                self._combo_index_for_data(
+                    self.resolution_combo,
+                    revision.generate_resolution,
+                )
+            )
+
+    def _revision_resolution_changed(self, index: int) -> None:
+        if self._rendering or index < 0:
+            return
+        card = self._selected_card()
+        if card is None:
+            return
+        try:
+            resolution = GenerateResolution(
+                self.resolution_combo.itemData(index)
+            )
+        except (TypeError, ValueError):
+            self.render(self.controller.document, self.selected_card_id)
+            return
+        if resolution is card.active_revision.generate_resolution:
+            return
+        self._render_inputs_changed()
+        self._execute(
+            SetRevisionGenerateResolutionCommand(
+                card_id=card.id,
+                revision_id=card.active_revision.id,
+                resolution=resolution,
+            ),
+            undo_message="Generate resolution changed",
         )
 
     def _render_hotspots(

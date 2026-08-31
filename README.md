@@ -18,7 +18,8 @@ stacks in `~/Documents/HotCards` and offers Open, Create, and confirmed
 permanent Delete actions.
 Only the current schema is accepted; older and future schemas are rejected.
 Each stack stores one immutable fixed aspect ratio: Square 1:1, Landscape 4:3,
-Portrait 3:4, or Widescreen 16:9. New stacks currently use Landscape 4:3.
+Portrait 3:4, or Widescreen 16:9. New Stack offers exactly those four formats
+and defaults to Landscape 4:3; the format cannot be changed after creation.
 
 Each card owns one or more numbered revisions. A revision contains its authored
 Description, selected stack Style, optional generated background, up to two
@@ -32,9 +33,10 @@ hotspot visibility. An
 adjacent step label and progress bar to the left of the image-model selector
 show actual MFLUX inference-step completion during image generation.
 
-The inspector tabs are Image, Styles, Hotspots, and Keys. Image
-follows the authoring sequence Description, Style, optional References, then
-Generate Image. Generate requires a nonempty Description and an available
+The inspector tabs are Generate, Styles, Hotspots, and Keys. Generate follows
+the authoring sequence Description, Style, optional References, Resolution,
+then Generate Image. Resolution labels show the exact output width and height
+for the stack format. Generate requires a nonempty Description and an available
 MFLUX model. The exact effective prompt is composed deterministically from the
 Description followed by the selected Style text; no language model prepares or
 rewrites it.
@@ -104,7 +106,9 @@ add a vertex, press Delete to remove the selected vertex or area, and press
 Escape to step back through the selection. Context menus expose the same
 geometry actions, and successful edits offer a dismissible Undo. Replacing a
 background preserves its hotspots so the author can review and adjust them
-manually.
+manually. Backgrounds at different pixel resolutions are smoothly fitted to the
+stack's fixed logical card format without stretching, so normalized hotspot
+geometry remains aligned in Author and Run modes.
 
 Run mode keeps its current keys only in the session. It starts empty, Back
 retains keys, Restart clears them, and leaving Run discards them. Condition-

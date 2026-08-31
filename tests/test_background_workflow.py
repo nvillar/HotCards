@@ -32,7 +32,11 @@ from hotcards.application.commands import (
 from hotcards.application.document_controller import DocumentController, UndoToken
 from hotcards.application.document_session import DocumentSession
 from hotcards.application.generated_revision_change import GeneratedRevisionChange
-from hotcards.domain.image_dimensions import GenerateResolution
+from hotcards.domain.image_dimensions import (
+    AspectRatio,
+    GenerateResolution,
+    output_dimensions,
+)
 from hotcards.domain.models import (
     Card,
     CardRevision,
@@ -162,6 +166,9 @@ def _settings() -> BackgroundGenerationSettings:
 
 def _bound_workflow(
     root: Path,
+    *,
+    aspect_ratio: AspectRatio = AspectRatio.LANDSCAPE,
+    resolution: GenerateResolution = GenerateResolution.RESOLUTION_512,
 ) -> tuple[
     BackgroundWorkflow,
     DocumentController,
@@ -177,10 +184,16 @@ def _bound_workflow(
     revision = CardRevision(
         description="A garden",
         hotspot_set=HotspotSet(interactions=(hotspot,)),
+        generate_resolution=resolution,
     )
     card = Card(name="Garden", revisions=(revision,), active_revision_id=revision.id)
     controller = DocumentController(
-        Stack(name="Stack", cards=(card,), start_card_id=card.id)
+        Stack(
+            name="Stack",
+            aspect_ratio=aspect_ratio,
+            cards=(card,),
+            start_card_id=card.id,
+        )
     )
     session = DocumentSession(controller)
     session.create(controller.document, root / "Stack.hotcards")
@@ -398,6 +411,38 @@ def test_generate_uses_revision_resolution_and_stack_aspect_ratio(
     assert provenance.inputs.resolution is GenerateResolution.RESOLUTION_1024
     assert (model.calls[-1]["width"], model.calls[-1]["height"]) == (1184, 880)
     assert (provenance.settings.width, provenance.settings.height) == (1184, 880)
+
+
+@pytest.mark.parametrize("aspect_ratio", tuple(AspectRatio))
+@pytest.mark.parametrize("resolution", tuple(GenerateResolution))
+def test_generate_uses_every_supported_ratio_and_resolution(
+    tmp_path: Path,
+    aspect_ratio: AspectRatio,
+    resolution: GenerateResolution,
+) -> None:
+    root = tmp_path / aspect_ratio.name.lower() / str(resolution.value)
+    workflow, controller, _session, workers, model, card = _bound_workflow(
+        root,
+        aspect_ratio=aspect_ratio,
+        resolution=resolution,
+    )
+
+    workflow.generate(card.id)
+    _complete_generation(workers)
+
+    expected_dimensions = output_dimensions(resolution, aspect_ratio)
+    provenance = controller.document.cards[0].active_revision.provenance
+    assert provenance is not None
+    assert provenance.operation == "generate"
+    assert provenance.inputs.resolution is resolution
+    assert (
+        model.calls[-1]["width"],
+        model.calls[-1]["height"],
+    ) == expected_dimensions
+    assert (
+        provenance.settings.width,
+        provenance.settings.height,
+    ) == expected_dimensions
 
 
 def test_description_and_style_changes_suppress_in_flight_generation(

@@ -598,6 +598,12 @@ class MainWindow(QMainWindow):
         if self._is_running:
             return
         selected_card_id = card_id if isinstance(card_id, UUID) else None
+        if (
+            selected_card_id != self._selected_card_id
+            and self.background_workflow is not None
+            and self.background_workflow.busy
+        ):
+            self._cancel_background_generation()
         self._selected_card_id = selected_card_id
         if self.card_sidebar.selected_card_id != self._selected_card_id:
             self.card_sidebar.select_card(self._selected_card_id)
@@ -711,6 +717,8 @@ class MainWindow(QMainWindow):
             or not self._commit_authoring_metadata()
         ):
             return
+        if workflow.busy:
+            self._cancel_background_generation()
         self.notification_bar.clear_notification("background-error")
         try:
             workflow.duplicate_revision(card_id, revision_id)
@@ -766,6 +774,8 @@ class MainWindow(QMainWindow):
             return
         token = self._undo_notification_token
         self._clear_undo_notification()
+        if self.background_workflow is not None and self.background_workflow.busy:
+            self._cancel_background_generation()
         if token is not None and self.controller.undo_if_current(token):
             self.render_document()
 
@@ -802,6 +812,8 @@ class MainWindow(QMainWindow):
         if revision is None:
             self._clear_undo_notification()
             return
+        if self.background_workflow is not None and self.background_workflow.busy:
+            self._cancel_background_generation()
         self._clear_undo_notification()
         command = CreateGeneratedRevisionCommand(
             card_id=change.card_id,
@@ -968,15 +980,21 @@ class MainWindow(QMainWindow):
 
     def undo(self) -> None:
         self._clear_undo_notification()
+        if self.background_workflow is not None and self.background_workflow.busy:
+            self._cancel_background_generation()
         if self.controller.undo():
             self.render_document()
 
     def redo(self) -> None:
         self._clear_undo_notification()
+        if self.background_workflow is not None and self.background_workflow.busy:
+            self._cancel_background_generation()
         if self.controller.redo():
             self.render_document()
 
     def _authoring_inputs_changed(self) -> None:
+        if self.background_workflow is not None and self.background_workflow.busy:
+            self._cancel_background_generation()
         self._update_generation_actions()
 
     def _primary_empty_action(self) -> None:
@@ -1192,6 +1210,20 @@ class MainWindow(QMainWindow):
             or not isinstance(revision_id, UUID)
         ):
             return
+        selected_card = next(
+            (
+                card
+                for card in self.controller.document.cards
+                if card.id == self._selected_card_id
+            ),
+            None,
+        )
+        if (
+            selected_card is not None
+            and revision_id != selected_card.active_revision_id
+            and self.background_workflow.busy
+        ):
+            self._cancel_background_generation()
         self.notification_bar.clear_notification("background-error")
         try:
             self.background_workflow.activate_revision(
