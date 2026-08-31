@@ -677,7 +677,21 @@ class ReplaceRevisionBackgroundCommand:
         card_index = _card_index(document, self.card_id)
         card = document.cards[card_index]
         revision_index = _revision_index(card, self.revision_id)
-        revision = card.revisions[revision_index].model_copy(
+        current_revision = card.revisions[revision_index]
+        if (
+            current_revision.background is not None
+            and self.background != current_revision.background
+        ):
+            dependencies = image_source_dependencies(document, (self.revision_id,))
+            if dependencies:
+                dependent = dependencies[0]
+                raise CommandError(
+                    "cannot replace this source background because "
+                    f"{dependent.operation.title()} revision "
+                    f'{dependent.dependent_revision_number} on card '
+                    f'"{dependent.dependent_card_name}" derives from it'
+                )
+        revision = current_revision.model_copy(
             update={
                 "background": (
                     self.background.model_copy(deep=True) if self.background is not None else None

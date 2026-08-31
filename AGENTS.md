@@ -84,10 +84,14 @@ for live MFLUX runs.
   for direct Generate, externally patched legacy Generate, Refine, and Edit.
   Keep operation-specific prompts and settings typed rather than accumulating
   nullable fields. Refine and Edit identify their exact source revision and
-  background; retain ordered accepted Edit lineage where applicable. Block
-  source revision deletion while any retained revision derives from it. Whole
-  card deletion may remove dependencies wholly contained in that card, but
-  must reject dependencies from retained cards.
+  background. A Refine inherits its source revision's accepted Edit lineage
+  unchanged; an Edit appends exactly its accepted current Edit to that source
+  lineage. Current Generate, Refine, and Edit dimensions must match their typed
+  resolution and the stack aspect ratio. Legacy Generate preserves its exact
+  historical prompt and dimensions without imposing a modern preset. Block
+  source revision deletion or background replacement while any retained
+  revision derives from it. Whole card deletion may remove dependencies wholly
+  contained in that card, but must reject dependencies from retained cards.
 - Keep one Description editor in the Background inspector. Place the Style
   selector above References and before Generate, show positional Reference
   guidance, and keep generation provenance in button tooltips. Keep inspector

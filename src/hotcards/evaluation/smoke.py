@@ -48,8 +48,8 @@ class SmokeSettings(DomainModel):
     output_dir: Path
     mflux_model: NonEmptyString = "flux2-klein-4b"
     seed: int = 42
-    width: PositiveInt = 1024
-    height: PositiveInt = 768
+    width: PositiveInt = 592
+    height: PositiveInt = 448
     step_count: PositiveInt = 4
     quantization: int | None = None
 

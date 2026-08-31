@@ -255,6 +255,46 @@ class StackStore:
                 temporary_path.unlink(missing_ok=True)
         return relative_path.as_posix()
 
+    def remove_image_asset_if_unreferenced(
+        self,
+        relative_path: str,
+        *,
+        card_id: UUID,
+        asset_id: UUID,
+        stack: Stack,
+    ) -> bool:
+        """Remove one exact bundle-owned image only when the document cannot reach it."""
+        parsed_path = _relative_asset_path(relative_path)
+        expected_path = _image_asset_path(card_id, asset_id)
+        if parsed_path != expected_path:
+            raise StackStoreError(
+                f"image asset path {parsed_path} does not match its card and asset IDs"
+            )
+        documents = [stack]
+        if self.stack_path.is_file():
+            documents.append(self.load())
+        if any(
+            revision.background is not None
+            and revision.background.image_path == relative_path
+            for document in documents
+            for card in document.cards
+            for revision in card.revisions
+        ):
+            raise StackStoreError(
+                f"refusing to remove referenced image asset: {relative_path}"
+            )
+        destination = self._resolved_asset(parsed_path)
+        try:
+            if not destination.exists():
+                return False
+            destination.unlink()
+            _fsync_directory(destination.parent)
+        except OSError as error:
+            raise StackStoreError(
+                f"could not remove image asset {relative_path}: {error}"
+            ) from error
+        return True
+
     def autosave_hook(self) -> Callable[[Stack], None]:
         """Return the synchronous save boundary for a later debouncer/controller."""
         return self.save

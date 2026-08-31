@@ -146,7 +146,7 @@ def refined_background(
             ),
             description="Refined card",
             render_prompt="Refined card",
-            resolution=GenerateResolution.RESOLUTION_768,
+            resolution=GenerateResolution.RESOLUTION_512,
             transformation=RefineTransformation.BALANCED,
             strength=0.5,
             settings=operation_settings(),
@@ -482,6 +482,16 @@ def test_source_revision_deletion_is_blocked_by_derived_revision() -> None:
             card_id=card.id,
             revision_id=source.id,
         ).apply(document)
+    with pytest.raises(
+        CommandError,
+        match='cannot replace this source background.*Refine revision 2',
+    ):
+        ReplaceRevisionBackgroundCommand(
+            card_id=card.id,
+            revision_id=source.id,
+            background=generated_background("Replacement"),
+        ).apply(document)
+    assert document.cards[0].revisions[0] == source
 
 
 def test_whole_card_deletion_removes_internal_lineage_but_blocks_external_dependents() -> None:
@@ -734,8 +744,8 @@ def test_reference_assignment_and_background_replacement_are_guarded() -> None:
                 model_identifier="test",
                 mflux_version="test",
                 seed=1,
-                width=1024,
-                height=768,
+                width=592,
+                height=448,
                 step_count=4,
                 generated_at=generated_at,
                 duration_seconds=1,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
@@ -22,6 +23,7 @@ from hotcards.application.commands import (
     CreateCardCommand,
     DuplicateRevisionCommand,
     EditRevisionDescriptionCommand,
+    ReplaceRevisionBackgroundCommand,
     SetRevisionGenerateResolutionCommand,
     SetRevisionReferenceCommand,
     SetRevisionStyleCommand,
@@ -34,10 +36,14 @@ from hotcards.domain.image_dimensions import GenerateResolution
 from hotcards.domain.models import (
     Card,
     CardRevision,
+    GeneratedBackground,
     HotspotSet,
     ImageReferenceSnapshot,
+    ImageSourceSnapshot,
     Interaction,
     NavigateAction,
+    RefineProvenance,
+    RefineTransformation,
     ResolvedCardReference,
     Stack,
     UnresolvedCardReference,
@@ -229,6 +235,94 @@ def test_generate_uses_description_and_preserves_result_lifecycle(
 
     assert controller.undo_if_current(applied[0].token)
     assert controller.document.cards[0].active_revision.background is None
+
+
+def test_rejected_generation_apply_removes_the_new_unreachable_asset(
+    tmp_path: Path,
+) -> None:
+    workflow, controller, session, workers, _model, _card = _bound_workflow(tmp_path)
+    source = _create_generated_source(
+        workflow,
+        controller,
+        workers,
+        name="Source",
+    )
+    source_revision = source.active_revision
+    source_background = source_revision.background
+    assert source_background is not None
+
+    workflow.generate(source.id)
+
+    dependent_id = uuid4()
+    controller.execute(CreateCardCommand(name="Dependent", card_id=dependent_id))
+    dependent = next(
+        card for card in controller.document.cards if card.id == dependent_id
+    )
+    derived_asset_id = uuid4()
+    derived_source = tmp_path / "derived-source.png"
+    Image.new("RGB", (592, 448), "green").save(derived_source)
+    bundle_path = session.state.bundle_path
+    assert bundle_path is not None
+    store = StackStore(bundle_path)
+    derived_path = store.store_image_asset(
+        derived_source,
+        card_id=dependent.id,
+        asset_id=derived_asset_id,
+    )
+    generated_at = datetime.now(UTC)
+    derived_background = GeneratedBackground(
+        id=derived_asset_id,
+        image_path=derived_path,
+        provenance=RefineProvenance(
+            source=ImageSourceSnapshot(
+                card_id=source.id,
+                revision_id=source_revision.id,
+                background_id=source_background.id,
+            ),
+            description="A refined source",
+            render_prompt="A refined source",
+            resolution=GenerateResolution.RESOLUTION_512,
+            transformation=RefineTransformation.BALANCED,
+            strength=0.50,
+            settings=source_background.provenance.settings,
+        ),
+        created_at=generated_at,
+    )
+    controller.execute(
+        ReplaceRevisionBackgroundCommand(
+            card_id=dependent.id,
+            revision_id=dependent.active_revision.id,
+            background=derived_background,
+        )
+    )
+    document_before_completion = controller.document
+    assets_before_completion = set(
+        (bundle_path / "assets" / "cards").glob("*/image-*.png")
+    )
+    failures: list[object] = []
+    workflow.failed.connect(failures.append)
+
+    _complete_generation(workers)
+
+    assert failures
+    assert "cannot replace this source background" in str(failures[-1])
+    assert controller.document == document_before_completion
+    assert (
+        next(card for card in controller.document.cards if card.id == source.id)
+        .active_revision.background
+        == source_background
+    )
+    assert set((bundle_path / "assets" / "cards").glob("*/image-*.png")) == (
+        assets_before_completion
+    )
+    assert not workflow.busy
+    worker_call_count = len(workers.calls)
+    with pytest.raises(
+        BackgroundWorkflowError,
+        match="cannot replace this source background",
+    ):
+        workflow.generate(source.id)
+    assert len(workers.calls) == worker_call_count
 
 
 def test_generate_appends_and_captures_selected_style(tmp_path: Path) -> None:

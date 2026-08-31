@@ -142,6 +142,7 @@ class MfluxGenerationRequest(DomainModel):
     output_path: Path
     model_identifier: NonEmptyString = "flux2-klein-4b"
     seed: int
+    aspect_ratio: AspectRatio = AspectRatio.LANDSCAPE
     width: PositiveInt = _DEFAULT_WIDTH
     height: PositiveInt = _DEFAULT_HEIGHT
     step_count: PositiveInt = 4
@@ -152,8 +153,14 @@ class MfluxGenerationRequest(DomainModel):
 
     @model_validator(mode="after")
     def require_matching_reference_inputs(self) -> MfluxGenerationRequest:
-        if self.width % 16 or self.height % 16:
-            raise ValueError("image dimensions must be multiples of 16")
+        expected_dimensions = output_dimensions(
+            self.inputs.resolution,
+            self.aspect_ratio,
+        )
+        if (self.width, self.height) != expected_dimensions:
+            raise ValueError(
+                "image dimensions must match the input resolution and aspect ratio"
+            )
         if len(self.inputs.references) != len(self.reference_image_paths):
             raise ValueError(
                 "reference image paths must match captured reference inputs"

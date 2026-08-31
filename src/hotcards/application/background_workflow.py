@@ -28,6 +28,7 @@ from hotcards.application.image_files import (
     require_readable_image,
 )
 from hotcards.application.workers import AdapterWorkers, WorkerOperation
+from hotcards.domain.image_dependencies import image_source_dependencies
 from hotcards.domain.image_dimensions import GenerateResolution, output_dimensions
 from hotcards.domain.models import (
     Card,
@@ -147,6 +148,16 @@ class BackgroundWorkflow(QObject):
         revision = card.active_revision
         if not revision.description.strip():
             raise BackgroundWorkflowError("enter a Description before generating")
+        if revision.background is not None:
+            dependencies = image_source_dependencies(document, (revision.id,))
+            if dependencies:
+                dependent = dependencies[0]
+                raise BackgroundWorkflowError(
+                    "cannot replace this source background because "
+                    f"{dependent.operation.title()} revision "
+                    f'{dependent.dependent_revision_number} on card '
+                    f'"{dependent.dependent_card_name}" derives from it'
+                )
         references = self._resolve_references(document, card)
         reference_snapshots = tuple(
             ImageReferenceSnapshot(
@@ -186,6 +197,7 @@ class BackgroundWorkflow(QObject):
             seed=(
                 secrets.randbelow(2_147_483_648) if settings.random_seed else settings.fixed_seed
             ),
+            aspect_ratio=document.aspect_ratio,
             width=width,
             height=height,
             step_count=settings.step_count,
@@ -311,15 +323,17 @@ class BackgroundWorkflow(QObject):
                 )
             )
             return
+        stored_image_path: str | None = None
+        store = self._require_store()
         try:
-            image_path = self._require_store().store_image_asset(
+            stored_image_path = store.store_image_asset(
                 result.output_path,
                 card_id=target.card_id,
                 asset_id=asset_id,
             )
             background = GeneratedBackground(
                 id=asset_id,
-                image_path=image_path,
+                image_path=stored_image_path,
                 provenance=result.provenance,
                 created_at=result.provenance.settings.generated_at,
             )
@@ -331,6 +345,18 @@ class BackgroundWorkflow(QObject):
                 generated=True,
             )
         except (CommandError, StackStoreError, ValidationError) as error:
+            if stored_image_path is not None:
+                try:
+                    store.remove_image_asset_if_unreferenced(
+                        stored_image_path,
+                        card_id=target.card_id,
+                        asset_id=asset_id,
+                        stack=self.controller.document,
+                    )
+                except StackStoreError as cleanup_error:
+                    error = BackgroundWorkflowError(
+                        f"{error}; could not roll back generated asset: {cleanup_error}"
+                    )
             self._finish_with_error(error)
             return
         self._pending_image_path = None

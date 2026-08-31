@@ -79,8 +79,8 @@ def test_style_suite_renders_complete_matrix_and_review_sheets(
     result_path = run_style_preset_evaluation(
         StylePresetSettings(
             output_dir=output_dir,
-            width=48,
-            height=32,
+            width=592,
+            height=448,
         ),
         generator_factory=lambda: MfluxGenerator(model_factory=lambda *_: FakeMfluxModel(requests)),
         environment_provider=lambda: {"git_sha": "test"},
@@ -122,7 +122,7 @@ def test_style_suite_marks_empty_style_sheet_unavailable(tmp_path: Path) -> None
     output_dir = tmp_path / "run"
 
     result_path = run_style_preset_evaluation(
-        StylePresetSettings(output_dir=output_dir, width=48, height=32),
+        StylePresetSettings(output_dir=output_dir, width=592, height=448),
         generator_factory=lambda: MfluxGenerator(
             model_factory=lambda *_: FakeMfluxModel(
                 [],
@@ -145,7 +145,7 @@ def test_style_suite_fails_when_no_image_can_be_generated(tmp_path: Path) -> Non
 
     with pytest.raises(ImageGenerationError, match="produced no images"):
         run_style_preset_evaluation(
-            StylePresetSettings(output_dir=output_dir, width=48, height=32),
+            StylePresetSettings(output_dir=output_dir, width=592, height=448),
             generator_factory=lambda: MfluxGenerator(
                 model_factory=lambda *_: FakeMfluxModel(
                     [],

@@ -108,8 +108,8 @@ class StylePresetSettings(DomainModel):
     experiment_path: Path = DEFAULT_STYLE_PRESET_EXPERIMENT
     model_identifier: NonEmptyString = "flux2-klein-9b"
     seeds: tuple[int, ...] = Field(default=DEFAULT_STYLE_PRESET_SEEDS, min_length=1)
-    width: PositiveInt = 1024
-    height: PositiveInt = 768
+    width: PositiveInt = 592
+    height: PositiveInt = 448
     step_count: PositiveInt = 4
     quantization: int | None = None
 

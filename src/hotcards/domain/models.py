@@ -19,7 +19,11 @@ from pydantic import (
     model_validator,
 )
 
-from hotcards.domain.image_dimensions import AspectRatio, GenerateResolution
+from hotcards.domain.image_dimensions import (
+    AspectRatio,
+    GenerateResolution,
+    output_dimensions,
+)
 
 CURRENT_SCHEMA_VERSION = 11
 
@@ -355,12 +359,6 @@ class ImageOperationSettings(DomainModel):
     generated_at: AwareDatetime
     duration_seconds: NonNegativeFiniteFloat
 
-    @model_validator(mode="after")
-    def require_aligned_dimensions(self) -> ImageOperationSettings:
-        if self.width % 16 or self.height % 16:
-            raise ValueError("image dimensions must be multiples of 16")
-        return self
-
 
 class ImageSourceSnapshot(DomainModel):
     """Exact source revision and background used by a derived operation."""
@@ -460,14 +458,18 @@ class EditProvenance(DomainModel):
     edit_lineage: tuple[AcceptedEdit, ...] = Field(min_length=1)
     settings: ImageOperationSettings
 
-    @model_validator(mode="after")
-    def require_current_edit_at_lineage_end(self) -> EditProvenance:
-        current = AcceptedEdit(
+    @property
+    def accepted_edit(self) -> AcceptedEdit:
+        """Return the accepted Edit represented by this operation."""
+        return AcceptedEdit(
             instruction=self.instruction,
             preserve=self.preserve,
             expanded_prompt=self.expanded_prompt,
         )
-        if self.edit_lineage[-1] != current:
+
+    @model_validator(mode="after")
+    def require_current_edit_at_lineage_end(self) -> EditProvenance:
+        if self.edit_lineage[-1] != self.accepted_edit:
             raise ValueError("Edit lineage must end with the accepted current Edit")
         return self
 
@@ -687,6 +689,32 @@ class Stack(DomainModel):
                 if revision.style_id is not None and revision.style_id not in known_style_ids:
                     raise ValueError("revision style_id must identify a Style in this stack")
                 provenance = revision.provenance
+                if isinstance(provenance, DirectGenerateProvenance):
+                    expected_dimensions = output_dimensions(
+                        provenance.inputs.resolution,
+                        self.aspect_ratio,
+                    )
+                    if (
+                        provenance.settings.width,
+                        provenance.settings.height,
+                    ) != expected_dimensions:
+                        raise ValueError(
+                            "direct Generate dimensions must match its resolution "
+                            "and stack aspect ratio"
+                        )
+                elif isinstance(provenance, (RefineProvenance, EditProvenance)):
+                    expected_dimensions = output_dimensions(
+                        provenance.resolution,
+                        self.aspect_ratio,
+                    )
+                    if (
+                        provenance.settings.width,
+                        provenance.settings.height,
+                    ) != expected_dimensions:
+                        raise ValueError(
+                            f"{provenance.operation.title()} dimensions must match "
+                            "its resolution and stack aspect ratio"
+                        )
                 if isinstance(provenance, (RefineProvenance, EditProvenance)):
                     source = provenance.source
                     if source.revision_id not in revision_card_ids:
@@ -765,6 +793,29 @@ class Stack(DomainModel):
                     raise ValueError("derived image source lineage cannot contain cycles")
                 visited.add(current_revision_id)
                 current_revision_id = derived_sources[current_revision_id]
+        for revision_id, source_revision_id in derived_sources.items():
+            provenance = revisions_by_id[revision_id].provenance
+            source_provenance = revisions_by_id[source_revision_id].provenance
+            assert isinstance(provenance, (RefineProvenance, EditProvenance))
+            assert source_provenance is not None
+            source_lineage = (
+                source_provenance.edit_lineage
+                if isinstance(source_provenance, (RefineProvenance, EditProvenance))
+                else ()
+            )
+            if isinstance(provenance, RefineProvenance):
+                if provenance.edit_lineage != source_lineage:
+                    raise ValueError(
+                        "Refine lineage must equal its source revision lineage"
+                    )
+            elif provenance.edit_lineage != (
+                *source_lineage,
+                provenance.accepted_edit,
+            ):
+                raise ValueError(
+                    "Edit lineage must equal its source revision lineage plus "
+                    "the accepted current Edit"
+                )
         return self
 
     def style_by_id(self, style_id: UUID | None) -> StyleDefinition | None:

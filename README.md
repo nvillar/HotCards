@@ -51,9 +51,9 @@ Image provenance is a strict typed operation record for direct Generate,
 externally patched historical Generate, Refine, or Edit. It retains exact
 prompts, model execution settings, seed, and actual output width and height;
 derived operations also identify their source revision and background. A source
-revision cannot be deleted while another retained revision derives from it.
-Deleting an entire card may remove an image-evolution chain contained wholly
-inside that card.
+revision cannot be deleted or have its background replaced while another
+retained revision derives from it. Deleting an entire card may remove an
+image-evolution chain contained wholly inside that card.
 
 Generated images are the only supported background source. Generate and image
 removal apply to the active revision through document commands. Completed

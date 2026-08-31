@@ -7,6 +7,11 @@ from uuid import uuid4
 import pytest
 from PIL import Image
 
+from hotcards.domain.image_dimensions import (
+    AspectRatio,
+    GenerateResolution,
+    output_dimensions,
+)
 from hotcards.domain.models import GenerateInputs, ImageReferenceSnapshot
 from hotcards.generation.errors import ImageGenerationError, ModelLoadError
 from hotcards.generation.mflux_generator import (
@@ -179,16 +184,43 @@ def test_reference_paths_must_match_snapshot_count(tmp_path: Path) -> None:
         )
 
 
-def test_generation_request_requires_aligned_dimensions(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="multiples of 16"):
+def test_generation_request_requires_resolution_and_aspect_dimensions(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError, match="input resolution and aspect ratio"):
         MfluxGenerationRequest(
             inputs=GenerateInputs(description="Invalid dimensions"),
             render_prompt="Invalid dimensions",
             output_path=tmp_path / "invalid.png",
             seed=1,
-            width=593,
+            width=608,
             height=448,
         )
+
+
+@pytest.mark.parametrize("aspect_ratio", tuple(AspectRatio))
+@pytest.mark.parametrize("resolution", tuple(GenerateResolution))
+def test_generation_request_accepts_every_schema_dimension_combination(
+    tmp_path: Path,
+    aspect_ratio: AspectRatio,
+    resolution: GenerateResolution,
+) -> None:
+    width, height = output_dimensions(resolution, aspect_ratio)
+
+    request = MfluxGenerationRequest(
+        inputs=GenerateInputs(
+            description="Valid dimensions",
+            resolution=resolution,
+        ),
+        render_prompt="Valid dimensions",
+        output_path=tmp_path / "valid.png",
+        seed=1,
+        aspect_ratio=aspect_ratio,
+        width=width,
+        height=height,
+    )
+
+    assert (request.width, request.height) == (width, height)
 
 
 def test_one_reference_snapshot_requires_one_image_path(

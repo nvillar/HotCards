@@ -47,8 +47,8 @@ def _generated_background(asset_id: UUID, image_path: str) -> GeneratedBackgroun
                 model_identifier="test",
                 mflux_version="test",
                 seed=1,
-                width=1024,
-                height=768,
+                width=592,
+                height=448,
                 step_count=4,
                 generated_at=generated_at,
                 duration_seconds=1,
@@ -261,6 +261,51 @@ def test_store_image_asset_refuses_overwrite_and_invalid_content(
     invalid.write_bytes(b"not an image")
     with pytest.raises(StackStoreError, match="decode"):
         store.store_image_asset(invalid, card_id=card_id, revision_id=uuid4())
+
+
+def test_remove_image_asset_only_removes_unreferenced_owned_assets(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.png"
+    _write_png(source)
+    store = StackStore(tmp_path / "Castle.hotcards")
+    card_id = uuid4()
+    asset_id = uuid4()
+    image_path = store.store_image_asset(
+        source,
+        card_id=card_id,
+        asset_id=asset_id,
+    )
+
+    assert store.remove_image_asset_if_unreferenced(
+        image_path,
+        card_id=card_id,
+        asset_id=asset_id,
+        stack=Stack(name="Empty"),
+    )
+    assert not store.asset_path(image_path).exists()
+
+    image_path = store.store_image_asset(
+        source,
+        card_id=card_id,
+        asset_id=asset_id,
+    )
+    revision = CardRevision(
+        background=_generated_background(asset_id, image_path),
+    )
+    stack = Stack(
+        name="Referenced",
+        cards=(Card(id=card_id, name="Card", revisions=(revision,)),),
+    )
+    store.save(stack)
+    with pytest.raises(StackStoreError, match="referenced image asset"):
+        store.remove_image_asset_if_unreferenced(
+            image_path,
+            card_id=card_id,
+            asset_id=asset_id,
+            stack=Stack(name="Stale"),
+        )
+    assert store.asset_path(image_path).is_file()
 
 
 def test_load_rejects_missing_unsupported_and_future_versions(

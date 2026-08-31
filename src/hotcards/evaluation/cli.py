@@ -107,8 +107,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
     )
     style_presets.add_argument("--quantization", type=int)
-    style_presets.add_argument("--width", type=_positive_int, default=1024)
-    style_presets.add_argument("--height", type=_positive_int, default=768)
+    style_presets.add_argument("--width", type=_positive_int, default=592)
+    style_presets.add_argument("--height", type=_positive_int, default=448)
     style_presets.add_argument("--steps", type=_positive_int, default=4)
     style_presets.add_argument(
         "--validate-only",

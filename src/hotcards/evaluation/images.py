@@ -68,8 +68,8 @@ class ImageEvaluationSettings(DomainModel):
     case_dir: Path = Path("evals/cases/images")
     mflux_models: tuple[NonEmptyString, ...] = DEFAULT_MFLUX_MODELS
     seed: int = 42
-    width: PositiveInt = 1024
-    height: PositiveInt = 768
+    width: PositiveInt = 592
+    height: PositiveInt = 448
     step_count: PositiveInt = 4
     quantization: int | None = None
 
