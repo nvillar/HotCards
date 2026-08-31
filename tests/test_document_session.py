@@ -15,15 +15,17 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from hotcards.application.commands import CreateCardCommand, RenameCardCommand
-from hotcards.application.document_controller import DocumentController
+from hotcards.application.document_controller import DocumentController, OwnedImageAsset
 from hotcards.application.document_session import DocumentSession, DocumentSessionError
 from hotcards.domain.models import (
     Card,
     CardRevision,
     DirectGenerateProvenance,
+    DuplicateProvenance,
     GeneratedBackground,
     GenerateInputs,
     ImageOperationSettings,
+    ImageSourceSnapshot,
     Stack,
 )
 from hotcards.storage.stack_store import StackStore, StackStoreError
@@ -32,6 +34,69 @@ from hotcards.storage.stack_store import StackStore, StackStoreError
 @pytest.fixture(scope="module")
 def application() -> QApplication:
     return QApplication.instance() or QApplication([])
+
+
+def _duplicate_bundle(
+    tmp_path: Path,
+    *,
+    symlink_owned_image: bool,
+) -> tuple[StackStore, Stack]:
+    store = StackStore(tmp_path / "Candidate.hotcards")
+    card = Card(name="Candidate")
+    asset_id = uuid4()
+    generated_at = datetime.now(UTC)
+    source_png = tmp_path / "candidate.png"
+    Image.new("RGB", (19, 13), (12, 34, 56)).save(source_png, format="PNG")
+    image_path = store.store_image_asset(
+        source_png,
+        card_id=card.id,
+        asset_id=asset_id,
+    )
+    revision = CardRevision(
+        background=GeneratedBackground(
+            id=asset_id,
+            image_path=image_path,
+            provenance=DuplicateProvenance(
+                source=ImageSourceSnapshot(
+                    card_id=uuid4(),
+                    revision_id=uuid4(),
+                    background_id=uuid4(),
+                ),
+                original_provenance=DirectGenerateProvenance(
+                    inputs=GenerateInputs(description="Candidate"),
+                    render_prompt="Candidate",
+                    settings=ImageOperationSettings(
+                        model_identifier="test",
+                        mflux_version="test",
+                        seed=7,
+                        width=592,
+                        height=448,
+                        step_count=4,
+                        generated_at=generated_at,
+                        duration_seconds=1,
+                    ),
+                ),
+            ),
+            created_at=generated_at,
+        ),
+    )
+    card = card.model_copy(
+        update={
+            "revisions": (revision,),
+            "active_revision_id": revision.id,
+        }
+    )
+    stack = Stack(name="Candidate", cards=(card,), start_card_id=card.id)
+    store.save(stack)
+
+    if symlink_owned_image:
+        target = store.bundle_path.joinpath(*image_path.split("/"))
+        alternate = store.bundle_path / "assets" / "alternate.png"
+        alternate.write_bytes(target.read_bytes())
+        target.unlink()
+        target.symlink_to(Path("..") / ".." / "alternate.png")
+    assert store.load() == stack
+    return store, stack
 
 
 def test_create_binds_bundle_before_mutations_and_flushes_autosave(
@@ -117,6 +182,117 @@ def test_invalid_open_preserves_current_document(tmp_path: Path) -> None:
 
     assert controller.document.name == "Current"
     assert session.state.bundle_path == tmp_path / "Current.hotcards"
+
+
+def test_secure_duplicate_asset_preflight_preserves_active_session(
+    tmp_path: Path,
+) -> None:
+    first = Card(name="First")
+    second = Card(name="Second")
+    active = Stack(
+        name="Active",
+        cards=(first, second),
+        start_card_id=first.id,
+    )
+    controller = DocumentController(active)
+    session = DocumentSession(controller)
+    active_store = StackStore(tmp_path / "Active.hotcards")
+    session.create(active, active_store.bundle_path)
+    controller.execute(RenameCardCommand(card_id=second.id, name="Pending edit"))
+    before_document = controller.document
+    before_store = session.store
+    before_state = session.state
+    before_token = controller.current_undo_token
+    before_pending = session._pending_snapshot
+    candidate_store, candidate_stack = _duplicate_bundle(
+        tmp_path,
+        symlink_owned_image=True,
+    )
+    replaced: list[Stack] = []
+    states: list[object] = []
+    session.document_replaced.connect(replaced.append)
+    session.state_changed.connect(states.append)
+
+    with pytest.raises(
+        DocumentSessionError,
+        match="could not securely open owned image",
+    ):
+        session.open(candidate_store.bundle_path)
+
+    assert session.store is before_store
+    assert session.state == before_state
+    assert session._pending_snapshot == before_pending
+    assert controller.document == before_document
+    assert controller.current_undo_token == before_token
+    assert controller.can_undo
+    assert replaced == []
+    assert states == []
+
+    controller.execute(RenameCardCommand(card_id=first.id, name="Still active"))
+    assert session.flush()
+    assert active_store.load() == controller.document
+    assert candidate_store.load() == candidate_stack
+
+
+def test_candidate_owned_asset_is_revalidated_before_active_flush(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    card = Card(name="Active")
+    active = Stack(name="Active", cards=(card,), start_card_id=card.id)
+    controller = DocumentController(active)
+    session = DocumentSession(controller)
+    active_store = StackStore(tmp_path / "Active.hotcards")
+    session.create(active, active_store.bundle_path)
+    before_store = session.store
+    controller.execute(RenameCardCommand(card_id=card.id, name="Pending edit"))
+    before_document = controller.document
+    before_state = session.state
+    before_token = controller.current_undo_token
+    before_pending = session._pending_snapshot
+    candidate_store, _candidate_stack = _duplicate_bundle(
+        tmp_path,
+        symlink_owned_image=False,
+    )
+    real_classifier = session._duplicate_owned_assets
+    candidate_classifications = 0
+
+    def swap_after_first_classification(
+        store: StackStore,
+        document: Stack,
+    ) -> tuple[OwnedImageAsset, ...]:
+        nonlocal candidate_classifications
+        assets = real_classifier(store, document)
+        if store.bundle_path == candidate_store.bundle_path:
+            candidate_classifications += 1
+            if candidate_classifications == 1:
+                owned_path = candidate_store.bundle_path.joinpath(
+                    *assets[0].relative_path.split("/")
+                )
+                alternate = candidate_store.bundle_path / "assets" / "alternate.png"
+                alternate.write_bytes(owned_path.read_bytes())
+                owned_path.unlink()
+                owned_path.symlink_to(Path("..") / ".." / "alternate.png")
+        return assets
+
+    monkeypatch.setattr(
+        session,
+        "_duplicate_owned_assets",
+        swap_after_first_classification,
+    )
+
+    with pytest.raises(
+        DocumentSessionError,
+        match="could not securely open owned image",
+    ):
+        session.open(candidate_store.bundle_path)
+
+    assert candidate_classifications == 1
+    assert session.store is before_store
+    assert session.state == before_state
+    assert session._pending_snapshot == before_pending
+    assert controller.document == before_document
+    assert controller.current_undo_token == before_token
 
 
 def test_reopening_active_bundle_flushes_before_reload(tmp_path: Path) -> None:

@@ -638,6 +638,72 @@ def test_pending_duplicate_durability_blocks_ui_until_save_retry(
     window.close()
 
 
+def test_open_candidate_validation_failure_preserves_active_ui_session(
+    application: QApplication,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = Card(name="First")
+    second = Card(name="Second")
+    stack = Stack(
+        name="Active",
+        cards=(first, second),
+        start_card_id=first.id,
+    )
+    controller = DocumentController(stack)
+    session = DocumentSession(controller)
+    session.create(stack, tmp_path / "Active.hotcards")
+    window = MainWindow(
+        controller,
+        FakeWorkers(),  # type: ignore[arg-type]
+        FakeSettings(),
+        availability_checks={AdapterKind.MFLUX: lambda: None},
+        document_session=session,
+        background_workflow=FakeBackgroundWorkflow(controller),  # type: ignore[arg-type]
+        start_diagnostics=False,
+    )
+    window.select_card(second.id)
+    controller.execute(RenameCardCommand(card_id=first.id, name="Pending edit"))
+    window.render_document()
+    before_document = controller.document
+    before_store = session.store
+    before_state = session.state
+    before_token = controller.current_undo_token
+    before_selection = window.card_sidebar.selected_card_id
+    candidate_path = tmp_path / "Candidate.hotcards"
+
+    monkeypatch.setattr(
+        main_window_module.QFileDialog,
+        "getExistingDirectory",
+        lambda *_args, **_kwargs: str(candidate_path),
+    )
+
+    def reject_candidate(_path: Path) -> Stack:
+        raise DocumentSessionError(
+            "could not securely open owned image: symbolic links are not allowed"
+        )
+
+    monkeypatch.setattr(session, "open", reject_candidate)
+
+    window.open_stack()
+
+    assert controller.document == before_document
+    assert controller.current_undo_token == before_token
+    assert session.store is before_store
+    assert session.state == before_state
+    assert window.card_sidebar.selected_card_id == before_selection
+    assert window.notification_bar.message_label.text() == "Could Not Open Stack"
+    notification = window.notification_bar.current_notification
+    assert notification is not None
+    assert "symbolic links are not allowed" in notification.detail
+
+    controller.execute(RenameCardCommand(card_id=second.id, name="Still active"))
+    assert session.flush()
+    assert before_store is not None
+    assert before_store.load() == controller.document
+    window.close()
+
+
 def test_close_reports_owned_asset_cleanup_failure_without_blocking(
     application: QApplication,
     tmp_path: Path,
