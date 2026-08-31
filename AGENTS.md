@@ -145,14 +145,16 @@ for live MFLUX runs.
   selector above References, place revision-local Resolution after References
   and before Generate, show exact output dimensions and positional Reference
   guidance, and keep generation provenance in button tooltips. Keep inspector
-  tabs ordered Generate, Refine, Edit, Styles, Hotspots, Keys. Keep the Refine
-  tab limited to Transformation, Output Resolution, and Refine. Keep the Edit
-  tab limited to Edit Instruction, the six Preserve controls, Output
-  Resolution, and Edit. The current canvas/header is the implicit source for
-  both. Keep Styles and Keys as
-  stack-global list managers with compact remove/add controls and vertically
-  stacked full-width fields. Require a nonempty Description for image
-  generation.
+  tabs ordered Generate, Refine, Edit, Hotspots. Keep the Refine tab limited to
+  Transformation, Output Resolution, and Refine. Keep the Edit tab limited to
+  Edit Instruction, the six Preserve controls, Output Resolution, and Edit.
+  The current canvas/header is the implicit source for both. Open
+  Styles and Keys from right-aligned Author-toolbar actions into separate
+  modeless singleton utility windows. Keep them as stack-global list managers
+  backed by the authoritative controller, with compact remove/add controls and
+  vertically stacked full-width fields. Hide the manager actions and windows in
+  Run mode, and close or rebind them on project replacement. Require a nonempty
+  Description for image generation.
 - Create stacks with one native format selector containing exactly Square 1:1,
   Landscape 4:3, Portrait 3:4, and Widescreen 16:9, defaulting to Landscape.
   Do not expose arbitrary dimensions or a post-creation aspect-ratio setting.
@@ -212,8 +214,9 @@ for live MFLUX runs.
 - Keep an ordered, stack-owned catalog of free-form named binary Keys with
   stable UUIDs. Key names are trimmed, nonempty, and case-insensitively unique.
   Renaming preserves references; block deletion while any hotspot in any
-  revision references the Key. Keep the Keys inspector after Hotspots and show
-  every reference grouped by hotspot revision and semantic role.
+  revision references the Key. Keep Key assignment controls in Hotspots and
+  show every reference grouped by hotspot revision and semantic role in the
+  Keys utility window.
 - Keep hotspot state behavior closed and typed: all required Keys must be
   present, all forbidden Keys absent, and explicit Remove and Grant sets must be
   disjoint. Do not add clear-all behavior, values, counters, expressions,

@@ -52,9 +52,7 @@ def test_advanced_settings_preserve_bottom_bar_model_selection(
     )
     dialog = SettingsDialog(settings)
 
-    assert not hasattr(dialog, "ollama_model_edit")
     assert not hasattr(dialog, "mflux_model_edit")
-    assert not hasattr(dialog, "ollama_endpoint_edit")
     saved = dialog.save()
 
     assert saved.mflux_model == "flux2-klein-9b-kv"

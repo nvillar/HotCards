@@ -73,6 +73,7 @@ from hotcards.storage.stack_store import (
     StackStoreTransactionError,
 )
 from hotcards.ui.inspector import Inspector
+from hotcards.ui.utility_windows import StyleManagerWindow
 
 
 @pytest.fixture(scope="module")
@@ -167,9 +168,7 @@ class FakeMfluxModel:
         self.consumed_source_pixels: list[object] = []
         self.tokenizers = {
             "qwen3": SimpleNamespace(
-                tokenizer=lambda _prompt, **_kwargs: {
-                    "input_ids": list(range(24))
-                },
+                tokenizer=lambda _prompt, **_kwargs: {"input_ids": list(range(24))},
                 template=None,
                 use_chat_template=False,
                 add_special_tokens=True,
@@ -180,11 +179,7 @@ class FakeMfluxModel:
         self.calls.append(kwargs)
         image_path = kwargs.get("image_path")
         image_paths = kwargs.get("image_paths")
-        if (
-            image_path is None
-            and isinstance(image_paths, list)
-            and len(image_paths) == 1
-        ):
+        if image_path is None and isinstance(image_paths, list) and len(image_paths) == 1:
             image_path = image_paths[0]
         if isinstance(image_path, Path):
             with Image.open(image_path) as image:
@@ -491,12 +486,8 @@ def test_edit_uses_only_secure_current_image_and_creates_complete_version(
     )
     applied: list[tuple[str, UndoToken]] = []
     cleared: list[None] = []
-    workflow.change_applied.connect(
-        lambda message, token: applied.append((message, token))
-    )
-    workflow.edit_instruction_clear_requested.connect(
-        lambda: cleared.append(None)
-    )
+    workflow.change_applied.connect(lambda message, token: applied.append((message, token)))
+    workflow.edit_instruction_clear_requested.connect(lambda: cleared.append(None))
     options = workflow.available_edit_output_sizes(card.id)
     assert options[0] == CurrentSourceSize(width=592, height=448)
 
@@ -509,9 +500,7 @@ def test_edit_uses_only_secure_current_image_and_creates_complete_version(
         ),
         output_size=options[0],
     )
-    snapshot_path = next(
-        (tmp_path / "temporary").glob(".refine-source-*.png")
-    )
+    snapshot_path = next((tmp_path / "temporary").glob(".refine-source-*.png"))
     _complete_generation(workers)
 
     changed_card = controller.document.cards[0]
@@ -577,9 +566,7 @@ def test_sequential_edits_append_lineage_and_use_fresh_seeds(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    workflow, controller, _session, workers, _model, card = _bound_workflow(
-        tmp_path
-    )
+    workflow, controller, _session, workers, _model, card = _bound_workflow(tmp_path)
     workflow.generate(card.id)
     _complete_generation(workers)
     seeds = iter((101, 202))
@@ -614,9 +601,7 @@ def test_sequential_edits_append_lineage_and_use_fresh_seeds(
 def test_edit_flattens_duplicate_and_refine_preserves_accepted_edit(
     tmp_path: Path,
 ) -> None:
-    workflow, controller, _session, workers, model, card = _bound_workflow(
-        tmp_path
-    )
+    workflow, controller, _session, workers, model, card = _bound_workflow(tmp_path)
     workflow.generate(card.id)
     _complete_generation(workers)
     source = controller.document.cards[0].active_revision
@@ -650,9 +635,7 @@ def test_edit_flattens_duplicate_and_refine_preserves_accepted_edit(
     _complete_generation(workers)
     edited = controller.document.cards[0].active_revision
     assert isinstance(edited.provenance, EditProvenance)
-    assert tuple(
-        edit.instruction for edit in edited.provenance.edit_lineage
-    ) == ("Open the gate.",)
+    assert tuple(edit.instruction for edit in edited.provenance.edit_lineage) == ("Open the gate.",)
 
     workflow.refine(
         card.id,
@@ -663,10 +646,7 @@ def test_edit_flattens_duplicate_and_refine_preserves_accepted_edit(
     refined = controller.document.cards[0].active_revision
     assert isinstance(refined.provenance, RefineProvenance)
     assert refined.provenance.edit_lineage == edited.provenance.edit_lineage
-    assert (
-        "The current Description is authoritative."
-        in refined.provenance.render_prompt
-    )
+    assert "The current Description is authoritative." in refined.provenance.render_prompt
     assert "1. Open the gate." in refined.provenance.render_prompt
     assert model.calls[-1]["image_strength"] == 0.50
 
@@ -703,9 +683,7 @@ def test_edit_output_sizes_include_exact_current_then_only_higher_presets(
 def test_edit_rejects_replaced_source_and_failed_model_without_new_version(
     tmp_path: Path,
 ) -> None:
-    workflow, controller, session, workers, model, card = _bound_workflow(
-        tmp_path
-    )
+    workflow, controller, session, workers, model, card = _bound_workflow(tmp_path)
     workflow.generate(card.id)
     _complete_generation(workers)
     source = controller.document.cards[0].active_revision
@@ -720,9 +698,7 @@ def test_edit_rejects_replaced_source_and_failed_model_without_new_version(
         preserve=EditPreserveOptions(),
         output_size=workflow.available_edit_output_sizes(card.id)[0],
     )
-    snapshot_path = next(
-        (tmp_path / "temporary").glob(".refine-source-*.png")
-    )
+    snapshot_path = next((tmp_path / "temporary").glob(".refine-source-*.png"))
     Image.new("RGB", (592, 448), "gold").save(source_path, format="PNG")
     _complete_generation(workers)
 
@@ -747,9 +723,7 @@ def test_edit_rejects_replaced_source_and_failed_model_without_new_version(
 def test_edit_allows_empty_description_but_suppresses_complete_revision_changes(
     tmp_path: Path,
 ) -> None:
-    workflow, controller, _session, workers, _model, card = _bound_workflow(
-        tmp_path
-    )
+    workflow, controller, _session, workers, _model, card = _bound_workflow(tmp_path)
     workflow.generate(card.id)
     _complete_generation(workers)
     source = controller.document.cards[0].active_revision
@@ -1042,9 +1016,7 @@ def test_refine_snapshot_cleanup_waits_for_native_invocation(
             transformation=RefineTransformation.PRESERVE,
             resolution=GenerateResolution.RESOLUTION_768,
         )
-    assert list((tmp_path / "temporary").glob(".refine-source-*.png")) == [
-        snapshot_path
-    ]
+    assert list((tmp_path / "temporary").glob(".refine-source-*.png")) == [snapshot_path]
     assert workflow._request_id is None
     workflow._invocation_finished()
     assert not workflow.invocation_active
@@ -1055,9 +1027,7 @@ def test_refine_cleanup_never_exposes_idle_state(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    workflow, _controller, _session, workers, _model, card = _bound_workflow(
-        tmp_path
-    )
+    workflow, _controller, _session, workers, _model, card = _bound_workflow(tmp_path)
     workflow.generate(card.id)
     _complete_generation(workers)
     workflow.refine(
@@ -1101,9 +1071,7 @@ def test_refine_cleanup_never_exposes_idle_state(
 def test_refine_cleanup_mismatch_preserves_foreign_entry_and_blocks_work(
     tmp_path: Path,
 ) -> None:
-    workflow, _controller, _session, workers, _model, card = _bound_workflow(
-        tmp_path
-    )
+    workflow, _controller, _session, workers, _model, card = _bound_workflow(tmp_path)
     workflow.generate(card.id)
     _complete_generation(workers)
     workflow.refine(
@@ -1219,9 +1187,7 @@ def test_edit_indeterminate_observed_after_keeps_instruction_and_promotes_histor
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    workflow, controller, session, workers, _model, card = _bound_workflow(
-        tmp_path
-    )
+    workflow, controller, session, workers, _model, card = _bound_workflow(tmp_path)
     workflow.generate(card.id)
     _complete_generation(workers)
     source = controller.document
@@ -1231,12 +1197,8 @@ def test_edit_indeterminate_observed_after_keeps_instruction_and_promotes_histor
     applied: list[tuple[str, UndoToken]] = []
     failures: list[object] = []
     workflow.document_changed.connect(changed_documents.append)
-    workflow.change_applied.connect(
-        lambda message, token: applied.append((message, token))
-    )
-    workflow.edit_instruction_clear_requested.connect(
-        lambda: cleared.append(None)
-    )
+    workflow.change_applied.connect(lambda message, token: applied.append((message, token)))
+    workflow.edit_instruction_clear_requested.connect(lambda: cleared.append(None))
     workflow.failed.connect(failures.append)
     assert session.store is not None
     real_store = session.store.store_image_asset_and_save
@@ -1386,9 +1348,7 @@ def test_refine_source_replacement_during_commit_rolls_back(
     monkeypatch: pytest.MonkeyPatch,
     replacement_checkpoint: str,
 ) -> None:
-    workflow, controller, session, workers, _model, card = _bound_workflow(
-        tmp_path
-    )
+    workflow, controller, session, workers, _model, card = _bound_workflow(tmp_path)
     workflow.generate(card.id)
     _complete_generation(workers)
     source = controller.document
@@ -1412,9 +1372,7 @@ def test_refine_source_replacement_during_commit_rolls_back(
         "_io_checkpoint",
         replace_source_at_commit,
     )
-    assets_before = set(
-        (session.store.bundle_path / "assets" / "cards").glob("*/image-*.png")
-    )
+    assets_before = set((session.store.bundle_path / "assets" / "cards").glob("*/image-*.png"))
     workflow.refine(
         card.id,
         transformation=RefineTransformation.BALANCED,
@@ -1425,9 +1383,9 @@ def test_refine_source_replacement_during_commit_rolls_back(
     assert replaced
     assert controller.document == source
     assert session.store.load() == source
-    assert set(
-        (session.store.bundle_path / "assets" / "cards").glob("*/image-*.png")
-    ) == assets_before
+    assert (
+        set((session.store.bundle_path / "assets" / "cards").glob("*/image-*.png")) == assets_before
+    )
     assert "changed while Refine was running" in str(failures[-1])
 
 
@@ -1435,9 +1393,7 @@ def test_refine_fifo_replacement_after_manifest_fsync_rolls_back(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    workflow, controller, session, workers, _model, card = _bound_workflow(
-        tmp_path
-    )
+    workflow, controller, session, workers, _model, card = _bound_workflow(tmp_path)
     workflow.generate(card.id)
     _complete_generation(workers)
     source = controller.document
@@ -1460,9 +1416,7 @@ def test_refine_fifo_replacement_after_manifest_fsync_rolls_back(
         "_io_checkpoint",
         replace_source_with_fifo,
     )
-    assets_before = set(
-        (session.store.bundle_path / "assets" / "cards").glob("*/image-*.png")
-    )
+    assets_before = set((session.store.bundle_path / "assets" / "cards").glob("*/image-*.png"))
     workflow.refine(
         card.id,
         transformation=RefineTransformation.BALANCED,
@@ -1473,9 +1427,9 @@ def test_refine_fifo_replacement_after_manifest_fsync_rolls_back(
     assert replaced
     assert controller.document == source
     assert Stack.model_validate_json(session.store.stack_path.read_text()) == source
-    assert set(
-        (session.store.bundle_path / "assets" / "cards").glob("*/image-*.png")
-    ) == assets_before
+    assert (
+        set((session.store.bundle_path / "assets" / "cards").glob("*/image-*.png")) == assets_before
+    )
     assert "no longer a regular file" in str(failures[-1])
 
 
@@ -1718,10 +1672,10 @@ def test_live_style_draft_cancels_generation_before_commit(
     )
     inspector = Inspector(controller)
     inspector.render(controller.document, card.id)
-    inspector.inspector_tabs.setCurrentIndex(inspector._styles_tab_index)
-    inspector.render_inputs_changed.connect(workflow.cancel)
-    inspector.show()
-    editor = inspector.style_name_edit if field == "name" else inspector.style_prompt_edit
+    manager = StyleManagerWindow(controller, inspector)
+    manager.inputs_changed.connect(workflow.cancel)
+    manager.show()
+    editor = manager.name_edit if field == "name" else manager.prompt_edit
     editor.setFocus()
     application.processEvents()
 
@@ -1729,9 +1683,9 @@ def test_live_style_draft_cancels_generation_before_commit(
     operation = workers.operations[-1]
     work = workers.calls[-1]
     if field == "name":
-        inspector.style_name_edit.setText(value)
+        manager.name_edit.setText(value)
     else:
-        inspector.style_prompt_edit.setPlainText(value)
+        manager.prompt_edit.setPlainText(value)
 
     assert operation.was_cancelled
     assert controller.document.style_by_id(style.id) == style
@@ -1741,7 +1695,7 @@ def test_live_style_draft_cancels_generation_before_commit(
         work()
     assert controller.document.cards[0].active_revision.background is None
 
-    inspector._style_editing_finished(
+    manager._editing_finished(
         None,
         Qt.FocusReason.OtherFocusReason,
     )
@@ -1761,7 +1715,7 @@ def test_live_style_draft_cancels_generation_before_commit(
     assert provenance.inputs.style is not None
     assert provenance.inputs.style.name == expected_name
     assert provenance.inputs.style.prompt_text == expected_prompt
-    inspector.close()
+    manager.close()
 
 
 def test_cancelled_generation_cannot_publish_or_leave_output(tmp_path: Path) -> None:

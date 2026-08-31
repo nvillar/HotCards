@@ -35,25 +35,19 @@ from PySide6.QtWidgets import (
 
 from hotcards.application.commands import (
     AddInteractionCommand,
-    AddKeyCommand,
-    AddStyleCommand,
     ChangeHotspotDestinationCommand,
     CommandError,
     CreateCardAndResolveCommand,
     CreateKeyAndAddHotspotReferenceCommand,
     DeleteInteractionCommand,
-    DeleteKeyCommand,
-    DeleteStyleCommand,
     DocumentCommand,
     EditRevisionDescriptionCommand,
-    RenameKeyCommand,
     ReorderHotspotCommand,
     SetHotspotConditionsCommand,
     SetHotspotKeyChangesCommand,
     SetRevisionGenerateResolutionCommand,
     SetRevisionReferenceCommand,
     SetRevisionStyleCommand,
-    UpdateStyleCommand,
 )
 from hotcards.application.document_controller import (
     DocumentController,
@@ -74,12 +68,10 @@ from hotcards.domain.models import (
     HotspotConditions,
     HotspotKeyChanges,
     Interaction,
-    KeyDefinition,
     PresetOutputSize,
     RefineTransformation,
     ResolvedCardReference,
     Stack,
-    StyleDefinition,
     UnresolvedCardReference,
     image_edit_lineage,
     original_image_provenance,
@@ -114,17 +106,13 @@ def _configure_rule_table(
 ) -> None:
     table.setHorizontalHeaderLabels(headers)
     table.verticalHeader().setVisible(False)
-    table.horizontalHeader().setSectionResizeMode(
-        stretch_column, QHeaderView.ResizeMode.Stretch
-    )
+    table.horizontalHeader().setSectionResizeMode(stretch_column, QHeaderView.ResizeMode.Stretch)
     for column in range(2):
         if column != stretch_column:
             table.horizontalHeader().setSectionResizeMode(
                 column, QHeaderView.ResizeMode.ResizeToContents
             )
-    table.horizontalHeader().setSectionResizeMode(
-        2, QHeaderView.ResizeMode.Fixed
-    )
+    table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
     table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
     table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
     table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -204,7 +192,6 @@ class Inspector(QWidget):
     refine_background_requested = Signal(object, object)
     edit_background_requested = Signal(str, object, object)
     hotspot_selected = Signal(object)
-    hotspot_usage_requested = Signal(object, object, object)
     change_applied = Signal(str, object)
     render_inputs_changed = Signal()
 
@@ -217,10 +204,6 @@ class Inspector(QWidget):
         self.controller = controller
         self.selected_card_id: UUID | None = None
         self._rendered_revision_id: UUID | None = None
-        self._selected_style_id: UUID | None = None
-        self._rendered_style_id: UUID | None = None
-        self._selected_key_id: UUID | None = None
-        self._rendered_key_id: UUID | None = None
         self._generate_using_text = ""
         self._generate_reason = ""
         self._refine_using_text = ""
@@ -255,9 +238,7 @@ class Inspector(QWidget):
         self._build_background_tab()
         self._build_refine_tab()
         self._build_edit_tab()
-        self._build_styles_tab()
         self._build_hotspots_tab()
-        self._build_keys_tab()
         self._connect_signals()
 
     def _build_background_tab(self) -> None:
@@ -275,8 +256,7 @@ class Inspector(QWidget):
         self.description_edit = _CommitPlainTextEdit()
         self.description_edit.setObjectName("descriptionEdit")
         self.description_edit.setPlaceholderText(
-            "Describe the image to generate. Refer to selected References as "
-            "image 1 and image 2."
+            "Describe the image to generate. Refer to selected References as image 1 and image 2."
         )
         self.description_edit.setAccessibleName("Description")
         editor_height = round((self.description_edit.fontMetrics().lineSpacing() * 10 + 20) * 1.25)
@@ -299,6 +279,11 @@ class Inspector(QWidget):
             "Rendering treatment appended to the Description during generation"
         )
         layout.addWidget(self.style_combo)
+        self.style_selection_error = QLabel()
+        self.style_selection_error.setObjectName("styleSelectionValidationError")
+        self.style_selection_error.setWordWrap(True)
+        self.style_selection_error.setVisible(False)
+        layout.addWidget(self.style_selection_error)
 
         layout.addSpacing(8)
         self.reference_label = QLabel("References")
@@ -371,16 +356,11 @@ class Inspector(QWidget):
         self.refine_transformation_label = QLabel("Transformation")
         layout.addWidget(self.refine_transformation_label)
         self.refine_transformation_combo = QComboBox()
-        self.refine_transformation_combo.setObjectName(
-            "refineTransformationCombo"
-        )
-        self.refine_transformation_combo.setAccessibleName(
-            "Refine transformation"
-        )
+        self.refine_transformation_combo.setObjectName("refineTransformationCombo")
+        self.refine_transformation_combo.setAccessibleName("Refine transformation")
         for transformation in RefineTransformation:
             self.refine_transformation_combo.addItem(
-                f"{transformation.value.title()} "
-                f"({transformation.strength:.2f})",
+                f"{transformation.value.title()} ({transformation.strength:.2f})",
                 transformation,
             )
         self.refine_transformation_combo.setCurrentIndex(
@@ -396,9 +376,7 @@ class Inspector(QWidget):
         layout.addWidget(self.refine_resolution_label)
         self.refine_resolution_combo = QComboBox()
         self.refine_resolution_combo.setObjectName("refineResolutionCombo")
-        self.refine_resolution_combo.setAccessibleName(
-            "Refine output resolution"
-        )
+        self.refine_resolution_combo.setAccessibleName("Refine output resolution")
         layout.addWidget(self.refine_resolution_combo)
         self.refine_error = QLabel()
         self.refine_error.setObjectName("refineValidationError")
@@ -430,15 +408,11 @@ class Inspector(QWidget):
         self.edit_instruction_edit = QPlainTextEdit()
         self.edit_instruction_edit.setObjectName("editInstructionEdit")
         self.edit_instruction_edit.setAccessibleName("Edit Instruction")
-        self.edit_instruction_edit.setPlaceholderText(
-            "Describe only the change to make"
-        )
+        self.edit_instruction_edit.setPlaceholderText("Describe only the change to make")
         self.edit_instruction_edit.setMaximumHeight(110)
         layout.addWidget(self.edit_instruction_edit)
         self.edit_instruction_error = QLabel()
-        self.edit_instruction_error.setObjectName(
-            "editInstructionValidationError"
-        )
+        self.edit_instruction_error.setObjectName("editInstructionValidationError")
         self.edit_instruction_error.setWordWrap(True)
         self.edit_instruction_error.setVisible(False)
         layout.addWidget(self.edit_instruction_error)
@@ -466,8 +440,7 @@ class Inspector(QWidget):
         for field_name, label, selected in preserve_fields:
             checkbox = QCheckBox(label)
             checkbox.setObjectName(
-                "editPreserve"
-                + "".join(part.title() for part in field_name.split("_"))
+                "editPreserve" + "".join(part.title() for part in field_name.split("_"))
             )
             checkbox.setChecked(selected)
             self.edit_preserve_checkboxes[field_name] = checkbox
@@ -495,80 +468,6 @@ class Inspector(QWidget):
 
         scroll.setWidget(page)
         self._edit_tab_index = self.inspector_tabs.addTab(scroll, "Edit")
-
-    def _build_styles_tab(self) -> None:
-        page = QWidget()
-        page.setObjectName("stylesInspectorTab")
-        layout = QVBoxLayout(page)
-
-        self.styles_placeholder = QLabel("No Styles yet.")
-        self.styles_placeholder.setWordWrap(True)
-        layout.addWidget(self.styles_placeholder)
-        self.style_list = QListWidget()
-        self.style_list.setObjectName("styleList")
-        self.style_list.setAccessibleName("Stack Styles")
-        layout.addWidget(self.style_list, 1)
-
-        controls = QHBoxLayout()
-        controls.addStretch(1)
-        self.delete_style_button = _compact_text_button(
-            "−",
-            object_name="deleteStyleButton",
-            accessible_name="Delete Style",
-            tooltip="Delete Style",
-        )
-        self.add_style_button = _compact_text_button(
-            "+",
-            object_name="addStyleButton",
-            accessible_name="Add Style",
-            tooltip="Add Style",
-        )
-        style_control_extent = max(
-            self.delete_style_button.sizeHint().width(),
-            self.delete_style_button.sizeHint().height(),
-            self.add_style_button.sizeHint().width(),
-            self.add_style_button.sizeHint().height(),
-        )
-        self.delete_style_button.setFixedSize(
-            style_control_extent,
-            style_control_extent,
-        )
-        self.add_style_button.setFixedSize(
-            style_control_extent,
-            style_control_extent,
-        )
-        controls.addWidget(self.delete_style_button)
-        controls.addWidget(self.add_style_button)
-        layout.addLayout(controls)
-
-        self.style_name_label = QLabel("Name")
-        self.style_name_label.setObjectName("styleNameLabel")
-        layout.addWidget(self.style_name_label)
-        self.style_name_edit = _CommitLineEdit()
-        self.style_name_edit.setObjectName("styleNameEdit")
-        self.style_name_edit.setAccessibleName("Style name")
-        layout.addWidget(self.style_name_edit)
-
-        self.style_prompt_label = QLabel("Style Text")
-        self.style_prompt_label.setObjectName("stylePromptLabel")
-        layout.addWidget(self.style_prompt_label)
-        self.style_prompt_edit = _CommitPlainTextEdit()
-        self.style_prompt_edit.setObjectName("stylePromptEdit")
-        self.style_prompt_edit.setAccessibleName("Style text")
-        self.style_prompt_edit.setPlaceholderText(
-            "Describe the visual treatment appended during generation"
-        )
-        self.style_prompt_edit.setMinimumHeight(
-            self.style_prompt_edit.fontMetrics().lineSpacing() * 7 + 20
-        )
-        layout.addWidget(self.style_prompt_edit)
-
-        self.style_error = QLabel()
-        self.style_error.setObjectName("styleValidationError")
-        self.style_error.setWordWrap(True)
-        self.style_error.setVisible(False)
-        layout.addWidget(self.style_error)
-        self._styles_tab_index = self.inspector_tabs.addTab(page, "Styles")
 
     def _build_hotspots_tab(self) -> None:
         page = QWidget()
@@ -649,9 +548,7 @@ class Inspector(QWidget):
         self.hotspot_rule_scroll.setObjectName("hotspotRuleScroll")
         self.hotspot_rule_scroll.setWidgetResizable(True)
         self.hotspot_rule_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self.hotspot_rule_scroll.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
-        )
+        self.hotspot_rule_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         rule_content = QWidget()
         rule_content.setObjectName("hotspotRuleContent")
         rule_layout = QVBoxLayout(rule_content)
@@ -730,71 +627,6 @@ class Inspector(QWidget):
         layout.addWidget(self.hotspot_rule_scroll, 2)
         self._hotspots_tab_index = self.inspector_tabs.addTab(page, "Hotspots")
 
-    def _build_keys_tab(self) -> None:
-        page = QWidget()
-        page.setObjectName("keysInspectorTab")
-        layout = QVBoxLayout(page)
-
-        self.keys_placeholder = QLabel("No Keys yet.")
-        self.keys_placeholder.setWordWrap(True)
-        layout.addWidget(self.keys_placeholder)
-        self.key_list = QListWidget()
-        self.key_list.setObjectName("keyList")
-        self.key_list.setAccessibleName("Stack Keys")
-        layout.addWidget(self.key_list, 1)
-
-        controls = QHBoxLayout()
-        controls.addStretch(1)
-        self.delete_key_button = _compact_text_button(
-            "−",
-            object_name="deleteKeyButton",
-            accessible_name="Delete Key",
-            tooltip="Delete unused Key",
-        )
-        self.add_key_button = _compact_text_button(
-            "+",
-            object_name="addKeyButton",
-            accessible_name="Add Key",
-            tooltip="Add Key",
-        )
-        control_extent = max(
-            self.delete_key_button.sizeHint().width(),
-            self.delete_key_button.sizeHint().height(),
-            self.add_key_button.sizeHint().width(),
-            self.add_key_button.sizeHint().height(),
-        )
-        self.delete_key_button.setFixedSize(control_extent, control_extent)
-        self.add_key_button.setFixedSize(control_extent, control_extent)
-        controls.addWidget(self.delete_key_button)
-        controls.addWidget(self.add_key_button)
-        layout.addLayout(controls)
-
-        self.key_name_label = QLabel("Name")
-        self.key_name_label.setObjectName("keyNameLabel")
-        layout.addWidget(self.key_name_label)
-        self.key_name_edit = _CommitLineEdit()
-        self.key_name_edit.setObjectName("keyNameEdit")
-        self.key_name_edit.setAccessibleName("Key name")
-        layout.addWidget(self.key_name_edit)
-
-        self.key_usage_label = QLabel("Used By")
-        self.key_usage_label.setObjectName("keyUsageLabel")
-        layout.addWidget(self.key_usage_label)
-        self.key_usage_list = QListWidget()
-        self.key_usage_list.setObjectName("keyUsageList")
-        self.key_usage_list.setAccessibleName("Key usages")
-        layout.addWidget(self.key_usage_list, 1)
-        self.show_hotspot_usage_button = QPushButton("Show Hotspot")
-        self.show_hotspot_usage_button.setObjectName("showHotspotUsageButton")
-        layout.addWidget(self.show_hotspot_usage_button)
-
-        self.key_error = QLabel()
-        self.key_error.setObjectName("keyValidationError")
-        self.key_error.setWordWrap(True)
-        self.key_error.setVisible(False)
-        layout.addWidget(self.key_error)
-        self._keys_tab_index = self.inspector_tabs.addTab(page, "Keys")
-
     @property
     def hotspots_active(self) -> bool:
         return self.inspector_tabs.currentIndex() == self._hotspots_tab_index
@@ -803,28 +635,20 @@ class Inspector(QWidget):
         self.description_edit.editing_finished.connect(self._description_editing_finished)
         self.description_edit.textChanged.connect(self._render_inputs_changed)
         self.generate_background_button.clicked.connect(self.generate_background_requested)
-        self.refine_background_button.clicked.connect(
-            self._request_refine_background
-        )
+        self.refine_background_button.clicked.connect(self._request_refine_background)
         self.refine_transformation_combo.currentIndexChanged.connect(
             lambda _index: self._render_inputs_changed()
         )
         self.refine_resolution_combo.currentIndexChanged.connect(
             lambda _index: self._render_inputs_changed()
         )
-        self.edit_instruction_edit.textChanged.connect(
-            self._edit_inputs_changed
-        )
+        self.edit_instruction_edit.textChanged.connect(self._edit_inputs_changed)
         for checkbox in self.edit_preserve_checkboxes.values():
-            checkbox.toggled.connect(
-                lambda _checked: self._edit_inputs_changed()
-            )
+            checkbox.toggled.connect(lambda _checked: self._edit_inputs_changed())
         self.edit_resolution_combo.currentIndexChanged.connect(
             lambda _index: self._edit_inputs_changed()
         )
-        self.edit_background_button.clicked.connect(
-            self._request_edit_background
-        )
+        self.edit_background_button.clicked.connect(self._request_edit_background)
         self.style_combo.currentIndexChanged.connect(self._revision_style_changed)
         self.reference_combo.currentIndexChanged.connect(
             lambda index: self._reference_changed(1, index)
@@ -832,16 +656,7 @@ class Inspector(QWidget):
         self.additional_reference_combo.currentIndexChanged.connect(
             lambda index: self._reference_changed(2, index)
         )
-        self.resolution_combo.currentIndexChanged.connect(
-            self._revision_resolution_changed
-        )
-        self.style_list.currentItemChanged.connect(self._style_selection_changed)
-        self.add_style_button.clicked.connect(self._add_style)
-        self.delete_style_button.clicked.connect(self._delete_style)
-        self.style_name_edit.editing_finished.connect(self._style_editing_finished)
-        self.style_prompt_edit.editing_finished.connect(self._style_editing_finished)
-        self.style_name_edit.textChanged.connect(self._style_draft_changed)
-        self.style_prompt_edit.textChanged.connect(self._style_draft_changed)
+        self.resolution_combo.currentIndexChanged.connect(self._revision_resolution_changed)
         self.hotspot_list.currentItemChanged.connect(self._hotspot_selection_changed)
         self.move_hotspot_up_button.clicked.connect(lambda: self._move_hotspot(-1))
         self.move_hotspot_down_button.clicked.connect(lambda: self._move_hotspot(1))
@@ -850,19 +665,6 @@ class Inspector(QWidget):
         self.add_condition_button.clicked.connect(self._add_condition)
         self.add_key_change_button.clicked.connect(self._add_key_change)
         self.hotspot_destination_combo.currentIndexChanged.connect(self._destination_changed)
-        self.key_list.currentItemChanged.connect(self._key_selection_changed)
-        self.add_key_button.clicked.connect(self._add_key)
-        self.delete_key_button.clicked.connect(self._delete_key)
-        self.key_name_edit.editing_finished.connect(
-            self._key_name_editing_finished
-        )
-        self.key_name_edit.returnPressed.connect(self._commit_key)
-        self.key_usage_list.currentItemChanged.connect(
-            lambda current, _previous: self.show_hotspot_usage_button.setEnabled(
-                current is not None
-            )
-        )
-        self.show_hotspot_usage_button.clicked.connect(self._show_hotspot_usage)
 
     def _render_inputs_changed(self) -> None:
         if not self._rendering:
@@ -897,14 +699,6 @@ class Inspector(QWidget):
         previous_revision_id = self._rendered_revision_id
         preserve_description = self.description_edit.hasFocus()
         description_draft = self.description_edit.toPlainText()
-        preserve_style_name = self.style_name_edit.hasFocus()
-        style_name_draft = self.style_name_edit.text()
-        preserve_style_prompt = self.style_prompt_edit.hasFocus()
-        style_prompt_draft = self.style_prompt_edit.toPlainText()
-        previous_style_id = self._rendered_style_id
-        preserve_key_name = self.key_name_edit.hasFocus()
-        key_name_draft = self.key_name_edit.text()
-        previous_key_id = self._rendered_key_id
         self._rendering = True
         try:
             card = next(
@@ -922,8 +716,7 @@ class Inspector(QWidget):
                 self._set_error(self.edit_output_error, "")
                 self._set_error(self.edit_instruction_error, "")
                 self._set_error(self.edit_output_error, "")
-                self._set_error(self.style_error, "")
-                self._set_error(self.key_error, "")
+                self._set_error(self.style_selection_error, "")
                 self.set_hotspot_error("")
                 self.description_edit.clear()
                 self.hotspot_list.clear()
@@ -943,20 +736,6 @@ class Inspector(QWidget):
                 else revision.description
             )
             self._render_style_selector(document, revision)
-            self._render_styles(
-                document,
-                revision,
-                style_name_draft=(
-                    style_name_draft
-                    if preserve_style_name and previous_style_id == self._selected_style_id
-                    else None
-                ),
-                style_prompt_draft=(
-                    style_prompt_draft
-                    if preserve_style_prompt and previous_style_id == self._selected_style_id
-                    else None
-                ),
-            )
             self._render_reference(document, card, revision)
             self._render_resolution(document, revision)
             self._render_description_workflow(document, card, revision)
@@ -971,14 +750,6 @@ class Inspector(QWidget):
                 source_size=refine_source_size,
             )
             self._render_hotspots(document, revision)
-            self._render_keys(
-                document,
-                key_name_draft=(
-                    key_name_draft
-                    if preserve_key_name and previous_key_id == self._selected_key_id
-                    else None
-                ),
-            )
         finally:
             self._rendering = False
 
@@ -1003,16 +774,6 @@ class Inspector(QWidget):
 
     def commit_card_metadata(self, *, render_change: bool = True) -> bool:
         """Commit every visible authoring draft before a context change or save."""
-        if (
-            self._selected_style() is not None
-            and not self._commit_style(render_change=render_change)
-        ):
-            return False
-        if (
-            self._selected_key_id is not None
-            and not self._commit_key(render_change=render_change)
-        ):
-            return False
         return self.commit_revision_metadata(render_change=render_change)
 
     def has_description_input(self) -> bool:
@@ -1081,9 +842,7 @@ class Inspector(QWidget):
     ) -> None:
         self._refine_reason = refine_reason
         self.refine_background_button.setEnabled(can_refine and not busy)
-        self.refine_background_button.setText(
-            "Refining…" if refining else "Refine"
-        )
+        self.refine_background_button.setText("Refining…" if refining else "Refine")
         self._refresh_generation_tooltips()
 
     def set_edit_capabilities(
@@ -1096,9 +855,7 @@ class Inspector(QWidget):
     ) -> None:
         self._edit_reason = edit_reason
         self.edit_background_button.setEnabled(can_edit and not busy)
-        self.edit_background_button.setText(
-            "Editing…" if editing else "Edit"
-        )
+        self.edit_background_button.setText("Editing…" if editing else "Edit")
         self._refresh_generation_tooltips()
 
     def set_edit_error(self, message: str) -> None:
@@ -1164,8 +921,7 @@ class Inspector(QWidget):
         self._set_error(self.description_error, "")
         self._set_error(self.reference_error, "")
         self._set_error(self.refine_error, "")
-        self._set_error(self.style_error, "")
-        self._set_error(self.key_error, "")
+        self._set_error(self.style_selection_error, "")
         self.set_hotspot_error("")
 
     def _render_style_selector(
@@ -1203,418 +959,9 @@ class Inspector(QWidget):
                 revision_id=card.active_revision.id,
                 style_id=style_id,
             ),
-            error_label=self.style_error,
+            error_label=self.style_selection_error,
             undo_message="Style changed",
         )
-
-    @property
-    def selected_style_id(self) -> UUID | None:
-        item = self.style_list.currentItem()
-        if item is None:
-            return None
-        value = item.data(Qt.ItemDataRole.UserRole)
-        return value if isinstance(value, UUID) else None
-
-    def _render_styles(
-        self,
-        document: Stack,
-        revision: CardRevision,
-        *,
-        style_name_draft: str | None,
-        style_prompt_draft: str | None,
-    ) -> None:
-        desired_id = self._selected_style_id
-        known_ids = {style.id for style in document.styles}
-        if desired_id not in known_ids:
-            desired_id = (
-                revision.style_id
-                if revision.style_id in known_ids
-                else document.styles[0].id
-                if document.styles
-                else None
-            )
-        with QSignalBlocker(self.style_list):
-            self.style_list.clear()
-            for style in document.styles:
-                item = QListWidgetItem(style.name)
-                item.setData(Qt.ItemDataRole.UserRole, style.id)
-                self.style_list.addItem(item)
-            selected_row = next(
-                (
-                    row
-                    for row in range(self.style_list.count())
-                    if self.style_list.item(row).data(Qt.ItemDataRole.UserRole) == desired_id
-                ),
-                -1,
-            )
-            self.style_list.setCurrentRow(selected_row)
-        self._selected_style_id = desired_id
-        self._rendered_style_id = desired_id
-        self.styles_placeholder.setVisible(not document.styles)
-        style = document.style_by_id(desired_id)
-        self._render_style_properties(
-            style,
-            style_name_draft=style_name_draft,
-            style_prompt_draft=style_prompt_draft,
-        )
-
-    def _render_style_properties(
-        self,
-        style: StyleDefinition | None,
-        *,
-        style_name_draft: str | None = None,
-        style_prompt_draft: str | None = None,
-    ) -> None:
-        enabled = style is not None
-        self.delete_style_button.setEnabled(enabled)
-        self.style_name_edit.setEnabled(enabled)
-        self.style_prompt_edit.setEnabled(enabled)
-        with QSignalBlocker(self.style_name_edit):
-            self.style_name_edit.setText(
-                style_name_draft
-                if style_name_draft is not None
-                else style.name
-                if style is not None
-                else ""
-            )
-        with QSignalBlocker(self.style_prompt_edit):
-            self.style_prompt_edit.setPlainText(
-                style_prompt_draft
-                if style_prompt_draft is not None
-                else style.prompt_text
-                if style is not None
-                else ""
-            )
-
-    def _style_selection_changed(
-        self,
-        current: QListWidgetItem | None,
-        _previous: QListWidgetItem | None,
-    ) -> None:
-        if self._rendering:
-            return
-        value = current.data(Qt.ItemDataRole.UserRole) if current is not None else None
-        self._selected_style_id = value if isinstance(value, UUID) else None
-        self._rendered_style_id = self._selected_style_id
-        self._set_error(self.style_error, "")
-        self._render_style_properties(self._selected_style())
-
-    def _style_editing_finished(
-        self,
-        _next_focus: object,
-        reason: object,
-    ) -> None:
-        self._commit_style(
-            render_change=reason != Qt.FocusReason.MouseFocusReason
-        )
-
-    def _style_draft_changed(self) -> None:
-        if (
-            self.style_name_edit.hasFocus()
-            or self.style_prompt_edit.hasFocus()
-        ):
-            self._render_inputs_changed()
-
-    def _add_style(self) -> None:
-        document = self.controller.document
-        existing_names = {style.name.casefold() for style in document.styles}
-        number = 1
-        name = "New Style"
-        while name.casefold() in existing_names:
-            number += 1
-            name = f"New Style {number}"
-        command = AddStyleCommand(name=name)
-        self._selected_style_id = command.style_id
-        if self._execute(
-            command,
-            error_label=self.style_error,
-            undo_message="Style added",
-        ):
-            self.inspector_tabs.setCurrentIndex(self._styles_tab_index)
-            self.style_name_edit.setFocus()
-            self.style_name_edit.selectAll()
-
-    def _delete_style(self) -> None:
-        style_id = self.selected_style_id
-        if style_id is None:
-            return
-        self._selected_style_id = None
-        self._render_inputs_changed()
-        self._execute(
-            DeleteStyleCommand(style_id=style_id),
-            error_label=self.style_error,
-            undo_message="Style deleted",
-        )
-
-    def _commit_style(self, *, render_change: bool = True) -> bool:
-        if self._rendering:
-            return False
-        style = self._selected_style()
-        if style is None:
-            return False
-        name = self.style_name_edit.text()
-        prompt_text = self.style_prompt_edit.toPlainText()
-        if name == style.name and prompt_text.strip() == style.prompt_text:
-            return True
-        self._render_inputs_changed()
-        return self._execute(
-            UpdateStyleCommand(
-                style_id=style.id,
-                name=name,
-                prompt_text=prompt_text,
-            ),
-            error_label=self.style_error,
-            undo_message="Style updated",
-            render_change=render_change,
-        )
-
-    def _selected_style(self) -> StyleDefinition | None:
-        return self.controller.document.style_by_id(self._selected_style_id)
-
-    @property
-    def selected_key_id(self) -> UUID | None:
-        item = self.key_list.currentItem()
-        if item is None:
-            return None
-        value = item.data(Qt.ItemDataRole.UserRole)
-        return value if isinstance(value, UUID) else None
-
-    @staticmethod
-    def _key_usages(
-        document: Stack,
-        key_id: UUID,
-    ) -> list[tuple[Card, int, Interaction, tuple[str, ...]]]:
-        usages: list[tuple[Card, int, Interaction, tuple[str, ...]]] = []
-        for card in document.cards:
-            for revision_number, revision in enumerate(card.revisions, start=1):
-                if revision.hotspot_set is None:
-                    continue
-                for interaction in revision.hotspot_set.interactions:
-                    roles = tuple(
-                        role
-                        for role, key_ids in (
-                            ("Has", interaction.conditions.requires),
-                            ("Lacks", interaction.conditions.forbids),
-                            ("Loses", interaction.key_changes.remove),
-                            ("Gains", interaction.key_changes.grant),
-                        )
-                        if key_id in key_ids
-                    )
-                    if roles:
-                        usages.append(
-                            (card, revision_number, interaction, roles)
-                        )
-        return usages
-
-    def _render_keys(
-        self,
-        document: Stack,
-        *,
-        key_name_draft: str | None,
-    ) -> None:
-        desired_id = self._selected_key_id
-        known_ids = {key.id for key in document.keys}
-        if desired_id not in known_ids:
-            desired_id = document.keys[0].id if document.keys else None
-        with QSignalBlocker(self.key_list):
-            self.key_list.clear()
-            for key in document.keys:
-                use_count = len(self._key_usages(document, key.id))
-                suffix = (
-                    "unused"
-                    if use_count == 0
-                    else f"{use_count} use"
-                    if use_count == 1
-                    else f"{use_count} uses"
-                )
-                item = QListWidgetItem(f"{key.name} — {suffix}")
-                item.setData(Qt.ItemDataRole.UserRole, key.id)
-                item.setToolTip(key.name)
-                self.key_list.addItem(item)
-            selected_row = next(
-                (
-                    row
-                    for row in range(self.key_list.count())
-                    if self.key_list.item(row).data(Qt.ItemDataRole.UserRole)
-                    == desired_id
-                ),
-                -1,
-            )
-            self.key_list.setCurrentRow(selected_row)
-        self._selected_key_id = desired_id
-        self._rendered_key_id = desired_id
-        self.keys_placeholder.setVisible(not document.keys)
-        key = (
-            document.key_by_id(desired_id)
-            if desired_id is not None
-            else None
-        )
-        self._render_key_properties(
-            document,
-            key,
-            key_name_draft=key_name_draft,
-        )
-
-    def _render_key_properties(
-        self,
-        document: Stack,
-        key: KeyDefinition | None,
-        *,
-        key_name_draft: str | None = None,
-    ) -> None:
-        enabled = key is not None
-        usages = self._key_usages(document, key.id) if key is not None else []
-        self.key_name_edit.setEnabled(enabled)
-        self.delete_key_button.setEnabled(enabled and not usages)
-        self.delete_key_button.setToolTip(
-            "Remove hotspot references before deleting this Key"
-            if usages
-            else "Delete unused Key"
-        )
-        with QSignalBlocker(self.key_name_edit):
-            self.key_name_edit.setText(
-                key_name_draft
-                if key_name_draft is not None
-                else key.name
-                if key is not None
-                else ""
-            )
-        with QSignalBlocker(self.key_usage_list):
-            self.key_usage_list.clear()
-            for card, revision_number, interaction, _roles in usages:
-                text = self._key_usage_text(
-                    card,
-                    revision_number,
-                    interaction,
-                )
-                item = QListWidgetItem(text)
-                item.setData(
-                    Qt.ItemDataRole.UserRole,
-                    (card.id, card.revisions[revision_number - 1].id, interaction.id),
-                )
-                item.setToolTip(text)
-                self.key_usage_list.addItem(item)
-        self.show_hotspot_usage_button.setEnabled(False)
-
-    @staticmethod
-    def _key_usage_text(
-        card: Card,
-        revision_number: int,
-        interaction: Interaction,
-    ) -> str:
-        return (
-            f"{card.name} · Version {revision_number}\n"
-            f"{interaction.label}"
-        )
-
-    def _key_selection_changed(
-        self,
-        current: QListWidgetItem | None,
-        _previous: QListWidgetItem | None,
-    ) -> None:
-        if self._rendering:
-            return
-        value = current.data(Qt.ItemDataRole.UserRole) if current is not None else None
-        self._selected_key_id = value if isinstance(value, UUID) else None
-        self._rendered_key_id = self._selected_key_id
-        self._set_error(self.key_error, "")
-        key = (
-            self.controller.document.key_by_id(self._selected_key_id)
-            if self._selected_key_id is not None
-            else None
-        )
-        self._render_key_properties(self.controller.document, key)
-
-    def _add_key(self) -> None:
-        document = self.controller.document
-        existing_names = {key.name.casefold() for key in document.keys}
-        number = 1
-        name = "New Key"
-        while name.casefold() in existing_names:
-            number += 1
-            name = f"New Key {number}"
-        command = AddKeyCommand(name=name)
-        self._selected_key_id = command.key_id
-        if self._execute(
-            command,
-            error_label=self.key_error,
-            undo_message="Key added",
-        ):
-            self.inspector_tabs.setCurrentIndex(self._keys_tab_index)
-            self.key_name_edit.setFocus()
-            self.key_name_edit.selectAll()
-
-    def _delete_key(self) -> None:
-        key_id = self.selected_key_id
-        if key_id is None:
-            return
-        self._selected_key_id = None
-        self._execute(
-            DeleteKeyCommand(key_id=key_id),
-            error_label=self.key_error,
-            undo_message="Key deleted",
-        )
-
-    def _key_name_editing_finished(
-        self,
-        _next_focus: object,
-        reason: object,
-    ) -> None:
-        mouse_focus = reason == Qt.FocusReason.MouseFocusReason
-        if not self._commit_key(render_change=not mouse_focus) or not mouse_focus:
-            return
-        key_id = self._selected_key_id
-        item = self.key_list.currentItem()
-        if key_id is None or item is None:
-            return
-        document = self.controller.document
-        key = document.key_by_id(key_id)
-        usages = self._key_usages(document, key_id)
-        suffix = (
-            "unused"
-            if not usages
-            else "1 use"
-            if len(usages) == 1
-            else f"{len(usages)} uses"
-        )
-        item.setText(f"{key.name} — {suffix}")
-        item.setToolTip(key.name)
-        for row, usage in enumerate(usages):
-            usage_item = self.key_usage_list.item(row)
-            if usage_item is None:
-                continue
-            card, revision_number, interaction, _roles = usage
-            text = self._key_usage_text(
-                card,
-                revision_number,
-                interaction,
-            )
-            usage_item.setText(text)
-            usage_item.setToolTip(text)
-
-    def _commit_key(self, *, render_change: bool = True) -> bool:
-        if self._rendering or self._selected_key_id is None:
-            return False
-        key = self.controller.document.key_by_id(self._selected_key_id)
-        name = self.key_name_edit.text()
-        if name.strip() == key.name:
-            return True
-        return self._execute(
-            RenameKeyCommand(key_id=key.id, name=name),
-            error_label=self.key_error,
-            undo_message="Key renamed",
-            render_change=render_change,
-        )
-
-    def _show_hotspot_usage(self) -> None:
-        item = self.key_usage_list.currentItem()
-        value = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
-        if (
-            isinstance(value, tuple)
-            and len(value) == 3
-            and all(isinstance(identifier, UUID) for identifier in value)
-        ):
-            self.hotspot_usage_requested.emit(*value)
 
     def _render_reference(
         self,
@@ -1663,11 +1010,7 @@ class Inspector(QWidget):
         card = self._selected_card()
         if card is None:
             return
-        combo = (
-            self.reference_combo
-            if position == 1
-            else self.additional_reference_combo
-        )
+        combo = self.reference_combo if position == 1 else self.additional_reference_combo
         value = combo.itemData(index)
         if isinstance(value, UUID):
             reference = ResolvedCardReference(target_card_id=value)
@@ -1724,9 +1067,7 @@ class Inspector(QWidget):
         if card is None:
             return
         try:
-            resolution = GenerateResolution(
-                self.resolution_combo.itemData(index)
-            )
+            resolution = GenerateResolution(self.resolution_combo.itemData(index))
         except (TypeError, ValueError):
             self.render(self.controller.document, self.selected_card_id)
             return
@@ -1764,10 +1105,7 @@ class Inspector(QWidget):
                 document.aspect_ratio,
             )
             if not available:
-                error = (
-                    "The current image is already at the maximum Refine "
-                    "resolution."
-                )
+                error = "The current image is already at the maximum Refine resolution."
         with QSignalBlocker(self.refine_resolution_combo):
             self.refine_resolution_combo.clear()
             for resolution in available:
@@ -1790,9 +1128,7 @@ class Inspector(QWidget):
         self._set_error(self.refine_error, error)
         resolution = self.refine_resolution_combo.currentData()
         try:
-            transformation = RefineTransformation(
-                self.refine_transformation_combo.currentData()
-            )
+            transformation = RefineTransformation(self.refine_transformation_combo.currentData())
         except (TypeError, ValueError):
             transformation = None
         lineage_count = (
@@ -1802,8 +1138,7 @@ class Inspector(QWidget):
         )
         style_suffix = " + Style" if revision.style_id is not None else ""
         lineage_suffix = (
-            f" + {lineage_count} accepted Edit"
-            f"{'s' if lineage_count != 1 else ''}"
+            f" + {lineage_count} accepted Edit{'s' if lineage_count != 1 else ''}"
             if lineage_count
             else ""
         )
@@ -1812,26 +1147,20 @@ class Inspector(QWidget):
         ]
         if isinstance(transformation, RefineTransformation):
             using.append(
-                f"Transformation: {transformation.value.title()} "
-                f"({transformation.strength:.2f})"
+                f"Transformation: {transformation.value.title()} ({transformation.strength:.2f})"
             )
         if isinstance(resolution, GenerateResolution):
             width, height = output_dimensions(
                 resolution,
                 document.aspect_ratio,
             )
-            using.append(
-                f"Resolution: {resolution.value} square-equivalent "
-                f"({width} x {height})"
-            )
+            using.append(f"Resolution: {resolution.value} square-equivalent ({width} x {height})")
         self._refine_using_text = "\n".join(using)
         self._refresh_generation_tooltips()
 
     def _request_refine_background(self) -> None:
         try:
-            transformation = RefineTransformation(
-                self.refine_transformation_combo.currentData()
-            )
+            transformation = RefineTransformation(self.refine_transformation_combo.currentData())
         except (TypeError, ValueError):
             transformation = None
         resolution = self.refine_resolution_combo.currentData()
@@ -1902,8 +1231,7 @@ class Inspector(QWidget):
         return EditPreserveOptions(
             **{
                 field_name: checkbox.isChecked()
-                for field_name, checkbox
-                in self.edit_preserve_checkboxes.items()
+                for field_name, checkbox in self.edit_preserve_checkboxes.items()
             }
         )
 
@@ -1915,9 +1243,7 @@ class Inspector(QWidget):
                 height=self._edit_source_size[1],
             )
         try:
-            return PresetOutputSize(
-                resolution=GenerateResolution(selection)
-            )
+            return PresetOutputSize(resolution=GenerateResolution(selection))
         except (TypeError, ValueError):
             return None
 
@@ -1945,10 +1271,7 @@ class Inspector(QWidget):
             for checkbox in self.edit_preserve_checkboxes.values()
             if checkbox.isChecked()
         ]
-        using.append(
-            "Preserve: "
-            + (", ".join(selected_labels) if selected_labels else "None")
-        )
+        using.append("Preserve: " + (", ".join(selected_labels) if selected_labels else "None"))
         if output_size is not None:
             if isinstance(output_size, CurrentSourceSize):
                 width, height = output_size.width, output_size.height
@@ -1966,15 +1289,10 @@ class Inspector(QWidget):
         active_revision = revision
         if active_revision is None:
             card = self._selected_card()
-            active_revision = (
-                card.active_revision
-                if card is not None
-                else None
-            )
+            active_revision = card.active_revision if card is not None else None
         provenance = (
             active_revision.background.provenance
-            if active_revision is not None
-            and active_revision.background is not None
+            if active_revision is not None and active_revision.background is not None
             else None
         )
         if provenance is not None:
@@ -2106,9 +1424,8 @@ class Inspector(QWidget):
             self.hotspot_destination_combo.addItem("Create New Card...", "create")
             if interaction is None:
                 self.hotspot_destination_combo.setCurrentIndex(-1)
-            elif (
-                interaction.action is not None
-                and isinstance(interaction.action.target, ResolvedCardReference)
+            elif interaction.action is not None and isinstance(
+                interaction.action.target, ResolvedCardReference
             ):
                 self.hotspot_destination_combo.setCurrentIndex(
                     self._combo_index_for_data(
@@ -2116,9 +1433,8 @@ class Inspector(QWidget):
                         interaction.action.target.target_card_id,
                     )
                 )
-            elif (
-                interaction.action is not None
-                and isinstance(interaction.action.target, UnresolvedCardReference)
+            elif interaction.action is not None and isinstance(
+                interaction.action.target, UnresolvedCardReference
             ):
                 self.hotspot_destination_combo.setCurrentIndex(
                     self._combo_index_for_data(
@@ -2128,9 +1444,7 @@ class Inspector(QWidget):
                 )
             else:
                 self.hotspot_destination_combo.setCurrentIndex(0)
-        self.hotspot_summary.setText(
-            self._hotspot_summary_text(document, interaction)
-        )
+        self.hotspot_summary.setText(self._hotspot_summary_text(document, interaction))
 
     def _render_condition_rows(
         self,
@@ -2344,12 +1658,10 @@ class Inspector(QWidget):
         ]
         action_parts: list[str] = []
         action_parts.extend(
-            f"lose {document.key_by_id(key_id).name}"
-            for key_id in interaction.key_changes.remove
+            f"lose {document.key_by_id(key_id).name}" for key_id in interaction.key_changes.remove
         )
         action_parts.extend(
-            f"gain {document.key_by_id(key_id).name}"
-            for key_id in interaction.key_changes.grant
+            f"gain {document.key_by_id(key_id).name}" for key_id in interaction.key_changes.grant
         )
         if interaction.action is not None:
             target = interaction.action.target
@@ -2365,9 +1677,7 @@ class Inspector(QWidget):
             )
             action_parts.append(f"go to {destination}")
         condition_text = (
-            f"When the runner {' and '.join(condition_parts)}"
-            if condition_parts
-            else "Always"
+            f"When the runner {' and '.join(condition_parts)}" if condition_parts else "Always"
         )
         return (
             f"{condition_text}, {', then '.join(action_parts)}."
@@ -2408,9 +1718,7 @@ class Inspector(QWidget):
         interaction = self._selected_interaction()
         if interaction is None:
             return
-        used = set(interaction.conditions.requires) | set(
-            interaction.conditions.forbids
-        )
+        used = set(interaction.conditions.requires) | set(interaction.conditions.forbids)
         self._choose_key_reference(
             title="Add Condition",
             role="requires",
@@ -2421,9 +1729,7 @@ class Inspector(QWidget):
         interaction = self._selected_interaction()
         if interaction is None:
             return
-        used = set(interaction.key_changes.remove) | set(
-            interaction.key_changes.grant
-        )
+        used = set(interaction.key_changes.remove) | set(interaction.key_changes.grant)
         self._choose_key_reference(
             title="Add Key Change",
             role="grant",
@@ -2437,14 +1743,10 @@ class Inspector(QWidget):
         role: Literal["requires", "forbids", "remove", "grant"],
         excluded: set[UUID],
     ) -> None:
-        available = [
-            key for key in self.controller.document.keys if key.id not in excluded
-        ]
+        available = [key for key in self.controller.document.keys if key.id not in excluded]
         create_label = "Create New Key..."
         labels = [key.name for key in available]
-        while create_label.casefold() in {
-            label.casefold() for label in labels
-        }:
+        while create_label.casefold() in {label.casefold() for label in labels}:
             create_label += "."
         selected, accepted = QInputDialog.getItem(
             self,
@@ -2499,7 +1801,6 @@ class Inspector(QWidget):
             name=name,
             role=role,
         )
-        self._selected_key_id = command.key_id
         self._execute(
             command,
             undo_message="Key and hotspot behavior added",
@@ -2516,9 +1817,7 @@ class Inspector(QWidget):
                 card_id=card.id,
                 revision_id=card.active_revision.id,
                 interaction_id=interaction.id,
-                conditions=interaction.conditions.model_copy(
-                    update={role: (*values, key_id)}
-                ),
+                conditions=interaction.conditions.model_copy(update={role: (*values, key_id)}),
             ),
             undo_message="Hotspot condition added",
         )
@@ -2577,18 +1876,14 @@ class Inspector(QWidget):
         if card is None or interaction is None:
             return
         values = tuple(
-            candidate
-            for candidate in getattr(interaction.conditions, role)
-            if candidate != key_id
+            candidate for candidate in getattr(interaction.conditions, role) if candidate != key_id
         )
         self._execute(
             SetHotspotConditionsCommand(
                 card_id=card.id,
                 revision_id=card.active_revision.id,
                 interaction_id=interaction.id,
-                conditions=interaction.conditions.model_copy(
-                    update={role: values}
-                ),
+                conditions=interaction.conditions.model_copy(update={role: values}),
             ),
             undo_message="Hotspot condition removed",
         )
@@ -2604,9 +1899,7 @@ class Inspector(QWidget):
                 card_id=card.id,
                 revision_id=card.active_revision.id,
                 interaction_id=interaction.id,
-                key_changes=interaction.key_changes.model_copy(
-                    update={role: (*values, key_id)}
-                ),
+                key_changes=interaction.key_changes.model_copy(update={role: (*values, key_id)}),
             ),
             undo_message="Hotspot key change added",
         )
@@ -2665,18 +1958,14 @@ class Inspector(QWidget):
         if card is None or interaction is None:
             return
         values = tuple(
-            candidate
-            for candidate in getattr(interaction.key_changes, role)
-            if candidate != key_id
+            candidate for candidate in getattr(interaction.key_changes, role) if candidate != key_id
         )
         self._execute(
             SetHotspotKeyChangesCommand(
                 card_id=card.id,
                 revision_id=card.active_revision.id,
                 interaction_id=interaction.id,
-                key_changes=interaction.key_changes.model_copy(
-                    update={role: values}
-                ),
+                key_changes=interaction.key_changes.model_copy(update={role: values}),
             ),
             undo_message="Hotspot key change removed",
         )

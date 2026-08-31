@@ -28,8 +28,9 @@ resolution is revision-local, defaults to 512 square-equivalent pixels, and is
 copied with the complete revision. The supported presets are 256, 512, 768, and
 1024. The compact
 header above the canvas edits the card name and selects, duplicates, or deletes
-revisions; the toolbar provides a single Author/Run mode toggle and manages
-hotspot visibility. An
+revisions; the Author toolbar places the Run toggle on the left and opens the
+stack-global Styles and Keys managers from the right. In Run mode it instead
+shows navigation and hotspot visibility controls. An
 adjacent step label and progress bar to the left of the image-model selector
 show actual MFLUX inference-step completion during image generation.
 
@@ -45,7 +46,7 @@ bundle transaction. Undo/Redo history retains the independent bytes only while
 needed to restore the duplicate, and discarding that history reclaims the
 unreferenced duplicate-owned asset without collecting unrelated bundle files.
 
-The inspector tabs are Generate, Refine, Edit, Styles, Hotspots, and Keys. Generate
+The inspector tabs are Generate, Refine, Edit, and Hotspots. Generate
 follows the authoring sequence Description, Style, optional References,
 Resolution, then Generate Image. Resolution labels show the exact output width
 and height for the stack format. Generate requires a nonempty Description and
@@ -109,8 +110,10 @@ generation can be kept there, moved into a new complete revision, or undone.
 Existing images remain visible until replacement succeeds, and successful
 changes offer a dismissible, history-safe Undo action in the notification bar.
 
-The Styles tab manages the stack's ordered, editable Style library with compact
-remove/add controls and full-width Name and Style Text fields. The built-in
+The modeless Styles utility window manages the stack's ordered, editable Style
+library with compact remove/add controls and full-width Name and Style Text
+fields. Reopening Styles raises the existing window rather than creating a
+second manager. The built-in
 library includes HyperCard, Cinematic Film, Isometric Game, Pixel Art,
 Watercolor Painting, Color Pencil, Pencil Sketch, Glazed Ceramic, Graphic
 Novel, and Miniature Toy. A new stack starts with HyperCard selected. An
@@ -127,12 +130,13 @@ exist. The bordered Then section applies disjoint explicit Remove and Grant
 sets before its optional Go to destination. Keys are stack-global free-form
 names with stable internal IDs.
 
-The Keys tab manages that global catalog with the same list, compact remove/add,
-and full-width Name patterns as Styles. It reports every card revision and
-hotspot that Requires, Forbids, Removes, or Grants the selected key, and can
-jump to that exact hotspot. Renaming updates every display through stable
-references. In-use keys cannot be deleted. Keys can also be created while
-adding a condition or key change.
+The modeless Keys utility window manages that global catalog with the same list,
+compact remove/add, and full-width Name patterns as Styles. It reports every
+card revision and hotspot that Requires, Forbids, Removes, or Grants the
+selected key, and can jump to that exact hotspot. Reopening Keys raises the
+existing window. Renaming updates every display through stable references.
+In-use keys cannot be deleted. Keys can also be created while adding a
+condition or key change.
 
 While the Hotspots tab is active, clicking empty canvas begins a polygon for the
 selected hotspot and creates one first when needed. Leaving the tab cancels any

@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QSizePolicy,
     QSplitter,
     QStackedWidget,
     QStyle,
@@ -105,6 +106,7 @@ from hotcards.ui.settings_dialog import (
     SettingsStore,
     load_machine_settings,
 )
+from hotcards.ui.utility_windows import KeyManagerWindow, StyleManagerWindow
 
 AvailabilityChecks = Mapping[AdapterKind, Callable[[], Any]]
 AvailabilityChecksFactory = Callable[[], AvailabilityChecks]
@@ -113,6 +115,9 @@ SettingsDialogFactory = Callable[[SettingsStore, QWidget], QDialog]
 
 class MainWindow(QMainWindow):
     """Application shell whose panes render one DocumentController."""
+
+    _STYLE_MANAGER_GEOMETRY_KEY = "windows/style_manager_geometry"
+    _KEY_MANAGER_GEOMETRY_KEY = "windows/key_manager_geometry"
 
     def __init__(
         self,
@@ -166,6 +171,8 @@ class MainWindow(QMainWindow):
         self._background_progress_message = ""
         self._last_session_mutation_blocked = False
         self._run_session = RunSession()
+        self.style_manager_window: StyleManagerWindow | None = None
+        self.key_manager_window: KeyManagerWindow | None = None
         if self.background_workflow is None and self.document_session is not None:
             self.background_workflow = BackgroundWorkflow(
                 controller,
@@ -264,6 +271,134 @@ class MainWindow(QMainWindow):
         self.run_controls_separator.setVisible(False)
         self.overlay_label_action.setVisible(False)
         self.overlay_selector_action.setVisible(False)
+
+        self.author_action_spacer = QWidget()
+        self.author_action_spacer.setObjectName("authorActionSpacer")
+        self.author_action_spacer.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Preferred,
+        )
+        self.author_action_spacer_action = toolbar.addWidget(self.author_action_spacer)
+        self.styles_button = QPushButton("Styles")
+        self.styles_button.setObjectName("stylesManagerButton")
+        self.styles_button.setAccessibleName("Open Styles manager")
+        self.styles_button.setToolTip("Open the stack Styles manager")
+        self.styles_button.clicked.connect(self._show_style_manager)
+        self.styles_button_action = toolbar.addWidget(self.styles_button)
+        self.keys_button = QPushButton("Keys")
+        self.keys_button.setObjectName("keysManagerButton")
+        self.keys_button.setAccessibleName("Open Keys manager")
+        self.keys_button.setToolTip("Open the stack Keys manager")
+        self.keys_button.clicked.connect(self._show_key_manager)
+        self.keys_button_action = toolbar.addWidget(self.keys_button)
+
+    def _show_style_manager(self) -> None:
+        if self._is_running:
+            return
+        window = self.style_manager_window
+        if window is None:
+            window = StyleManagerWindow(self.controller, self)
+            self.style_manager_window = window
+            self._attach_utility_actions(window)
+            window.document_changed.connect(
+                lambda document, source=window: self.render_document(
+                    document,
+                    utility_source=source,
+                )
+            )
+            window.change_applied.connect(self._show_undo_notification)
+            window.inputs_changed.connect(self._authoring_inputs_changed)
+            window.closing.connect(
+                lambda geometry: self.settings.setValue(
+                    self._STYLE_MANAGER_GEOMETRY_KEY,
+                    geometry,
+                )
+            )
+            window.destroyed.connect(
+                lambda _object=None, source=window: self._utility_destroyed(source)
+            )
+            geometry = self.settings.value(self._STYLE_MANAGER_GEOMETRY_KEY)
+            if geometry is not None:
+                window.restoreGeometry(geometry)
+        window.set_mutation_allowed(not self.controller.mutation_blocked)
+        window.render(self.controller.document)
+        window.show()
+        window.raise_()
+        window.activateWindow()
+
+    def _show_key_manager(self) -> None:
+        if self._is_running:
+            return
+        window = self.key_manager_window
+        if window is None:
+            window = KeyManagerWindow(self.controller, self)
+            self.key_manager_window = window
+            self._attach_utility_actions(window)
+            window.document_changed.connect(
+                lambda document, source=window: self.render_document(
+                    document,
+                    utility_source=source,
+                )
+            )
+            window.change_applied.connect(self._show_undo_notification)
+            window.hotspot_usage_requested.connect(self._show_hotspot_usage)
+            window.closing.connect(
+                lambda geometry: self.settings.setValue(
+                    self._KEY_MANAGER_GEOMETRY_KEY,
+                    geometry,
+                )
+            )
+            window.destroyed.connect(
+                lambda _object=None, source=window: self._utility_destroyed(source)
+            )
+            geometry = self.settings.value(self._KEY_MANAGER_GEOMETRY_KEY)
+            if geometry is not None:
+                window.restoreGeometry(geometry)
+        window.set_mutation_allowed(not self.controller.mutation_blocked)
+        window.render(self.controller.document)
+        window.show()
+        window.raise_()
+        window.activateWindow()
+
+    def _utility_destroyed(self, window: QWidget) -> None:
+        if self.style_manager_window is window:
+            self.style_manager_window = None
+        if self.key_manager_window is window:
+            self.key_manager_window = None
+
+    def _attach_utility_actions(self, window: QWidget) -> None:
+        window.addActions(
+            [
+                self.new_stack_action,
+                self.open_stack_action,
+                self.save_action,
+                self.save_as_action,
+                self.undo_action,
+                self.redo_action,
+                self.duplicate_card_action,
+            ]
+        )
+
+    def _render_utility_windows(
+        self,
+        *,
+        skip: QWidget | None = None,
+    ) -> None:
+        for window in (
+            self.style_manager_window,
+            self.key_manager_window,
+        ):
+            if window is not None and window is not skip:
+                window.render(self.controller.document)
+
+    def _close_utility_windows(self, *, commit_pending: bool = True) -> None:
+        for attribute in ("style_manager_window", "key_manager_window"):
+            window = getattr(self, attribute)
+            if window is None:
+                continue
+            closed = window.close() if commit_pending else window.close_without_committing()
+            if closed:
+                setattr(self, attribute, None)
 
     def _build_panes(self) -> None:
         self.card_sidebar = CardSidebar(
@@ -395,7 +530,6 @@ class MainWindow(QMainWindow):
         self.inspector.edit_background_requested.connect(self._edit_background)
         self.inspector.change_applied.connect(self._show_undo_notification)
         self.inspector.hotspot_selected.connect(self.card_canvas.select_interaction)
-        self.inspector.hotspot_usage_requested.connect(self._show_hotspot_usage)
         self.card_canvas.interaction_selected.connect(self.inspector.select_interaction)
         self.card_canvas.empty_area_requested.connect(self._begin_implicit_hotspot_area)
         self.card_canvas.polygon_created.connect(self._create_hotspot_polygon)
@@ -429,9 +563,7 @@ class MainWindow(QMainWindow):
                 None,
             )
             if edit_instruction_clear_requested is not None:
-                edit_instruction_clear_requested.connect(
-                    self.inspector.clear_edit_instruction
-                )
+                edit_instruction_clear_requested.connect(self.inspector.clear_edit_instruction)
         self.pane_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.pane_splitter.setObjectName("threePaneSplitter")
         self.pane_splitter.addWidget(self.card_sidebar)
@@ -548,6 +680,7 @@ class MainWindow(QMainWindow):
         _document: Stack | None = None,
         *,
         render_sidebar: bool = True,
+        utility_source: QWidget | None = None,
     ) -> None:
         """Refresh all panes from the controller's authoritative snapshot."""
         snapshot = self.controller.document
@@ -628,6 +761,7 @@ class MainWindow(QMainWindow):
         self._update_window_title()
         self._update_generation_actions()
         self._update_run_actions()
+        self._render_utility_windows(skip=utility_source)
 
     def select_card(self, card_id: object) -> None:
         if self._is_running:
@@ -725,12 +859,48 @@ class MainWindow(QMainWindow):
 
     def _commit_authoring_metadata(self) -> bool:
         if self.controller.mutation_blocked:
-            return True
+            self._show_pending_durability_error(PENDING_DURABILITY_MESSAGE)
+            return False
+        for window in (
+            self.style_manager_window,
+            self.key_manager_window,
+        ):
+            if window is not None and not window.commit_pending_edits(render_change=False):
+                window.show()
+                window.raise_()
+                window.activateWindow()
+                return False
         if self._selected_card_id is None:
             return True
         if not self.inspector.commit_card_metadata(render_change=False):
             return False
         return self._commit_canvas_card_name(render_change=False)
+
+    def _flush_document(self, *, title: str) -> bool:
+        if self.document_session is None:
+            return True
+        if self.document_session.flush():
+            return True
+        self._show_document_error(
+            title,
+            self.document_session.state.error or "The document could not be saved.",
+        )
+        return False
+
+    def _prepare_authoring_lifecycle(
+        self,
+        *,
+        save_error_title: str,
+        flush_after_commit: bool = False,
+    ) -> bool:
+        durability_was_pending = self.controller.mutation_blocked
+        if durability_was_pending and not self._flush_document(title=save_error_title):
+            return False
+        if not self._commit_authoring_metadata():
+            return False
+        if durability_was_pending or flush_after_commit:
+            return self._flush_document(title=save_error_title)
+        return True
 
     def _revision_selection_changed(self, index: int) -> None:
         if self._rendering or self._selected_card_id is None or index < 0:
@@ -940,7 +1110,7 @@ class MainWindow(QMainWindow):
         """Create and bind a new stack before exposing its initial card."""
         if self.document_session is None:
             return
-        if not self._commit_authoring_metadata():
+        if not self._prepare_authoring_lifecycle(save_error_title="Could Not Save Current Stack"):
             return
         dialog = NewStackDialog(self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
@@ -964,7 +1134,7 @@ class MainWindow(QMainWindow):
         """Open a validated bundle without replacing the current session on failure."""
         if self.document_session is None:
             return
-        if not self._commit_authoring_metadata():
+        if not self._prepare_authoring_lifecycle(save_error_title="Could Not Save Current Stack"):
             return
         selected_path = QFileDialog.getExistingDirectory(
             self,
@@ -982,21 +1152,16 @@ class MainWindow(QMainWindow):
         """Flush accepted mutations and keep a failed save visible."""
         if self.document_session is None:
             return True
-        if not self._commit_authoring_metadata():
-            return False
-        saved = self.document_session.flush()
-        if not saved:
-            self._show_document_error(
-                "Could Not Save Stack",
-                self.document_session.state.error or "The document could not be saved.",
-            )
-        return saved
+        return self._prepare_authoring_lifecycle(
+            save_error_title="Could Not Save Stack",
+            flush_after_commit=True,
+        )
 
     def save_as(self) -> None:
         """Clone the current bound bundle and rebind future autosaves."""
         if self.document_session is None or self.document_session.store is None:
             return
-        if not self._commit_authoring_metadata():
+        if not self._prepare_authoring_lifecycle(save_error_title="Could Not Save Current Stack"):
             return
         selected_path, _filter = QFileDialog.getSaveFileName(
             self,
@@ -1163,6 +1328,7 @@ class MainWindow(QMainWindow):
 
     def _document_replaced(self, _document: object) -> None:
         self._cancel_background_generation()
+        self._close_utility_windows(commit_pending=False)
         self._clear_undo_notification()
         self._card_selection_history.clear()
         self._rendered_card_id = None
@@ -1191,7 +1357,13 @@ class MainWindow(QMainWindow):
         if state.error is None:
             self.notification_bar.clear_notification("document-error")
         bound = state.bundle_path is not None
-        mutation_allowed = bound and not state.mutation_blocked
+        mutation_allowed = (self.document_session is None or bound) and not state.mutation_blocked
+        for window in (
+            self.style_manager_window,
+            self.key_manager_window,
+        ):
+            if window is not None:
+                window.set_mutation_allowed(mutation_allowed)
         self.card_sidebar.set_document_editable(self.document_session is None or mutation_allowed)
         if self.document_session is not None and not bound:
             self.create_first_card_button.setText("Create New Stack")
@@ -1211,6 +1383,8 @@ class MainWindow(QMainWindow):
         else:
             self.create_first_card_button.setText("Create Your First Card")
         self._update_document_actions()
+        self.styles_button.setEnabled(mutation_allowed and not self._is_running)
+        self.keys_button.setEnabled(mutation_allowed and not self._is_running)
         self._update_window_title()
         self._update_generation_actions()
         if durability_resolved:
@@ -1271,6 +1445,8 @@ class MainWindow(QMainWindow):
         self.overlay_selector.setEnabled(mutation_allowed and self._is_running)
         self.card_sidebar.set_document_editable(mutation_allowed and not self._is_running)
         authoring_enabled = mutation_allowed and not self._is_running
+        self.styles_button.setEnabled(authoring_enabled)
+        self.keys_button.setEnabled(authoring_enabled)
         self.inspector.setEnabled(authoring_enabled)
         self.canvas_card_name.setReadOnly(not authoring_enabled)
         self.revision_combo.setEnabled(authoring_enabled)
@@ -1713,9 +1889,7 @@ class MainWindow(QMainWindow):
             refining=workflow_busy and active_operation == "refine",
         )
         has_edit_instruction = self.inspector.has_edit_instruction_input()
-        has_edit_output_size = (
-            self.inspector.selected_edit_output_size() is not None
-        )
+        has_edit_output_size = self.inspector.selected_edit_output_size() is not None
         edit_reason = "Ready to edit"
         if self.controller.mutation_blocked:
             edit_reason = PENDING_DURABILITY_MESSAGE
@@ -2219,6 +2393,17 @@ class MainWindow(QMainWindow):
             action.setVisible(self._is_running)
         self.back_button_action.setVisible(self._is_running)
         self.restart_button_action.setVisible(self._is_running)
+        self.styles_button_action.setVisible(authoring)
+        self.keys_button_action.setVisible(authoring)
+        self.styles_button.setVisible(authoring)
+        self.keys_button.setVisible(authoring)
+        self.styles_button.setEnabled(authoring_enabled)
+        self.keys_button.setEnabled(authoring_enabled)
+        if self._is_running:
+            if self.style_manager_window is not None:
+                self.style_manager_window.hide()
+            if self.key_manager_window is not None:
+                self.key_manager_window.hide()
 
     def _update_run_actions(self) -> None:
         state = self._run_session.state
@@ -2281,20 +2466,19 @@ class MainWindow(QMainWindow):
         return dialog.clickedButton() is retry_button
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        if (
+            self.document_session is not None
+            and self.controller.mutation_blocked
+            and not self._flush_for_close()
+        ):
+            event.ignore()
+            return
         if not self._commit_authoring_metadata():
             event.ignore()
             return
-        if self.document_session is not None and not self.document_session.flush():
-            if self._ask_retry_failed_close_save(
-                (self.document_session.state.error or "The stack could not be saved.")
-                + "\n\nRetry saving before closing?",
-            ):
-                if not self.document_session.flush():
-                    event.ignore()
-                    return
-            else:
-                event.ignore()
-                return
+        if self.document_session is not None and not self._flush_for_close():
+            event.ignore()
+            return
         if self.document_session is not None and not self.document_session.close_history():
             self._show_document_error(
                 "Could Not Clean Up Stack",
@@ -2303,9 +2487,20 @@ class MainWindow(QMainWindow):
             )
         if self.background_workflow is not None:
             self.background_workflow.close()
+        self._close_utility_windows()
         if self._owns_workers:
             self.workers.shutdown(wait_milliseconds=100)
         super().closeEvent(event)
+
+    def _flush_for_close(self) -> bool:
+        if self.document_session is None or self.document_session.flush():
+            return True
+        if not self._ask_retry_failed_close_save(
+            (self.document_session.state.error or "The stack could not be saved.")
+            + "\n\nRetry saving before closing?",
+        ):
+            return False
+        return self.document_session.flush()
 
 
 __all__ = [

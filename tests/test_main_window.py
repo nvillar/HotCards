@@ -185,9 +185,7 @@ class FakeBackgroundWorkflow(QObject):
         preserve: object,
         output_size: object,
     ) -> None:
-        self.edit_calls.append(
-            (card_id, instruction, preserve, output_size)
-        )
+        self.edit_calls.append((card_id, instruction, preserve, output_size))
 
     def clear_background(self, card_id: object) -> None:
         self.clear_calls.append(card_id)
@@ -322,6 +320,176 @@ def test_card_header_and_toolbar_match_revision_hierarchy(
     assert window.revision_combo.width() < 100
 
 
+def test_author_utility_windows_are_modeless_singletons_and_reopen(
+    application: QApplication,
+) -> None:
+    window, _controller, _workers, _background = _window()
+    window.show()
+    application.processEvents()
+
+    window.styles_button.click()
+    application.processEvents()
+    first_style_window = window.style_manager_window
+    assert first_style_window is not None
+    assert first_style_window.isVisible()
+    assert first_style_window.windowModality() == Qt.WindowModality.NonModal
+    assert window.save_action in first_style_window.actions()
+    shortcut_triggers: list[None] = []
+    window.save_action.triggered.connect(lambda: shortcut_triggers.append(None))
+    window.save_action.setEnabled(True)
+    first_style_window.name_edit.setFocus()
+    application.processEvents()
+    QTest.keySequence(
+        first_style_window.name_edit,
+        window.save_action.shortcut(),
+    )
+    application.processEvents()
+    assert shortcut_triggers == [None]
+
+    window.styles_button.click()
+    application.processEvents()
+    assert window.style_manager_window is first_style_window
+
+    first_style_window.close()
+    application.processEvents()
+    assert window.style_manager_window is None
+    assert MainWindow._STYLE_MANAGER_GEOMETRY_KEY in window.settings.values
+
+    window.styles_button.click()
+    window.keys_button.click()
+    application.processEvents()
+    assert window.style_manager_window is not None
+    assert window.style_manager_window is not first_style_window
+    assert window.key_manager_window is not None
+    assert window.key_manager_window.windowModality() == Qt.WindowModality.NonModal
+    window.close()
+    application.processEvents()
+
+
+def test_pending_durability_disables_utility_manager_mutations(
+    application: QApplication,
+) -> None:
+    key = KeyDefinition(name="Old")
+    window, controller, _workers, _background = _window(
+        Stack(name="Demo", keys=(key,), cards=(Card(name="Card"),))
+    )
+    window._show_style_manager()
+    window._show_key_manager()
+    style_manager = window.style_manager_window
+    key_manager = window.key_manager_window
+    assert style_manager is not None
+    assert key_manager is not None
+    key_manager.name_edit.setFocus()
+    application.processEvents()
+    key_manager.name_edit.setText("Draft")
+
+    def fail_indeterminate(candidate: Stack) -> None:
+        raise StackStoreTransactionError(
+            RuntimeError("manifest fsync failed"),
+            observed_stack=candidate,
+            durability_indeterminate=True,
+        )
+
+    with pytest.raises(StackStoreTransactionError):
+        controller.execute_persisted(
+            CreateCardCommand(name="Observed"),
+            fail_indeterminate,
+        )
+
+    window._session_state_changed(
+        DocumentSessionState(
+            bundle_path=Path("/tmp/Demo.hotcards"),
+            dirty=True,
+            error="save pending",
+            mutation_blocked=True,
+        )
+    )
+
+    assert not window.styles_button.isEnabled()
+    assert not window.keys_button.isEnabled()
+    assert not style_manager.add_button.isEnabled()
+    assert not style_manager.name_edit.isEnabled()
+    assert not key_manager.add_button.isEnabled()
+    assert not key_manager.name_edit.isEnabled()
+    assert key_manager.name_edit.text() == "Draft"
+    assert key_manager.error_label.isVisible()
+    window._close_utility_windows(commit_pending=False)
+    window.close()
+    application.processEvents()
+
+
+def test_utility_windows_close_on_project_replacement_without_stale_draft(
+    application: QApplication,
+) -> None:
+    window, controller, _workers, _background = _window()
+    window._show_style_manager()
+    manager = window.style_manager_window
+    assert manager is not None
+    manager.show()
+    manager.name_edit.setFocus()
+    application.processEvents()
+    manager.name_edit.setText("Old project draft")
+
+    existing_style = controller.document.styles[0]
+    replacement_style = StyleDefinition(
+        id=existing_style.id,
+        name="Replacement",
+        prompt_text="Replacement treatment.",
+    )
+    replacement = Stack(
+        name="Replacement",
+        styles=(replacement_style,),
+        new_card_style_id=None,
+        cards=(Card(name="New card"),),
+    )
+    controller.replace_document(replacement)
+    window._document_replaced(replacement)
+    application.processEvents()
+
+    assert window.style_manager_window is None
+    assert controller.document.styles == (replacement_style,)
+    window.close()
+    application.processEvents()
+
+
+def test_style_manager_updates_generate_selector_and_cancels_active_work(
+    application: QApplication,
+) -> None:
+    selected_style = StyleDefinition(
+        name="Ink",
+        prompt_text="Rendered in ink.",
+    )
+    card = Card(
+        name="Card",
+        revisions=(CardRevision(description="Scene", style_id=selected_style.id),),
+    )
+    window, controller, _workers, background = _window(
+        Stack(
+            name="Demo",
+            styles=(selected_style,),
+            new_card_style_id=selected_style.id,
+            cards=(card,),
+        )
+    )
+    background.busy = True
+    background.active_operation = "generate"
+    window._show_style_manager()
+    manager = window.style_manager_window
+    assert manager is not None
+
+    manager.show()
+    manager.name_edit.setFocus()
+    application.processEvents()
+    manager.name_edit.setText("Updated Style")
+    assert background.cancel_calls == 1
+    assert manager.commit_pending_edits(render_change=True)
+
+    assert controller.document.style_by_id(selected_style.id).name == "Updated Style"
+    assert window.inspector.style_combo.currentText() == "Updated Style"
+    window.close()
+    application.processEvents()
+
+
 def test_hotspot_rule_editor_scrolls_without_growing_the_window(
     application: QApplication,
 ) -> None:
@@ -377,6 +545,18 @@ def test_hotspot_rule_editor_scrolls_without_growing_the_window(
     assert toolbar_actions.index(window.overlay_label_action) < (
         toolbar_actions.index(window.overlay_selector_action)
     )
+    assert toolbar_actions.index(window.overlay_selector_action) < (
+        toolbar_actions.index(window.styles_button_action)
+    )
+    assert toolbar_actions.index(window.mode_button_action) < (
+        toolbar_actions.index(window.author_action_spacer_action)
+    )
+    assert toolbar_actions.index(window.author_action_spacer_action) < (
+        toolbar_actions.index(window.styles_button_action)
+    )
+    assert toolbar_actions.index(window.styles_button_action) < (
+        toolbar_actions.index(window.keys_button_action)
+    )
     assert window.back_button.font().pointSizeF() == (window.mode_button.font().pointSizeF())
     assert window.restart_button.font().pointSizeF() == (window.mode_button.font().pointSizeF())
     assert window.back_button.sizeHint().height() >= (window.mode_button.sizeHint().height())
@@ -385,7 +565,10 @@ def test_hotspot_rule_editor_scrolls_without_growing_the_window(
     assert not window.run_overlay_separator.isVisible()
     assert not window.overlay_label_action.isVisible()
     assert not window.overlay_selector_action.isVisible()
-    assert not hasattr(window, "styles_button")
+    assert window.styles_button.text() == "Styles"
+    assert window.keys_button.text() == "Keys"
+    assert window.styles_button_action.isVisible()
+    assert window.keys_button_action.isVisible()
     assert not hasattr(window, "document_status_label")
     assert window.generation_progress_container.isHidden()
     margins = window.generation_progress_layout.contentsMargins()
@@ -647,6 +830,54 @@ def test_pending_duplicate_durability_blocks_ui_until_save_retry(
     assert window.duplicate_card_action.isEnabled()
     assert window.inspector.isEnabled()
     assert not window.canvas_card_name.isReadOnly()
+    window.close()
+
+
+def test_save_resolves_pending_then_persists_utility_draft(
+    application: QApplication,
+    tmp_path: Path,
+) -> None:
+    stack = Stack(name="Demo", cards=(Card(name="Source"),))
+    controller = DocumentController(stack)
+    session = DocumentSession(controller)
+    session.create(stack, tmp_path / "Demo.hotcards")
+    window = MainWindow(
+        controller,
+        FakeWorkers(),  # type: ignore[arg-type]
+        FakeSettings(),
+        availability_checks={AdapterKind.MFLUX: lambda: None},
+        document_session=session,
+        background_workflow=FakeBackgroundWorkflow(controller),  # type: ignore[arg-type]
+        start_diagnostics=False,
+    )
+    window._show_style_manager()
+    manager = window.style_manager_window
+    assert manager is not None
+    manager.name_edit.setFocus()
+    application.processEvents()
+    manager.name_edit.setText("Draft Style")
+
+    def fail_indeterminate(candidate: Stack) -> None:
+        raise StackStoreTransactionError(
+            RuntimeError("manifest fsync failed"),
+            observed_stack=candidate,
+            durability_indeterminate=True,
+        )
+
+    with pytest.raises(DocumentSessionError, match="durability remains indeterminate"):
+        session.execute_persisted(
+            CreateCardCommand(name="Observed"),
+            persist=fail_indeterminate,
+        )
+
+    assert controller.mutation_blocked
+    assert manager.name_edit.text() == "Draft Style"
+    assert window.save_document()
+
+    assert not controller.mutation_blocked
+    assert controller.document.styles[0].name == "Draft Style"
+    assert session.store is not None
+    assert session.store.load().styles[0].name == "Draft Style"
     window.close()
 
 
@@ -1308,19 +1539,26 @@ def test_failed_style_focus_commit_blocks_save(
         flush=lambda: flush_calls.append(True) or True,
     )
     style = controller.document.styles[0]
-    window.inspector.inspector_tabs.setCurrentIndex(window.inspector._styles_tab_index)
-    window.inspector.style_name_edit.setFocus()
-    window.inspector.style_name_edit.setText("")
+    window._show_style_manager()
+    manager = window.style_manager_window
+    assert manager is not None
+    manager.name_edit.setFocus()
+    manager.name_edit.setText("")
 
-    window.inspector._style_editing_finished(
+    manager._editing_finished(
         window,
-        Qt.FocusReason.MouseFocusReason,
+        Qt.FocusReason.ActiveWindowFocusReason,
     )
 
-    assert window.inspector.style_name_edit.text() == ""
+    assert manager.name_edit.text() == ""
     assert not window.save_document()
     assert flush_calls == []
     assert controller.document.style_by_id(style.id) == style
+    manager.name_edit.setText(style.name)
+    assert manager.commit_pending_edits(render_change=False)
+    window.document_session = None
+    window.close()
+    application.processEvents()
 
 
 def test_author_and_run_modes_apply_consistent_read_only_chrome(
@@ -1359,6 +1597,10 @@ def test_author_and_run_modes_apply_consistent_read_only_chrome(
     assert not hasattr(window, "llm_model_combo")
     assert window.image_model_label.isHidden()
     assert window.image_model_combo.isHidden()
+    assert window.styles_button.isHidden()
+    assert window.keys_button.isHidden()
+    assert window.style_manager_window is None
+    assert window.key_manager_window is None
 
     window.mode_button.click()
     application.processEvents()
@@ -1372,6 +1614,8 @@ def test_author_and_run_modes_apply_consistent_read_only_chrome(
     assert not window.add_revision_button.isHidden()
     assert not window.image_model_label.isHidden()
     assert not window.image_model_combo.isHidden()
+    assert not window.styles_button.isHidden()
+    assert not window.keys_button.isHidden()
     assert not window.run_controls_separator.isVisible()
     assert not window.run_overlay_separator.isVisible()
     assert not window.back_action.isVisible()
@@ -1800,12 +2044,8 @@ def test_edit_tab_wires_current_image_defaults_errors_and_cancellation(
 
     assert window.inspector.inspector_tabs.tabText(2) == "Edit"
     assert not window.inspector.edit_background_button.isEnabled()
-    assert window.inspector.edit_resolution_combo.itemText(0) == (
-        "Current (1024 x 768)"
-    )
-    assert window.inspector.edit_resolution_combo.itemText(1) == (
-        "1024 (1184 x 880)"
-    )
+    assert window.inspector.edit_resolution_combo.itemText(0) == ("Current (1024 x 768)")
+    assert window.inspector.edit_resolution_combo.itemText(1) == ("1024 (1184 x 880)")
     window.inspector.edit_instruction_edit.setPlainText("Open the gate.")
     assert window.inspector.edit_background_button.isEnabled()
     window.inspector.edit_background_button.click()
