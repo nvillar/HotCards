@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
     QFrame,
+    QGroupBox,
     QInputDialog,
     QLabel,
     QStyle,
@@ -37,7 +38,6 @@ from hotcards.domain.models import (
     CardRevision,
     CurrentSourceSize,
     DirectGenerateProvenance,
-    EditPreserveOptions,
     ExactOutputSize,
     GeneratedBackground,
     GenerateInputs,
@@ -111,29 +111,13 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     inspector = Inspector(controller)
     inspector.render(controller.document, card.id)
 
-    assert inspector.inspector_tabs.count() == 4
+    assert inspector.inspector_tabs.count() == 3
     assert inspector.inspector_tabs.tabText(0) == "Generate"
-    assert inspector.inspector_tabs.tabText(1) == "Refine"
-    assert inspector.inspector_tabs.tabText(2) == "Edit"
-    assert inspector.inspector_tabs.tabText(3) == "Hotspots"
+    assert inspector.inspector_tabs.tabText(1) == "Transform"
+    assert inspector.inspector_tabs.tabText(2) == "Hotspots"
     assert not hasattr(inspector, "style_list")
     assert not hasattr(inspector, "key_list")
-    assert [checkbox.text() for checkbox in inspector.edit_preserve_checkboxes.values()] == [
-        "Subject identity",
-        "Pose and expression",
-        "Composition and framing",
-        "Background",
-        "Lighting and color",
-        "Existing text and logos",
-    ]
-    assert [checkbox.isChecked() for checkbox in inspector.edit_preserve_checkboxes.values()] == [
-        True,
-        True,
-        True,
-        False,
-        False,
-        False,
-    ]
+    assert not hasattr(inspector, "edit_preserve_checkboxes")
     assert all(
         label.text() != "Keys are global to this stack." for label in inspector.findChildren(QLabel)
     )
@@ -188,13 +172,30 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     )
     assert inspector.hotspot_when_label.text() == "When"
     assert inspector.hotspot_then_label.text() == "Then"
+    assert isinstance(inspector.hotspot_when_panel, QGroupBox)
+    assert isinstance(inspector.hotspot_then_panel, QGroupBox)
+    assert not inspector.hotspot_when_panel.title()
+    assert not inspector.hotspot_then_panel.title()
+    assert not inspector.hotspot_when_panel.styleSheet()
+    assert not inspector.hotspot_then_panel.styleSheet()
+    assert inspector.hotspot_when_label.font().pointSizeF() == (
+        inspector.reinterpret_section_label.font().pointSizeF()
+    )
+    assert inspector.hotspot_then_label.font().pointSizeF() == (
+        inspector.edit_section_label.font().pointSizeF()
+    )
     assert inspector.add_condition_button.text() == "+ Add condition"
     assert inspector.add_condition_button.isFlat()
     assert inspector.add_key_change_button.text() == "+ Add key change"
     assert inspector.add_key_change_button.isFlat()
     assert not hasattr(inspector, "clear_all_keys_checkbox")
+    assert not hasattr(inspector, "hotspot_summary")
     hotspot_layout = inspector.hotspot_list.parentWidget().layout()
     assert hotspot_layout is not None
+    assert inspector.hotspot_list.parentWidget().objectName() == "hotspotsInspectorContent"
+    assert hotspot_layout.contentsMargins() == (
+        inspector.refine_background_button.parentWidget().parentWidget().layout().contentsMargins()
+    )
     then_layout = inspector.hotspot_then_panel.layout()
     assert then_layout is not None
     assert then_layout.indexOf(inspector.key_change_table) < (
@@ -206,7 +207,9 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     assert then_layout.indexOf(inspector.hotspot_target_label) < (
         then_layout.indexOf(inspector.hotspot_destination_combo)
     )
-    assert hotspot_layout.stretch(hotspot_layout.indexOf(inspector.hotspot_list)) == 1
+    assert inspector.hotspot_list.minimumHeight() == 120
+    assert inspector.hotspot_list.maximumHeight() == 120
+    assert hotspot_layout.stretch(hotspot_layout.indexOf(inspector.hotspot_list)) == 0
     hotspot_control_sizes = {
         button.size()
         for button in (
@@ -240,7 +243,7 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
         assert obsolete not in visible_copy
 
 
-def test_edit_tab_uses_current_or_higher_size_and_emits_exact_inputs(
+def test_transform_edit_uses_current_or_higher_size_and_emits_exact_inputs(
     application: QApplication,
 ) -> None:
     revision = CardRevision(
@@ -250,9 +253,9 @@ def test_edit_tab_uses_current_or_higher_size_and_emits_exact_inputs(
     card = Card(name="Courtyard", revisions=(revision,))
     controller = DocumentController(Stack(name="Demo", cards=(card,)))
     inspector = Inspector(controller)
-    requests: list[tuple[object, object, object]] = []
+    requests: list[tuple[object, object]] = []
     inspector.edit_background_requested.connect(
-        lambda instruction, preserve, output: requests.append((instruction, preserve, output))
+        lambda instruction, output: requests.append((instruction, output))
     )
 
     inspector.render(
@@ -262,30 +265,27 @@ def test_edit_tab_uses_current_or_higher_size_and_emits_exact_inputs(
     )
 
     assert inspector.edit_resolution_combo.count() == 2
-    assert inspector.edit_resolution_combo.itemText(0) == ("Large — 768 × 576 (Current image)")
+    assert inspector.edit_resolution_combo.itemText(0) == "Large"
     assert inspector.edit_resolution_combo.itemData(0) == CurrentSourceSize(
         width=768,
         height=576,
     )
-    assert inspector.edit_resolution_combo.itemText(1) == ("Full — 1024 × 768")
+    assert inspector.edit_resolution_combo.itemData(0, Qt.ItemDataRole.ToolTipRole) == "768 × 576"
+    assert inspector.edit_resolution_combo.itemText(1) == "Full"
     inspector.edit_instruction_edit.setPlainText("  Open the gate.  ")
     inspector.edit_background_button.click()
 
     assert len(requests) == 1
-    instruction, preserve, output = requests[0]
+    instruction, output = requests[0]
     assert instruction == "Open the gate."
-    assert preserve == EditPreserveOptions(
-        subject_identity=True,
-        pose_and_expression=True,
-        composition_and_framing=True,
-    )
     assert output.mode == "current"
     assert (output.width, output.height) == (768, 576)
-    assert "Expanded prompt:" in inspector.edit_background_button.toolTip()
-    assert "Token budget: 512" in inspector.edit_background_button.toolTip()
+    assert inspector.edit_background_button.toolTip() == (
+        "Create a new version with only the requested change."
+    )
 
 
-def test_refine_tab_has_transformation_resolution_and_action_only(
+def test_transform_reinterpret_has_source_similarity_resolution_and_action(
     application: QApplication,
 ) -> None:
     revision = CardRevision(
@@ -301,7 +301,23 @@ def test_refine_tab_has_transformation_resolution_and_action_only(
         refine_source_size=(512, 384),
     )
 
-    assert inspector.inspector_tabs.tabText(inspector._refine_tab_index) == "Refine"
+    assert inspector.inspector_tabs.tabText(inspector._transform_tab_index) == "Transform"
+    reinterpret_group = inspector.refine_background_button.parentWidget()
+    edit_group = inspector.edit_background_button.parentWidget()
+    assert isinstance(reinterpret_group, QGroupBox)
+    assert isinstance(edit_group, QGroupBox)
+    assert not reinterpret_group.title()
+    assert not edit_group.title()
+    assert inspector.reinterpret_section_label.text() == "Reinterpret"
+    assert inspector.edit_section_label.text() == "Edit"
+    assert inspector.reinterpret_section_label.font().pointSizeF() == (
+        inspector.refine_transformation_label.font().pointSizeF()
+    )
+    assert inspector.edit_section_label.font().pointSizeF() == (
+        inspector.edit_instruction_label.font().pointSizeF()
+    )
+    assert not hasattr(inspector, "refine_description_label")
+    assert not hasattr(inspector, "edit_description_label")
     assert (
         RefineTransformation(inspector.refine_transformation_combo.currentData())
         is RefineTransformation.BALANCED
@@ -310,36 +326,38 @@ def test_refine_tab_has_transformation_resolution_and_action_only(
         inspector.refine_transformation_combo.itemText(index)
         for index in range(inspector.refine_transformation_combo.count())
     ] == [
-        "Reimagine (0.25)",
-        "Balanced (0.50)",
-        "Preserve (0.75)",
+        "Reimagine",
+        "Balanced",
+        "Preserve",
     ]
+    assert inspector.refine_transformation_label.text() == "Source Similarity"
+    assert "Balance the Description" in inspector.refine_transformation_combo.toolTip()
     assert [
         inspector.refine_resolution_combo.itemText(index)
         for index in range(inspector.refine_resolution_combo.count())
     ] == [
-        "Small — 256 × 192",
-        "Medium — 512 × 384 (Current image)",
-        "Large — 768 × 576",
-        "Full — 1024 × 768",
+        "Medium",
+        "Large",
+        "Full",
     ]
+    assert inspector.refine_resolution_label.text() == "Resolution"
+    assert inspector.edit_resolution_label.text() == "Resolution"
     assert inspector.refine_resolution_combo.currentData() == CurrentSourceSize(
         width=512,
         height=384,
     )
-    content = inspector.refine_background_button.parentWidget()
-    layout = content.layout()
-    assert layout is not None
-    assert layout.indexOf(inspector.refine_transformation_label) < layout.indexOf(
+    refine_layout = inspector.refine_background_button.parentWidget().layout()
+    assert refine_layout is not None
+    assert refine_layout.indexOf(inspector.refine_transformation_label) < refine_layout.indexOf(
         inspector.refine_transformation_combo
     )
-    assert layout.indexOf(inspector.refine_transformation_combo) < layout.indexOf(
+    assert refine_layout.indexOf(inspector.refine_transformation_combo) < refine_layout.indexOf(
         inspector.refine_resolution_label
     )
-    assert layout.indexOf(inspector.refine_resolution_label) < layout.indexOf(
+    assert refine_layout.indexOf(inspector.refine_resolution_label) < refine_layout.indexOf(
         inspector.refine_resolution_combo
     )
-    assert layout.indexOf(inspector.refine_resolution_combo) < layout.indexOf(
+    assert refine_layout.indexOf(inspector.refine_resolution_combo) < refine_layout.indexOf(
         inspector.refine_background_button
     )
     assert not hasattr(inspector, "refine_source_card_combo")
@@ -351,7 +369,7 @@ def test_refine_tab_has_transformation_resolution_and_action_only(
     )
     inspector.set_refine_capabilities(
         can_refine=True,
-        refine_reason="Ready to refine",
+        refine_reason="Ready to reinterpret",
         busy=False,
         refining=False,
     )
@@ -363,9 +381,10 @@ def test_refine_tab_has_transformation_resolution_and_action_only(
             CurrentSourceSize(width=512, height=384),
         )
     ]
-    assert "Current image + Description" in (inspector.refine_background_button.toolTip())
-    assert "Balanced (0.50)" in inspector.refine_background_button.toolTip()
-    assert "512 × 384" in inspector.refine_background_button.toolTip()
+    assert inspector.refine_background_button.text() == "Reinterpret"
+    assert inspector.refine_background_button.toolTip() == (
+        "Create a new version using the current image, Description."
+    )
 
 
 def test_refine_resolution_inserts_nonstandard_current_size_by_area(
@@ -388,11 +407,9 @@ def test_refine_resolution_inserts_nonstandard_current_size_by_area(
         inspector.refine_resolution_combo.itemText(index)
         for index in range(inspector.refine_resolution_combo.count())
     ] == [
-        "Small — 256 × 192",
-        "Medium — 512 × 384",
-        "Current size — 640 × 480",
-        "Large — 768 × 576",
-        "Full — 1024 × 768",
+        "Current",
+        "Large",
+        "Full",
     ]
     assert inspector.refine_resolution_combo.currentData() == CurrentSourceSize(
         width=640,
@@ -433,7 +450,7 @@ def test_refine_selection_becomes_current_when_new_image_matches_preset(
         width=512,
         height=384,
     )
-    assert inspector.refine_resolution_combo.currentIndex() == 1
+    assert inspector.refine_resolution_combo.currentIndex() == 0
 
 
 def test_key_manager_manages_global_names_and_lists_hotspot_usages(
@@ -567,10 +584,6 @@ def test_hotspot_pipeline_edits_conditions_changes_and_navigation(
     assert key_change_remove.size() == QSize(20, 20)
     assert inspector.no_key_changes_label.isHidden()
     assert inspector.hotspot_target_label.text() == "Go to"
-    assert inspector.hotspot_summary.text() == (
-        "When the runner has Red key, lose Red key, then gain Door open, then go to Castle."
-    )
-
     grant_key = inspector.key_change_table.cellWidget(1, 1)
     assert isinstance(grant_key, QComboBox)
     grant_key.setCurrentIndex(
@@ -662,7 +675,7 @@ def test_description_edits_target_active_revision(
 
 
 @pytest.mark.parametrize("aspect_ratio", tuple(AspectRatio))
-def test_resolution_selector_shows_actual_dimensions_for_every_preset(
+def test_resolution_selector_uses_tier_names_and_dimension_tooltips(
     application: QApplication,
     aspect_ratio: AspectRatio,
 ) -> None:
@@ -674,9 +687,12 @@ def test_resolution_selector_shows_actual_dimensions_for_every_preset(
     assert [
         inspector.resolution_combo.itemText(index)
         for index in range(inspector.resolution_combo.count())
+    ] == [tier.label for tier in ResolutionTier]
+    assert [
+        inspector.resolution_combo.itemData(index, Qt.ItemDataRole.ToolTipRole)
+        for index in range(inspector.resolution_combo.count())
     ] == [
-        f"{tier.label} — {output_dimensions(tier, aspect_ratio)[0]} × "
-        f"{output_dimensions(tier, aspect_ratio)[1]}"
+        f"{output_dimensions(tier, aspect_ratio)[0]} × {output_dimensions(tier, aspect_ratio)[1]}"
         for tier in ResolutionTier
     ]
     assert inspector.resolution_combo.currentData() == PresetOutputSize(tier=ResolutionTier.MEDIUM)
@@ -722,8 +738,10 @@ def test_resolution_selector_is_revision_local_and_undoable(
     assert autosaves[-1].cards[0].active_revision.generate_output_size == PresetOutputSize(
         tier=ResolutionTier.FULL
     )
-    assert applied[-1][0] == "Generate output size changed"
-    assert controller.undo_if_current(applied[-1][1])  # type: ignore[arg-type]
+    assert not applied
+    undo_token = controller.current_undo_token
+    assert undo_token is not None
+    assert controller.undo_if_current(undo_token)
     inspector.render(controller.document, card.id)
     assert inspector.resolution_combo.currentData() == PresetOutputSize(tier=ResolutionTier.MEDIUM)
     assert controller.redo()
@@ -731,7 +749,7 @@ def test_resolution_selector_is_revision_local_and_undoable(
     assert inspector.resolution_combo.currentData() == PresetOutputSize(tier=ResolutionTier.FULL)
 
 
-def test_generate_output_size_marks_current_without_changing_next_selection(
+def test_generate_selects_current_size_on_navigation_and_syncs_it_on_request(
     application: QApplication,
 ) -> None:
     revision = CardRevision(
@@ -748,8 +766,28 @@ def test_generate_output_size_marks_current_without_changing_next_selection(
         refine_source_size=(1024, 768),
     )
 
-    assert inspector.resolution_combo.itemText(3) == ("Full — 1024 × 768 (Current image)")
-    assert inspector.resolution_combo.currentData() == PresetOutputSize(tier=ResolutionTier.MEDIUM)
+    assert inspector.resolution_combo.itemText(3) == "Full"
+    assert inspector.resolution_combo.currentData() == PresetOutputSize(tier=ResolutionTier.FULL)
+    assert "Resolution: Full (1024 × 768)" in (inspector.generate_background_button.toolTip())
+    assert controller.document.cards[0].active_revision.generate_output_size == PresetOutputSize(
+        tier=ResolutionTier.MEDIUM
+    )
+
+    inspector.render(
+        controller.document,
+        card.id,
+        refine_source_size=(1024, 768),
+    )
+    assert inspector.resolution_combo.currentData() == PresetOutputSize(tier=ResolutionTier.FULL)
+
+    requested: list[None] = []
+    inspector.generate_background_requested.connect(lambda: requested.append(None))
+    inspector.generate_background_button.click()
+
+    assert requested == [None]
+    assert controller.document.cards[0].active_revision.generate_output_size == PresetOutputSize(
+        tier=ResolutionTier.FULL
+    )
 
 
 def test_generate_output_size_inserts_selectable_exact_current_size(
@@ -770,17 +808,56 @@ def test_generate_output_size_inserts_selectable_exact_current_size(
         for index in range(inspector.resolution_combo.count())
     ]
     assert labels == [
-        "Small — 256 × 192",
-        "Medium — 512 × 384",
-        "Current size — 592 × 448",
-        "Large — 768 × 576",
-        "Full — 1024 × 768",
+        "Small",
+        "Medium",
+        "Current",
+        "Large",
+        "Full",
     ]
-    exact_index = labels.index("Current size — 592 × 448")
-    inspector.resolution_combo.setCurrentIndex(exact_index)
+    assert inspector.resolution_combo.currentText() == "Current"
+    assert inspector.resolution_combo.toolTip() == "592 × 448"
+    inspector.generate_background_button.click()
     assert controller.document.cards[0].active_revision.generate_output_size == (
         ExactOutputSize(width=592, height=448)
     )
+
+
+def test_card_navigation_selects_each_current_resolution(
+    application: QApplication,
+) -> None:
+    first = Card(name="First", revisions=(CardRevision(background=_background()),))
+    second = Card(name="Second", revisions=(CardRevision(background=_background()),))
+    controller = DocumentController(Stack(name="Demo", cards=(first, second)))
+    inspector = Inspector(controller)
+
+    inspector.render(
+        controller.document,
+        first.id,
+        refine_source_size=(512, 384),
+    )
+    inspector.resolution_combo.setCurrentIndex(
+        inspector._combo_index_for_data(
+            inspector.resolution_combo,
+            PresetOutputSize(tier=ResolutionTier.FULL),
+        )
+    )
+    inspector.refine_resolution_combo.setCurrentIndex(
+        inspector._combo_index_for_data(
+            inspector.refine_resolution_combo,
+            PresetOutputSize(tier=ResolutionTier.LARGE),
+        )
+    )
+
+    inspector.render(
+        controller.document,
+        second.id,
+        refine_source_size=(768, 576),
+    )
+
+    current = CurrentSourceSize(width=768, height=576)
+    assert inspector.resolution_combo.currentData() == PresetOutputSize(tier=ResolutionTier.LARGE)
+    assert inspector.refine_resolution_combo.currentData() == current
+    assert inspector.edit_resolution_combo.currentData() == current
 
 
 @pytest.mark.parametrize("source_size", ((641, 480), (1008, 784)))
@@ -798,17 +875,17 @@ def test_generate_shows_invalid_current_size_without_selecting_or_persisting_it(
         refine_source_size=source_size,
     )
 
-    unavailable_label = f"Current size — {source_size[0]} × {source_size[1]} (Unavailable)"
     labels = [
         inspector.resolution_combo.itemText(index)
         for index in range(inspector.resolution_combo.count())
     ]
-    unavailable_index = labels.index(unavailable_label)
+    unavailable_index = labels.index("Current")
     item = inspector.resolution_combo.model().item(unavailable_index)
     assert item is not None
     assert not item.isEnabled()
     assert inspector.resolution_combo.currentData() == PresetOutputSize(tier=ResolutionTier.MEDIUM)
-    assert "Current size unavailable" in inspector.resolution_combo.toolTip()
+    assert "Unavailable" in item.toolTip()
+    assert f"{source_size[0]} × {source_size[1]}" in item.toolTip()
 
     inspector.resolution_combo.setCurrentIndex(unavailable_index)
 
@@ -836,9 +913,9 @@ def test_edit_resolution_inserts_nonstandard_current_and_only_higher_tiers(
         inspector.edit_resolution_combo.itemText(index)
         for index in range(inspector.edit_resolution_combo.count())
     ] == [
-        "Current size — 640 × 480",
-        "Large — 768 × 576",
-        "Full — 1024 × 768",
+        "Current",
+        "Large",
+        "Full",
     ]
 
 
@@ -859,39 +936,40 @@ def test_refine_and_edit_show_invalid_current_size_as_unavailable(
         card.id,
         refine_source_size=source_size,
     )
-    unavailable_label = f"Current size — {source_size[0]} × {source_size[1]} (Unavailable)"
-
     refine_labels = [
         inspector.refine_resolution_combo.itemText(index)
         for index in range(inspector.refine_resolution_combo.count())
     ]
-    refine_unavailable = refine_labels.index(unavailable_label)
+    refine_unavailable = refine_labels.index("Current")
     refine_item = inspector.refine_resolution_combo.model().item(refine_unavailable)
     assert refine_item is not None
     assert not refine_item.isEnabled()
-    assert isinstance(
-        inspector.refine_resolution_combo.currentData(),
-        PresetOutputSize,
-    )
-    inspector.refine_resolution_combo.setCurrentIndex(refine_unavailable)
-    assert isinstance(
-        inspector.refine_resolution_combo.currentData(),
-        PresetOutputSize,
-    )
-
-    edit_labels = [
-        inspector.edit_resolution_combo.itemText(index)
-        for index in range(inspector.edit_resolution_combo.count())
-    ]
-    edit_unavailable = edit_labels.index(unavailable_label)
-    edit_item = inspector.edit_resolution_combo.model().item(edit_unavailable)
-    assert edit_item is not None
-    assert not edit_item.isEnabled()
     higher_tiers = higher_output_tiers(
         source_size[0],
         source_size[1],
         AspectRatio.LANDSCAPE,
     )
+    if higher_tiers:
+        assert inspector.refine_resolution_combo.currentData() == PresetOutputSize(
+            tier=higher_tiers[0]
+        )
+        inspector.refine_resolution_combo.setCurrentIndex(refine_unavailable)
+        assert inspector.refine_resolution_combo.currentData() == PresetOutputSize(
+            tier=higher_tiers[0]
+        )
+        assert inspector.refine_resolution_combo.isEnabled()
+    else:
+        assert inspector.refine_resolution_combo.currentData() is None
+        assert not inspector.refine_resolution_combo.isEnabled()
+
+    edit_labels = [
+        inspector.edit_resolution_combo.itemText(index)
+        for index in range(inspector.edit_resolution_combo.count())
+    ]
+    edit_unavailable = edit_labels.index("Current")
+    edit_item = inspector.edit_resolution_combo.model().item(edit_unavailable)
+    assert edit_item is not None
+    assert not edit_item.isEnabled()
     if higher_tiers:
         assert inspector.edit_resolution_combo.currentData() == (
             PresetOutputSize(tier=higher_tiers[0])

@@ -701,14 +701,14 @@ def test_source_revision_deletion_is_blocked_by_derived_revision() -> None:
     assert [(item.dependent_revision_id, item.operation) for item in dependencies] == [
         (derived.id, "refine")
     ]
-    with pytest.raises(CommandError, match='Refine revision 2 on card "Evolution"'):
+    with pytest.raises(CommandError, match='Reinterpret revision 2 on card "Evolution"'):
         DeleteRevisionCommand(
             card_id=card.id,
             revision_id=source.id,
         ).apply(document)
     with pytest.raises(
         CommandError,
-        match="cannot replace this source background.*Refine revision 2",
+        match="cannot replace this source background.*Reinterpret revision 2",
     ):
         ReplaceRevisionBackgroundCommand(
             card_id=card.id,

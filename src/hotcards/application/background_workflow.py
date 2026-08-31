@@ -45,7 +45,6 @@ from hotcards.application.workers import AdapterWorkers, WorkerOperation
 from hotcards.domain.image_dependencies import image_source_dependencies
 from hotcards.domain.image_dimensions import (
     AspectRatio,
-    ResolutionTier,
     higher_output_tiers,
     validate_exact_output_dimensions,
 )
@@ -283,7 +282,7 @@ class BackgroundWorkflow(QObject):
                 dependent = dependencies[0]
                 raise BackgroundWorkflowError(
                     "cannot replace this source background because "
-                    f"{dependent.operation.title()} revision "
+                    f"{dependent.operation_label} revision "
                     f"{dependent.dependent_revision_number} on card "
                     f'"{dependent.dependent_card_name}" derives from it'
                 )
@@ -362,7 +361,7 @@ class BackgroundWorkflow(QObject):
         self,
         card_id: UUID,
     ) -> tuple[RefineOutputSize, ...]:
-        """Return exact current size followed by every named output tier."""
+        """Return exact current size followed by strictly larger presets."""
         card = self._card(self.controller.document, card_id)
         revision = card.active_revision
         background = revision.background
@@ -385,7 +384,14 @@ class BackgroundWorkflow(QObject):
         )
         return (
             *((current_output_size,) if current_output_size is not None else ()),
-            *(PresetOutputSize(tier=tier) for tier in ResolutionTier),
+            *(
+                PresetOutputSize(tier=tier)
+                for tier in higher_output_tiers(
+                    width,
+                    height,
+                    self.controller.document.aspect_ratio,
+                )
+            ),
         )
 
     def refine(
@@ -395,7 +401,7 @@ class BackgroundWorkflow(QObject):
         transformation: RefineTransformation,
         output_size: RefineOutputSize,
     ) -> WorkerOperation:
-        """Refine the current image into one automatic complete revision."""
+        """Reinterpret the current image into one automatic complete revision."""
         self._require_ready(card_id)
         if not self.session.flush():
             raise BackgroundWorkflowError(
@@ -405,10 +411,10 @@ class BackgroundWorkflow(QObject):
         card = self._card(document, card_id)
         revision = card.active_revision
         if not revision.description.strip():
-            raise BackgroundWorkflowError("enter a Description before refining")
+            raise BackgroundWorkflowError("enter a Description before reinterpreting")
         background = revision.background
         if background is None:
-            raise BackgroundWorkflowError("generate an image before refining")
+            raise BackgroundWorkflowError("generate an image before reinterpreting")
         store = self._require_store()
         try:
             source_snapshot = store.snapshot_image_asset(
@@ -426,7 +432,7 @@ class BackgroundWorkflow(QObject):
         except Exception:
             if not source_snapshot.dispose():
                 logger.warning(
-                    "Refine source snapshot cleanup preserved a changed file: %s",
+                    "Reinterpret source snapshot cleanup preserved a changed file: %s",
                     source_snapshot.snapshot_path,
                 )
             raise
@@ -437,11 +443,20 @@ class BackgroundWorkflow(QObject):
         )
         available_output_sizes: tuple[RefineOutputSize, ...] = (
             *((current_output_size,) if current_output_size is not None else ()),
-            *(PresetOutputSize(tier=tier) for tier in ResolutionTier),
+            *(
+                PresetOutputSize(tier=tier)
+                for tier in higher_output_tiers(
+                    source_snapshot.width,
+                    source_snapshot.height,
+                    document.aspect_ratio,
+                )
+            ),
         )
         if output_size not in available_output_sizes:
             self._cleanup_source_snapshot_if_idle()
-            raise BackgroundWorkflowError("select the current Refine size or a named output tier")
+            raise BackgroundWorkflowError(
+                "select the current Reinterpret size or a preset with more pixels"
+            )
         try:
             settings = self._settings_provider()
         except Exception:
@@ -503,7 +518,7 @@ class BackgroundWorkflow(QObject):
         self._request_id = request_id
         self._request_target = target
         self._active_operation = "refine"
-        self._set_busy(True, "Refining image...")
+        self._set_busy(True, "Reinterpreting image...")
         try:
             operation = self.workers.run_mflux(
                 lambda: self._mflux_generator.refine(
@@ -514,7 +529,7 @@ class BackgroundWorkflow(QObject):
                     ),
                     cancellation=cancellation,
                 ),
-                stage="refining background image",
+                stage="reinterpreting background image",
                 request_cancel=cancellation.cancel,
                 dispose_result=dispose_mflux_result,
                 invocation_started=self._invocation_started,
@@ -525,7 +540,7 @@ class BackgroundWorkflow(QObject):
             self._request_target = None
             self._active_operation = None
             self._cleanup_source_snapshot_if_idle()
-            self._set_busy(False, "Image refinement failed")
+            self._set_busy(False, "Image reinterpretation failed")
             raise
         self._operation = operation
         operation.succeeded.connect(partial(self._refine_succeeded, request_id, target, asset_id))
@@ -574,7 +589,6 @@ class BackgroundWorkflow(QObject):
         card_id: UUID,
         *,
         instruction: str,
-        preserve: EditPreserveOptions,
         output_size: EditOutputSize,
     ) -> WorkerOperation:
         """Edit the current image into one automatic complete revision."""
@@ -636,13 +650,11 @@ class BackgroundWorkflow(QObject):
             )
         try:
             settings = self._settings_provider()
-            expanded_prompt = compose_edit_prompt(
-                normalized_instruction,
-                preserve,
-            )
+            expanded_prompt = compose_edit_prompt(normalized_instruction)
         except Exception:
             self._cleanup_source_snapshot_if_idle()
             raise
+        preserve = EditPreserveOptions()
         inherited_lineage = image_edit_lineage(background.provenance)
         accepted_edit = AcceptedEdit(
             instruction=normalized_instruction,
@@ -799,7 +811,7 @@ class BackgroundWorkflow(QObject):
             self._set_busy(
                 False,
                 (
-                    "Refine cancelled"
+                    "Reinterpret cancelled"
                     if operation == "refine"
                     else ("Edit cancelled" if operation == "edit" else "Generation cancelled")
                 ),
@@ -948,14 +960,14 @@ class BackgroundWorkflow(QObject):
             return
         if not isinstance(result, MfluxRefineResult):
             self._finish_with_error(
-                BackgroundWorkflowError("image refinement returned an unexpected result")
+                BackgroundWorkflowError("image reinterpretation returned an unexpected result")
             )
             return
         self._pending_result = result
         if not self._refine_target_is_current(target):
             self._finish_with_error(
                 BackgroundWorkflowError(
-                    "the stack or source revision changed before Refine completed"
+                    "the stack or source revision changed before Reinterpret completed"
                 )
             )
             return
@@ -1027,9 +1039,9 @@ class BackgroundWorkflow(QObject):
                 self.document_changed.emit(self.controller.document)
             self._finish_with_error(error)
             return
-        self.progress_changed.emit("Image refined")
+        self.progress_changed.emit("Image reinterpreted")
         self.document_changed.emit(changed)
-        self._emit_change_applied("Image refined", previous_token)
+        self._emit_change_applied("Image reinterpreted", previous_token)
         self._pending_result = None
         result.dispose_output()
         self._operation = None
@@ -1037,7 +1049,7 @@ class BackgroundWorkflow(QObject):
         self._request_target = None
         self._active_operation = None
         self._cleanup_source_snapshot_if_idle()
-        self._set_busy(False, "Image refined")
+        self._set_busy(False, "Image reinterpreted")
 
     def _edit_succeeded(
         self,
@@ -1243,7 +1255,7 @@ class BackgroundWorkflow(QObject):
         self._set_busy(
             False,
             (
-                "Image refinement failed"
+                "Image reinterpretation failed"
                 if operation == "refine"
                 else ("Image editing failed" if operation == "edit" else "Image generation failed")
             ),
@@ -1262,7 +1274,7 @@ class BackgroundWorkflow(QObject):
     def _track_source_snapshot(self, snapshot: StoredImageSnapshot) -> None:
         with self._source_snapshot_lock:
             if self._source_snapshot is not None:
-                raise BackgroundWorkflowError("a Refine source snapshot is already active")
+                raise BackgroundWorkflowError("a Reinterpret source snapshot is already active")
             self._source_snapshot = snapshot
 
     def _cleanup_source_snapshot_if_idle(self) -> bool:
@@ -1285,7 +1297,7 @@ class BackgroundWorkflow(QObject):
             with self._source_snapshot_lock:
                 assert self._source_snapshot is snapshot
             logger.warning(
-                "Refine source snapshot cleanup preserved a changed file: %s",
+                "Reinterpret source snapshot cleanup preserved a changed file: %s",
                 snapshot.snapshot_path,
             )
         return disposed
@@ -1301,7 +1313,7 @@ class BackgroundWorkflow(QObject):
         with self._source_snapshot_lock:
             if self._source_snapshot is not None:
                 raise BackgroundWorkflowError(
-                    "the previous Refine source snapshot could not be cleaned up"
+                    "the previous Reinterpret source snapshot could not be cleaned up"
                 )
         if self.controller.mutation_blocked:
             raise BackgroundWorkflowError(

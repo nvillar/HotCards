@@ -7,7 +7,7 @@ from pathlib import Path
 from uuid import UUID
 
 from PySide6.QtCore import QSignalBlocker, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
+from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QHBoxLayout,
@@ -76,25 +76,19 @@ class CardSidebar(QWidget):
         self.start_button.clicked.connect(self.set_selected_as_start)
         self.duplicate_button = QToolButton()
         self.duplicate_button.setObjectName("duplicateCardButton")
-        self.duplicate_button.setIcon(
-            self.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon)
-        )
+        self.duplicate_button.setIcon(self._duplicate_icon())
         self.duplicate_button.setAccessibleName("Duplicate card")
         self.duplicate_button.setToolTip("Duplicate the selected card")
         self.duplicate_button.clicked.connect(self._request_duplicate)
         self.move_up_button = QToolButton()
         self.move_up_button.setObjectName("moveCardUpButton")
-        self.move_up_button.setIcon(
-            self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowUp)
-        )
+        self.move_up_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowUp))
         self.move_up_button.setAccessibleName("Move card up")
         self.move_up_button.setToolTip("Move card up")
         self.move_up_button.clicked.connect(lambda: self._move_selected(-1))
         self.move_down_button = QToolButton()
         self.move_down_button.setObjectName("moveCardDownButton")
-        self.move_down_button.setIcon(
-            self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowDown)
-        )
+        self.move_down_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowDown))
         self.move_down_button.setAccessibleName("Move card down")
         self.move_down_button.setToolTip("Move card down")
         self.move_down_button.clicked.connect(lambda: self._move_selected(1))
@@ -354,6 +348,21 @@ class CardSidebar(QWidget):
         font.setPointSize(15)
         painter.setFont(font)
         painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "★")
+        painter.end()
+        return QIcon(pixmap)
+
+    def _duplicate_icon(self) -> QIcon:
+        pixmap = QPixmap(20, 20)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(self.palette().color(self.foregroundRole()), 1.75)
+        pen.setJoinStyle(Qt.PenJoinStyle.MiterJoin)
+        painter.setPen(pen)
+        painter.drawLine(4, 13, 4, 4)
+        painter.drawLine(4, 4, 13, 4)
+        painter.drawLine(13, 4, 13, 7)
+        painter.drawRect(7, 7, 9, 9)
         painter.end()
         return QIcon(pixmap)
 

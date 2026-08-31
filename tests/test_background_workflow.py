@@ -51,7 +51,6 @@ from hotcards.domain.models import (
     CurrentSourceSize,
     DirectGenerateProvenance,
     DuplicateProvenance,
-    EditPreserveOptions,
     EditProvenance,
     ExactOutputSize,
     GeneratedBackground,
@@ -124,7 +123,7 @@ class FakeWorkers:
     ) -> FakeOperation:
         assert stage in {
             "generating background image",
-            "refining background image",
+            "reinterpreting background image",
             "editing background image",
         }
 
@@ -412,7 +411,7 @@ def test_refine_uses_current_image_seed_and_creates_complete_version(
     assert model.calls[-1]["image_strength"] == 0.50
     assert "image_paths" not in model.calls[-1]
     assert (model.calls[-1]["width"], model.calls[-1]["height"]) == (768, 576)
-    assert applied and applied[-1][0] == "Image refined"
+    assert applied and applied[-1][0] == "Image reinterpreted"
     token = applied[-1][1]
     refined_path = session.store.asset_path(refined.background.image_path)
     assert refined_path.is_file()
@@ -496,10 +495,6 @@ def test_edit_uses_only_secure_current_image_and_creates_complete_version(
     workflow.edit(
         card.id,
         instruction="  Open the garden gate.  ",
-        preserve=EditPreserveOptions(
-            subject_identity=True,
-            composition_and_framing=True,
-        ),
         output_size=options[0],
     )
     snapshot_path = next((tmp_path / "temporary").glob(".refine-source-*.png"))
@@ -527,6 +522,8 @@ def test_edit_uses_only_secure_current_image_and_creates_complete_version(
         width=512,
         height=384,
     )
+    assert style.prompt_text not in provenance.expanded_prompt
+    assert "visual style" in provenance.expanded_prompt
     assert provenance.settings.seed == 8675309
     assert provenance.prompt_token_count == 24
     assert model.calls[-1]["image_paths"] == [snapshot_path]
@@ -582,7 +579,6 @@ def test_sequential_edits_append_lineage_and_use_fresh_seeds(
         workflow.edit(
             card.id,
             instruction=instruction,
-            preserve=EditPreserveOptions(subject_identity=True),
             output_size=current_size,
         )
         _complete_generation(workers)
@@ -631,7 +627,6 @@ def test_edit_flattens_duplicate_and_refine_preserves_accepted_edit(
     workflow.edit(
         card.id,
         instruction="Open the gate.",
-        preserve=EditPreserveOptions(subject_identity=True),
         output_size=workflow.available_edit_output_sizes(card.id)[0],
     )
     _complete_generation(workers)
@@ -697,7 +692,6 @@ def test_edit_rejects_replaced_source_and_failed_model_without_new_version(
     workflow.edit(
         card.id,
         instruction="Open the gate.",
-        preserve=EditPreserveOptions(),
         output_size=workflow.available_edit_output_sizes(card.id)[0],
     )
     snapshot_path = next((tmp_path / "temporary").glob(".refine-source-*.png"))
@@ -713,7 +707,6 @@ def test_edit_rejects_replaced_source_and_failed_model_without_new_version(
     workflow.edit(
         card.id,
         instruction="Add ivy.",
-        preserve=EditPreserveOptions(),
         output_size=workflow.available_edit_output_sizes(card.id)[0],
     )
     workers.operations[-1].failed.emit(RuntimeError("model failed"))
@@ -740,7 +733,6 @@ def test_edit_allows_empty_description_but_suppresses_complete_revision_changes(
     workflow.edit(
         card.id,
         instruction="Open the gate.",
-        preserve=EditPreserveOptions(),
         output_size=workflow.available_edit_output_sizes(card.id)[0],
     )
     _complete_generation(workers)
@@ -761,7 +753,6 @@ def test_edit_allows_empty_description_but_suppresses_complete_revision_changes(
     workflow.edit(
         card.id,
         instruction="Add ivy.",
-        preserve=EditPreserveOptions(),
         output_size=workflow.available_edit_output_sizes(card.id)[0],
     )
     controller.execute(
@@ -807,7 +798,7 @@ def test_refine_preserves_none_vs_empty_hotspot_set(
     assert revisions[1].hotspot_set == hotspot_set
 
 
-def test_refine_offers_current_and_every_tier_including_lower_and_same(
+def test_refine_offers_current_and_only_higher_tiers(
     tmp_path: Path,
 ) -> None:
     workflow, controller, session, workers, _model, card = _bound_workflow(
@@ -821,23 +812,7 @@ def test_refine_offers_current_and_every_tier_including_lower_and_same(
 
     assert workflow.available_refine_output_sizes(card.id) == (
         CurrentSourceSize(width=1024, height=768),
-        *(PresetOutputSize(tier=tier) for tier in ResolutionTier),
     )
-
-    source_path = session.store.asset_path(revision.background.image_path)
-    Image.new("RGB", (1024, 768), "navy").save(source_path)
-
-    workflow.refine(
-        card.id,
-        transformation=RefineTransformation.REIMAGINE,
-        output_size=PresetOutputSize(tier=ResolutionTier.SMALL),
-    )
-    _complete_generation(workers)
-    provenance = controller.document.cards[0].active_revision.provenance
-    assert isinstance(provenance, RefineProvenance)
-    assert provenance.transformation is RefineTransformation.REIMAGINE
-    assert provenance.strength == 0.25
-    assert provenance.output_size == PresetOutputSize(tier=ResolutionTier.SMALL)
 
 
 @pytest.mark.parametrize(
@@ -862,16 +837,28 @@ def test_invalid_current_size_keeps_named_workflow_outputs_available(
     )
 
     assert workflow.available_refine_output_sizes(card.id) == tuple(
-        PresetOutputSize(tier=tier) for tier in ResolutionTier
+        PresetOutputSize(tier=tier) for tier in edit_tiers
     )
     assert workflow.available_edit_output_sizes(card.id) == tuple(
         PresetOutputSize(tier=tier) for tier in edit_tiers
     )
 
+    if not edit_tiers:
+        with pytest.raises(BackgroundWorkflowError, match="more pixels"):
+            workflow.refine(
+                card.id,
+                transformation=RefineTransformation.BALANCED,
+                output_size=PresetOutputSize(tier=ResolutionTier.FULL),
+            )
+        assert not workflow.busy
+        assert not list((tmp_path / "temporary").glob(".refine-source-*.png"))
+        return
+
+    selected_tier = edit_tiers[0]
     workflow.refine(
         card.id,
         transformation=RefineTransformation.BALANCED,
-        output_size=PresetOutputSize(tier=ResolutionTier.MEDIUM),
+        output_size=PresetOutputSize(tier=selected_tier),
     )
     _complete_generation(workers)
 
@@ -879,7 +866,7 @@ def test_invalid_current_size_keeps_named_workflow_outputs_available(
     assert not list((tmp_path / "temporary").glob(".refine-source-*.png"))
     provenance = controller.document.cards[0].active_revision.provenance
     assert isinstance(provenance, RefineProvenance)
-    assert provenance.output_size == PresetOutputSize(tier=ResolutionTier.MEDIUM)
+    assert provenance.output_size == PresetOutputSize(tier=selected_tier)
 
 
 def test_refine_flattens_duplicate_source_settings(tmp_path: Path) -> None:
@@ -1001,7 +988,7 @@ def test_refine_uses_immutable_snapshot_and_rejects_replaced_source(
     assert model.calls[-1]["image_path"] == snapshot_path
     assert not snapshot_path.exists()
     assert controller.document.cards[0].revisions == (source_revision,)
-    assert "changed while Refine was running" in str(failures[-1])
+    assert "changed while Reinterpret was running" in str(failures[-1])
 
 
 def test_refine_rejects_symlink_source_without_starting_model(
@@ -1277,7 +1264,6 @@ def test_edit_indeterminate_observed_after_keeps_instruction_and_promotes_histor
     workflow.edit(
         card.id,
         instruction="Open the gate.",
-        preserve=EditPreserveOptions(),
         output_size=workflow.available_edit_output_sizes(card.id)[0],
     )
     _complete_generation(workers)
@@ -1427,7 +1413,7 @@ def test_refine_source_replacement_during_commit_rolls_back(
     assert (
         set((session.store.bundle_path / "assets" / "cards").glob("*/image-*.png")) == assets_before
     )
-    assert "changed while Refine was running" in str(failures[-1])
+    assert "changed while Reinterpret was running" in str(failures[-1])
 
 
 def test_refine_fifo_replacement_after_manifest_fsync_rolls_back(

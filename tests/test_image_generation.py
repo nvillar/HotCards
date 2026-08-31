@@ -98,8 +98,7 @@ def test_refine_prompt_without_edit_lineage_is_description_then_style() -> None:
     )
 
     assert compose_refine_prompt("A red fox beneath a tree", style, ()) == (
-        "A red fox beneath a tree.\n\n"
-        "Rendered with bold black ink contours."
+        "A red fox beneath a tree.\n\nRendered with bold black ink contours."
     )
 
 
@@ -132,9 +131,7 @@ def test_refine_prompt_preserves_ordered_authored_edit_lineage() -> None:
         "2. Add ivy to the wall."
     )
     assert "Hidden expansion" not in prompt
-    assert prompt.index("current Description is authoritative") < prompt.index(
-        "Open the gate"
-    )
+    assert prompt.index("current Description is authoritative") < prompt.index("Open the gate")
 
 
 @pytest.mark.parametrize("value", ("", "   "))
@@ -143,48 +140,20 @@ def test_refine_prompt_requires_current_description(value: str) -> None:
         compose_refine_prompt(value, None, ())
 
 
-def test_edit_prompt_trims_instruction_and_omits_preserve_section_when_empty() -> None:
-    assert compose_edit_prompt(
-        "  Replace the closed door with an open arch.  ",
-        EditPreserveOptions(),
-    ) == (
+def test_edit_prompt_trims_instruction_and_preserves_every_unrequested_detail() -> None:
+    assert compose_edit_prompt("  Replace the closed door with an open arch.  ") == (
         "Edit the provided image according to this instruction:\n\n"
         "Replace the closed door with an open arch.\n\n"
-        "Make only the changes required by the edit instruction. "
-        "Preserve all other details."
-    )
-
-
-def test_edit_prompt_uses_all_preserve_clauses_in_canonical_order() -> None:
-    prompt = compose_edit_prompt(
-        "Add a brass lantern.",
-        EditPreserveOptions(
-            subject_identity=True,
-            pose_and_expression=True,
-            composition_and_framing=True,
-            background=True,
-            lighting_and_color=True,
-            existing_text_and_logos=True,
-        ),
-    )
-
-    assert prompt == (
-        "Edit the provided image according to this instruction:\n\n"
-        "Add a brass lantern.\n\n"
-        "Preserve the following properties except where changing them is "
-        "explicitly required by the edit instruction:\n"
-        "- Preserve the recognizable identity and appearance of existing subjects.\n"
-        "- Preserve poses, gestures, gaze, and facial expressions.\n"
-        "- Preserve viewpoint, perspective, placement, crop, and framing.\n"
-        "- Preserve the existing background and environment.\n"
-        "- Preserve lighting, shadows, contrast, and overall color treatment.\n"
-        "- Preserve visible text, lettering, symbols, and logos.\n\n"
-        "Make only the changes required by the edit instruction. "
-        "Preserve all other details."
+        "The source image is authoritative for everything not explicitly changed "
+        "by the instruction. Make only the requested change and the minimum "
+        "accompanying changes necessary for visual coherence. Preserve all other "
+        "subjects, identities, objects, text, composition, framing, background, "
+        "lighting, colors, and visual style. Do not add, remove, or reinterpret "
+        "unrelated details."
     )
 
 
 @pytest.mark.parametrize("value", ("", "   "))
 def test_edit_prompt_requires_instruction(value: str) -> None:
     with pytest.raises(ValueError, match="Edit Instruction"):
-        compose_edit_prompt(value, EditPreserveOptions())
+        compose_edit_prompt(value)

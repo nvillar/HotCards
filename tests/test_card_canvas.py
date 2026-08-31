@@ -9,8 +9,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PIL import Image, ImageDraw
-from PySide6.QtCore import QPointF, Qt
-from PySide6.QtGui import QColor
+from PySide6.QtCore import QPoint, QPointF, Qt
+from PySide6.QtGui import QColor, QWheelEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
@@ -57,6 +57,35 @@ def test_canvas_renders_image_and_round_trips_document_coordinates(
     assert restored is not None
     assert restored.x() == pytest.approx(0.25, abs=0.01)
     assert restored.y() == pytest.approx(0.75, abs=0.01)
+    canvas.close()
+
+
+def test_canvas_wheel_input_does_not_zoom(
+    application: QApplication,
+    tmp_path: Path,
+) -> None:
+    image_path = tmp_path / "background.png"
+    Image.new("RGB", (1024, 768), "navy").save(image_path)
+    canvas = CardCanvas()
+    canvas.resize(800, 600)
+    canvas.show()
+    canvas.show_image(image_path)
+    application.processEvents()
+    transform = canvas.transform()
+
+    event = QWheelEvent(
+        QPointF(400, 300),
+        QPointF(400, 300),
+        QPoint(),
+        QPoint(0, 120),
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+        Qt.ScrollPhase.ScrollUpdate,
+        False,
+    )
+    application.sendEvent(canvas.viewport(), event)
+
+    assert canvas.transform() == transform
     canvas.close()
 
 

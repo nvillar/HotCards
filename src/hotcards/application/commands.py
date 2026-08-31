@@ -395,7 +395,7 @@ class DeleteCardCommand:
             dependent = dependencies[0]
             raise CommandError(
                 f'cannot delete card "{deleted_card.name}" because '
-                f"{dependent.operation.title()} revision "
+                f"{dependent.operation_label} revision "
                 f"{dependent.dependent_revision_number} on card "
                 f'"{dependent.dependent_card_name}" derives from it'
             )
@@ -769,7 +769,7 @@ class CreateGeneratedRevisionCommand:
 
 @dataclass(frozen=True, slots=True)
 class CreateRefinedRevisionCommand:
-    """Append and activate one complete Refine result derived from a source."""
+    """Append and activate one complete Reinterpret result derived from a source."""
 
     card_id: UUID
     source_revision_id: UUID
@@ -783,7 +783,7 @@ class CreateRefinedRevisionCommand:
             source_revision_id=self.source_revision_id,
             background=self.background,
             new_revision_id=self.new_revision_id,
-            operation="Refine",
+            operation="Reinterpret",
         )
 
 
@@ -859,7 +859,7 @@ class DeleteRevisionCommand:
             dependent = dependencies[0]
             raise CommandError(
                 "cannot delete this source revision because "
-                f"{dependent.operation.title()} revision "
+                f"{dependent.operation_label} revision "
                 f"{dependent.dependent_revision_number} on card "
                 f'"{dependent.dependent_card_name}" derives from it'
             )
@@ -900,7 +900,7 @@ class ReplaceRevisionBackgroundCommand:
                 dependent = dependencies[0]
                 raise CommandError(
                     "cannot replace this source background because "
-                    f"{dependent.operation.title()} revision "
+                    f"{dependent.operation_label} revision "
                     f"{dependent.dependent_revision_number} on card "
                     f'"{dependent.dependent_card_name}" derives from it'
                 )

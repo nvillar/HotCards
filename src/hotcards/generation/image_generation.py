@@ -6,40 +6,12 @@ from collections.abc import Sequence
 
 from hotcards.domain.models import (
     AcceptedEdit,
-    EditPreserveOptions,
     GenerateInputs,
     StyleSnapshot,
 )
 
 DIRECT_GENERATION_PROMPT_VERSION = "direct-generation-v1"
 EDIT_PROMPT_TOKEN_BUDGET = 512
-
-_EDIT_PRESERVE_CLAUSES = (
-    (
-        "subject_identity",
-        "Preserve the recognizable identity and appearance of existing subjects.",
-    ),
-    (
-        "pose_and_expression",
-        "Preserve poses, gestures, gaze, and facial expressions.",
-    ),
-    (
-        "composition_and_framing",
-        "Preserve viewpoint, perspective, placement, crop, and framing.",
-    ),
-    (
-        "background",
-        "Preserve the existing background and environment.",
-    ),
-    (
-        "lighting_and_color",
-        "Preserve lighting, shadows, contrast, and overall color treatment.",
-    ),
-    (
-        "existing_text_and_logos",
-        "Preserve visible text, lettering, symbols, and logos.",
-    ),
-)
 
 
 def _with_sentence_boundary(value: str) -> str:
@@ -93,34 +65,22 @@ def compose_refine_prompt(
     return "\n\n".join(parts)
 
 
-def compose_edit_prompt(
-    instruction: str,
-    preserve: EditPreserveOptions,
-) -> str:
-    """Build the exact deterministic Flux Edit prompt in canonical order."""
+def compose_edit_prompt(instruction: str) -> str:
+    """Build the exact deterministic minimal-change Flux Edit prompt."""
     normalized_instruction = instruction.strip()
     if not normalized_instruction:
         raise ValueError("enter an Edit Instruction before editing")
-    sections = [
-        "Edit the provided image according to this instruction:"
-        f"\n\n{normalized_instruction}"
-    ]
-    constraints = [
-        clause
-        for field_name, clause in _EDIT_PRESERVE_CLAUSES
-        if getattr(preserve, field_name)
-    ]
-    if constraints:
-        sections.append(
-            "Preserve the following properties except where changing them is "
-            "explicitly required by the edit instruction:\n"
-            + "\n".join(f"- {constraint}" for constraint in constraints)
+    return "\n\n".join(
+        (
+            f"Edit the provided image according to this instruction:\n\n{normalized_instruction}",
+            "The source image is authoritative for everything not explicitly "
+            "changed by the instruction. Make only the requested change and the "
+            "minimum accompanying changes necessary for visual coherence. Preserve "
+            "all other subjects, identities, objects, text, composition, framing, "
+            "background, lighting, colors, and visual style. Do not add, remove, or "
+            "reinterpret unrelated details.",
         )
-    sections.append(
-        "Make only the changes required by the edit instruction. Preserve all "
-        "other details."
     )
-    return "\n\n".join(sections)
 
 
 __all__ = [

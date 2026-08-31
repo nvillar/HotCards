@@ -271,9 +271,9 @@ def _dispose_owned_private_file(
                 dir_fd=parent_fd,
                 follow_symlinks=False,
             )
-            if (
-                not stat.S_ISREG(current.st_mode)
-                or (current.st_dev, current.st_ino) != (device, inode)
+            if not stat.S_ISREG(current.st_mode) or (current.st_dev, current.st_ino) != (
+                device,
+                inode,
             ):
                 return False
             quarantine_name = f".refine-cleanup-{uuid4()}"
@@ -338,7 +338,7 @@ def _require_image_asset_unchanged_at(
     *,
     card_id: UUID,
     asset_id: UUID,
-    operation: str = "Refine",
+    operation: str = "Reinterpret",
 ) -> None:
     source_path = _relative_asset_path(snapshot.relative_path)
     expected_path = _image_asset_path(card_id, asset_id)
@@ -363,9 +363,7 @@ def _require_image_asset_unchanged_at(
         descriptors.callback(os.close, source_fd)
         source_stat = os.fstat(source_fd)
         if not stat.S_ISREG(source_stat.st_mode):
-            raise StackStoreError(
-                f"Refine source is no longer a regular file: {source_path}"
-            )
+            raise StackStoreError(f"{operation} source is no longer a regular file: {source_path}")
         if (
             card_stat.st_dev,
             card_stat.st_ino,
@@ -381,9 +379,7 @@ def _require_image_asset_unchanged_at(
             snapshot.source_size,
             snapshot.source_sha256,
         ):
-            raise StackStoreError(
-                f"the current image changed while {operation} was running"
-            )
+            raise StackStoreError(f"the current image changed while {operation} was running")
         current_fd = os.open(
             source_path.name,
             _secure_open_flags(),
@@ -402,9 +398,7 @@ def _require_image_asset_unchanged_at(
             snapshot.source_size,
             snapshot.source_sha256,
         ):
-            raise StackStoreError(
-                f"the current image changed while {operation} was running"
-            )
+            raise StackStoreError(f"the current image changed while {operation} was running")
 
 
 def _open_matching_directory_at(
@@ -965,9 +959,7 @@ class StackStore:
                 descriptors.callback(os.close, source_fd)
                 before = os.fstat(source_fd)
                 if not stat.S_ISREG(before.st_mode):
-                    raise StackStoreError(
-                        f"source image is not a regular file: {source_path}"
-                    )
+                    raise StackStoreError(f"source image is not a regular file: {source_path}")
                 dimensions = _validate_png_fd(source_fd, source_path.as_posix())
                 after = os.fstat(source_fd)
                 if (
@@ -1142,7 +1134,7 @@ class StackStore:
         card_id: UUID,
         asset_id: UUID,
     ) -> None:
-        """Reject a Refine result when its logical source image changed."""
+        """Reject a Reinterpret result when its logical source image changed."""
         try:
             with ExitStack() as descriptors:
                 bundle_fd = os.open(
@@ -1160,7 +1152,8 @@ class StackStore:
             raise
         except OSError as error:
             raise StackStoreError(
-                f"the current image changed or became unavailable while Refine was running: {error}"
+                "the current image changed or became unavailable while "
+                f"Reinterpret was running: {error}"
             ) from error
 
     @_serialized_bundle_mutation
@@ -1301,7 +1294,7 @@ class StackStore:
         expected_source_snapshot: StoredImageSnapshot | None = None,
         expected_source_card_id: UUID | None = None,
         expected_source_asset_id: UUID | None = None,
-        expected_source_operation: str = "Refine",
+        expected_source_operation: str = "Reinterpret",
     ) -> StoredImageAsset:
         """Atomically import one PNG and commit the manifest that references it."""
         return self._store_image_asset_and_save(
@@ -1334,7 +1327,7 @@ class StackStore:
         expected_source_snapshot: StoredImageSnapshot | None = None,
         expected_source_card_id: UUID | None = None,
         expected_source_asset_id: UUID | None = None,
-        expected_source_operation: str = "Refine",
+        expected_source_operation: str = "Reinterpret",
     ) -> StoredImageAsset:
         if (source_relative_path is None) == (source_file_path is None):
             raise StackStoreError("exactly one image source must be provided")
@@ -1347,8 +1340,7 @@ class StackStore:
             value is None for value in expected_source_values
         ):
             raise StackStoreError(
-                "expected image-operation source snapshot and IDs must be "
-                "provided together"
+                "expected image-operation source snapshot and IDs must be provided together"
             )
         source_path: PurePosixPath | None = None
         if source_relative_path is not None:

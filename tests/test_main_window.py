@@ -54,7 +54,6 @@ from hotcards.domain.models import (
     CardRevision,
     CurrentSourceSize,
     DirectGenerateProvenance,
-    EditPreserveOptions,
     GeneratedBackground,
     GenerateInputs,
     HotspotConditions,
@@ -161,7 +160,7 @@ class FakeBackgroundWorkflow(QObject):
         self.active_operation: str | None = None
         self.generate_calls: list[object] = []
         self.refine_calls: list[tuple[object, object, object]] = []
-        self.edit_calls: list[tuple[object, object, object, object]] = []
+        self.edit_calls: list[tuple[object, object, object]] = []
         self.clear_calls: list[object] = []
         self.cancel_calls = 0
         self.closed = False
@@ -183,10 +182,9 @@ class FakeBackgroundWorkflow(QObject):
         card_id: object,
         *,
         instruction: object,
-        preserve: object,
         output_size: object,
     ) -> None:
-        self.edit_calls.append((card_id, instruction, preserve, output_size))
+        self.edit_calls.append((card_id, instruction, output_size))
 
     def clear_background(self, card_id: object) -> None:
         self.clear_calls.append(card_id)
@@ -511,13 +509,16 @@ def test_hotspot_rule_editor_scrolls_without_growing_the_window(
         Stack(name="Demo", keys=keys, cards=(card,))
     )
     window.inspector.inspector_tabs.setCurrentIndex(window.inspector._hotspots_tab_index)
-    window.resize(1180, 760)
+    window.resize(1180, 700)
     window.show()
     application.processEvents()
     try:
-        assert window.minimumSizeHint().height() <= 760
-        assert window.height() == 760
-        assert window.inspector.hotspot_rule_scroll.verticalScrollBar().maximum() > 0
+        assert window.minimumSizeHint().height() <= 700
+        assert window.height() == 700
+        assert window.inspector.hotspot_scroll.verticalScrollBar().maximum() > 0
+        assert window.card_sidebar.card_list.geometry().right() == (
+            window.card_sidebar.add_button.geometry().right()
+        )
     finally:
         window.close()
         application.processEvents()
@@ -531,6 +532,7 @@ def test_hotspot_rule_editor_scrolls_without_growing_the_window(
     )
     assert window.overlay_label.text() == "Hotspots"
     assert window.toolbar_leading_spacer.width() == 8
+    assert window.toolbar_trailing_spacer.width() == window.toolbar_leading_spacer.width()
     assert window.mode_button.text() == "Run"
     assert window.mode_button.toolTip() == "Switch to Run mode"
     toolbar_actions = window.authoring_toolbar.actions()
@@ -557,6 +559,9 @@ def test_hotspot_rule_editor_scrolls_without_growing_the_window(
     )
     assert toolbar_actions.index(window.styles_button_action) < (
         toolbar_actions.index(window.keys_button_action)
+    )
+    assert toolbar_actions.index(window.keys_button_action) < (
+        toolbar_actions.index(window.toolbar_trailing_spacer_action)
     )
     assert window.back_button.font().pointSizeF() == (window.mode_button.font().pointSizeF())
     assert window.restart_button.font().pointSizeF() == (window.mode_button.font().pointSizeF())
@@ -590,7 +595,8 @@ def test_hotspot_rule_editor_scrolls_without_growing_the_window(
         central_layout.indexOf(window.notification_bar)
     )
     assert window.inspector.inspector_tabs.tabText(0) == "Generate"
-    assert window.fit_canvas_button.size() == window.clear_background_button.size()
+    assert not hasattr(window, "fit_canvas_button")
+    assert not hasattr(window, "clear_background_button")
 
 
 def test_card_browser_uses_thumbnails_and_compact_action_row(
@@ -621,6 +627,10 @@ def test_card_browser_uses_thumbnails_and_compact_action_row(
     assert icon.size() == QSize(72, 48)
     assert icon.toImage().pixelColor(10, 10) == QColor("red")
     assert not sidebar.start_button.icon().isNull()
+    duplicate_icon = sidebar.duplicate_button.icon().pixmap(QSize(20, 20)).toImage()
+    assert duplicate_icon.pixelColor(4, 4).alpha() > 0
+    assert duplicate_icon.pixelColor(11, 11).alpha() == 0
+    assert duplicate_icon.pixelColor(16, 16).alpha() > 0
     assert sidebar.start_button.toolTip() == ("Make the selected card the start card")
     assert sidebar.add_button.toolTip() == "Add a new card"
     assert sidebar.duplicate_button.toolTip() == "Duplicate the selected card"
@@ -791,7 +801,6 @@ def test_pending_duplicate_durability_blocks_ui_until_save_retry(
     assert window.canvas_card_name.isReadOnly()
     assert not window.revision_combo.isEnabled()
     assert not window.add_revision_button.isEnabled()
-    assert not window.clear_background_button.isEnabled()
     assert not window.inspector.generate_background_button.isEnabled()
     assert window.card_sidebar.card_list.isEnabled()
     window.card_sidebar.card_list.setCurrentRow(1)
@@ -1893,14 +1902,6 @@ def test_generate_replacement_starts_without_a_second_confirmation(
     )
     window.render_document()
     assert window.inspector.generate_background_button.text() == ("Re-generate Image")
-    assert window.clear_background_button.isEnabled()
-    assert window.clear_background_button.text() == ""
-    assert not window.clear_background_button.icon().isNull()
-    assert window.canvas_fit_controls.indexOf(window.clear_background_button) == (
-        window.canvas_fit_controls.indexOf(window.fit_canvas_button) + 1
-    )
-    window.clear_background_button.click()
-    assert background.clear_calls == [card_id]
 
     window._generate_background()
     assert background.generate_calls == [card_id, card_id]
@@ -1964,12 +1965,14 @@ def test_refine_tab_wires_current_image_options_and_cancels_live_changes(
     window._availability[AdapterKind.MFLUX] = True
     window._update_generation_actions()
 
-    assert window.inspector.inspector_tabs.tabText(1) == "Refine"
+    assert window.inspector.inspector_tabs.tabText(1) == "Transform"
     assert window.inspector.refine_background_button.isEnabled()
     assert window.inspector.refine_resolution_combo.currentData() == CurrentSourceSize(
         width=512, height=384
     )
-    assert "512 × 384" in window.inspector.refine_background_button.toolTip()
+    assert window.inspector.refine_background_button.toolTip() == (
+        "Create a new version using the current image, Description."
+    )
     window.inspector.refine_background_button.click()
     assert background.refine_calls == [
         (
@@ -1982,7 +1985,7 @@ def test_refine_tab_wires_current_image_options_and_cancels_live_changes(
     background.busy = True
     background.active_operation = "refine"
     window._update_generation_actions()
-    assert window.inspector.refine_background_button.text() == "Refining…"
+    assert window.inspector.refine_background_button.text() == "Reinterpreting…"
     assert not window.inspector.generate_background_button.isEnabled()
     assert not window.image_model_combo.isEnabled()
     window.inspector.refine_transformation_combo.setCurrentIndex(
@@ -2046,25 +2049,18 @@ def test_edit_tab_wires_current_image_defaults_errors_and_cancellation(
     window._availability[AdapterKind.MFLUX] = True
     window._update_generation_actions()
 
-    assert window.inspector.inspector_tabs.tabText(2) == "Edit"
+    assert window.inspector.inspector_tabs.tabText(1) == "Transform"
     assert not window.inspector.edit_background_button.isEnabled()
     assert window.inspector.edit_resolution_combo.count() == 1
-    assert window.inspector.edit_resolution_combo.itemText(0) == (
-        "Full — 1024 × 768 (Current image)"
-    )
+    assert window.inspector.edit_resolution_combo.itemText(0) == "Full"
     window.inspector.edit_instruction_edit.setPlainText("Open the gate.")
     assert window.inspector.edit_background_button.isEnabled()
     window.inspector.edit_background_button.click()
 
     assert len(background.edit_calls) == 1
-    card_id, instruction, preserve, output_size = background.edit_calls[0]
+    card_id, instruction, output_size = background.edit_calls[0]
     assert card_id == card.id
     assert instruction == "Open the gate."
-    assert preserve == EditPreserveOptions(
-        subject_identity=True,
-        pose_and_expression=True,
-        composition_and_framing=True,
-    )
     assert output_size == CurrentSourceSize(width=1024, height=768)
 
     background.busy = True
@@ -2072,7 +2068,7 @@ def test_edit_tab_wires_current_image_defaults_errors_and_cancellation(
     window._update_generation_actions()
     assert window.inspector.edit_background_button.text() == "Editing…"
     assert not window.inspector.generate_background_button.isEnabled()
-    window.inspector.edit_preserve_checkboxes["background"].click()
+    window.inspector.edit_instruction_edit.setPlainText("Close the gate.")
     assert background.cancel_calls == 1
 
     window.inspector.edit_instruction_edit.setPlainText("Keep this draft.")

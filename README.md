@@ -48,15 +48,15 @@ bundle transaction. Undo/Redo history retains the independent bytes only while
 needed to restore the duplicate, and discarding that history reclaims the
 unreferenced duplicate-owned asset without collecting unrelated bundle files.
 
-The inspector tabs are Generate, Refine, Edit, and Hotspots. Generate
-follows the authoring sequence Description, Style, optional References,
-Resolution, then Generate Image. Resolution labels show the exact output width
-and height for the stack format. All three image-operation selectors annotate
-the current image when its decoded size matches a named tier, or insert one
-selectable exact current-size row for an aligned nonstandard size. Generate
-still offers every named tier and keeps its next-output selection independent
-from the current-image annotation. Generate requires a nonempty Description and
-an available MFLUX model. The exact effective prompt is composed
+The inspector tabs are Generate, Transform, and Hotspots. Transform contains
+compact stacked Reinterpret and Edit sections. Generate follows the authoring
+sequence Description, Style, optional References, Resolution, then Generate
+Image. Resolution selectors show only named tiers, with exact dimensions in
+tooltips, and select the current image size when entering a card or revision. A
+compatible aligned nonstandard image uses a selectable Current row. Generate
+offers every named tier. Reinterpret and Edit offer only the current size and higher
+tiers. Generate requires a nonempty Description and an available MFLUX model.
+The exact effective prompt is composed
 deterministically from the Description followed by the selected Style text; no
 language model prepares or rewrites it.
 
@@ -69,28 +69,27 @@ snapshots, Style ID/name/text, and composed render prompt are retained in
 generated-image provenance.
 
 Image provenance is a strict typed operation record for direct Generate,
-externally patched historical Generate, Refine, Edit, or an independent card
-duplicate. Duplicate provenance records its immediate source and a flattened
-snapshot of the original image operation without retaining a live source
-dependency. Provenance retains exact
+externally patched historical Generate, Reinterpret (stored as `refine`), Edit,
+or an independent card duplicate. Duplicate provenance records its immediate
+source and a flattened snapshot of the original image operation without
+retaining a live source dependency. Provenance retains exact
 prompts, model execution settings, seed, and actual output width and height;
 derived operations also identify their source revision and background. A source
 revision cannot be deleted or have its background replaced while another
 retained revision derives from it. Deleting an entire card may remove an
 image-evolution chain contained wholly inside that card.
 
-The production MFLUX 0.19.1 adapter routes plain Generate and Refine through
+The production MFLUX 0.19.1 adapter routes plain Generate and Reinterpret through
 the regular model family, and Reference-backed Generate and Edit through the
 Edit family. Model loading and inference share one process-local serialized
 boundary with at most one compatible cached family/configuration. Cancellation
 discards candidate output, and changing the selected model releases the prior
 configuration.
 
-Refine is exposed as an automatic-version workflow for the current canvas
-image. It uses regular Flux2Klein img2img with Reimagine 0.25, Balanced 0.50,
-or Preserve 0.75 transformation strength and reuses the current image's seed.
-Output defaults to the decoded current size and offers every named tier, so a
-Refine can reinterpret at the same size or render smaller or larger. The
+Reinterpret is exposed as an automatic-version workflow for the current canvas
+image. Its Source Similarity choices are Reimagine, Balanced, and Preserve,
+with per-choice guidance, and it reuses the current image's seed. Output
+defaults to the decoded current size and offers only higher named tiers. The
 current background is the sole image input; Generate
 References are never resent. Its deterministic prompt contains the current
 Description, selected Style, and any ordered accepted Edit instructions already
@@ -101,15 +100,17 @@ rollback-safe transaction, and Undo/Redo retain its owned asset only while
 needed.
 
 Edit is also an automatic-version workflow for the current canvas image. It
-sends that image alone to Flux2KleinEdit with the authored Edit Instruction and
-six explicit Preserve choices; Description, Style, and Generate References are
-copied into the new revision but are not model inputs. The expanded prompt is
-deterministic and must fit the model's 512-token budget without truncation.
+sends that image alone to Flux2KleinEdit with the authored Edit Instruction.
+The source image is authoritative: only the requested change and the minimum
+accompanying changes needed for visual coherence should be made, while all
+unrelated details are preserved. Description, Style, and Generate References
+are copied into the new revision but are not model inputs. The expanded prompt
+is deterministic and must fit the model's 512-token budget without truncation.
 Output defaults to the current image's exact decoded dimensions, including
 aligned non-preset sizes, and also offers only named tiers with strictly greater
 pixel area. Each Edit
 uses a fresh seed and appends its accepted instruction to ordered provenance
-lineage. Later Refine operations preserve that lineage unless it conflicts with
+lineage. Later Reinterpret operations preserve that lineage unless it conflicts with
 the current authoritative Description; Generate ignores it.
 
 Generated images are the only supported background source. Generate and image
@@ -159,8 +160,9 @@ background preserves its hotspots so the author can review and adjust them
 manually. Complete backgrounds at different pixel resolutions are smoothly
 fitted and centered inside the stack's fixed logical card format without
 stretching or cropping; narrow rounding differences use letterboxing or
-pillarboxing. Normalized hotspot geometry follows the fitted image bounds in
-Author and Run modes.
+pillarboxing. The canvas remains automatically fitted without zoom, pan, manual
+fit, or image-clear controls. Normalized hotspot geometry follows the fitted
+image bounds in Author and Run modes.
 
 Run mode keeps its current keys only in the session. It starts empty, Back
 retains keys, Restart clears them, and leaving Run discards them. Condition-

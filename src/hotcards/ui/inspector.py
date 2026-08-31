@@ -11,9 +11,9 @@ from PySide6.QtGui import QFocusEvent, QStandardItemModel
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
-    QCheckBox,
     QComboBox,
     QFrame,
+    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QInputDialog,
@@ -65,8 +65,6 @@ from hotcards.domain.models import (
     CardRevision,
     CurrentSourceSize,
     EditOutputSize,
-    EditPreserveOptions,
-    EditProvenance,
     ExactOutputSize,
     GenerateOutputSize,
     HotspotConditions,
@@ -77,13 +75,7 @@ from hotcards.domain.models import (
     ResolvedCardReference,
     Stack,
     UnresolvedCardReference,
-    image_edit_lineage,
-    original_image_provenance,
     selected_output_dimensions,
-)
-from hotcards.generation.image_generation import (
-    EDIT_PROMPT_TOKEN_BUDGET,
-    compose_edit_prompt,
 )
 
 
@@ -124,22 +116,10 @@ def _configure_rule_table(
     table.setFrameShape(QFrame.Shape.NoFrame)
 
 
-def _rule_panel(object_name: str) -> tuple[QFrame, QVBoxLayout]:
-    panel = QFrame()
+def _rule_panel(object_name: str) -> tuple[QGroupBox, QVBoxLayout]:
+    panel = QGroupBox()
     panel.setObjectName(object_name)
-    panel.setFrameShape(QFrame.Shape.StyledPanel)
-    panel.setStyleSheet(
-        f"""
-        QFrame#{object_name} {{
-            background-color: palette(base);
-            border: 1px solid palette(mid);
-            border-radius: 4px;
-        }}
-        """
-    )
     layout = QVBoxLayout(panel)
-    layout.setContentsMargins(8, 8, 8, 8)
-    layout.setSpacing(8)
     return panel, layout
 
 
@@ -189,15 +169,21 @@ def _centered_cell_widget(widget: QWidget) -> QWidget:
     return container
 
 
-def _tier_label(
-    tier: ResolutionTier,
-    aspect_ratio: AspectRatio,
-    *,
-    current: bool = False,
-) -> str:
-    width, height = output_dimensions(tier, aspect_ratio)
-    suffix = " (Current image)" if current else ""
-    return f"{tier.label} — {width} × {height}{suffix}"
+_SOURCE_SIMILARITY_TOOLTIPS = {
+    RefineTransformation.REIMAGINE: (
+        "Give the Description the most freedom to change the current image's "
+        "content and composition."
+    ),
+    RefineTransformation.BALANCED: ("Balance the Description with the current image."),
+    RefineTransformation.PRESERVE: (
+        "Keep the current image's content and composition as close as possible "
+        "while applying the Description."
+    ),
+}
+
+
+def _tier_label(tier: ResolutionTier) -> str:
+    return tier.label
 
 
 def _current_tier(
@@ -243,17 +229,32 @@ def _exact_size_error(
     return None
 
 
-def _disable_combo_item(
+def _add_resolution_item(
     combo: QComboBox,
-    index: int,
-    tooltip: str,
+    *,
+    label: str,
+    value: object,
+    dimensions: tuple[int, int],
+    unavailable_reason: str | None = None,
 ) -> None:
+    combo.addItem(label, value)
     model = combo.model()
-    if isinstance(model, QStandardItemModel):
-        item = model.item(index)
-        if item is not None:
-            item.setEnabled(False)
-            item.setToolTip(tooltip)
+    if not isinstance(model, QStandardItemModel):
+        return
+    item = model.item(combo.count() - 1)
+    if item is None:
+        return
+    dimensions_text = f"{dimensions[0]} × {dimensions[1]}"
+    if unavailable_reason is None:
+        item.setToolTip(dimensions_text)
+        return
+    item.setEnabled(False)
+    item.setToolTip(f"{dimensions_text}\nUnavailable: {unavailable_reason}")
+
+
+def _sync_combo_tooltip(combo: QComboBox) -> None:
+    tooltip = combo.itemData(combo.currentIndex(), Qt.ItemDataRole.ToolTipRole)
+    combo.setToolTip(tooltip if isinstance(tooltip, str) else "")
 
 
 def _first_selectable_combo_index(combo: QComboBox) -> int:
@@ -273,7 +274,7 @@ class Inspector(QWidget):
     document_changed = Signal(object)
     generate_background_requested = Signal()
     refine_background_requested = Signal(object, object)
-    edit_background_requested = Signal(str, object, object)
+    edit_background_requested = Signal(str, object)
     hotspot_selected = Signal(object)
     change_applied = Signal(str, object)
     render_inputs_changed = Signal()
@@ -319,8 +320,7 @@ class Inspector(QWidget):
         root.addWidget(self.pages, 1)
 
         self._build_background_tab()
-        self._build_refine_tab()
-        self._build_edit_tab()
+        self._build_transform_tab()
         self._build_hotspots_tab()
         self._connect_signals()
 
@@ -425,24 +425,36 @@ class Inspector(QWidget):
         scroll.setWidget(page)
         self.inspector_tabs.addTab(scroll, "Generate")
 
-    def _build_refine_tab(self) -> None:
+    def _build_transform_tab(self) -> None:
         scroll = QScrollArea()
-        scroll.setObjectName("refineInspectorTab")
+        scroll.setObjectName("transformInspectorTab")
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         page = QWidget()
-        page.setObjectName("refineInspectorContent")
+        page.setObjectName("transformInspectorContent")
         layout = QVBoxLayout(page)
 
-        self.refine_transformation_label = QLabel("Transformation")
-        layout.addWidget(self.refine_transformation_label)
+        self.reinterpret_section_label = QLabel("Reinterpret")
+        self.reinterpret_section_label.setObjectName("reinterpretSectionLabel")
+        layout.addWidget(self.reinterpret_section_label)
+        refine_group = QGroupBox()
+        refine_group.setObjectName("refineTransformGroup")
+        refine_layout = QVBoxLayout(refine_group)
+
+        self.refine_transformation_label = QLabel("Source Similarity")
+        refine_layout.addWidget(self.refine_transformation_label)
         self.refine_transformation_combo = QComboBox()
         self.refine_transformation_combo.setObjectName("refineTransformationCombo")
-        self.refine_transformation_combo.setAccessibleName("Refine transformation")
+        self.refine_transformation_combo.setAccessibleName("Reinterpret source similarity")
         for transformation in RefineTransformation:
             self.refine_transformation_combo.addItem(
-                f"{transformation.value.title()} ({transformation.strength:.2f})",
+                transformation.value.title(),
                 transformation,
+            )
+            self.refine_transformation_combo.setItemData(
+                self.refine_transformation_combo.count() - 1,
+                _SOURCE_SIMILARITY_TOOLTIPS[transformation],
+                Qt.ItemDataRole.ToolTipRole,
             )
         self.refine_transformation_combo.setCurrentIndex(
             self._combo_index_for_data(
@@ -450,109 +462,80 @@ class Inspector(QWidget):
                 RefineTransformation.BALANCED,
             )
         )
-        layout.addWidget(self.refine_transformation_combo)
+        _sync_combo_tooltip(self.refine_transformation_combo)
+        refine_layout.addWidget(self.refine_transformation_combo)
 
-        layout.addSpacing(8)
-        self.refine_resolution_label = QLabel("Output Resolution")
-        layout.addWidget(self.refine_resolution_label)
+        self.refine_resolution_label = QLabel("Resolution")
+        refine_layout.addWidget(self.refine_resolution_label)
         self.refine_resolution_combo = QComboBox()
         self.refine_resolution_combo.setObjectName("refineResolutionCombo")
-        self.refine_resolution_combo.setAccessibleName("Refine output resolution")
-        layout.addWidget(self.refine_resolution_combo)
+        self.refine_resolution_combo.setAccessibleName("Reinterpret resolution")
+        refine_layout.addWidget(self.refine_resolution_combo)
         self.refine_error = QLabel()
         self.refine_error.setObjectName("refineValidationError")
         self.refine_error.setWordWrap(True)
         self.refine_error.setVisible(False)
-        layout.addWidget(self.refine_error)
+        refine_layout.addWidget(self.refine_error)
+
+        self.refine_background_button = QPushButton("Reinterpret")
+        self.refine_background_button.setObjectName("refineBackgroundButton")
+        refine_layout.addWidget(self.refine_background_button)
+        self._focus_commit_targets.add(self.refine_background_button)
+        layout.addWidget(refine_group)
 
         layout.addSpacing(8)
-        self.refine_background_button = QPushButton("Refine")
-        self.refine_background_button.setObjectName("refineBackgroundButton")
-        layout.addWidget(self.refine_background_button)
-        self._focus_commit_targets.add(self.refine_background_button)
-        layout.addStretch(1)
-
-        scroll.setWidget(page)
-        self._refine_tab_index = self.inspector_tabs.addTab(scroll, "Refine")
-
-    def _build_edit_tab(self) -> None:
-        scroll = QScrollArea()
-        scroll.setObjectName("editInspectorTab")
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        page = QWidget()
-        page.setObjectName("editInspectorContent")
-        layout = QVBoxLayout(page)
-
+        self.edit_section_label = QLabel("Edit")
+        self.edit_section_label.setObjectName("editSectionLabel")
+        layout.addWidget(self.edit_section_label)
+        edit_group = QGroupBox()
+        edit_group.setObjectName("editTransformGroup")
+        edit_layout = QVBoxLayout(edit_group)
         self.edit_instruction_label = QLabel("Edit Instruction")
-        layout.addWidget(self.edit_instruction_label)
+        edit_layout.addWidget(self.edit_instruction_label)
         self.edit_instruction_edit = QPlainTextEdit()
         self.edit_instruction_edit.setObjectName("editInstructionEdit")
         self.edit_instruction_edit.setAccessibleName("Edit Instruction")
-        self.edit_instruction_edit.setPlaceholderText("Describe only the change to make")
+        self.edit_instruction_edit.setPlaceholderText(
+            "Describe the change to make, everything else will be preserved"
+        )
         self.edit_instruction_edit.setMaximumHeight(110)
-        layout.addWidget(self.edit_instruction_edit)
+        edit_layout.addWidget(self.edit_instruction_edit)
         self.edit_instruction_error = QLabel()
         self.edit_instruction_error.setObjectName("editInstructionValidationError")
         self.edit_instruction_error.setWordWrap(True)
         self.edit_instruction_error.setVisible(False)
-        layout.addWidget(self.edit_instruction_error)
+        edit_layout.addWidget(self.edit_instruction_error)
 
-        layout.addSpacing(8)
-        self.edit_preserve_label = QLabel("Preserve")
-        layout.addWidget(self.edit_preserve_label)
-        preserve_fields = (
-            ("subject_identity", "Subject identity", True),
-            ("pose_and_expression", "Pose and expression", True),
-            (
-                "composition_and_framing",
-                "Composition and framing",
-                True,
-            ),
-            ("background", "Background", False),
-            ("lighting_and_color", "Lighting and color", False),
-            (
-                "existing_text_and_logos",
-                "Existing text and logos",
-                False,
-            ),
-        )
-        self.edit_preserve_checkboxes: dict[str, QCheckBox] = {}
-        for field_name, label, selected in preserve_fields:
-            checkbox = QCheckBox(label)
-            checkbox.setObjectName(
-                "editPreserve" + "".join(part.title() for part in field_name.split("_"))
-            )
-            checkbox.setChecked(selected)
-            self.edit_preserve_checkboxes[field_name] = checkbox
-            layout.addWidget(checkbox)
-
-        layout.addSpacing(8)
-        self.edit_resolution_label = QLabel("Output Resolution")
-        layout.addWidget(self.edit_resolution_label)
+        self.edit_resolution_label = QLabel("Resolution")
+        edit_layout.addWidget(self.edit_resolution_label)
         self.edit_resolution_combo = QComboBox()
         self.edit_resolution_combo.setObjectName("editResolutionCombo")
-        self.edit_resolution_combo.setAccessibleName("Edit output resolution")
-        layout.addWidget(self.edit_resolution_combo)
+        self.edit_resolution_combo.setAccessibleName("Edit resolution")
+        edit_layout.addWidget(self.edit_resolution_combo)
         self.edit_output_error = QLabel()
         self.edit_output_error.setObjectName("editOutputValidationError")
         self.edit_output_error.setWordWrap(True)
         self.edit_output_error.setVisible(False)
-        layout.addWidget(self.edit_output_error)
+        edit_layout.addWidget(self.edit_output_error)
 
-        layout.addSpacing(8)
         self.edit_background_button = QPushButton("Edit")
         self.edit_background_button.setObjectName("editBackgroundButton")
-        layout.addWidget(self.edit_background_button)
+        edit_layout.addWidget(self.edit_background_button)
         self._focus_commit_targets.add(self.edit_background_button)
+        layout.addWidget(edit_group)
         layout.addStretch(1)
 
         scroll.setWidget(page)
-        self._edit_tab_index = self.inspector_tabs.addTab(scroll, "Edit")
+        self._transform_tab_index = self.inspector_tabs.addTab(scroll, "Transform")
 
     def _build_hotspots_tab(self) -> None:
+        scroll = QScrollArea()
+        scroll.setObjectName("hotspotsInspectorTab")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         page = QWidget()
-        page.setObjectName("hotspotsInspectorTab")
+        page.setObjectName("hotspotsInspectorContent")
         layout = QVBoxLayout(page)
 
         self.hotspots_placeholder = QLabel("No hotspots yet.")
@@ -561,7 +544,8 @@ class Inspector(QWidget):
         self.hotspot_list = QListWidget()
         self.hotspot_list.setObjectName("hotspotList")
         self.hotspot_list.setWordWrap(True)
-        layout.addWidget(self.hotspot_list, 1)
+        self.hotspot_list.setFixedHeight(120)
+        layout.addWidget(self.hotspot_list)
 
         controls = QHBoxLayout()
         self.move_hotspot_up_button = _compact_icon_button(
@@ -625,19 +609,9 @@ class Inspector(QWidget):
         controls.addWidget(self.add_hotspot_button)
         layout.addLayout(controls)
 
-        self.hotspot_rule_scroll = QScrollArea()
-        self.hotspot_rule_scroll.setObjectName("hotspotRuleScroll")
-        self.hotspot_rule_scroll.setWidgetResizable(True)
-        self.hotspot_rule_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self.hotspot_rule_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        rule_content = QWidget()
-        rule_content.setObjectName("hotspotRuleContent")
-        rule_layout = QVBoxLayout(rule_content)
-        rule_layout.setContentsMargins(0, 0, 0, 0)
-
         self.hotspot_when_label = QLabel("When")
         self.hotspot_when_label.setObjectName("hotspotWhenLabel")
-        rule_layout.addWidget(self.hotspot_when_label)
+        layout.addWidget(self.hotspot_when_label)
         self.hotspot_when_panel, when_layout = _rule_panel("hotspotWhenPanel")
         self.condition_table = QTableWidget(0, 3)
         self.condition_table.setObjectName("hotspotConditionTable")
@@ -658,11 +632,11 @@ class Inspector(QWidget):
             0,
             Qt.AlignmentFlag.AlignLeft,
         )
-        rule_layout.addWidget(self.hotspot_when_panel)
+        layout.addWidget(self.hotspot_when_panel)
 
         self.hotspot_then_label = QLabel("Then")
         self.hotspot_then_label.setObjectName("hotspotThenLabel")
-        rule_layout.addWidget(self.hotspot_then_label)
+        layout.addWidget(self.hotspot_then_label)
         self.hotspot_then_panel, then_layout = _rule_panel("hotspotThenPanel")
         self.key_change_table = QTableWidget(0, 3)
         self.key_change_table.setObjectName("hotspotKeyChangeTable")
@@ -691,22 +665,17 @@ class Inspector(QWidget):
         self.hotspot_destination_combo.setObjectName("hotspotDestinationCombo")
         self.hotspot_destination_combo.setAccessibleName("Hotspot destination")
         then_layout.addWidget(self.hotspot_destination_combo)
-        rule_layout.addWidget(self.hotspot_then_panel)
-
-        self.hotspot_summary = QLabel()
-        self.hotspot_summary.setObjectName("hotspotSummary")
-        self.hotspot_summary.setWordWrap(True)
-        rule_layout.addWidget(self.hotspot_summary)
+        layout.addWidget(self.hotspot_then_panel)
 
         self.hotspot_error = QLabel()
         self.hotspot_error.setObjectName("hotspotValidationError")
         self.hotspot_error.setWordWrap(True)
         self.hotspot_error.setVisible(False)
-        rule_layout.addWidget(self.hotspot_error)
-        rule_layout.addStretch(1)
-        self.hotspot_rule_scroll.setWidget(rule_content)
-        layout.addWidget(self.hotspot_rule_scroll, 2)
-        self._hotspots_tab_index = self.inspector_tabs.addTab(page, "Hotspots")
+        layout.addWidget(self.hotspot_error)
+        layout.addStretch(1)
+        scroll.setWidget(page)
+        self.hotspot_scroll = scroll
+        self._hotspots_tab_index = self.inspector_tabs.addTab(scroll, "Hotspots")
 
     @property
     def hotspots_active(self) -> bool:
@@ -715,15 +684,13 @@ class Inspector(QWidget):
     def _connect_signals(self) -> None:
         self.description_edit.editing_finished.connect(self._description_editing_finished)
         self.description_edit.textChanged.connect(self._render_inputs_changed)
-        self.generate_background_button.clicked.connect(self.generate_background_requested)
+        self.generate_background_button.clicked.connect(self._request_generate_background)
         self.refine_background_button.clicked.connect(self._request_refine_background)
         self.refine_transformation_combo.currentIndexChanged.connect(
-            lambda _index: self._render_inputs_changed()
+            self._refine_similarity_changed
         )
         self.refine_resolution_combo.currentIndexChanged.connect(self._refine_output_changed)
         self.edit_instruction_edit.textChanged.connect(self._edit_inputs_changed)
-        for checkbox in self.edit_preserve_checkboxes.values():
-            checkbox.toggled.connect(lambda _checked: self._edit_inputs_changed())
         self.edit_resolution_combo.currentIndexChanged.connect(self._edit_output_changed)
         self.edit_background_button.clicked.connect(self._request_edit_background)
         self.style_combo.currentIndexChanged.connect(self._revision_style_changed)
@@ -755,6 +722,10 @@ class Inspector(QWidget):
         self._render_edit_tooltip()
         self.render_inputs_changed.emit()
 
+    def _refine_similarity_changed(self, _index: int) -> None:
+        _sync_combo_tooltip(self.refine_transformation_combo)
+        self._render_inputs_changed()
+
     def _refine_output_changed(self, _index: int) -> None:
         if self._rendering:
             return
@@ -763,6 +734,7 @@ class Inspector(QWidget):
             if fallback >= 0:
                 with QSignalBlocker(self.refine_resolution_combo):
                     self.refine_resolution_combo.setCurrentIndex(fallback)
+        _sync_combo_tooltip(self.refine_resolution_combo)
         self._render_inputs_changed()
 
     def _edit_output_changed(self, _index: int) -> None:
@@ -773,6 +745,7 @@ class Inspector(QWidget):
             if fallback >= 0:
                 with QSignalBlocker(self.edit_resolution_combo):
                     self.edit_resolution_combo.setCurrentIndex(fallback)
+        _sync_combo_tooltip(self.edit_resolution_combo)
         self._edit_inputs_changed()
 
     def _description_editing_finished(
@@ -838,17 +811,20 @@ class Inspector(QWidget):
                 document,
                 revision,
                 source_size=refine_source_size,
+                select_current=not same_revision,
             )
             self._render_description_workflow(document, card, revision)
             self._render_refine(
                 document,
                 revision,
                 source_size=refine_source_size,
+                select_current=not same_revision,
             )
             self._render_edit(
                 document,
                 revision,
                 source_size=refine_source_size,
+                select_current=not same_revision,
             )
             self._render_hotspots(document, revision)
         finally:
@@ -904,14 +880,20 @@ class Inspector(QWidget):
             else ""
         )
         style_suffix = " + Style" if revision.style_id is not None else ""
+        selected_output_size = self.resolution_combo.currentData()
+        if not isinstance(
+            selected_output_size,
+            (PresetOutputSize, ExactOutputSize),
+        ):
+            selected_output_size = revision.generate_output_size
         width, height = selected_output_dimensions(
-            revision.generate_output_size,
+            selected_output_size,
             document.aspect_ratio,
         )
-        if isinstance(revision.generate_output_size, PresetOutputSize):
-            output_label = revision.generate_output_size.tier.label
+        if isinstance(selected_output_size, PresetOutputSize):
+            output_label = selected_output_size.tier.label
         else:
-            output_label = "Exact size"
+            output_label = "Exact"
         self._generate_using_text = (
             f"Using: Description{style_suffix}{reference_suffix}\n"
             f"Resolution: {output_label} ({width} × {height})"
@@ -944,9 +926,9 @@ class Inspector(QWidget):
         busy: bool,
         refining: bool,
     ) -> None:
-        self._refine_reason = refine_reason
+        self._refine_reason = "" if can_refine and not busy else refine_reason
         self.refine_background_button.setEnabled(can_refine and not busy)
-        self.refine_background_button.setText("Refining…" if refining else "Refine")
+        self.refine_background_button.setText("Reinterpreting…" if refining else "Reinterpret")
         self._refresh_generation_tooltips()
 
     def set_edit_capabilities(
@@ -957,7 +939,7 @@ class Inspector(QWidget):
         busy: bool,
         editing: bool,
     ) -> None:
-        self._edit_reason = edit_reason
+        self._edit_reason = "" if can_edit and not busy else edit_reason
         self.edit_background_button.setEnabled(can_edit and not busy)
         self.edit_background_button.setText("Editing…" if editing else "Edit")
         self._refresh_generation_tooltips()
@@ -1147,7 +1129,9 @@ class Inspector(QWidget):
         revision: CardRevision,
         *,
         source_size: tuple[int, int] | None,
+        select_current: bool,
     ) -> None:
+        previous_selection = self.resolution_combo.currentData()
         current_tier = _current_tier(source_size, document.aspect_ratio)
         current_error = _exact_size_error(source_size, document.aspect_ratio)
         rows: list[tuple[str, object, tuple[int, int]]] = []
@@ -1165,11 +1149,7 @@ class Inspector(QWidget):
                 output_size = revision.generate_output_size
             rows.append(
                 (
-                    _tier_label(
-                        tier,
-                        document.aspect_ratio,
-                        current=tier == current_tier,
-                    ),
+                    _tier_label(tier),
                     output_size,
                     dimensions,
                 )
@@ -1192,10 +1172,10 @@ class Inspector(QWidget):
             dimensions = (output_size.width, output_size.height)
             if any(existing[2] == dimensions for existing in rows):
                 continue
-            label = "Current size" if current else "Exact size"
+            label = "Current" if current else "Exact"
             rows.append(
                 (
-                    f"{label} — {output_size.width} × {output_size.height}",
+                    label,
                     output_size,
                     dimensions,
                 )
@@ -1203,35 +1183,59 @@ class Inspector(QWidget):
         if source_size is not None and current_tier is None and current_error is not None:
             rows.append(
                 (
-                    f"Current size — {source_size[0]} × {source_size[1]} (Unavailable)",
+                    "Current",
                     None,
                     source_size,
                 )
             )
+        sorted_rows = _sort_size_rows(rows)
         with QSignalBlocker(self.resolution_combo):
             self.resolution_combo.clear()
-            for label, output_size, _dimensions in _sort_size_rows(rows):
-                self.resolution_combo.addItem(label, output_size)
-                if output_size is None:
-                    _disable_combo_item(
-                        self.resolution_combo,
-                        self.resolution_combo.count() - 1,
-                        f"Unavailable: {current_error}. Choose a named tier.",
-                    )
-            selected_index = self._combo_index_for_data(
-                self.resolution_combo,
-                revision.generate_output_size,
-            )
+            for label, output_size, dimensions in sorted_rows:
+                _add_resolution_item(
+                    self.resolution_combo,
+                    label=label,
+                    value=output_size,
+                    dimensions=dimensions,
+                    unavailable_reason=(
+                        f"{current_error}. Choose a named tier."
+                        if output_size is None and current_error is not None
+                        else None
+                    ),
+                )
+            if select_current and source_size is not None and current_error is None:
+                selected_index = next(
+                    (
+                        index
+                        for index, (_label, output_size, dimensions) in enumerate(sorted_rows)
+                        if output_size is not None and dimensions == source_size
+                    ),
+                    -1,
+                )
+            elif (
+                source_size is not None
+                and isinstance(previous_selection, (PresetOutputSize, ExactOutputSize))
+                and selected_output_dimensions(
+                    previous_selection,
+                    document.aspect_ratio,
+                )
+                == source_size
+            ):
+                selected_index = self._combo_index_for_data(
+                    self.resolution_combo,
+                    previous_selection,
+                )
+            else:
+                selected_index = self._combo_index_for_data(
+                    self.resolution_combo,
+                    revision.generate_output_size,
+                )
             self.resolution_combo.setCurrentIndex(
                 selected_index
                 if selected_index >= 0
                 else _first_selectable_combo_index(self.resolution_combo)
             )
-        self.resolution_combo.setToolTip(
-            f"Current size unavailable: {current_error}. Choose a named tier."
-            if current_error is not None
-            else "Generate output tier or exact current-image size"
-        )
+        _sync_combo_tooltip(self.resolution_combo)
 
     def _revision_resolution_changed(self, index: int) -> None:
         if self._rendering or index < 0:
@@ -1243,6 +1247,7 @@ class Inspector(QWidget):
         if not isinstance(output_size, (PresetOutputSize, ExactOutputSize)):
             self.render(self.controller.document, self.selected_card_id)
             return
+        _sync_combo_tooltip(self.resolution_combo)
         if output_size == card.active_revision.generate_output_size:
             return
         self._render_inputs_changed()
@@ -1251,9 +1256,26 @@ class Inspector(QWidget):
                 card_id=card.id,
                 revision_id=card.active_revision.id,
                 output_size=output_size,
-            ),
-            undo_message="Generate output size changed",
+            )
         )
+
+    def _request_generate_background(self) -> None:
+        card = self._selected_card()
+        output_size = self.resolution_combo.currentData()
+        if card is None or not isinstance(
+            output_size,
+            (PresetOutputSize, ExactOutputSize),
+        ):
+            return
+        if output_size != card.active_revision.generate_output_size and not self._execute(
+            SetRevisionGenerateOutputSizeCommand(
+                card_id=card.id,
+                revision_id=card.active_revision.id,
+                output_size=output_size,
+            )
+        ):
+            return
+        self.generate_background_requested.emit()
 
     def _render_refine(
         self,
@@ -1261,13 +1283,14 @@ class Inspector(QWidget):
         revision: CardRevision,
         *,
         source_size: tuple[int, int] | None,
+        select_current: bool,
     ) -> None:
         previous_selection = self.refine_resolution_combo.currentData()
         self._refine_source_size = source_size
         error = ""
         current_error = _exact_size_error(source_size, document.aspect_ratio)
         if revision.background is None:
-            error = "Generate an image before refining."
+            error = "Generate an image before reinterpreting."
         elif source_size is None:
             error = "The current image is unavailable or unreadable."
         with QSignalBlocker(self.refine_resolution_combo):
@@ -1281,51 +1304,53 @@ class Inspector(QWidget):
                         height=source_size[1],
                     )
                 rows: list[tuple[str, object, tuple[int, int]]] = []
-                for tier in ResolutionTier:
-                    data: object = PresetOutputSize(tier=tier)
-                    if tier == current_tier and current_output_size is not None:
-                        data = current_output_size
+                if current_output_size is not None:
                     rows.append(
                         (
-                            _tier_label(
-                                tier,
-                                document.aspect_ratio,
-                                current=tier == current_tier,
-                            ),
-                            data,
-                            output_dimensions(tier, document.aspect_ratio),
-                        ),
-                    )
-                if current_tier is None:
-                    rows.append(
-                        (
-                            (
-                                f"Current size — {source_size[0]} × "
-                                f"{source_size[1]}"
-                                + (" (Unavailable)" if current_output_size is None else "")
-                            ),
+                            _tier_label(current_tier) if current_tier is not None else "Current",
                             current_output_size,
                             source_size,
                         )
                     )
-                for label, data, _dimensions in _sort_size_rows(rows):
-                    self.refine_resolution_combo.addItem(label, data)
-                    if data is None:
-                        _disable_combo_item(
-                            self.refine_resolution_combo,
-                            self.refine_resolution_combo.count() - 1,
-                            f"Unavailable: {current_error}. Choose a named tier.",
+                elif current_tier is None:
+                    rows.append(
+                        (
+                            "Current",
+                            None,
+                            source_size,
                         )
+                    )
+                rows.extend(
+                    (
+                        _tier_label(tier),
+                        PresetOutputSize(tier=tier),
+                        output_dimensions(tier, document.aspect_ratio),
+                    )
+                    for tier in higher_output_tiers(
+                        source_size[0],
+                        source_size[1],
+                        document.aspect_ratio,
+                    )
+                )
+                for label, data, dimensions in _sort_size_rows(rows):
+                    _add_resolution_item(
+                        self.refine_resolution_combo,
+                        label=label,
+                        value=data,
+                        dimensions=dimensions,
+                        unavailable_reason=(
+                            f"{current_error}. Choose a higher named tier."
+                            if data is None and current_error is not None
+                            else None
+                        ),
+                    )
             use_current = current_output_size is not None and (
-                not isinstance(
+                select_current
+                or not isinstance(
                     previous_selection,
                     (PresetOutputSize, CurrentSourceSize),
                 )
                 or isinstance(previous_selection, CurrentSourceSize)
-                or (
-                    isinstance(previous_selection, PresetOutputSize)
-                    and previous_selection.tier == current_tier
-                )
             )
             selection = (
                 current_output_size
@@ -1350,45 +1375,12 @@ class Inspector(QWidget):
         self.refine_resolution_combo.setEnabled(
             _first_selectable_combo_index(self.refine_resolution_combo) >= 0
         )
-        self.refine_resolution_combo.setToolTip(
-            f"Current size unavailable: {current_error}. Choose a named tier."
-            if current_error is not None
-            else ""
-        )
+        _sync_combo_tooltip(self.refine_resolution_combo)
         self._set_error(self.refine_error, error)
-        output_size = self.refine_resolution_combo.currentData()
-        try:
-            transformation = RefineTransformation(self.refine_transformation_combo.currentData())
-        except (TypeError, ValueError):
-            transformation = None
-        lineage_count = (
-            len(image_edit_lineage(revision.background.provenance))
-            if revision.background is not None
-            else 0
+        style_suffix = ", and Style" if revision.style_id is not None else ""
+        self._refine_using_text = (
+            f"Create a new version using the current image, Description{style_suffix}."
         )
-        style_suffix = " + Style" if revision.style_id is not None else ""
-        lineage_suffix = (
-            f" + {lineage_count} accepted Edit{'s' if lineage_count != 1 else ''}"
-            if lineage_count
-            else ""
-        )
-        using = [
-            f"Using: Current image + Description{style_suffix}{lineage_suffix}",
-        ]
-        if isinstance(transformation, RefineTransformation):
-            using.append(
-                f"Transformation: {transformation.value.title()} ({transformation.strength:.2f})"
-            )
-        if isinstance(output_size, (PresetOutputSize, CurrentSourceSize)):
-            width, height = selected_output_dimensions(
-                output_size,
-                document.aspect_ratio,
-            )
-            if isinstance(output_size, CurrentSourceSize):
-                using.append(f"Resolution: Current image ({width} × {height})")
-            else:
-                using.append(f"Resolution: {output_size.tier.label} ({width} × {height})")
-        self._refine_using_text = "\n".join(using)
         self._refresh_generation_tooltips()
 
     def _request_refine_background(self) -> None:
@@ -1400,14 +1392,14 @@ class Inspector(QWidget):
         if not isinstance(transformation, RefineTransformation):
             self._set_error(
                 self.refine_error,
-                "Select a supported Refine transformation.",
+                "Select a supported Source Similarity.",
             )
             return
         if not isinstance(output_size, (PresetOutputSize, CurrentSourceSize)):
             if not self.refine_error.text():
                 self._set_error(
                     self.refine_error,
-                    "Select a Refine output size.",
+                    "Select a Reinterpret resolution.",
                 )
             return
         self.refine_background_requested.emit(transformation, output_size)
@@ -1418,6 +1410,7 @@ class Inspector(QWidget):
         revision: CardRevision,
         *,
         source_size: tuple[int, int] | None,
+        select_current: bool,
     ) -> None:
         previous_selection = self.edit_resolution_combo.currentData()
         self._edit_source_size = source_size
@@ -1443,40 +1436,38 @@ class Inspector(QWidget):
                     document.aspect_ratio,
                 )
                 if current_tier is None:
-                    self.edit_resolution_combo.addItem(
-                        (
-                            f"Current size — {source_size[0]} × "
-                            f"{source_size[1]}"
-                            + (" (Unavailable)" if current_output_size is None else "")
+                    _add_resolution_item(
+                        self.edit_resolution_combo,
+                        label="Current",
+                        value=current_output_size,
+                        dimensions=source_size,
+                        unavailable_reason=(
+                            f"{current_error}. Choose a higher named tier."
+                            if current_output_size is None and current_error is not None
+                            else None
                         ),
-                        current_output_size,
                     )
-                    if current_output_size is None:
-                        _disable_combo_item(
-                            self.edit_resolution_combo,
-                            self.edit_resolution_combo.count() - 1,
-                            f"Unavailable: {current_error}. Choose a higher named tier.",
-                        )
                 else:
-                    self.edit_resolution_combo.addItem(
-                        _tier_label(
-                            current_tier,
-                            document.aspect_ratio,
-                            current=True,
-                        ),
-                        current_output_size,
+                    _add_resolution_item(
+                        self.edit_resolution_combo,
+                        label=_tier_label(current_tier),
+                        value=current_output_size,
+                        dimensions=source_size,
                     )
                 for tier in higher_output_tiers(
                     source_size[0],
                     source_size[1],
                     document.aspect_ratio,
                 ):
-                    self.edit_resolution_combo.addItem(
-                        _tier_label(tier, document.aspect_ratio),
-                        PresetOutputSize(tier=tier),
+                    _add_resolution_item(
+                        self.edit_resolution_combo,
+                        label=_tier_label(tier),
+                        value=PresetOutputSize(tier=tier),
+                        dimensions=output_dimensions(tier, document.aspect_ratio),
                     )
                 use_current = current_output_size is not None and (
-                    not isinstance(
+                    select_current
+                    or not isinstance(
                         previous_selection,
                         (PresetOutputSize, CurrentSourceSize),
                     )
@@ -1512,21 +1503,9 @@ class Inspector(QWidget):
         self.edit_resolution_combo.setEnabled(
             _first_selectable_combo_index(self.edit_resolution_combo) >= 0
         )
-        self.edit_resolution_combo.setToolTip(
-            (f"Current size unavailable: {current_error}. Choose a higher named tier.")
-            if current_error is not None
-            else ""
-        )
+        _sync_combo_tooltip(self.edit_resolution_combo)
         self._set_error(self.edit_output_error, error)
-        self._render_edit_tooltip(revision=revision)
-
-    def _selected_edit_preserve(self) -> EditPreserveOptions:
-        return EditPreserveOptions(
-            **{
-                field_name: checkbox.isChecked()
-                for field_name, checkbox in self.edit_preserve_checkboxes.items()
-            }
-        )
+        self._render_edit_tooltip()
 
     def _selected_edit_output_size(self) -> EditOutputSize | None:
         selection = self.edit_resolution_combo.currentData()
@@ -1534,60 +1513,8 @@ class Inspector(QWidget):
             return selection
         return None
 
-    def _render_edit_tooltip(
-        self,
-        *,
-        revision: CardRevision | None = None,
-    ) -> None:
-        instruction = self.edit_instruction_edit.toPlainText().strip()
-        preserve = self._selected_edit_preserve()
-        output_size = self._selected_edit_output_size()
-        using = ["Using: Current image only"]
-        if instruction:
-            try:
-                expanded_prompt = compose_edit_prompt(
-                    instruction,
-                    preserve,
-                )
-            except ValueError:
-                expanded_prompt = ""
-            if expanded_prompt:
-                using.append(f"Expanded prompt:\n{expanded_prompt}")
-        selected_labels = [
-            checkbox.text()
-            for checkbox in self.edit_preserve_checkboxes.values()
-            if checkbox.isChecked()
-        ]
-        using.append("Preserve: " + (", ".join(selected_labels) if selected_labels else "None"))
-        if output_size is not None:
-            if isinstance(output_size, CurrentSourceSize):
-                width, height = output_size.width, output_size.height
-                using.append(f"Resolution: Current ({width} x {height})")
-            else:
-                width, height = selected_output_dimensions(
-                    output_size,
-                    self.controller.document.aspect_ratio,
-                )
-                using.append(f"Resolution: {output_size.tier.label} ({width} × {height})")
-        using.append(f"Token budget: {EDIT_PROMPT_TOKEN_BUDGET}")
-        active_revision = revision
-        if active_revision is None:
-            card = self._selected_card()
-            active_revision = card.active_revision if card is not None else None
-        provenance = (
-            active_revision.background.provenance
-            if active_revision is not None and active_revision.background is not None
-            else None
-        )
-        if provenance is not None:
-            provenance = original_image_provenance(provenance)
-        if isinstance(provenance, EditProvenance):
-            using.append(
-                "Last accepted Edit tokens: "
-                f"{provenance.prompt_token_count}/"
-                f"{provenance.prompt_token_budget}"
-            )
-        self._edit_using_text = "\n".join(using)
+    def _render_edit_tooltip(self) -> None:
+        self._edit_using_text = "Create a new version with only the requested change."
         self._refresh_generation_tooltips()
 
     def _request_edit_background(self) -> None:
@@ -1605,12 +1532,10 @@ class Inspector(QWidget):
                 "Select the current size or a higher Edit output tier.",
             )
             return
-        preserve = self._selected_edit_preserve()
         self._set_error(self.edit_instruction_error, "")
         self._set_error(self.edit_output_error, "")
         self.edit_background_requested.emit(
             instruction,
-            preserve,
             output_size,
         )
 
@@ -1672,7 +1597,6 @@ class Inspector(QWidget):
         self.hotspot_when_panel.setVisible(has_interaction)
         self.hotspot_then_label.setVisible(has_interaction)
         self.hotspot_then_panel.setVisible(has_interaction)
-        self.hotspot_summary.setVisible(has_interaction)
         self.condition_table.setEnabled(has_interaction)
         self.add_condition_button.setEnabled(has_interaction)
         self.key_change_table.setEnabled(has_interaction)
@@ -1728,7 +1652,6 @@ class Inspector(QWidget):
                 )
             else:
                 self.hotspot_destination_combo.setCurrentIndex(0)
-        self.hotspot_summary.setText(self._hotspot_summary_text(document, interaction))
 
     def _render_condition_rows(
         self,
@@ -1922,52 +1845,6 @@ class Inspector(QWidget):
             combo.addItem(key.name, key.id)
         combo.setCurrentIndex(Inspector._combo_index_for_data(combo, selected_key_id))
         return combo
-
-    @staticmethod
-    def _hotspot_summary_text(
-        document: Stack,
-        interaction: Interaction | None,
-    ) -> str:
-        if interaction is None:
-            return ""
-        condition_parts = [
-            *(
-                f"has {document.key_by_id(key_id).name}"
-                for key_id in interaction.conditions.requires
-            ),
-            *(
-                f"lacks {document.key_by_id(key_id).name}"
-                for key_id in interaction.conditions.forbids
-            ),
-        ]
-        action_parts: list[str] = []
-        action_parts.extend(
-            f"lose {document.key_by_id(key_id).name}" for key_id in interaction.key_changes.remove
-        )
-        action_parts.extend(
-            f"gain {document.key_by_id(key_id).name}" for key_id in interaction.key_changes.grant
-        )
-        if interaction.action is not None:
-            target = interaction.action.target
-            destination = (
-                next(
-                    card.name
-                    for card in document.cards
-                    if isinstance(target, ResolvedCardReference)
-                    and card.id == target.target_card_id
-                )
-                if isinstance(target, ResolvedCardReference)
-                else target.target_name or "an unresolved destination"
-            )
-            action_parts.append(f"go to {destination}")
-        condition_text = (
-            f"When the runner {' and '.join(condition_parts)}" if condition_parts else "Always"
-        )
-        return (
-            f"{condition_text}, {', then '.join(action_parts)}."
-            if action_parts
-            else f"{condition_text}; no actions."
-        )
 
     def _hotspot_selection_changed(
         self,

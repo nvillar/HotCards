@@ -76,7 +76,6 @@ from hotcards.application.workers import (
 from hotcards.domain.models import (
     Card,
     CurrentSourceSize,
-    EditPreserveOptions,
     HotspotSet,
     Interaction,
     Polygon,
@@ -290,6 +289,9 @@ class MainWindow(QMainWindow):
         self.keys_button.setToolTip("Open the stack Keys manager")
         self.keys_button.clicked.connect(self._show_key_manager)
         self.keys_button_action = toolbar.addWidget(self.keys_button)
+        self.toolbar_trailing_spacer = QWidget()
+        self.toolbar_trailing_spacer.setFixedWidth(self.toolbar_leading_spacer.width())
+        self.toolbar_trailing_spacer_action = toolbar.addWidget(self.toolbar_trailing_spacer)
 
     def _show_style_manager(self) -> None:
         if self._is_running:
@@ -480,40 +482,7 @@ class MainWindow(QMainWindow):
         canvas_layout.addWidget(self.canvas_card_name_error)
         self.card_canvas = CardCanvas()
         canvas_layout.addWidget(self.card_canvas, 1)
-        self.canvas_fit_controls = QHBoxLayout()
-        self.canvas_fit_controls.addStretch(1)
-        self.fit_canvas_button = QToolButton()
-        self.fit_canvas_button.setObjectName("fitCanvasButton")
-        self.fit_canvas_button.setText("⛶")
-        self.fit_canvas_button.setAccessibleName("Fit image to window")
-        self.fit_canvas_button.setToolTip("Fit image to window")
-        self.canvas_fit_controls.addWidget(self.fit_canvas_button)
-        self.clear_background_button = QToolButton()
-        self.clear_background_button.setObjectName("clearBackgroundButton")
-        self.clear_background_button.setIcon(
-            self.style().standardIcon(QStyle.StandardPixmap.SP_TrashIcon)
-        )
-        self.clear_background_button.setAccessibleName("Clear image")
-        self.clear_background_button.setToolTip("This revision has no image")
-        self.canvas_fit_controls.addWidget(self.clear_background_button)
-        canvas_action_extent = max(
-            self.fit_canvas_button.sizeHint().width(),
-            self.fit_canvas_button.sizeHint().height(),
-            self.clear_background_button.sizeHint().width(),
-            self.clear_background_button.sizeHint().height(),
-        )
-        self.fit_canvas_button.setFixedSize(
-            canvas_action_extent,
-            canvas_action_extent,
-        )
-        self.clear_background_button.setFixedSize(
-            canvas_action_extent,
-            canvas_action_extent,
-        )
-        canvas_layout.addLayout(self.canvas_fit_controls)
         self.canvas_pages.addWidget(card_canvas)
-        self.fit_canvas_button.clicked.connect(self.card_canvas.fit_to_window)
-        self.clear_background_button.clicked.connect(self._clear_background)
         self.canvas_card_name.editingFinished.connect(self._commit_canvas_card_name)
         self.canvas_card_name.textEdited.connect(self._card_name_edited)
         self.revision_combo.currentIndexChanged.connect(self._revision_selection_changed)
@@ -571,7 +540,7 @@ class MainWindow(QMainWindow):
         self.pane_splitter.setStretchFactor(0, 0)
         self.pane_splitter.setStretchFactor(1, 1)
         self.pane_splitter.setStretchFactor(2, 0)
-        self.pane_splitter.setSizes([220, 700, 280])
+        self.pane_splitter.setSizes([240, 680, 280])
 
         self.notification_bar = NotificationBar()
         self.notification_bar.action_requested.connect(self._notification_action_requested)
@@ -1550,7 +1519,7 @@ class MainWindow(QMainWindow):
         except BackgroundWorkflowError as error:
             self._show_error(
                 "background-error",
-                "Could not refine image",
+                "Could not reinterpret image",
                 detail=str(error),
             )
         self.render_document()
@@ -1559,7 +1528,6 @@ class MainWindow(QMainWindow):
     def _edit_background(
         self,
         instruction: object,
-        preserve: object,
         output_size: object,
     ) -> None:
         workflow = self.background_workflow
@@ -1568,7 +1536,6 @@ class MainWindow(QMainWindow):
             workflow is None
             or card_id is None
             or not isinstance(instruction, str)
-            or not isinstance(preserve, EditPreserveOptions)
             or not isinstance(
                 output_size,
                 (CurrentSourceSize, PresetOutputSize),
@@ -1584,7 +1551,6 @@ class MainWindow(QMainWindow):
             workflow.edit(
                 card_id,
                 instruction=instruction,
-                preserve=preserve,
                 output_size=output_size,
             )
         except (BackgroundWorkflowError, ValidationError) as error:
@@ -1596,25 +1562,6 @@ class MainWindow(QMainWindow):
             )
         self.render_document()
         self._update_generation_actions()
-
-    def _clear_background(self) -> None:
-        workflow = self.background_workflow
-        card_id = self._selected_card_id
-        if workflow is None or card_id is None:
-            return
-        self.notification_bar.clear_notification("background-error")
-        try:
-            workflow.clear_background(card_id)
-        except (
-            BackgroundWorkflowError,
-            CommandError,
-            ValidationError,
-        ) as error:
-            self._show_error(
-                "background-error",
-                "Could not clear image",
-                detail=str(error),
-            )
 
     def _activate_revision(self, revision_id: object) -> None:
         if (
@@ -1675,7 +1622,7 @@ class MainWindow(QMainWindow):
         self.notification_bar.clear_notification("background-warning")
         if message in {
             "Generation cancelled",
-            "Refine cancelled",
+            "Reinterpret cancelled",
             "Edit cancelled",
         }:
             self._show_info("background-cancelled", message)
@@ -1720,8 +1667,8 @@ class MainWindow(QMainWindow):
         self.generation_progress_container.show()
 
     def _background_failed(self, failure: object) -> None:
-        if self._background_progress_message == "Image refinement failed":
-            title = "Image refinement failed"
+        if self._background_progress_message == "Image reinterpretation failed":
+            title = "Image reinterpretation failed"
         elif self._background_progress_message == "Image editing failed":
             title = "Image editing failed"
         else:
@@ -1849,14 +1796,14 @@ class MainWindow(QMainWindow):
             refine_output_size,
             (CurrentSourceSize, PresetOutputSize),
         )
-        refine_reason = "Ready to refine"
+        refine_reason = "Ready to reinterpret"
         if self.controller.mutation_blocked:
             refine_reason = PENDING_DURABILITY_MESSAGE
         elif not has_card:
             refine_reason = "Select a card in a saved stack"
         elif workflow_busy:
             refine_reason = (
-                "Refine is running for this card"
+                "Reinterpret is running for this card"
                 if self.background_workflow is not None
                 and self._selected_card_id is not None
                 and getattr(
@@ -1867,11 +1814,11 @@ class MainWindow(QMainWindow):
                 else ("An image operation is running; MFLUX runs one job at a time")
             )
         elif not has_description_input:
-            refine_reason = "Enter a Description before refining"
+            refine_reason = "Enter a Description before reinterpreting"
         elif not has_image:
-            refine_reason = "Generate an image before refining"
+            refine_reason = "Generate an image before reinterpreting"
         elif not has_refine_output_size:
-            refine_reason = self.inspector.refine_error.text() or "Select a Refine output size"
+            refine_reason = self.inspector.refine_error.text() or "Select a Reinterpret resolution"
         elif not mflux_available:
             refine_reason = self._action_diagnostic(AdapterKind.MFLUX)
         self.inspector.set_refine_capabilities(
@@ -1927,12 +1874,6 @@ class MainWindow(QMainWindow):
             edit_reason=edit_reason,
             busy=workflow_busy,
             editing=workflow_busy and active_operation == "edit",
-        )
-        self.clear_background_button.setEnabled(
-            mutation_allowed and has_card and has_image and not workflow_busy
-        )
-        self.clear_background_button.setToolTip(
-            "Clear the current image" if has_image else "This revision has no image"
         )
         authoring = not self._is_running
         self.image_model_combo.setEnabled(authoring and not workflow_busy)
@@ -2368,8 +2309,6 @@ class MainWindow(QMainWindow):
         self.delete_revision_button.setVisible(authoring)
         self.card_sidebar.setVisible(authoring)
         self.inspector.setVisible(authoring)
-        self.fit_canvas_button.setVisible(authoring)
-        self.clear_background_button.setVisible(authoring)
         self.create_first_card_button.setVisible(authoring)
         self.image_model_label.setVisible(authoring)
         self.image_model_combo.setVisible(authoring)

@@ -22,6 +22,11 @@ class ImageSourceDependency:
     dependent_revision_number: int
     operation: Literal["refine", "edit"]
 
+    @property
+    def operation_label(self) -> str:
+        """Return the user-facing operation name."""
+        return "Reinterpret" if self.operation == "refine" else "Edit"
+
 
 def image_source_dependencies(
     document: Stack,

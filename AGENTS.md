@@ -92,34 +92,40 @@ for live MFLUX runs.
   background, project, revision, model, or mode changes must suppress an
   in-flight stale image result. Hotspots must not alter image-generation
   prompts.
-- In Generate, Refine, and Edit output selectors, annotate a matching named
-  tier with `(Current image)` without duplicating the row. Insert one selectable
-  `Current size — W × H` row for an aligned nonstandard current image. Keep
-  Generate's next-output selection independent; default Refine and Edit to the
-  exact current size.
-- Refine only the readable current background through regular Flux2Klein
+- In Generate, Reinterpret, and Edit resolution selectors, show only the named tier
+  names and expose exact dimensions in tooltips. Insert one selectable Current
+  row for an aligned nonstandard current image. On card or revision entry,
+  select the current image size in all three controls. Generate offers every
+  named tier; Reinterpret and Edit offer only the current size and higher-area
+  tiers. Treat resolution selection as a passive setting change without a
+  notification.
+- Reinterpret (the persisted `refine` operation) only the readable current
+  background through regular Flux2Klein
   img2img; never resend its Generate References. Offer Reimagine 0.25,
-  Balanced 0.50, and Preserve 0.75, default output to the exact current size,
-  and offer all named tiers including lower, same-size, and higher output.
+  Balanced 0.50, and Preserve 0.75 as Source Similarity choices with
+  user-facing descriptions but no numeric values, default output to the exact
+  current size, and offer only higher named tiers.
   Reuse the
   source operation seed after flattening duplicate provenance. Pass MFLUX a
   private immutable snapshot copied from a securely opened source asset, and
   reject the result if that logical asset changes before acceptance. Compose
-  the exact Refine prompt from current Description, selected Style text, then
+  the exact Reinterpret prompt from current Description, selected Style text, then
   ordered authored accepted Edit instructions. State that the source already
   contains those edits, preserve them unless they conflict, and make current
   Description authoritative. On success atomically store the image and append
   and activate one complete copied revision through one Undo boundary; do not
-  expose Keep/Create New Version for Refine.
+  expose Keep/Create New Version for Reinterpret.
 - Edit only the readable current background through Flux2KleinEdit with one
-  direct authored Edit Instruction and the six ordered Preserve choices:
-  Subject identity, Pose and expression, Composition and framing, Background,
-  Lighting and color, and Existing text and logos. Default the first three on.
-  Compose the expanded prompt deterministically with REM-compatible clauses,
-  validate it against the FLUX Edit tokenizer's hard 512-token budget without
-  rewriting or truncation, use a fresh random seed, and never send Description,
-  Style, or Generate References. Default output to the source image's exact
-  decoded dimensions and additionally offer only higher-area presets. Pass
+  direct authored Edit Instruction. Treat the source image as authoritative for
+  everything not explicitly changed: request only the authored change and the
+  minimum accompanying changes needed for visual coherence, preserve unrelated
+  details, and prohibit unrelated additions, removals, or reinterpretations.
+  Keep legacy Preserve metadata readable, but do not expose or apply Preserve
+  controls to new edits. Validate the deterministic expanded prompt against the
+  FLUX Edit tokenizer's hard 512-token budget without rewriting or truncation,
+  use a fresh random seed, and never send Description, Style, or Generate
+  References. Default output to the source image's exact decoded dimensions and
+  additionally offer only higher-area presets. Pass
   MFLUX a private immutable no-follow source snapshot and reject replacement
   races before acceptance. Append the accepted Edit to inherited flattened
   lineage, atomically store the image, and append and activate one complete
@@ -142,8 +148,8 @@ for live MFLUX runs.
   source revision deletion or background replacement while any retained
   revision derives from it. Whole card deletion may remove dependencies wholly
   contained in that card, but must reject dependencies from retained cards.
-- Route all production and evaluation Generate, Refine, and Edit inference
-  through one typed MFLUX adapter. Plain Generate and Refine use the regular
+- Route all production and evaluation Generate, Reinterpret, and Edit inference
+  through one typed MFLUX adapter. Plain Generate and Reinterpret use the regular
   family; Reference-backed Generate and Edit use the Edit family. Serialize
   model loading and inference through one stable process-local invocation
   thread, cache at most one compatible family/model/quantization configuration,
@@ -151,11 +157,14 @@ for live MFLUX runs.
   running must publish no output; interrupted active models must not be reused.
 - Keep one Description editor in the Generate inspector. Place the Style
   selector above References, place revision-local Resolution after References
-  and before Generate, show exact output dimensions and positional Reference
-  guidance, and keep generation provenance in button tooltips. Keep inspector
-  tabs ordered Generate, Refine, Edit, Hotspots. Keep the Refine tab limited to
-  Transformation, Output Resolution, and Refine. Keep the Edit tab limited to
-  Edit Instruction, the six Preserve controls, Output Resolution, and Edit.
+  and before Generate, expose exact output dimensions and positional Reference
+  guidance in tooltips, and keep generation provenance in the Generate button
+  tooltip. Keep Reinterpret and Edit button tooltips to one concise action
+  sentence plus a disabled-state reason when needed. Keep inspector tabs ordered
+  Generate, Transform, Hotspots. In Transform, stack a compact Reinterpret
+  section above Edit using normal label typography rather than native group-box
+  titles. Reinterpret contains Source Similarity, Resolution, and Reinterpret;
+  Edit contains Edit Instruction, Resolution, and Edit.
   The current canvas/header is the implicit source for both. Open
   Styles and Keys from right-aligned Author-toolbar actions into separate
   modeless singleton utility windows. Keep them as stack-global list managers
@@ -163,6 +172,11 @@ for live MFLUX runs.
   vertically stacked full-width fields. Hide the manager actions and windows in
   Run mode, and close or rebind them on project replacement. Require a nonempty
   Description for image generation.
+- In Hotspots, keep When and Then as normal labels outside untitled grouped
+  panels using the same native treatment as the Reinterpret and Edit sections.
+  Keep the list, ordering controls, labels, and grouped panels on one inset
+  scrollable content surface matching Transform; do not nest a separate
+  zero-margin rule viewport.
 - Create stacks with one native format selector containing exactly Square 1:1,
   Landscape 4:3, Portrait 3:4, and Widescreen 16:9, defaulting to Landscape.
   Do not expose arbitrary dimensions or a post-creation aspect-ratio setting.
@@ -171,7 +185,7 @@ for live MFLUX runs.
   needed. Use the fitted image bounds for all normalized hotspot rendering,
   gestures, and Run hit testing; bars are noninteractive.
 - Support generated backgrounds only; do not add image import. Apply Generate
-  and Clear directly through document commands. Keep an existing image visible
+  directly through document commands. Keep an existing image visible
   until replacement succeeds. After Description or image generation succeeds,
   expose Create New Version and Undo bound to the exact current history token;
   an explicit Keep action retains the result on the current revision. Creating
@@ -185,6 +199,8 @@ for live MFLUX runs.
 - Store each hotspot set under exactly one complete card revision. Replacing a
   background preserves its hotspots so the author can review and adjust them
   manually.
+- Keep the canvas automatically fitted to the complete image. Do not expose
+  zoom, pan, manual fit, or image-clear controls.
 - Hotspots may have no polygons. Derive their labels from Remove, Grant, then
   destination actions and display long labels on at most two lines. Area-less
   hotspots retain all semantics in storage and are ignored by Run-mode hit

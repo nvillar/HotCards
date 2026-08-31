@@ -352,7 +352,7 @@ class ImageSourceSnapshot(DomainModel):
 
 
 class EditPreserveOptions(DomainModel):
-    """Six deterministic preservation controls captured for Edit."""
+    """Legacy Edit preservation choices retained for stack compatibility."""
 
     subject_identity: bool = False
     pose_and_expression: bool = False
