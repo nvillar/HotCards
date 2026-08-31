@@ -6,7 +6,8 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from hotcards.evaluation.cli import run_cli
+from hotcards.domain.image_dimensions import AspectRatio, GenerateResolution
+from hotcards.evaluation.cli import build_parser, run_cli
 from hotcards.evaluation.smoke import SmokeSettings, SmokeStageError, run_smoke
 from hotcards.generation.mflux_generator import MfluxGenerator
 
@@ -61,12 +62,18 @@ def test_smoke_runner_writes_cold_and_warm_stage_results(tmp_path: Path) -> None
     assert (
         cold["provenance"]["settings"]["width"],
         cold["provenance"]["settings"]["height"],
-    ) == (592, 448)
+    ) == (1184, 880)
+    assert cold["provenance"]["inputs"]["resolution"] == 1024
     assert (output_dir / "generated-cold.png").is_file()
     assert (output_dir / "generated-warm.png").is_file()
     assert (output_dir / "manifest.json").is_file()
     assert (output_dir / "summary.csv").is_file()
     assert (output_dir / "report.html").is_file()
+
+
+def test_smoke_settings_reject_obsolete_arbitrary_dimensions(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="width"):
+        SmokeSettings(output_dir=tmp_path / "run", width=592)  # type: ignore[call-arg]
 
 
 def test_smoke_runner_records_actionable_generation_failure(
@@ -93,6 +100,9 @@ def test_smoke_runner_records_actionable_generation_failure(
     ("option", "value"),
     [
         ("--quantization", "not-an-integer"),
+        ("--resolution", "300"),
+        ("--aspect-ratio", "3:2"),
+        ("--width", "592"),
     ],
 )
 def test_smoke_cli_rejects_invalid_numeric_values(option: str, value: str) -> None:
@@ -100,3 +110,12 @@ def test_smoke_cli_rejects_invalid_numeric_values(option: str, value: str) -> No
         run_cli(["smoke", option, value])
 
     assert caught.value.code == 2
+
+
+def test_smoke_cli_accepts_typed_generation_dimensions() -> None:
+    args = build_parser().parse_args(
+        ["smoke", "--resolution", "768", "--aspect-ratio", "16:9"]
+    )
+
+    assert args.resolution is GenerateResolution.RESOLUTION_768
+    assert args.aspect_ratio is AspectRatio.WIDESCREEN

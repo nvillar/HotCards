@@ -15,6 +15,11 @@ from typing import Protocol
 
 from PIL import Image
 
+from hotcards.domain.image_dimensions import (
+    AspectRatio,
+    GenerateResolution,
+    output_dimensions,
+)
 from hotcards.domain.models import GenerateInputs
 from hotcards.evaluation.manifest import (
     EnvironmentProvider,
@@ -437,8 +442,8 @@ def run_flux_reference_evaluation(
     model_identifier: str = "flux2-klein-4b",
     quantization: int | None = None,
     seed: int = 42,
-    width: int = 1024,
-    height: int = 768,
+    resolution: GenerateResolution = GenerateResolution.RESOLUTION_1024,
+    aspect_ratio: AspectRatio = AspectRatio.LANDSCAPE,
     step_count: int = 4,
     use_kv_cache: bool | None = None,
     model_factory: ReferenceModelFactory = _default_model_factory,
@@ -446,11 +451,14 @@ def run_flux_reference_evaluation(
     environment_provider: EnvironmentProvider = default_environment,
 ) -> Path:
     """Run supported one- and two-Reference experiments with auditable inputs."""
+    width, height = output_dimensions(resolution, aspect_ratio)
     settings = {
         "stack_path": str(stack_path),
         "model_identifier": model_identifier,
         "quantization": quantization,
         "seed": seed,
+        "resolution": resolution.value,
+        "aspect_ratio": aspect_ratio.value,
         "width": width,
         "height": height,
         "step_count": step_count,

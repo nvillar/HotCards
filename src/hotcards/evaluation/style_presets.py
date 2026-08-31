@@ -13,6 +13,11 @@ from uuid import NAMESPACE_URL, uuid5
 
 from pydantic import Field, model_validator
 
+from hotcards.domain.image_dimensions import (
+    AspectRatio,
+    GenerateResolution,
+    output_dimensions,
+)
 from hotcards.domain.models import (
     DomainModel,
     GenerateInputs,
@@ -108,8 +113,8 @@ class StylePresetSettings(DomainModel):
     experiment_path: Path = DEFAULT_STYLE_PRESET_EXPERIMENT
     model_identifier: NonEmptyString = "flux2-klein-9b"
     seeds: tuple[int, ...] = Field(default=DEFAULT_STYLE_PRESET_SEEDS, min_length=1)
-    width: PositiveInt = 592
-    height: PositiveInt = 448
+    resolution: GenerateResolution = GenerateResolution.RESOLUTION_1024
+    aspect_ratio: AspectRatio = AspectRatio.LANDSCAPE
     step_count: PositiveInt = 4
     quantization: int | None = None
 
@@ -335,6 +340,10 @@ def _execute_style_preset_evaluation(
         "warnings": [],
     }
     _write_result(settings.output_dir, result)
+    width, height = output_dimensions(
+        settings.resolution,
+        settings.aspect_ratio,
+    )
 
     for scene in experiment.scenes:
         for seed in settings.seeds:
@@ -362,13 +371,15 @@ def _execute_style_preset_evaluation(
                     inputs=GenerateInputs(
                         description=scene.description,
                         style=style_snapshot,
+                        resolution=settings.resolution,
                     ),
                     render_prompt=render_prompt,
                     output_path=output_path,
                     model_identifier=settings.model_identifier,
                     seed=seed,
-                    width=settings.width,
-                    height=settings.height,
+                    aspect_ratio=settings.aspect_ratio,
+                    width=width,
+                    height=height,
                     step_count=settings.step_count,
                     quantization=settings.quantization,
                 )

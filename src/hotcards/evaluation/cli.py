@@ -5,6 +5,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+from hotcards.domain.image_dimensions import AspectRatio, GenerateResolution
 from hotcards.evaluation.flux_references import (
     default_reference_output_dir,
     run_flux_reference_evaluation,
@@ -39,6 +40,43 @@ def _positive_int(value: str) -> int:
     return parsed
 
 
+def _generate_resolution(value: str) -> GenerateResolution:
+    try:
+        return GenerateResolution(int(value))
+    except (TypeError, ValueError) as error:
+        supported = ", ".join(str(item.value) for item in GenerateResolution)
+        raise argparse.ArgumentTypeError(
+            f"resolution must be one of: {supported}"
+        ) from error
+
+
+def _aspect_ratio(value: str) -> AspectRatio:
+    try:
+        return AspectRatio(value)
+    except ValueError as error:
+        supported = ", ".join(item.value for item in AspectRatio)
+        raise argparse.ArgumentTypeError(
+            f"aspect ratio must be one of: {supported}"
+        ) from error
+
+
+def _add_generation_dimensions(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--resolution",
+        type=_generate_resolution,
+        default=GenerateResolution.RESOLUTION_1024,
+        metavar="{256,512,768,1024}",
+        help="supported square-equivalent output resolution (default: 1024)",
+    )
+    parser.add_argument(
+        "--aspect-ratio",
+        type=_aspect_ratio,
+        default=AspectRatio.LANDSCAPE,
+        metavar="{1:1,4:3,3:4,16:9}",
+        help="fixed output aspect ratio (default: 4:3)",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the evaluation command-line parser."""
     parser = argparse.ArgumentParser(
@@ -54,6 +92,7 @@ def build_parser() -> argparse.ArgumentParser:
     smoke.add_argument("--mflux-model", default="flux2-klein-4b")
     smoke.add_argument("--seed", type=int, default=42)
     smoke.add_argument("--quantization", type=int)
+    _add_generation_dimensions(smoke)
     images = subparsers.add_parser(
         "images",
         help="compare MFLUX models with deterministic author-controlled prompts",
@@ -68,6 +107,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     images.add_argument("--seed", type=int, default=42)
     images.add_argument("--quantization", type=int)
+    _add_generation_dimensions(images)
     references = subparsers.add_parser(
         "flux-references",
         help="measure FLUX.2 Klein ordered Reference behavior",
@@ -77,8 +117,7 @@ def build_parser() -> argparse.ArgumentParser:
     references.add_argument("--mflux-model", default="flux2-klein-4b")
     references.add_argument("--seed", type=int, default=42)
     references.add_argument("--quantization", type=int)
-    references.add_argument("--width", type=_positive_int, default=1024)
-    references.add_argument("--height", type=_positive_int, default=768)
+    _add_generation_dimensions(references)
     references.add_argument("--steps", type=_positive_int, default=4)
     references.add_argument(
         "--kv-cache",
@@ -107,8 +146,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
     )
     style_presets.add_argument("--quantization", type=int)
-    style_presets.add_argument("--width", type=_positive_int, default=592)
-    style_presets.add_argument("--height", type=_positive_int, default=448)
+    _add_generation_dimensions(style_presets)
     style_presets.add_argument("--steps", type=_positive_int, default=4)
     style_presets.add_argument(
         "--validate-only",
@@ -129,6 +167,8 @@ def run_cli(arguments: Sequence[str] | None = None) -> int:
                     mflux_model=args.mflux_model,
                     seed=args.seed,
                     quantization=args.quantization,
+                    resolution=args.resolution,
+                    aspect_ratio=args.aspect_ratio,
                 )
             )
         elif args.command == "images":
@@ -139,6 +179,8 @@ def run_cli(arguments: Sequence[str] | None = None) -> int:
                     mflux_models=tuple(args.mflux_models or DEFAULT_MFLUX_MODELS),
                     seed=args.seed,
                     quantization=args.quantization,
+                    resolution=args.resolution,
+                    aspect_ratio=args.aspect_ratio,
                 )
             )
         elif args.command == "flux-references":
@@ -148,8 +190,8 @@ def run_cli(arguments: Sequence[str] | None = None) -> int:
                 model_identifier=args.mflux_model,
                 quantization=args.quantization,
                 seed=args.seed,
-                width=args.width,
-                height=args.height,
+                resolution=args.resolution,
+                aspect_ratio=args.aspect_ratio,
                 step_count=args.steps,
                 use_kv_cache=args.kv_cache,
             )
@@ -164,8 +206,8 @@ def run_cli(arguments: Sequence[str] | None = None) -> int:
                         experiment_path=args.experiment,
                         model_identifier=args.mflux_model,
                         seeds=tuple(args.seeds or DEFAULT_STYLE_PRESET_SEEDS),
-                        width=args.width,
-                        height=args.height,
+                        resolution=args.resolution,
+                        aspect_ratio=args.aspect_ratio,
                         step_count=args.steps,
                         quantization=args.quantization,
                     )

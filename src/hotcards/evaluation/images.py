@@ -12,6 +12,11 @@ from typing import Literal
 
 from pydantic import Field
 
+from hotcards.domain.image_dimensions import (
+    AspectRatio,
+    GenerateResolution,
+    output_dimensions,
+)
 from hotcards.domain.models import (
     DomainModel,
     GenerateInputs,
@@ -68,8 +73,8 @@ class ImageEvaluationSettings(DomainModel):
     case_dir: Path = Path("evals/cases/images")
     mflux_models: tuple[NonEmptyString, ...] = DEFAULT_MFLUX_MODELS
     seed: int = 42
-    width: PositiveInt = 592
-    height: PositiveInt = 448
+    resolution: GenerateResolution = GenerateResolution.RESOLUTION_1024
+    aspect_ratio: AspectRatio = AspectRatio.LANDSCAPE
     step_count: PositiveInt = 4
     quantization: int | None = None
 
@@ -123,14 +128,22 @@ def _request(
     model: str,
     settings: ImageEvaluationSettings,
 ) -> MfluxGenerationRequest:
+    inputs = case.inputs.model_copy(
+        update={"resolution": settings.resolution},
+    )
+    width, height = output_dimensions(
+        settings.resolution,
+        settings.aspect_ratio,
+    )
     return MfluxGenerationRequest(
-        inputs=case.inputs,
+        inputs=inputs,
         render_prompt=render_prompt,
         output_path=output_path,
         model_identifier=model,
         seed=settings.seed,
-        width=settings.width,
-        height=settings.height,
+        aspect_ratio=settings.aspect_ratio,
+        width=width,
+        height=height,
         step_count=settings.step_count,
         quantization=settings.quantization,
     )

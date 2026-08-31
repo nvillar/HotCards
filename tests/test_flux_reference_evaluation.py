@@ -5,8 +5,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
+import pytest
 from PIL import Image
 
+from hotcards.domain.image_dimensions import AspectRatio, GenerateResolution
 from hotcards.domain.models import (
     Card,
     CardRevision,
@@ -16,6 +18,7 @@ from hotcards.domain.models import (
     ImageOperationSettings,
     Stack,
 )
+from hotcards.evaluation.cli import build_parser
 from hotcards.evaluation.flux_references import (
     _model_config,
     run_flux_reference_evaluation,
@@ -135,6 +138,20 @@ def test_reference_model_config_selects_every_supported_variant() -> None:
     assert _model_config("flux2-klein-9b-kv", edit=False).model_name.endswith("klein-9B")
 
 
+def test_reference_cli_rejects_obsolete_arbitrary_dimensions() -> None:
+    defaults = build_parser().parse_args(
+        ["flux-references", "--stack", "Stack.hotcards"]
+    )
+    assert defaults.resolution is GenerateResolution.RESOLUTION_1024
+    assert defaults.aspect_ratio is AspectRatio.LANDSCAPE
+    with pytest.raises(SystemExit) as caught:
+        build_parser().parse_args(
+            ["flux-references", "--stack", "Stack.hotcards", "--width", "48"]
+        )
+
+    assert caught.value.code == 2
+
+
 def test_reference_suite_preserves_order_prompts_and_provenance(
     tmp_path: Path,
 ) -> None:
@@ -145,8 +162,8 @@ def test_reference_suite_preserves_order_prompts_and_provenance(
     result_path = run_flux_reference_evaluation(
         output_dir=output_dir,
         stack_path=stack_path,
-        width=48,
-        height=32,
+        resolution=GenerateResolution.RESOLUTION_256,
+        aspect_ratio=AspectRatio.LANDSCAPE,
         model_factory=lambda *_: FakeReferenceModel(requests),
         source_model_factory=lambda *_: FakeReferenceModel(requests),
         environment_provider=lambda: {"git_sha": "test"},
@@ -155,6 +172,11 @@ def test_reference_suite_preserves_order_prompts_and_provenance(
     result = json.loads(result_path.read_text())
     assert result["status"] == "success"
     assert len(requests) == 8
+    assert {(request["width"], request["height"]) for request in requests} == {
+        (288, 224)
+    }
+    assert result["settings"]["resolution"] == 256
+    assert result["settings"]["aspect_ratio"] == "4:3"
     assert "image_paths" not in requests[0]
     combined = next(case for case in result["cases"] if case["case_id"] == "character-plus-style")
     assert combined["reference_keys"] == ["character_identity", "map_style"]
@@ -194,8 +216,8 @@ def test_reference_suite_isolates_failure_and_failed_dependency(
     result_path = run_flux_reference_evaluation(
         output_dir=output_dir,
         stack_path=stack_path,
-        width=48,
-        height=32,
+        resolution=GenerateResolution.RESOLUTION_256,
+        aspect_ratio=AspectRatio.LANDSCAPE,
         model_factory=lambda *_: FakeReferenceModel(
             requests,
             fail_prompt_fragment="rear garden at ground level",
