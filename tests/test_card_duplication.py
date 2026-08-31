@@ -202,6 +202,7 @@ def test_duplicate_save_failure_rolls_back_document_and_new_asset(
         "destination-created",
         "asset-file-fsynced",
         "asset-directory-fsynced",
+        "cards-directory-fsynced",
         "manifest-written",
         "manifest-file-fsynced",
         "manifest-replaced",
@@ -618,6 +619,256 @@ def test_secure_duplicate_destination_swap_never_writes_or_deletes_outside(
     assert outside.read_bytes() == b"outside bytes"
     assert session.store.load() == controller.document
     assert len(list(session.store.bundle_path.rglob("*.png"))) == 1
+
+
+def test_duplicate_cards_directory_fsync_failure_precedes_manifest_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow, controller, session, source = _bound_source(
+        tmp_path,
+        with_background=True,
+    )
+    assert session.store is not None
+    before = controller.document
+    previous_manifest = session.store.stack_path.read_bytes()
+    cards_path = session.store.bundle_path / "assets" / "cards"
+    cards_stat = cards_path.stat()
+    real_fsync = stack_store_module.os.fsync
+    checkpoints: list[str] = []
+    injected = False
+
+    def record_checkpoint(name: str) -> None:
+        checkpoints.append(name)
+
+    def fail_cards_fsync(fd: int) -> None:
+        nonlocal injected
+        descriptor_stat = os.fstat(fd)
+        if (
+            not injected
+            and descriptor_stat.st_dev == cards_stat.st_dev
+            and descriptor_stat.st_ino == cards_stat.st_ino
+        ):
+            injected = True
+            raise OSError("cards directory fsync failure")
+        real_fsync(fd)
+
+    monkeypatch.setattr(stack_store_module, "_io_checkpoint", record_checkpoint)
+    monkeypatch.setattr(stack_store_module.os, "fsync", fail_cards_fsync)
+
+    with pytest.raises(CardDuplicationError, match="cards directory fsync failure"):
+        workflow.duplicate(source.id)
+
+    assert injected
+    assert "manifest-written" not in checkpoints
+    assert controller.document == before
+    assert session.store.stack_path.read_bytes() == previous_manifest
+    assert session.store.load() == before
+    assert len(list(session.store.bundle_path.rglob("*.png"))) == 1
+
+
+def test_precommit_failure_with_rollback_write_error_cleans_reconciled_asset(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow, controller, session, source = _bound_source(
+        tmp_path,
+        with_background=True,
+    )
+    assert session.store is not None
+    before = controller.document
+    previous_manifest = session.store.stack_path.read_bytes()
+    before_assets = set(session.store.bundle_path.rglob("*.png"))
+    real_write_manifest = stack_store_module._write_manifest_at
+    injected = False
+
+    def fail_before_manifest(name: str) -> None:
+        nonlocal injected
+        if name == "cards-directory-fsynced" and not injected:
+            injected = True
+            raise OSError("pre-manifest failure")
+
+    def fail_rollback_manifest(
+        bundle_fd: int,
+        payload: bytes,
+        *,
+        prefix: str,
+        checkpoints: bool,
+    ) -> str:
+        if not checkpoints:
+            raise OSError("rollback write failure")
+        return real_write_manifest(
+            bundle_fd,
+            payload,
+            prefix=prefix,
+            checkpoints=checkpoints,
+        )
+
+    monkeypatch.setattr(stack_store_module, "_io_checkpoint", fail_before_manifest)
+    monkeypatch.setattr(
+        stack_store_module,
+        "_write_manifest_at",
+        fail_rollback_manifest,
+    )
+
+    with pytest.raises(
+        CardDuplicationError,
+        match="rollback also failed.*rollback write failure",
+    ):
+        workflow.duplicate(source.id)
+
+    assert injected
+    assert controller.document == before
+    assert session.store.stack_path.read_bytes() == previous_manifest
+    assert session.store.load() == before
+    assert set(session.store.bundle_path.rglob("*.png")) == before_assets
+    assert session.close_history()
+
+
+def test_indeterminate_rollback_retains_owned_asset_for_cleanup_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow, controller, session, source = _bound_source(
+        tmp_path,
+        with_background=True,
+    )
+    assert session.store is not None
+    before = controller.document
+    before_assets = set(session.store.bundle_path.rglob("*.png"))
+    real_open = stack_store_module.os.open
+    real_write_manifest = stack_store_module._write_manifest_at
+    real_load = StackStore.load
+    stack_open_count = 0
+    operation_failed = False
+    cleanup_reconciliation_blocked = True
+
+    def fail_before_manifest(name: str) -> None:
+        nonlocal operation_failed
+        if name == "cards-directory-fsynced" and not operation_failed:
+            operation_failed = True
+            raise OSError("pre-manifest failure")
+
+    def fail_rollback_manifest(
+        bundle_fd: int,
+        payload: bytes,
+        *,
+        prefix: str,
+        checkpoints: bool,
+    ) -> str:
+        if not checkpoints:
+            raise OSError("rollback write failure")
+        return real_write_manifest(
+            bundle_fd,
+            payload,
+            prefix=prefix,
+            checkpoints=checkpoints,
+        )
+
+    def fail_reconciliation_open(
+        path: object,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal stack_open_count
+        if path == "stack.json" and dir_fd is not None:
+            stack_open_count += 1
+            if stack_open_count >= 2:
+                raise OSError("manifest reconciliation unavailable")
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    def fail_cleanup_reconciliation(store: StackStore) -> Stack:
+        if cleanup_reconciliation_blocked:
+            raise StackStoreError("cleanup reconciliation unavailable")
+        return real_load(store)
+
+    monkeypatch.setattr(stack_store_module, "_io_checkpoint", fail_before_manifest)
+    monkeypatch.setattr(
+        stack_store_module,
+        "_write_manifest_at",
+        fail_rollback_manifest,
+    )
+    monkeypatch.setattr(stack_store_module.os, "open", fail_reconciliation_open)
+    monkeypatch.setattr(StackStore, "load", fail_cleanup_reconciliation)
+
+    with pytest.raises(
+        CardDuplicationError,
+        match="manifest reconciliation unavailable",
+    ):
+        workflow.duplicate(source.id)
+
+    assert operation_failed
+    assert controller.document == before
+    assert len(set(session.store.bundle_path.rglob("*.png")) - before_assets) == 1
+
+    cleanup_reconciliation_blocked = False
+    monkeypatch.setattr(stack_store_module.os, "open", real_open)
+    assert session.flush()
+    assert set(session.store.bundle_path.rglob("*.png")) == before_assets
+
+
+def test_rollback_directory_cleanup_preserves_swapped_foreign_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
+        pytest.skip("secure dirfd flags are unavailable")
+    workflow, controller, session, source = _bound_source(
+        tmp_path,
+        with_background=True,
+    )
+    assert session.store is not None
+    before = controller.document
+    cards_directory = session.store.bundle_path / "assets" / "cards"
+    owned_renamed = cards_directory / "owned-renamed"
+    foreign_directory: Path | None = None
+    foreign_inode: int | None = None
+    operation_failed = False
+    swapped = False
+
+    def fail_then_swap(name: str) -> None:
+        nonlocal foreign_directory, foreign_inode, operation_failed, swapped
+        if name == "cards-directory-fsynced" and not operation_failed:
+            operation_failed = True
+            raise OSError("force rollback")
+        if name != "destination-directory-cleanup" or swapped:
+            return
+        destination_directories = [
+            path
+            for path in cards_directory.iterdir()
+            if path.name != str(source.id)
+        ]
+        assert len(destination_directories) == 1
+        original_directory = destination_directories[0]
+        original_directory.rename(owned_renamed)
+        original_directory.mkdir()
+        (original_directory / "foreign.txt").write_bytes(b"foreign")
+        foreign_directory = original_directory
+        foreign_inode = original_directory.stat().st_ino
+        swapped = True
+
+    monkeypatch.setattr(stack_store_module, "_io_checkpoint", fail_then_swap)
+
+    with pytest.raises(CardDuplicationError, match="force rollback"):
+        workflow.duplicate(source.id)
+
+    assert operation_failed
+    assert swapped
+    assert controller.document == before
+    assert session.store.load() == before
+    assert foreign_directory is not None
+    assert foreign_directory.is_dir()
+    assert foreign_directory.stat().st_ino == foreign_inode
+    assert (foreign_directory / "foreign.txt").read_bytes() == b"foreign"
+    assert owned_renamed.is_dir()
+    assert list(owned_renamed.iterdir()) == []
+    assert len(list(session.store.bundle_path.rglob("*.png"))) == 1
+
+    (foreign_directory / "foreign.txt").unlink()
+    foreign_directory.rmdir()
+    owned_renamed.rmdir()
 
 
 def test_undo_then_new_command_reclaims_duplicate_owned_asset(

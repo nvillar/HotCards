@@ -171,6 +171,38 @@ def _file_at_matches(
         os.close(candidate_fd)
 
 
+def _open_matching_directory_at(
+    parent_fd: int,
+    name: str,
+    *,
+    device: int,
+    inode: int,
+) -> int | None:
+    try:
+        candidate_fd = os.open(
+            name,
+            _secure_open_flags(directory=True),
+            dir_fd=parent_fd,
+        )
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        if error.errno in {errno.ELOOP, errno.ENOTDIR}:
+            return None
+        raise StackStoreError(
+            f"could not securely inspect asset directory {name!r}: {error}"
+        ) from error
+    candidate_stat = os.fstat(candidate_fd)
+    if (
+        candidate_stat.st_dev != device
+        or candidate_stat.st_ino != inode
+        or not stat.S_ISDIR(candidate_stat.st_mode)
+    ):
+        os.close(candidate_fd)
+        return None
+    return candidate_fd
+
+
 def _asset_path_matches(
     bundle_fd: int,
     *,
@@ -524,6 +556,8 @@ class StackStore:
         rollback_errors: list[Exception] = []
         destination_owned = False
         destination_directory_created = False
+        destination_directory_device: int | None = None
+        destination_directory_inode: int | None = None
         destination_name = destination_path.name
         stored_asset: StoredImageAsset | None = None
         manifest_temporary_name: str | None = None
@@ -599,6 +633,9 @@ class StackStore:
                 str(destination_card_id),
             )
             stack.callback(os.close, destination_card_fd)
+            destination_directory_stat = os.fstat(destination_card_fd)
+            destination_directory_device = destination_directory_stat.st_dev
+            destination_directory_inode = destination_directory_stat.st_ino
             _io_checkpoint("destination-directory-opened")
 
             try:
@@ -632,6 +669,8 @@ class StackStore:
                 _validate_png_fd(destination_fd, source_path.as_posix())
                 os.fsync(destination_card_fd)
                 _io_checkpoint("asset-directory-fsynced")
+                os.fsync(cards_fd)
+                _io_checkpoint("cards-directory-fsynced")
 
                 current_assets_fd = _open_directory_at(bundle_fd, "assets")
                 stack.callback(os.close, current_assets_fd)
@@ -720,7 +759,6 @@ class StackStore:
                     except OSError as error:
                         rollback_errors.append(error)
                 rollback_name: str | None = None
-                manifest_restored = False
                 try:
                     rollback_name = _write_manifest_at(
                         bundle_fd,
@@ -734,53 +772,15 @@ class StackStore:
                         checkpoints=False,
                     )
                     rollback_name = None
-                    restored_fd = os.open(
-                        STACK_FILENAME,
-                        _secure_open_flags(),
-                        dir_fd=bundle_fd,
-                    )
-                    try:
-                        manifest_restored = _read_all(restored_fd) == previous_payload
-                    finally:
-                        os.close(restored_fd)
-                    if not manifest_restored:
-                        raise StackStoreError(
-                            "rollback did not restore the previous stack document"
-                        )
                 except Exception as error:
                     rollback_errors.append(error)
                     if rollback_name is not None:
                         try:
                             os.unlink(rollback_name, dir_fd=bundle_fd)
+                        except FileNotFoundError:
+                            pass
                         except OSError as cleanup_error:
                             rollback_errors.append(cleanup_error)
-                if (
-                    destination_owned
-                    and manifest_restored
-                    and stored_asset is not None
-                    and _file_at_matches(
-                        destination_card_fd,
-                        destination_name,
-                        device=stored_asset.device,
-                        inode=stored_asset.inode,
-                    )
-                ):
-                    try:
-                        os.unlink(destination_name, dir_fd=destination_card_fd)
-                        os.fsync(destination_card_fd)
-                    except FileNotFoundError:
-                        pass
-                    except OSError as error:
-                        rollback_errors.append(error)
-                if destination_directory_created:
-                    try:
-                        os.rmdir(str(destination_card_id), dir_fd=cards_fd)
-                        os.fsync(cards_fd)
-                    except FileNotFoundError:
-                        pass
-                    except OSError as error:
-                        if error.errno not in {errno.ENOTEMPTY, errno.EEXIST}:
-                            rollback_errors.append(error)
                 persisted_after_failure: Stack | None = None
                 try:
                     current_stack_fd = os.open(
@@ -795,15 +795,73 @@ class StackStore:
                     current_stack = Stack.model_validate_json(current_payload)
                     if current_stack == previous_stack:
                         persisted_after_failure = previous_stack
-                    elif current_stack == changed_stack and not manifest_restored:
+                    elif current_stack == changed_stack:
                         persisted_after_failure = changed_stack
+                    else:
+                        rollback_errors.append(
+                            StackStoreError(
+                                "persisted stack document matches neither the "
+                                "previous nor duplicate state"
+                            )
+                        )
                 except (OSError, ValidationError) as error:
                     rollback_errors.append(error)
+                retained_asset = stored_asset if destination_owned else None
+                if persisted_after_failure == previous_stack:
+                    retained_asset = None
+                    if (
+                        destination_owned
+                        and stored_asset is not None
+                        and _file_at_matches(
+                            destination_card_fd,
+                            destination_name,
+                            device=stored_asset.device,
+                            inode=stored_asset.inode,
+                        )
+                    ):
+                        try:
+                            os.unlink(destination_name, dir_fd=destination_card_fd)
+                            os.fsync(destination_card_fd)
+                        except FileNotFoundError:
+                            pass
+                        except OSError as error:
+                            rollback_errors.append(error)
+                            retained_asset = stored_asset
+                    if (
+                        destination_directory_created
+                        and destination_directory_device is not None
+                        and destination_directory_inode is not None
+                    ):
+                        try:
+                            _io_checkpoint("destination-directory-cleanup")
+                            matching_directory_fd = _open_matching_directory_at(
+                                cards_fd,
+                                str(destination_card_id),
+                                device=destination_directory_device,
+                                inode=destination_directory_inode,
+                            )
+                            if matching_directory_fd is not None:
+                                try:
+                                    if not os.listdir(matching_directory_fd):
+                                        os.rmdir(
+                                            str(destination_card_id),
+                                            dir_fd=cards_fd,
+                                        )
+                                        os.fsync(cards_fd)
+                                finally:
+                                    os.close(matching_directory_fd)
+                        except FileNotFoundError:
+                            pass
+                        except OSError as error:
+                            if error.errno not in {errno.ENOTEMPTY, errno.EEXIST}:
+                                rollback_errors.append(error)
+                        except StackStoreError as error:
+                            rollback_errors.append(error)
                 raise StackStoreTransactionError(
                     operation_error,
                     tuple(rollback_errors),
                     persisted_stack=persisted_after_failure,
-                    owned_asset=stored_asset,
+                    owned_asset=retained_asset,
                 ) from operation_error
 
         assert stored_asset is not None

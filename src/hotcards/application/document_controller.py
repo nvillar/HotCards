@@ -129,8 +129,11 @@ class DocumentController:
         try:
             persist(validated_copy(after))
         except Exception as error:
-            if getattr(error, "persisted_stack", None) == after:
+            persisted_after = getattr(error, "persisted_stack", None) == after
+            retained_owned_asset = getattr(error, "owned_asset", None) is not None
+            if persisted_after:
                 self._record_change(before, after)
+            if persisted_after or retained_owned_asset:
                 for asset in tuple(owned_assets):
                     self._owned_assets[(asset.bundle_path, asset.relative_path)] = asset
                 self._release_unreachable_owned_assets()
