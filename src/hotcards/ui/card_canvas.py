@@ -560,12 +560,11 @@ class CardCanvas(QGraphicsView):
             super().mouseDoubleClickEvent(event)
             return
         if self._draft_points is not None:
-            point = self._clamped_document_point(event.position().toPoint())
-            if (
-                not self._draft_points
-                or self._point_distance(self._draft_points[-1], point) > 1e-6
-            ):
-                self._draft_points.append(point)
+            viewport_point = event.position().toPoint()
+            if self._draft_vertex_at(viewport_point) is None:
+                self._draft_points.append(
+                    self._clamped_document_point(viewport_point)
+                )
             self._finish_drawing()
             event.accept()
             return
@@ -918,8 +917,25 @@ class CardCanvas(QGraphicsView):
 
     def _append_draft_point(self, viewport_point: QPoint) -> None:
         assert self._draft_points is not None
+        vertex_index = self._draft_vertex_at(viewport_point)
+        if vertex_index == 0 and len(self._draft_points) >= 3:
+            self._finish_drawing()
+            return
+        if vertex_index is not None:
+            return
         self._draft_points.append(self._clamped_document_point(viewport_point))
         self._render_hotspots()
+
+    def _draft_vertex_at(self, viewport_point: QPoint) -> int | None:
+        assert self._draft_points is not None
+        for vertex_index, point in enumerate(self._draft_points):
+            candidate = self.viewport_point_for(point)
+            if hypot(
+                candidate.x() - viewport_point.x(),
+                candidate.y() - viewport_point.y(),
+            ) <= 9:
+                return vertex_index
+        return None
 
     def _finish_drawing(self) -> None:
         assert self._draft_points is not None
@@ -1015,8 +1031,8 @@ class CardCanvas(QGraphicsView):
             self._set_hovered_edge_insertion(None)
             self.viewport().setCursor(Qt.CursorShape.CrossCursor)
             self.setToolTip(
-                "Click to add a vertex. Double-click or press Enter to finish; "
-                "Escape cancels."
+                "Click to add a vertex, or click the first vertex to close. "
+                "Double-click or press Enter also finishes; Escape cancels."
             )
             return
         vertex = self._vertex_at(viewport_point)

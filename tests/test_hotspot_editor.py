@@ -10,7 +10,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PIL import Image
-from PySide6.QtCore import QPointF, Qt
+from PySide6.QtCore import QPoint, QPointF, Qt
 from PySide6.QtGui import QContextMenuEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
@@ -123,6 +123,61 @@ def test_canvas_renders_selected_hotspot_and_draws_new_polygon(
     canvas.begin_polygon(interaction.id)
     QTest.keyClick(canvas, Qt.Key.Key_Escape)
     assert not canvas.drawing
+    canvas.close()
+
+
+def test_drawing_ignores_overlapping_vertices_and_first_vertex_closes(
+    application: QApplication,
+    tmp_path: Path,
+) -> None:
+    canvas, interaction = configured_canvas(application, tmp_path)
+    created: list[Polygon] = []
+    errors: list[str] = []
+    canvas.polygon_created.connect(
+        lambda _interaction_id, polygon: created.append(polygon)
+    )
+    canvas.editing_error.connect(errors.append)
+    points = (
+        QPointF(0.55, 0.2),
+        QPointF(0.85, 0.2),
+        QPointF(0.7, 0.55),
+    )
+
+    canvas.begin_polygon(interaction.id)
+    for point in points[:2]:
+        QTest.mouseClick(
+            canvas.viewport(),
+            Qt.MouseButton.LeftButton,
+            pos=canvas.viewport_point_for(point),
+        )
+    second_vertex = canvas.viewport_point_for(points[1])
+    QTest.mouseClick(
+        canvas.viewport(),
+        Qt.MouseButton.LeftButton,
+        pos=second_vertex + QPoint(4, 3),
+    )
+
+    assert canvas.drawing
+    assert canvas._draft_points is not None
+    assert len(canvas._draft_points) == 2
+    assert errors == []
+
+    QTest.mouseClick(
+        canvas.viewport(),
+        Qt.MouseButton.LeftButton,
+        pos=canvas.viewport_point_for(points[2]),
+    )
+    first_vertex = canvas.viewport_point_for(points[0])
+    QTest.mouseClick(
+        canvas.viewport(),
+        Qt.MouseButton.LeftButton,
+        pos=first_vertex + QPoint(3, 4),
+    )
+
+    assert len(created) == 1
+    assert len(created[0].points) == 3
+    assert not canvas.drawing
+    assert errors == []
     canvas.close()
 
 

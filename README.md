@@ -118,12 +118,14 @@ adding a condition or key change.
 While the Hotspots tab is active, clicking empty canvas begins a polygon for the
 selected hotspot and creates one first when needed. Leaving the tab cancels any
 unfinished polygon and hides its authoring overlays. Canvas editing uses
-hierarchical hotspot, area, and vertex selection: drag an area or vertex to
-move it, use the edge `+` or double-click an edge to add a vertex, press Delete
-to remove the selected vertex or area, and press Escape to step back through
-the selection. Context menus expose the same geometry actions, and successful
-edits offer a dismissible Undo. Replacing a background preserves its hotspots
-so the author can review and adjust them manually.
+hierarchical hotspot, area, and vertex selection. While drawing, overlapping
+vertex clicks are ignored and clicking the first vertex closes a valid polygon.
+Drag an area or vertex to move it, use the edge `+` or double-click an edge to
+add a vertex, press Delete to remove the selected vertex or area, and press
+Escape to step back through the selection. Context menus expose the same
+geometry actions, and successful edits offer a dismissible Undo. Replacing a
+background preserves its hotspots so the author can review and adjust them
+manually.
 
 Run mode keeps its current keys only in the session. It starts empty, Back
 retains keys, Restart clears them, and leaving Run discards them. Condition-

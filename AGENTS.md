@@ -149,6 +149,9 @@ for live Ollama and MFLUX runs.
   synchronization and same-revision edits must not discard a valid more
   specific selection. Enable geometry gestures and authoring overlays only
   while the Hotspots tab is active; leaving it cancels an unfinished polygon.
+  Silently ignore draft vertex clicks that overlap an existing vertex, except
+  that clicking the first vertex closes a draft once it has at least three
+  vertices.
 - Suppress stale Image Prompt results after relevant target revision,
   Description, Reference assignment, source revision/background, project, or
   mode changes. Editing source text without regenerating its referenced
