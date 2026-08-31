@@ -17,6 +17,7 @@ from hotcards.application.commands import (
     CreateCardCommand,
     CreateGeneratedRevisionCommand,
     CreateKeyAndAddHotspotReferenceCommand,
+    CreateRefinedRevisionCommand,
     DeleteCardCommand,
     DeleteInteractionCommand,
     DeleteKeyCommand,
@@ -555,6 +556,53 @@ def test_create_generated_revision_preserves_resolution_on_both_complete_version
         GenerateResolution.RESOLUTION_768,
         GenerateResolution.RESOLUTION_768,
     )
+
+
+@pytest.mark.parametrize("hotspot_set", (None, HotspotSet()))
+def test_create_refined_revision_copies_complete_source_automatically(
+    hotspot_set: HotspotSet | None,
+) -> None:
+    style = StyleDefinition(name="Ink", prompt_text="Rendered in ink")
+    reference = Card(name="Reference")
+    source = CardRevision(
+        description="Before",
+        hotspot_set=hotspot_set,
+        references=(ResolvedCardReference(target_card_id=reference.id),),
+        style_id=style.id,
+        generate_resolution=GenerateResolution.RESOLUTION_768,
+        background=generated_background("Source"),
+    )
+    card = Card(name="Card", revisions=(source,))
+    document = Stack(
+        name="Stack",
+        styles=(style,),
+        new_card_style_id=style.id,
+        cards=(card, reference),
+    )
+    new_background = refined_background(
+        source_card_id=card.id,
+        source_revision=source,
+    )
+    command = CreateRefinedRevisionCommand(
+        card_id=card.id,
+        source_revision_id=source.id,
+        background=new_background,
+    )
+
+    changed = command.apply(document)
+
+    changed_card = changed.cards[0]
+    assert changed_card.revisions[0] == source
+    assert changed_card.active_revision.id == command.new_revision_id
+    assert changed_card.active_revision.description == source.description
+    assert changed_card.active_revision.style_id == source.style_id
+    assert changed_card.active_revision.references == source.references
+    assert changed_card.active_revision.hotspot_set == hotspot_set
+    assert (
+        changed_card.active_revision.generate_resolution
+        is GenerateResolution.RESOLUTION_768
+    )
+    assert changed_card.active_revision.background == new_background
 
 
 def test_revision_description_and_reference_edits_are_typed_changes() -> None:

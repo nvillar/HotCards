@@ -58,7 +58,11 @@ from hotcards.application.document_controller import (
     DocumentController,
     DocumentMutationBlockedError,
 )
-from hotcards.domain.image_dimensions import GenerateResolution, output_dimensions
+from hotcards.domain.image_dimensions import (
+    GenerateResolution,
+    higher_output_resolutions,
+    output_dimensions,
+)
 from hotcards.domain.models import (
     Card,
     CardRevision,
@@ -66,10 +70,12 @@ from hotcards.domain.models import (
     HotspotKeyChanges,
     Interaction,
     KeyDefinition,
+    RefineTransformation,
     ResolvedCardReference,
     Stack,
     StyleDefinition,
     UnresolvedCardReference,
+    image_edit_lineage,
 )
 
 
@@ -184,6 +190,7 @@ class Inspector(QWidget):
 
     document_changed = Signal(object)
     generate_background_requested = Signal()
+    refine_background_requested = Signal(object, object)
     hotspot_selected = Signal(object)
     hotspot_usage_requested = Signal(object, object, object)
     change_applied = Signal(str, object)
@@ -204,6 +211,9 @@ class Inspector(QWidget):
         self._rendered_key_id: UUID | None = None
         self._generate_using_text = ""
         self._generate_reason = ""
+        self._refine_using_text = ""
+        self._refine_reason = ""
+        self._refine_source_size: tuple[int, int] | None = None
         self._rendering = False
         self.setObjectName("inspector")
         self.setMinimumWidth(300)
@@ -228,6 +238,7 @@ class Inspector(QWidget):
         root.addWidget(self.pages, 1)
 
         self._build_background_tab()
+        self._build_refine_tab()
         self._build_styles_tab()
         self._build_hotspots_tab()
         self._build_keys_tab()
@@ -331,6 +342,63 @@ class Inspector(QWidget):
 
         scroll.setWidget(page)
         self.inspector_tabs.addTab(scroll, "Generate")
+
+    def _build_refine_tab(self) -> None:
+        scroll = QScrollArea()
+        scroll.setObjectName("refineInspectorTab")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        page = QWidget()
+        page.setObjectName("refineInspectorContent")
+        layout = QVBoxLayout(page)
+
+        self.refine_transformation_label = QLabel("Transformation")
+        layout.addWidget(self.refine_transformation_label)
+        self.refine_transformation_combo = QComboBox()
+        self.refine_transformation_combo.setObjectName(
+            "refineTransformationCombo"
+        )
+        self.refine_transformation_combo.setAccessibleName(
+            "Refine transformation"
+        )
+        for transformation in RefineTransformation:
+            self.refine_transformation_combo.addItem(
+                f"{transformation.value.title()} "
+                f"({transformation.strength:.2f})",
+                transformation,
+            )
+        self.refine_transformation_combo.setCurrentIndex(
+            self._combo_index_for_data(
+                self.refine_transformation_combo,
+                RefineTransformation.BALANCED,
+            )
+        )
+        layout.addWidget(self.refine_transformation_combo)
+
+        layout.addSpacing(8)
+        self.refine_resolution_label = QLabel("Output Resolution")
+        layout.addWidget(self.refine_resolution_label)
+        self.refine_resolution_combo = QComboBox()
+        self.refine_resolution_combo.setObjectName("refineResolutionCombo")
+        self.refine_resolution_combo.setAccessibleName(
+            "Refine output resolution"
+        )
+        layout.addWidget(self.refine_resolution_combo)
+        self.refine_error = QLabel()
+        self.refine_error.setObjectName("refineValidationError")
+        self.refine_error.setWordWrap(True)
+        self.refine_error.setVisible(False)
+        layout.addWidget(self.refine_error)
+
+        layout.addSpacing(8)
+        self.refine_background_button = QPushButton("Refine")
+        self.refine_background_button.setObjectName("refineBackgroundButton")
+        layout.addWidget(self.refine_background_button)
+        self._focus_commit_targets.add(self.refine_background_button)
+        layout.addStretch(1)
+
+        scroll.setWidget(page)
+        self._refine_tab_index = self.inspector_tabs.addTab(scroll, "Refine")
 
     def _build_styles_tab(self) -> None:
         page = QWidget()
@@ -639,6 +707,15 @@ class Inspector(QWidget):
         self.description_edit.editing_finished.connect(self._description_editing_finished)
         self.description_edit.textChanged.connect(self._render_inputs_changed)
         self.generate_background_button.clicked.connect(self.generate_background_requested)
+        self.refine_background_button.clicked.connect(
+            self._request_refine_background
+        )
+        self.refine_transformation_combo.currentIndexChanged.connect(
+            lambda _index: self._render_inputs_changed()
+        )
+        self.refine_resolution_combo.currentIndexChanged.connect(
+            lambda _index: self._render_inputs_changed()
+        )
         self.style_combo.currentIndexChanged.connect(self._revision_style_changed)
         self.reference_combo.currentIndexChanged.connect(
             lambda index: self._reference_changed(1, index)
@@ -692,7 +769,13 @@ class Inspector(QWidget):
             render_change=not mouse_focus and next_focus not in self._focus_commit_targets
         )
 
-    def render(self, document: Stack, selected_card_id: UUID | None) -> None:
+    def render(
+        self,
+        document: Stack,
+        selected_card_id: UUID | None,
+        *,
+        refine_source_size: tuple[int, int] | None = None,
+    ) -> None:
         previous_card_id = self.selected_card_id
         previous_revision_id = self._rendered_revision_id
         preserve_description = self.description_edit.hasFocus()
@@ -717,6 +800,7 @@ class Inspector(QWidget):
                 self.pages.setCurrentIndex(0)
                 self._set_error(self.description_error, "")
                 self._set_error(self.reference_error, "")
+                self._set_error(self.refine_error, "")
                 self._set_error(self.style_error, "")
                 self._set_error(self.key_error, "")
                 self.set_hotspot_error("")
@@ -755,6 +839,11 @@ class Inspector(QWidget):
             self._render_reference(document, card, revision)
             self._render_resolution(document, revision)
             self._render_description_workflow(document, card, revision)
+            self._render_refine(
+                document,
+                revision,
+                source_size=refine_source_size,
+            )
             self._render_hotspots(document, revision)
             self._render_keys(
                 document,
@@ -850,11 +939,32 @@ class Inspector(QWidget):
         )
         self._refresh_generation_tooltips()
 
+    def set_refine_capabilities(
+        self,
+        *,
+        can_refine: bool,
+        refine_reason: str,
+        busy: bool,
+        refining: bool,
+    ) -> None:
+        self._refine_reason = refine_reason
+        self.refine_background_button.setEnabled(can_refine and not busy)
+        self.refine_background_button.setText(
+            "Refining…" if refining else "Refine"
+        )
+        self._refresh_generation_tooltips()
+
     def _refresh_generation_tooltips(self) -> None:
         self.generate_background_button.setToolTip(
             self._tooltip_with_using(
                 self._generate_reason,
                 self._generate_using_text,
+            )
+        )
+        self.refine_background_button.setToolTip(
+            self._tooltip_with_using(
+                self._refine_reason,
+                self._refine_using_text,
             )
         )
 
@@ -891,6 +1001,7 @@ class Inspector(QWidget):
         self._rendered_revision_id = None
         self._set_error(self.description_error, "")
         self._set_error(self.reference_error, "")
+        self._set_error(self.refine_error, "")
         self._set_error(self.style_error, "")
         self._set_error(self.key_error, "")
         self.set_hotspot_error("")
@@ -1468,6 +1579,114 @@ class Inspector(QWidget):
             ),
             undo_message="Generate resolution changed",
         )
+
+    def _render_refine(
+        self,
+        document: Stack,
+        revision: CardRevision,
+        *,
+        source_size: tuple[int, int] | None,
+    ) -> None:
+        current_resolution = self.refine_resolution_combo.currentData()
+        self._refine_source_size = source_size
+        available: tuple[GenerateResolution, ...] = ()
+        error = ""
+        if revision.background is None:
+            error = "Generate an image before refining."
+        elif source_size is None:
+            error = "The current image is unavailable or unreadable."
+        else:
+            available = higher_output_resolutions(
+                source_size[0],
+                source_size[1],
+                document.aspect_ratio,
+            )
+            if not available:
+                error = (
+                    "The current image is already at the maximum Refine "
+                    "resolution."
+                )
+        with QSignalBlocker(self.refine_resolution_combo):
+            self.refine_resolution_combo.clear()
+            for resolution in available:
+                width, height = output_dimensions(
+                    resolution,
+                    document.aspect_ratio,
+                )
+                self.refine_resolution_combo.addItem(
+                    f"{resolution.value} ({width} x {height})",
+                    resolution,
+                )
+            selected_index = self._combo_index_for_data(
+                self.refine_resolution_combo,
+                current_resolution,
+            )
+            self.refine_resolution_combo.setCurrentIndex(
+                selected_index if selected_index >= 0 else 0
+            )
+        self.refine_resolution_combo.setEnabled(bool(available))
+        self._set_error(self.refine_error, error)
+        resolution = self.refine_resolution_combo.currentData()
+        try:
+            transformation = RefineTransformation(
+                self.refine_transformation_combo.currentData()
+            )
+        except (TypeError, ValueError):
+            transformation = None
+        lineage_count = (
+            len(image_edit_lineage(revision.background.provenance))
+            if revision.background is not None
+            else 0
+        )
+        style_suffix = " + Style" if revision.style_id is not None else ""
+        lineage_suffix = (
+            f" + {lineage_count} accepted Edit"
+            f"{'s' if lineage_count != 1 else ''}"
+            if lineage_count
+            else ""
+        )
+        using = [
+            f"Using: Current image + Description{style_suffix}{lineage_suffix}",
+        ]
+        if isinstance(transformation, RefineTransformation):
+            using.append(
+                f"Transformation: {transformation.value.title()} "
+                f"({transformation.strength:.2f})"
+            )
+        if isinstance(resolution, GenerateResolution):
+            width, height = output_dimensions(
+                resolution,
+                document.aspect_ratio,
+            )
+            using.append(
+                f"Resolution: {resolution.value} square-equivalent "
+                f"({width} x {height})"
+            )
+        self._refine_using_text = "\n".join(using)
+        self._refresh_generation_tooltips()
+
+    def _request_refine_background(self) -> None:
+        try:
+            transformation = RefineTransformation(
+                self.refine_transformation_combo.currentData()
+            )
+        except (TypeError, ValueError):
+            transformation = None
+        resolution = self.refine_resolution_combo.currentData()
+        if not isinstance(transformation, RefineTransformation):
+            self._set_error(
+                self.refine_error,
+                "Select a supported Refine transformation.",
+            )
+            return
+        if not isinstance(resolution, GenerateResolution):
+            if not self.refine_error.text():
+                self._set_error(
+                    self.refine_error,
+                    "Select a higher Refine output resolution.",
+                )
+            return
+        self.refine_background_requested.emit(transformation, resolution)
 
     def _render_hotspots(
         self,

@@ -858,7 +858,6 @@ class StackStore:
                 temporary_path.unlink(missing_ok=True)
         return relative_path.as_posix()
 
-    @_serialized_bundle_mutation
     def copy_image_asset_and_save(
         self,
         source_relative_path: str,
@@ -871,16 +870,80 @@ class StackStore:
         changed_stack: Stack,
     ) -> StoredImageAsset:
         """Atomically own a secure image copy and its manifest transition."""
-        source_path = _relative_asset_path(source_relative_path)
-        expected_source_path = _image_asset_path(
-            source_card_id,
-            source_asset_id,
+        return self._store_image_asset_and_save(
+            source_relative_path=source_relative_path,
+            source_file_path=None,
+            source_card_id=source_card_id,
+            source_asset_id=source_asset_id,
+            destination_card_id=destination_card_id,
+            destination_asset_id=destination_asset_id,
+            previous_stack=previous_stack,
+            changed_stack=changed_stack,
         )
-        if source_path != expected_source_path:
+
+    def store_image_asset_and_save(
+        self,
+        source_file_path: Path,
+        *,
+        destination_card_id: UUID,
+        destination_asset_id: UUID,
+        previous_stack: Stack,
+        changed_stack: Stack,
+    ) -> StoredImageAsset:
+        """Atomically import one PNG and commit the manifest that references it."""
+        return self._store_image_asset_and_save(
+            source_relative_path=None,
+            source_file_path=source_file_path,
+            source_card_id=None,
+            source_asset_id=None,
+            destination_card_id=destination_card_id,
+            destination_asset_id=destination_asset_id,
+            previous_stack=previous_stack,
+            changed_stack=changed_stack,
+        )
+
+    @_serialized_bundle_mutation
+    def _store_image_asset_and_save(
+        self,
+        *,
+        source_relative_path: str | None,
+        source_file_path: Path | None,
+        source_card_id: UUID | None,
+        source_asset_id: UUID | None,
+        destination_card_id: UUID,
+        destination_asset_id: UUID,
+        previous_stack: Stack,
+        changed_stack: Stack,
+    ) -> StoredImageAsset:
+        if (source_relative_path is None) == (source_file_path is None):
+            raise StackStoreError("exactly one image source must be provided")
+        source_path: PurePosixPath | None = None
+        if source_relative_path is not None:
+            if source_card_id is None or source_asset_id is None:
+                raise StackStoreError(
+                    "bundle image copies require source card and asset IDs"
+                )
+            source_path = _relative_asset_path(source_relative_path)
+        elif source_card_id is not None or source_asset_id is not None:
             raise StackStoreError(
-                f"image asset path {source_path} does not match its card and "
-                f"asset IDs; expected {expected_source_path}"
+                "external image imports cannot specify bundle source IDs"
             )
+        if source_path is not None:
+            assert source_card_id is not None
+            assert source_asset_id is not None
+            source_label = source_path.as_posix()
+            expected_source_path = _image_asset_path(
+                source_card_id,
+                source_asset_id,
+            )
+            if source_path != expected_source_path:
+                raise StackStoreError(
+                    f"image asset path {source_path} does not match its card and "
+                    f"asset IDs; expected {expected_source_path}"
+                )
+        else:
+            assert source_file_path is not None
+            source_label = os.fspath(source_file_path)
         destination_path = _image_asset_path(
             destination_card_id,
             destination_asset_id,
@@ -949,26 +1012,64 @@ class StackStore:
                 )
             previous_payload = persisted_payload
 
-            assets_fd = _open_directory_at(bundle_fd, "assets")
-            stack.callback(os.close, assets_fd)
-            cards_fd = _open_directory_at(assets_fd, "cards")
-            stack.callback(os.close, cards_fd)
-            source_card_fd = _open_directory_at(cards_fd, str(source_card_id))
-            stack.callback(os.close, source_card_fd)
-            try:
-                source_fd = os.open(
-                    source_path.name,
-                    _secure_open_flags(),
-                    dir_fd=source_card_fd,
+            if source_path is None:
+                assets_fd = _open_directory_at(
+                    bundle_fd,
+                    "assets",
+                    create=True,
                 )
-            except OSError as error:
-                raise StackStoreError(
-                    f"could not securely open source image {source_path}: {error}"
-                ) from error
+                stack.callback(os.close, assets_fd)
+                cards_fd = _open_directory_at(
+                    assets_fd,
+                    "cards",
+                    create=True,
+                )
+                stack.callback(os.close, cards_fd)
+                try:
+                    os.fsync(assets_fd)
+                    os.fsync(bundle_fd)
+                except OSError as error:
+                    raise StackStoreError(
+                        "could not durably create the image asset namespace: "
+                        f"{error}"
+                    ) from error
+            else:
+                assets_fd = _open_directory_at(bundle_fd, "assets")
+                stack.callback(os.close, assets_fd)
+                cards_fd = _open_directory_at(assets_fd, "cards")
+                stack.callback(os.close, cards_fd)
+            source_card_fd: int | None = None
+            if source_path is not None:
+                assert source_card_id is not None
+                source_card_fd = _open_directory_at(cards_fd, str(source_card_id))
+                stack.callback(os.close, source_card_fd)
+                try:
+                    source_fd = os.open(
+                        source_path.name,
+                        _secure_open_flags(),
+                        dir_fd=source_card_fd,
+                    )
+                except OSError as error:
+                    raise StackStoreError(
+                        f"could not securely open source image {source_path}: {error}"
+                    ) from error
+            else:
+                assert source_file_path is not None
+                try:
+                    source_fd = os.open(
+                        source_file_path,
+                        _secure_open_flags(),
+                    )
+                except OSError as error:
+                    raise StackStoreError(
+                        f"could not securely open source image "
+                        f"{source_file_path}: {error}"
+                    ) from error
             stack.callback(os.close, source_fd)
-            if not stat.S_ISREG(os.fstat(source_fd).st_mode):
+            source_stat = os.fstat(source_fd)
+            if not stat.S_ISREG(source_stat.st_mode):
                 raise StackStoreError(
-                    f"source image is not a regular file: {source_path}"
+                    f"source image is not a regular file: {source_label}"
                 )
             _io_checkpoint("source-opened")
 
@@ -1028,7 +1129,7 @@ class StackStore:
                 _copy_all(source_fd, destination_fd)
                 os.fsync(destination_fd)
                 _io_checkpoint("asset-file-fsynced")
-                _validate_png_fd(destination_fd, source_path.as_posix())
+                _validate_png_fd(destination_fd, source_label)
                 os.fsync(destination_card_fd)
                 _io_checkpoint("asset-directory-fsynced")
                 os.fsync(cards_fd)
@@ -1038,29 +1139,46 @@ class StackStore:
                 stack.callback(os.close, current_assets_fd)
                 current_cards_fd = _open_directory_at(current_assets_fd, "cards")
                 stack.callback(os.close, current_cards_fd)
-                current_source_card_fd = _open_directory_at(
-                    current_cards_fd,
-                    str(source_card_id),
-                )
-                stack.callback(os.close, current_source_card_fd)
-                current_source_fd = os.open(
-                    source_path.name,
-                    _secure_open_flags(),
-                    dir_fd=current_source_card_fd,
-                )
-                stack.callback(os.close, current_source_fd)
-                source_stat = os.fstat(source_fd)
-                current_source_stat = os.fstat(current_source_fd)
-                if (
-                    source_stat.st_dev,
-                    source_stat.st_ino,
-                ) != (
-                    current_source_stat.st_dev,
-                    current_source_stat.st_ino,
-                ):
-                    raise StackStoreError(
-                        "source image namespace changed during the transaction"
+                if source_path is not None:
+                    assert source_card_id is not None
+                    current_source_card_fd = _open_directory_at(
+                        current_cards_fd,
+                        str(source_card_id),
                     )
+                    stack.callback(os.close, current_source_card_fd)
+                    current_source_fd = os.open(
+                        source_path.name,
+                        _secure_open_flags(),
+                        dir_fd=current_source_card_fd,
+                    )
+                    stack.callback(os.close, current_source_fd)
+                    current_source_stat = os.fstat(current_source_fd)
+                    if (
+                        source_stat.st_dev,
+                        source_stat.st_ino,
+                    ) != (
+                        current_source_stat.st_dev,
+                        current_source_stat.st_ino,
+                    ):
+                        raise StackStoreError(
+                            "source image namespace changed during the transaction"
+                        )
+                else:
+                    current_source_stat = os.fstat(source_fd)
+                    if (
+                        source_stat.st_dev,
+                        source_stat.st_ino,
+                        source_stat.st_size,
+                        source_stat.st_mtime_ns,
+                    ) != (
+                        current_source_stat.st_dev,
+                        current_source_stat.st_ino,
+                        current_source_stat.st_size,
+                        current_source_stat.st_mtime_ns,
+                    ):
+                        raise StackStoreError(
+                            "source image changed during the transaction"
+                        )
                 current_destination_card_fd = _open_directory_at(
                     current_cards_fd,
                     str(destination_card_id),
@@ -1104,16 +1222,22 @@ class StackStore:
                     filename=destination_name,
                     device=stored_asset.device,
                     inode=stored_asset.inode,
-                ) or not _asset_path_matches(
-                    bundle_fd,
-                    card_id=source_card_id,
-                    filename=source_path.name,
-                    device=source_stat.st_dev,
-                    inode=source_stat.st_ino,
                 ):
                     raise StackStoreError(
                         "image namespace changed before transaction completion"
                     )
+                if source_path is not None:
+                    assert source_card_id is not None
+                    if not _asset_path_matches(
+                        bundle_fd,
+                        card_id=source_card_id,
+                        filename=source_path.name,
+                        device=source_stat.st_dev,
+                        inode=source_stat.st_ino,
+                    ):
+                        raise StackStoreError(
+                            "image namespace changed before transaction completion"
+                        )
                 if not changed_manifest_durable:
                     raise StackStoreError(
                         "duplicate manifest durability was not established"

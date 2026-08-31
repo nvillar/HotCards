@@ -92,6 +92,17 @@ for live MFLUX runs.
   background, project, revision, model, or mode changes must suppress an
   in-flight stale image result. Hotspots must not alter image-generation
   prompts.
+- Refine only the readable current background through regular Flux2Klein
+  img2img; never resend its Generate References. Offer Reimagine 0.25,
+  Balanced 0.50, and Preserve 0.75, plus only resolution presets whose derived
+  pixel area is strictly greater than the decoded source image. Reuse the
+  source operation seed after flattening duplicate provenance. Compose the
+  exact Refine prompt from current Description, selected Style text, then
+  ordered authored accepted Edit instructions. State that the source already
+  contains those edits, preserve them unless they conflict, and make current
+  Description authoritative. On success atomically store the image and append
+  and activate one complete copied revision through one Undo boundary; do not
+  expose Keep/Create New Version for Refine.
 - Persist generated backgrounds with a strict discriminated provenance union
   for direct Generate, externally patched legacy Generate, Refine, Edit, and
   independent card duplication.
@@ -116,7 +127,9 @@ for live MFLUX runs.
   selector above References, place revision-local Resolution after References
   and before Generate, show exact output dimensions and positional Reference
   guidance, and keep generation provenance in button tooltips. Keep inspector
-  tabs ordered Generate, Styles, Hotspots, Keys. Keep Styles and Keys as
+  tabs ordered Generate, Refine, Styles, Hotspots, Keys. Keep the Refine tab
+  limited to Transformation, Output Resolution, and Refine; the current
+  canvas/header is its implicit source. Keep Styles and Keys as
   stack-global list managers with compact remove/add controls and vertically
   stacked full-width fields. Require a nonempty Description for image
   generation.
@@ -164,7 +177,7 @@ for live MFLUX runs.
   header, and bottom model selectors there.
 - Keep the image-model selector in the status bar and persist it through Qt
   settings. Offer FLUX.2 Klein 4B and FLUX.2 Klein 9B KV. Keep the model field
-  out of Advanced Settings. Disable the selector while image generation is
+  out of Advanced Settings. Disable the selector while any image operation is
   running; changing the model must cancel work using the previous setting.
 - Represent a revision's applied hotspot set as `HotspotSet | None`.
   `None` means no set has been applied; an empty `HotspotSet` means an applied

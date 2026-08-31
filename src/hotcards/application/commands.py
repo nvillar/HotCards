@@ -776,6 +776,42 @@ class CreateGeneratedRevisionCommand:
 
 
 @dataclass(frozen=True, slots=True)
+class CreateRefinedRevisionCommand:
+    """Append and activate one complete Refine result derived from a source."""
+
+    card_id: UUID
+    source_revision_id: UUID
+    background: Background
+    new_revision_id: UUID = field(default_factory=uuid4)
+
+    def apply(self, document: Stack) -> Stack:
+        card_index = _card_index(document, self.card_id)
+        card = document.cards[card_index]
+        source_index = _revision_index(card, self.source_revision_id)
+        if card.active_revision_id != self.source_revision_id:
+            raise CommandError("the Refine source revision is no longer active")
+        if any(revision.id == self.new_revision_id for revision in card.revisions):
+            raise CommandError(
+                f"revision {self.new_revision_id} already exists on card {card.id}"
+            )
+        source = card.revisions[source_index]
+        revision = source.model_copy(
+            deep=True,
+            update={
+                "id": self.new_revision_id,
+                "background": self.background.model_copy(deep=True),
+            },
+        )
+        card = card.model_copy(
+            update={
+                "revisions": (*card.revisions, revision),
+                "active_revision_id": revision.id,
+            }
+        )
+        return validated_copy(_replace_card(document, card_index, card))
+
+
+@dataclass(frozen=True, slots=True)
 class DeleteRevisionCommand:
     """Remove one revision and activate the nearest remaining revision."""
 

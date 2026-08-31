@@ -26,7 +26,11 @@ from hotcards.domain.models import (
     ResolvedCardReference,
     Stack,
 )
-from hotcards.storage.stack_store import StackStore, StackStoreError
+from hotcards.storage.stack_store import (
+    StackStore,
+    StackStoreError,
+    StackStoreTransactionError,
+)
 
 
 def _write_png(path: Path) -> None:
@@ -357,6 +361,103 @@ def test_clone_to_creates_independent_bundle_with_referenced_assets(tmp_path: Pa
     assert copied_store.asset_path(image_path).is_file()
     copied_store.asset_path(image_path).unlink()
     assert original.asset_path(image_path).is_file()
+
+
+def test_external_image_and_manifest_commit_as_one_transaction(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "refined.png"
+    _write_png(source)
+    store = StackStore(tmp_path / "Refine.hotcards")
+    card = Card(name="Card")
+    previous = Stack(name="Stack", cards=(card,))
+    store.save(previous)
+    asset_id = uuid4()
+    image_path = store.image_asset_path(card.id, asset_id)
+    revision = card.active_revision.model_copy(
+        update={"background": _generated_background(asset_id, image_path)}
+    )
+    changed = previous.model_copy(
+        update={
+            "cards": (
+                card.model_copy(
+                    update={
+                        "revisions": (revision,),
+                        "active_revision_id": revision.id,
+                    }
+                ),
+            )
+        }
+    )
+
+    stored = store.store_image_asset_and_save(
+        source,
+        destination_card_id=card.id,
+        destination_asset_id=asset_id,
+        previous_stack=previous,
+        changed_stack=changed,
+    )
+
+    assert store.load() == changed
+    assert stored.relative_path == image_path
+    assert store.stored_image_asset(
+        image_path,
+        card_id=card.id,
+        asset_id=asset_id,
+    ) == stored
+
+
+def test_external_image_transaction_rolls_back_manifest_and_asset(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "refined.png"
+    _write_png(source)
+    store = StackStore(tmp_path / "Refine.hotcards")
+    card = Card(name="Card")
+    previous = Stack(name="Stack", cards=(card,))
+    store.save(previous)
+    asset_id = uuid4()
+    image_path = store.image_asset_path(card.id, asset_id)
+    revision = card.active_revision.model_copy(
+        update={"background": _generated_background(asset_id, image_path)}
+    )
+    changed = previous.model_copy(
+        update={
+            "cards": (
+                card.model_copy(
+                    update={
+                        "revisions": (revision,),
+                        "active_revision_id": revision.id,
+                    }
+                ),
+            )
+        }
+    )
+    injected = False
+
+    def fail_after_replace(name: str) -> None:
+        nonlocal injected
+        if name == "manifest-replaced" and not injected:
+            injected = True
+            raise OSError("injected Refine durability failure")
+
+    monkeypatch.setattr(stack_store_module, "_io_checkpoint", fail_after_replace)
+
+    with pytest.raises(
+        StackStoreTransactionError,
+        match="Refine durability failure",
+    ):
+        store.store_image_asset_and_save(
+            source,
+            destination_card_id=card.id,
+            destination_asset_id=asset_id,
+            previous_stack=previous,
+            changed_stack=changed,
+        )
+
+    assert store.load() == previous
+    assert not store.asset_path(image_path).exists()
 
 
 def test_clone_to_refuses_existing_destination(tmp_path: Path) -> None:

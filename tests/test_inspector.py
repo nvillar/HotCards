@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+from datetime import UTC, datetime
+from uuid import uuid4
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -28,12 +30,17 @@ from hotcards.domain.image_dimensions import (
 from hotcards.domain.models import (
     Card,
     CardRevision,
+    DirectGenerateProvenance,
+    GeneratedBackground,
+    GenerateInputs,
     HotspotConditions,
     HotspotKeyChanges,
     HotspotSet,
+    ImageOperationSettings,
     Interaction,
     KeyDefinition,
     NavigateAction,
+    RefineTransformation,
     ResolvedCardReference,
     Stack,
     StyleDefinition,
@@ -54,6 +61,30 @@ def _interaction(label: str = "Door") -> Interaction:
     )
 
 
+def _background() -> GeneratedBackground:
+    asset_id = uuid4()
+    generated_at = datetime.now(UTC)
+    return GeneratedBackground(
+        id=asset_id,
+        image_path=f"assets/cards/card/image-{asset_id}.png",
+        provenance=DirectGenerateProvenance(
+            inputs=GenerateInputs(description="A courtyard"),
+            render_prompt="A courtyard",
+            settings=ImageOperationSettings(
+                model_identifier="test",
+                mflux_version="test",
+                seed=7,
+                width=592,
+                height=448,
+                step_count=4,
+                generated_at=generated_at,
+                duration_seconds=1,
+            ),
+        ),
+        created_at=generated_at,
+    )
+
+
 def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     application: QApplication,
 ) -> None:
@@ -70,11 +101,12 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     inspector = Inspector(controller)
     inspector.render(controller.document, card.id)
 
-    assert inspector.inspector_tabs.count() == 4
+    assert inspector.inspector_tabs.count() == 5
     assert inspector.inspector_tabs.tabText(0) == "Generate"
-    assert inspector.inspector_tabs.tabText(1) == "Styles"
-    assert inspector.inspector_tabs.tabText(2) == "Hotspots"
-    assert inspector.inspector_tabs.tabText(3) == "Keys"
+    assert inspector.inspector_tabs.tabText(1) == "Refine"
+    assert inspector.inspector_tabs.tabText(2) == "Styles"
+    assert inspector.inspector_tabs.tabText(3) == "Hotspots"
+    assert inspector.inspector_tabs.tabText(4) == "Keys"
     assert all(
         label.text() != "Keys are global to this stack."
         for label in inspector.findChildren(QLabel)
@@ -126,11 +158,13 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     styles_layout = inspector.style_list.parentWidget().layout()
     assert styles_layout is not None
     assert styles_layout.stretch(styles_layout.indexOf(inspector.style_list)) == 1
-    style_controls = styles_layout.itemAt(styles_layout.indexOf(inspector.style_list) + 1).layout()
+    style_controls = styles_layout.itemAt(
+        styles_layout.indexOf(inspector.style_list) + 1
+    ).layout()
     assert style_controls is not None
-    assert style_controls.indexOf(inspector.delete_style_button) < style_controls.indexOf(
-        inspector.add_style_button
-    )
+    assert style_controls.indexOf(
+        inspector.delete_style_button
+    ) < style_controls.indexOf(inspector.add_style_button)
     assert styles_layout.indexOf(inspector.style_name_label) < (
         styles_layout.indexOf(inspector.style_name_edit)
     )
@@ -182,9 +216,9 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
         hotspot_layout.indexOf(inspector.hotspot_list) + 1
     ).layout()
     assert hotspot_controls is not None
-    assert hotspot_controls.indexOf(inspector.delete_hotspot_button) < hotspot_controls.indexOf(
-        inspector.add_hotspot_button
-    )
+    assert hotspot_controls.indexOf(
+        inspector.delete_hotspot_button
+    ) < hotspot_controls.indexOf(inspector.add_hotspot_button)
     keys_layout = inspector.key_list.parentWidget().layout()
     assert keys_layout is not None
     key_controls = keys_layout.itemAt(
@@ -206,6 +240,119 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
         "Generate Hotspots",
     ):
         assert obsolete not in visible_copy
+
+
+def test_refine_tab_has_transformation_resolution_and_action_only(
+    application: QApplication,
+) -> None:
+    revision = CardRevision(
+        description="A moonlit courtyard",
+        background=_background(),
+    )
+    card = Card(name="Courtyard", revisions=(revision,))
+    controller = DocumentController(Stack(name="Demo", cards=(card,)))
+    inspector = Inspector(controller)
+    inspector.render(
+        controller.document,
+        card.id,
+        refine_source_size=(592, 448),
+    )
+
+    assert inspector.inspector_tabs.tabText(inspector._refine_tab_index) == "Refine"
+    assert RefineTransformation(
+        inspector.refine_transformation_combo.currentData()
+    ) is RefineTransformation.BALANCED
+    assert [
+        inspector.refine_transformation_combo.itemText(index)
+        for index in range(inspector.refine_transformation_combo.count())
+    ] == [
+        "Reimagine (0.25)",
+        "Balanced (0.50)",
+        "Preserve (0.75)",
+    ]
+    assert [
+        inspector.refine_resolution_combo.itemText(index)
+        for index in range(inspector.refine_resolution_combo.count())
+    ] == [
+        "768 (880 x 672)",
+        "1024 (1184 x 880)",
+    ]
+    content = inspector.refine_background_button.parentWidget()
+    layout = content.layout()
+    assert layout is not None
+    assert layout.indexOf(inspector.refine_transformation_label) < layout.indexOf(
+        inspector.refine_transformation_combo
+    )
+    assert layout.indexOf(inspector.refine_transformation_combo) < layout.indexOf(
+        inspector.refine_resolution_label
+    )
+    assert layout.indexOf(inspector.refine_resolution_label) < layout.indexOf(
+        inspector.refine_resolution_combo
+    )
+    assert layout.indexOf(inspector.refine_resolution_combo) < layout.indexOf(
+        inspector.refine_background_button
+    )
+    assert not hasattr(inspector, "refine_source_card_combo")
+    assert not hasattr(inspector, "refine_source_revision_combo")
+
+    requested: list[tuple[object, object]] = []
+    inspector.refine_background_requested.connect(
+        lambda transformation, resolution: requested.append(
+            (transformation, resolution)
+        )
+    )
+    inspector.set_refine_capabilities(
+        can_refine=True,
+        refine_reason="Ready to refine",
+        busy=False,
+        refining=False,
+    )
+    inspector.refine_background_button.click()
+
+    assert requested == [
+        (
+            RefineTransformation.BALANCED,
+            GenerateResolution.RESOLUTION_768,
+        )
+    ]
+    assert "Current image + Description" in (
+        inspector.refine_background_button.toolTip()
+    )
+    assert "Balanced (0.50)" in inspector.refine_background_button.toolTip()
+    assert "880 x 672" in inspector.refine_background_button.toolTip()
+
+
+def test_refine_resolution_handles_legacy_size_and_maximum(
+    application: QApplication,
+) -> None:
+    revision = CardRevision(
+        description="A moonlit courtyard",
+        background=_background(),
+    )
+    card = Card(name="Courtyard", revisions=(revision,))
+    controller = DocumentController(Stack(name="Demo", cards=(card,)))
+    inspector = Inspector(controller)
+
+    inspector.render(
+        controller.document,
+        card.id,
+        refine_source_size=(1024, 768),
+    )
+    assert inspector.refine_resolution_combo.count() == 1
+    assert (
+        inspector.refine_resolution_combo.currentData()
+        is GenerateResolution.RESOLUTION_1024
+    )
+    assert not inspector.refine_error.isVisible()
+
+    inspector.render(
+        controller.document,
+        card.id,
+        refine_source_size=(1184, 880),
+    )
+    assert inspector.refine_resolution_combo.count() == 0
+    assert not inspector.refine_resolution_combo.isEnabled()
+    assert "maximum Refine resolution" in inspector.refine_error.text()
 
 
 def test_keys_tab_manages_global_names_and_lists_hotspot_usages(

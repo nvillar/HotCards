@@ -64,6 +64,10 @@ from hotcards.application.document_session import (
     DocumentSessionState,
 )
 from hotcards.application.generated_revision_change import GeneratedRevisionChange
+from hotcards.application.image_files import (
+    UnreadableImageError,
+    readable_image_dimensions,
+)
 from hotcards.application.run_session import RunSession, RunSessionState
 from hotcards.application.workers import (
     AdapterKind,
@@ -72,11 +76,13 @@ from hotcards.application.workers import (
     WorkerFailure,
     WorkerOperation,
 )
+from hotcards.domain.image_dimensions import GenerateResolution
 from hotcards.domain.models import (
     Card,
     HotspotSet,
     Interaction,
     Polygon,
+    RefineTransformation,
     ResolvedCardReference,
     RunOverlayMode,
     Stack,
@@ -390,6 +396,9 @@ class MainWindow(QMainWindow):
             self._inspector_tab_changed
         )
         self.inspector.generate_background_requested.connect(self._generate_background)
+        self.inspector.refine_background_requested.connect(
+            self._refine_background
+        )
         self.inspector.change_applied.connect(self._show_undo_notification)
         self.inspector.hotspot_selected.connect(self.card_canvas.select_interaction)
         self.inspector.hotspot_usage_requested.connect(self._show_hotspot_usage)
@@ -563,6 +572,10 @@ class MainWindow(QMainWindow):
             self._selected_card_id = self._run_session.state.current_card_id
         elif self._selected_card_id not in card_ids:
             self._selected_card_id = snapshot.cards[0].id if snapshot.cards else None
+        selected_card = next(
+            (card for card in snapshot.cards if card.id == self._selected_card_id),
+            None,
+        )
         self._rendering = True
         try:
             if render_sidebar:
@@ -571,10 +584,10 @@ class MainWindow(QMainWindow):
                     self._selected_card_id,
                     draft_card_ids=(),
                 )
-            self.inspector.render(snapshot, self._selected_card_id)
-            selected_card = next(
-                (card for card in snapshot.cards if card.id == self._selected_card_id),
-                None,
+            self.inspector.render(
+                snapshot,
+                self._selected_card_id,
+                refine_source_size=self._refine_source_size(selected_card),
             )
             if selected_card is None:
                 self._rendered_card_id = None
@@ -1341,6 +1354,40 @@ class MainWindow(QMainWindow):
         self.render_document()
         self._update_generation_actions()
 
+    def _refine_background(
+        self,
+        transformation: object,
+        resolution: object,
+    ) -> None:
+        workflow = self.background_workflow
+        card_id = self._selected_card_id
+        if (
+            workflow is None
+            or card_id is None
+            or not isinstance(transformation, RefineTransformation)
+            or not isinstance(resolution, GenerateResolution)
+        ):
+            return
+        self.notification_bar.clear_notification("background-error")
+        self.notification_bar.clear_notification("background-warning")
+        self.notification_bar.clear_notification("background-cancelled")
+        if not self._commit_authoring_metadata():
+            return
+        try:
+            workflow.refine(
+                card_id,
+                transformation=transformation,
+                resolution=resolution,
+            )
+        except BackgroundWorkflowError as error:
+            self._show_error(
+                "background-error",
+                "Could not refine image",
+                detail=str(error),
+            )
+        self.render_document()
+        self._update_generation_actions()
+
     def _clear_background(self) -> None:
         workflow = self.background_workflow
         card_id = self._selected_card_id
@@ -1421,7 +1468,7 @@ class MainWindow(QMainWindow):
     def _background_progress_changed(self, message: str) -> None:
         self.notification_bar.clear_notification("background-error")
         self.notification_bar.clear_notification("background-warning")
-        if message == "Generation cancelled":
+        if message in {"Generation cancelled", "Refine cancelled"}:
             self._show_info("background-cancelled", message)
         else:
             self.notification_bar.clear_notification("background-cancelled")
@@ -1467,16 +1514,21 @@ class MainWindow(QMainWindow):
         self.generation_progress_container.show()
 
     def _background_failed(self, failure: object) -> None:
+        title = (
+            "Image refinement failed"
+            if self._background_progress_message == "Image refinement failed"
+            else "Image generation failed"
+        )
         if isinstance(failure, WorkerFailure):
             self._show_error(
                 "background-error",
-                "Image generation failed",
+                title,
                 detail=failure.message,
             )
         else:
             self._show_error(
                 "background-error",
-                "Image generation failed",
+                title,
                 detail=str(failure),
             )
         self._update_generation_actions()
@@ -1555,6 +1607,11 @@ class MainWindow(QMainWindow):
         workflow_busy = (
             self.background_workflow.busy if self.background_workflow is not None else False
         )
+        active_operation = (
+            getattr(self.background_workflow, "active_operation", None)
+            if self.background_workflow is not None
+            else None
+        )
         active_revision = selected_card.active_revision if selected_card is not None else None
         has_image = active_revision is not None and active_revision.background is not None
         generate_reason = "Ready to generate"
@@ -1565,12 +1622,12 @@ class MainWindow(QMainWindow):
         elif workflow_busy:
             generate_reason = (
                 "Background generation is running for this card"
-                if self.background_workflow is not None
+                if active_operation == "generate"
+                and self.background_workflow is not None
                 and self._selected_card_id is not None
                 and self.background_workflow.is_generating_for(self._selected_card_id)
                 else (
-                    "Background generation is running for another card; "
-                    "MFLUX runs one job at a time"
+                    "An image operation is running; MFLUX runs one job at a time"
                 )
             )
         elif not has_description_input:
@@ -1582,7 +1639,54 @@ class MainWindow(QMainWindow):
             generate_reason=generate_reason,
             has_image=has_image,
             busy=workflow_busy,
-            generating=workflow_busy,
+            generating=workflow_busy and active_operation == "generate",
+        )
+        refine_resolution = self.inspector.refine_resolution_combo.currentData()
+        has_refine_resolution = isinstance(
+            refine_resolution,
+            GenerateResolution,
+        )
+        refine_reason = "Ready to refine"
+        if self.controller.mutation_blocked:
+            refine_reason = PENDING_DURABILITY_MESSAGE
+        elif not has_card:
+            refine_reason = "Select a card in a saved stack"
+        elif workflow_busy:
+            refine_reason = (
+                "Refine is running for this card"
+                if self.background_workflow is not None
+                and self._selected_card_id is not None
+                and getattr(
+                    self.background_workflow,
+                    "is_refining_for",
+                    lambda _card_id: False,
+                )(self._selected_card_id)
+                else (
+                    "An image operation is running; MFLUX runs one job at a time"
+                )
+            )
+        elif not has_description_input:
+            refine_reason = "Enter a Description before refining"
+        elif not has_image:
+            refine_reason = "Generate an image before refining"
+        elif not has_refine_resolution:
+            refine_reason = (
+                self.inspector.refine_error.text()
+                or "Select a higher Refine output resolution"
+            )
+        elif not mflux_available:
+            refine_reason = self._action_diagnostic(AdapterKind.MFLUX)
+        self.inspector.set_refine_capabilities(
+            can_refine=(
+                has_card
+                and has_description_input
+                and has_image
+                and has_refine_resolution
+                and mflux_available
+            ),
+            refine_reason=refine_reason,
+            busy=workflow_busy,
+            refining=workflow_busy and active_operation == "refine",
         )
         self.clear_background_button.setEnabled(
             mutation_allowed and has_card and has_image and not workflow_busy
@@ -1655,6 +1759,25 @@ class MainWindow(QMainWindow):
         self.settings.setValue(MFLUX_MODEL_KEY, model)
         self.settings.sync()
         self._restart_availability_checks()
+
+    def _refine_source_size(
+        self,
+        card: Card | None,
+    ) -> tuple[int, int] | None:
+        if (
+            card is None
+            or card.active_revision.background is None
+            or self.document_session is None
+            or self.document_session.store is None
+        ):
+            return None
+        try:
+            path = self.document_session.store.asset_path(
+                card.active_revision.background.image_path
+            )
+            return readable_image_dimensions(path)
+        except (StackStoreError, UnreadableImageError):
+            return None
 
     def _render_card_canvas(self, card: object) -> None:
         if not isinstance(card, Card):

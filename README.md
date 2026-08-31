@@ -45,13 +45,13 @@ bundle transaction. Undo/Redo history retains the independent bytes only while
 needed to restore the duplicate, and discarding that history reclaims the
 unreferenced duplicate-owned asset without collecting unrelated bundle files.
 
-The inspector tabs are Generate, Styles, Hotspots, and Keys. Generate follows
-the authoring sequence Description, Style, optional References, Resolution,
-then Generate Image. Resolution labels show the exact output width and height
-for the stack format. Generate requires a nonempty Description and an available
-MFLUX model. The exact effective prompt is composed deterministically from the
-Description followed by the selected Style text; no language model prepares or
-rewrites it.
+The inspector tabs are Generate, Refine, Styles, Hotspots, and Keys. Generate
+follows the authoring sequence Description, Style, optional References,
+Resolution, then Generate Image. Resolution labels show the exact output width
+and height for the stack format. Generate requires a nonempty Description and
+an available MFLUX model. The exact effective prompt is composed
+deterministically from the Description followed by the selected Style text; no
+language model prepares or rewrites it.
 
 Reference order is authoritative. The first selected card is `image 1` and the
 optional second card is `image 2`; authors use those positional labels directly
@@ -77,8 +77,20 @@ the regular model family, and Reference-backed Generate and Edit through the
 Edit family. Model loading and inference share one process-local serialized
 boundary with at most one compatible cached family/configuration. Cancellation
 discards candidate output, and changing the selected model releases the prior
-configuration. Refine and Edit execution primitives are not yet exposed as
-authoring workflows.
+configuration. Edit execution is not yet exposed as an authoring workflow.
+
+Refine is exposed as an automatic-version workflow for the current canvas
+image. It uses regular Flux2Klein img2img with Reimagine 0.25, Balanced 0.50,
+or Preserve 0.75 transformation strength and reuses the current image's seed.
+Only output presets with a strictly greater pixel area than the decoded current
+image are offered. The current background is the sole image input; Generate
+References are never resent. Its deterministic prompt contains the current
+Description, selected Style, and any ordered accepted Edit instructions already
+present in the source, with the current Description explicitly authoritative.
+Success preserves the source and automatically appends and activates one
+complete derived revision. The new image and manifest commit as one
+rollback-safe transaction, and Undo/Redo retain its owned asset only while
+needed.
 
 Generated images are the only supported background source. Generate and image
 removal apply to the active revision through document commands. Completed

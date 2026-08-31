@@ -14,6 +14,7 @@ from uuid import UUID, uuid4
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
+from PIL import Image
 from PySide6.QtCore import QObject, QSize, Qt, Signal
 from PySide6.QtGui import QCloseEvent, QColor, QKeySequence, QPixmap
 from PySide6.QtTest import QTest
@@ -150,13 +151,24 @@ class FakeBackgroundWorkflow(QObject):
         super().__init__()
         self.controller = controller
         self.busy = False
+        self.active_operation: str | None = None
         self.generate_calls: list[object] = []
+        self.refine_calls: list[tuple[object, object, object]] = []
         self.clear_calls: list[object] = []
         self.cancel_calls = 0
         self.closed = False
 
     def generate(self, card_id: object) -> None:
         self.generate_calls.append(card_id)
+
+    def refine(
+        self,
+        card_id: object,
+        *,
+        transformation: object,
+        resolution: object,
+    ) -> None:
+        self.refine_calls.append((card_id, transformation, resolution))
 
     def clear_background(self, card_id: object) -> None:
         self.clear_calls.append(card_id)
@@ -194,11 +206,15 @@ class FakeBackgroundWorkflow(QObject):
             self.change_applied.emit("Revision deleted", token)
 
     def is_generating_for(self, _card_id: object) -> bool:
-        return self.busy
+        return self.busy and self.active_operation in {None, "generate"}
+
+    def is_refining_for(self, _card_id: object) -> bool:
+        return self.busy and self.active_operation == "refine"
 
     def cancel(self) -> None:
         self.cancel_calls += 1
         self.busy = False
+        self.active_operation = None
 
     def close(self) -> None:
         self.closed = True
@@ -1599,6 +1615,89 @@ def test_generate_is_disabled_without_description(
     window._update_generation_actions()
 
     assert not window.inspector.generate_background_button.isEnabled()
+
+
+def test_refine_tab_wires_current_image_options_and_cancels_live_changes(
+    application: QApplication,
+    tmp_path: Path,
+) -> None:
+    bundle = tmp_path / "Refine.hotcards"
+    store = StackStore(bundle)
+    card = Card(name="Card")
+    asset_id = uuid4()
+    source = tmp_path / "source.png"
+    Image.new("RGB", (592, 448), "navy").save(source)
+    image_path = store.store_image_asset(
+        source,
+        card_id=card.id,
+        asset_id=asset_id,
+    )
+    revision = CardRevision(
+        description="A courtyard",
+        background=_generated_background(
+            asset_id=asset_id,
+            image_path=image_path,
+            description="A courtyard",
+        ),
+    )
+    card = card.model_copy(
+        update={
+            "revisions": (revision,),
+            "active_revision_id": revision.id,
+        }
+    )
+    stack = Stack(name="Demo", cards=(card,), start_card_id=card.id)
+    store.save(stack)
+    controller = DocumentController(Stack(name="Welcome"))
+    session = DocumentSession(controller)
+    session.open(bundle)
+    background = FakeBackgroundWorkflow(controller)
+    window = MainWindow(
+        controller,
+        FakeWorkers(),  # type: ignore[arg-type]
+        FakeSettings(),
+        document_session=session,
+        background_workflow=background,  # type: ignore[arg-type]
+        start_diagnostics=False,
+    )
+    window._availability[AdapterKind.MFLUX] = True
+    window._update_generation_actions()
+
+    assert window.inspector.inspector_tabs.tabText(1) == "Refine"
+    assert window.inspector.refine_background_button.isEnabled()
+    assert (
+        window.inspector.refine_resolution_combo.currentData()
+        is GenerateResolution.RESOLUTION_768
+    )
+    assert "880 x 672" in window.inspector.refine_background_button.toolTip()
+    window.inspector.refine_background_button.click()
+    assert background.refine_calls == [
+        (
+            card.id,
+            RefineTransformation.BALANCED,
+            GenerateResolution.RESOLUTION_768,
+        )
+    ]
+
+    background.busy = True
+    background.active_operation = "refine"
+    window._update_generation_actions()
+    assert window.inspector.refine_background_button.text() == "Refining…"
+    assert not window.inspector.generate_background_button.isEnabled()
+    assert not window.image_model_combo.isEnabled()
+    window.inspector.refine_transformation_combo.setCurrentIndex(
+        window.inspector._combo_index_for_data(
+            window.inspector.refine_transformation_combo,
+            RefineTransformation.PRESERVE,
+        )
+    )
+    assert background.cancel_calls == 1
+
+    background.busy = True
+    background.active_operation = "refine"
+    window.mode_button.click()
+    assert background.cancel_calls == 2
+    assert not window.inspector.isVisible()
 
 
 def test_notification_undo_expires_after_another_command(

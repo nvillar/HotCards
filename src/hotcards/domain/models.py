@@ -523,6 +523,11 @@ def image_edit_lineage(provenance: ImageProvenance) -> tuple[AcceptedEdit, ...]:
     return ()
 
 
+def image_operation_settings(provenance: ImageProvenance) -> ImageOperationSettings:
+    """Return the exact operation settings behind an image, flattening duplicates."""
+    return original_image_provenance(provenance).settings
+
+
 class HotspotSet(DomainModel):
     """The complete applied hotspot set for one card revision."""
 

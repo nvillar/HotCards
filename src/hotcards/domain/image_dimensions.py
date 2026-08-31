@@ -58,4 +58,29 @@ def output_dimensions(
     return _nearest_16(width), _nearest_16(height)
 
 
-__all__ = ["AspectRatio", "GenerateResolution", "output_dimensions"]
+def higher_output_resolutions(
+    current_width: int,
+    current_height: int,
+    aspect_ratio: AspectRatio,
+) -> tuple[GenerateResolution, ...]:
+    """Return presets whose derived output area exceeds the current image area."""
+    if current_width <= 0 or current_height <= 0:
+        raise ValueError("current image dimensions must be positive")
+    current_area = current_width * current_height
+    return tuple(
+        resolution
+        for resolution in GenerateResolution
+        if (
+            output_dimensions(resolution, aspect_ratio)[0]
+            * output_dimensions(resolution, aspect_ratio)[1]
+        )
+        > current_area
+    )
+
+
+__all__ = [
+    "AspectRatio",
+    "GenerateResolution",
+    "higher_output_resolutions",
+    "output_dimensions",
+]

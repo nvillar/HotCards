@@ -21,9 +21,13 @@ from hotcards.application.background_workflow import (
     BackgroundWorkflowError,
 )
 from hotcards.application.commands import (
+    CommandError,
     CreateCardCommand,
+    DeleteRevisionCommand,
     DuplicateRevisionCommand,
     EditRevisionDescriptionCommand,
+    RenameCardCommand,
+    ReplaceHotspotSetCommand,
     ReplaceRevisionBackgroundCommand,
     SetRevisionGenerateResolutionCommand,
     SetRevisionReferenceCommand,
@@ -41,6 +45,7 @@ from hotcards.domain.image_dimensions import (
 from hotcards.domain.models import (
     Card,
     CardRevision,
+    DuplicateProvenance,
     GeneratedBackground,
     HotspotSet,
     ImageReferenceSnapshot,
@@ -55,7 +60,7 @@ from hotcards.domain.models import (
 )
 from hotcards.generation.errors import ImageGenerationCancelled
 from hotcards.generation.mflux_generator import MfluxGenerator
-from hotcards.storage.stack_store import StackStore
+from hotcards.storage.stack_store import StackStore, StackStoreError
 from hotcards.ui.inspector import Inspector
 
 
@@ -103,7 +108,10 @@ class FakeWorkers:
         invocation_started: object = None,
         invocation_finished: object = None,
     ) -> FakeOperation:
-        assert stage == "generating background image"
+        assert stage in {
+            "generating background image",
+            "refining background image",
+        }
 
         def wrapped_operation() -> object:
             if callable(invocation_started):
@@ -284,6 +292,353 @@ def test_generate_uses_description_and_preserves_result_lifecycle(
 
     assert controller.undo_if_current(applied[0].token)
     assert controller.document.cards[0].active_revision.background is None
+
+
+def test_refine_uses_current_image_seed_and_creates_complete_version(
+    tmp_path: Path,
+) -> None:
+    workflow, controller, session, workers, model, card = _bound_workflow(
+        tmp_path
+    )
+    workflow.generate(card.id)
+    _complete_generation(workers)
+    source_card = controller.document.cards[0]
+    source_revision = source_card.active_revision
+    source_background = source_revision.background
+    assert source_background is not None
+    source_path = session.store.asset_path(source_background.image_path)
+    style = controller.document.styles[0]
+    controller.execute(
+        SetRevisionStyleCommand(
+            card_id=card.id,
+            revision_id=source_revision.id,
+            style_id=style.id,
+        )
+    )
+    reference = _create_generated_source(
+        workflow,
+        controller,
+        workers,
+        name="Reference",
+    )
+    controller.execute(
+        SetRevisionReferenceCommand(
+            card_id=card.id,
+            revision_id=source_revision.id,
+            reference=ResolvedCardReference(target_card_id=reference.id),
+        )
+    )
+    source_revision = controller.document.cards[0].active_revision
+    applied: list[tuple[str, UndoToken]] = []
+    workflow.change_applied.connect(
+        lambda message, token: applied.append((message, token))
+    )
+
+    workflow.refine(
+        card.id,
+        transformation=RefineTransformation.BALANCED,
+        resolution=GenerateResolution.RESOLUTION_768,
+    )
+    _complete_generation(workers)
+
+    changed_card = controller.document.cards[0]
+    refined = changed_card.active_revision
+    assert len(changed_card.revisions) == 2
+    assert changed_card.revisions[0] == source_revision
+    assert refined.id != source_revision.id
+    assert refined.description == source_revision.description
+    assert refined.style_id == source_revision.style_id
+    assert refined.references == source_revision.references
+    assert refined.hotspot_set == source_revision.hotspot_set
+    assert refined.generate_resolution == source_revision.generate_resolution
+    assert refined.background is not None
+    provenance = refined.background.provenance
+    assert isinstance(provenance, RefineProvenance)
+    assert provenance.source == ImageSourceSnapshot(
+        card_id=card.id,
+        revision_id=source_revision.id,
+        background_id=source_background.id,
+    )
+    assert provenance.description == source_revision.description
+    assert provenance.style is not None
+    assert provenance.style.style_id == style.id
+    assert provenance.transformation is RefineTransformation.BALANCED
+    assert provenance.strength == 0.50
+    assert provenance.settings.seed == source_background.provenance.settings.seed
+    assert model.calls[-1]["seed"] == source_background.provenance.settings.seed
+    assert model.calls[-1]["image_path"] == source_path
+    assert model.calls[-1]["image_strength"] == 0.50
+    assert "image_paths" not in model.calls[-1]
+    assert (model.calls[-1]["width"], model.calls[-1]["height"]) == (880, 672)
+    assert applied and applied[-1][0] == "Image refined"
+    token = applied[-1][1]
+    refined_path = session.store.asset_path(refined.background.image_path)
+    assert refined_path.is_file()
+
+    assert controller.undo_if_current(token)
+    assert session.flush()
+    assert controller.document.cards[0].active_revision == source_revision
+    assert refined_path.is_file()
+    assert controller.redo()
+    assert session.flush()
+    assert controller.document.cards[0].active_revision == refined
+    assert refined_path.is_file()
+    with pytest.raises(CommandError, match="cannot delete this source revision"):
+        controller.execute(
+            DeleteRevisionCommand(
+                card_id=card.id,
+                revision_id=source_revision.id,
+            )
+        )
+
+    assert controller.undo()
+    assert session.flush()
+    controller.execute(RenameCardCommand(card_id=card.id, name="Garden renamed"))
+    assert session.flush()
+    assert not refined_path.exists()
+
+
+@pytest.mark.parametrize("hotspot_set", (None, HotspotSet()))
+def test_refine_preserves_none_vs_empty_hotspot_set(
+    tmp_path: Path,
+    hotspot_set: HotspotSet | None,
+) -> None:
+    workflow, controller, _session, workers, _model, card = _bound_workflow(
+        tmp_path
+    )
+    controller.execute(
+        ReplaceHotspotSetCommand(
+            card_id=card.id,
+            revision_id=card.active_revision.id,
+            hotspot_set=hotspot_set,
+        )
+    )
+    workflow.generate(card.id)
+    _complete_generation(workers)
+
+    workflow.refine(
+        card.id,
+        transformation=RefineTransformation.PRESERVE,
+        resolution=GenerateResolution.RESOLUTION_768,
+    )
+    _complete_generation(workers)
+
+    revisions = controller.document.cards[0].revisions
+    assert revisions[0].hotspot_set == hotspot_set
+    assert revisions[1].hotspot_set == hotspot_set
+
+
+def test_refine_filters_legacy_pixel_size_and_disables_at_maximum(
+    tmp_path: Path,
+) -> None:
+    workflow, controller, session, workers, _model, card = _bound_workflow(
+        tmp_path,
+        resolution=GenerateResolution.RESOLUTION_1024,
+    )
+    workflow.generate(card.id)
+    _complete_generation(workers)
+    revision = controller.document.cards[0].active_revision
+    assert revision.background is not None
+
+    assert workflow.available_refine_resolutions(card.id) == ()
+    with pytest.raises(BackgroundWorkflowError, match="maximum"):
+        workflow.refine(
+            card.id,
+            transformation=RefineTransformation.BALANCED,
+            resolution=GenerateResolution.RESOLUTION_1024,
+        )
+
+    source_path = session.store.asset_path(revision.background.image_path)
+    Image.new("RGB", (1024, 768), "navy").save(source_path)
+    assert workflow.available_refine_resolutions(card.id) == (
+        GenerateResolution.RESOLUTION_1024,
+    )
+
+    workflow.refine(
+        card.id,
+        transformation=RefineTransformation.REIMAGINE,
+        resolution=GenerateResolution.RESOLUTION_1024,
+    )
+    _complete_generation(workers)
+    provenance = controller.document.cards[0].active_revision.provenance
+    assert isinstance(provenance, RefineProvenance)
+    assert provenance.transformation is RefineTransformation.REIMAGINE
+    assert provenance.strength == 0.25
+
+
+def test_refine_flattens_duplicate_source_settings(tmp_path: Path) -> None:
+    workflow, controller, _session, workers, model, card = _bound_workflow(
+        tmp_path
+    )
+    workflow.generate(card.id)
+    _complete_generation(workers)
+    revision = controller.document.cards[0].active_revision
+    background = revision.background
+    assert background is not None
+    duplicate_background = background.model_copy(
+        update={
+            "provenance": DuplicateProvenance(
+                source=ImageSourceSnapshot(
+                    card_id=uuid4(),
+                    revision_id=uuid4(),
+                    background_id=uuid4(),
+                ),
+                original_provenance=background.provenance,
+            )
+        }
+    )
+    controller.execute(
+        ReplaceRevisionBackgroundCommand(
+            card_id=card.id,
+            revision_id=revision.id,
+            background=duplicate_background,
+        )
+    )
+
+    workflow.refine(
+        card.id,
+        transformation=RefineTransformation.PRESERVE,
+        resolution=GenerateResolution.RESOLUTION_768,
+    )
+    _complete_generation(workers)
+
+    refined = controller.document.cards[0].active_revision
+    provenance = refined.provenance
+    assert isinstance(provenance, RefineProvenance)
+    assert provenance.source.card_id == card.id
+    assert provenance.source.revision_id == revision.id
+    assert provenance.source.background_id == duplicate_background.id
+    assert provenance.settings.seed == background.provenance.settings.seed
+    assert model.calls[-1]["seed"] == background.provenance.settings.seed
+
+
+def test_refine_stale_revision_or_model_change_creates_no_version(
+    tmp_path: Path,
+) -> None:
+    workflow, controller, _session, workers, _model, card = _bound_workflow(
+        tmp_path
+    )
+    workflow.generate(card.id)
+    _complete_generation(workers)
+    source = controller.document.cards[0].active_revision
+    failures: list[object] = []
+    workflow.failed.connect(failures.append)
+
+    workflow.refine(
+        card.id,
+        transformation=RefineTransformation.BALANCED,
+        resolution=GenerateResolution.RESOLUTION_768,
+    )
+    controller.execute(
+        ReplaceHotspotSetCommand(
+            card_id=card.id,
+            revision_id=source.id,
+            hotspot_set=HotspotSet(),
+        )
+    )
+    _complete_generation(workers)
+
+    assert len(controller.document.cards[0].revisions) == 1
+    assert "source revision changed" in str(failures[-1])
+
+    current = controller.document.cards[0].active_revision
+    workflow.refine(
+        card.id,
+        transformation=RefineTransformation.BALANCED,
+        resolution=GenerateResolution.RESOLUTION_768,
+    )
+    workflow._settings_provider = lambda: BackgroundGenerationSettings(
+        mflux_model="flux2-klein-9b",
+        step_count=4,
+        quantization=8,
+        random_seed=False,
+        fixed_seed=42,
+    )
+    _complete_generation(workers)
+
+    assert controller.document.cards[0].active_revision == current
+    assert len(controller.document.cards[0].revisions) == 1
+    assert "source revision changed" in str(failures[-1])
+
+
+def test_refine_storage_failure_creates_no_revision_or_asset(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow, controller, session, workers, _model, card = _bound_workflow(
+        tmp_path
+    )
+    workflow.generate(card.id)
+    _complete_generation(workers)
+    source = controller.document
+    assert session.store is not None
+    assets_before = set(
+        (session.store.bundle_path / "assets" / "cards").glob("*/image-*.png")
+    )
+    failures: list[object] = []
+    workflow.failed.connect(failures.append)
+
+    def fail_store(*_args: object, **_kwargs: object) -> object:
+        raise StackStoreError("injected Refine transaction failure")
+
+    monkeypatch.setattr(
+        session.store,
+        "store_image_asset_and_save",
+        fail_store,
+    )
+    workflow.refine(
+        card.id,
+        transformation=RefineTransformation.BALANCED,
+        resolution=GenerateResolution.RESOLUTION_768,
+    )
+    _complete_generation(workers)
+
+    assert controller.document == source
+    assert set(
+        (session.store.bundle_path / "assets" / "cards").glob("*/image-*.png")
+    ) == assets_before
+    assert "injected Refine transaction failure" in str(failures[-1])
+    assert not list((tmp_path / "temporary").glob("refined-*.png"))
+
+
+def test_refine_cancel_or_model_failure_creates_no_version(
+    tmp_path: Path,
+) -> None:
+    workflow, controller, _session, workers, _model, card = _bound_workflow(
+        tmp_path
+    )
+    workflow.generate(card.id)
+    _complete_generation(workers)
+    source = controller.document
+
+    workflow.refine(
+        card.id,
+        transformation=RefineTransformation.BALANCED,
+        resolution=GenerateResolution.RESOLUTION_768,
+    )
+    operation = workers.operations[-1]
+    work = workers.calls[-1]
+    workflow.cancel()
+
+    assert operation.was_cancelled
+    assert callable(work)
+    with pytest.raises(ImageGenerationCancelled, match="cancelled"):
+        work()
+    assert controller.document == source
+    assert not list((tmp_path / "temporary").glob("refined-*.png"))
+
+    failures: list[object] = []
+    workflow.failed.connect(failures.append)
+    workflow.refine(
+        card.id,
+        transformation=RefineTransformation.BALANCED,
+        resolution=GenerateResolution.RESOLUTION_768,
+    )
+    workers.operations[-1].failed.emit(RuntimeError("injected model failure"))
+
+    assert controller.document == source
+    assert "injected model failure" in str(failures[-1])
+    assert not list((tmp_path / "temporary").glob("refined-*.png"))
 
 
 def test_rejected_generation_apply_removes_the_new_unreachable_asset(

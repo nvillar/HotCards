@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 from threading import Event
+from typing import Literal
 from uuid import UUID, uuid4
 
 from pydantic import ValidationError
@@ -17,6 +18,7 @@ from PySide6.QtCore import QObject, Signal
 from hotcards.application.commands import (
     ActivateRevisionCommand,
     CommandError,
+    CreateRefinedRevisionCommand,
     DeleteRevisionCommand,
     DuplicateRevisionCommand,
     ReplaceRevisionBackgroundCommand,
@@ -24,36 +26,62 @@ from hotcards.application.commands import (
 from hotcards.application.document_controller import (
     DocumentController,
     DocumentMutationBlockedError,
+    OwnedImageAsset,
+    UndoToken,
 )
-from hotcards.application.document_session import DocumentSession
+from hotcards.application.document_session import (
+    DocumentSession,
+    DocumentSessionError,
+)
 from hotcards.application.generated_revision_change import GeneratedRevisionChange
 from hotcards.application.image_files import (
     UnreadableImageError,
+    readable_image_dimensions,
     require_readable_image,
 )
 from hotcards.application.workers import AdapterWorkers, WorkerOperation
 from hotcards.domain.image_dependencies import image_source_dependencies
-from hotcards.domain.image_dimensions import GenerateResolution, output_dimensions
+from hotcards.domain.image_dimensions import (
+    AspectRatio,
+    GenerateResolution,
+    higher_output_resolutions,
+    output_dimensions,
+)
 from hotcards.domain.models import (
+    AcceptedEdit,
     Card,
     CardRevision,
     GeneratedBackground,
     GenerateInputs,
     ImageReferenceSnapshot,
+    ImageSourceSnapshot,
+    RefineTransformation,
     ResolvedCardReference,
     Stack,
     StyleSnapshot,
     UnresolvedCardReference,
+    image_edit_lineage,
+    image_operation_settings,
 )
-from hotcards.generation.image_generation import compose_generation_prompt
+from hotcards.generation.image_generation import (
+    compose_generation_prompt,
+    compose_refine_prompt,
+)
 from hotcards.generation.mflux_generator import (
     MfluxCancellationToken,
     MfluxGenerateRequest,
     MfluxGenerateResult,
     MfluxGenerator,
+    MfluxRefineRequest,
+    MfluxRefineResult,
     dispose_mflux_result,
 )
-from hotcards.storage.stack_store import StackStore, StackStoreError
+from hotcards.storage.stack_store import (
+    StackStore,
+    StackStoreError,
+    StackStoreTransactionError,
+    StoredImageAsset,
+)
 
 
 class BackgroundWorkflowError(ValueError):
@@ -91,6 +119,21 @@ class _GenerationReferenceTarget:
     revision_id: UUID
     background_id: UUID
     image_path: str
+
+
+@dataclass(frozen=True, slots=True)
+class _RefineTarget:
+    stack_id: UUID
+    card_id: UUID
+    revision: CardRevision
+    bundle_path: Path
+    style: StyleSnapshot | None
+    edit_lineage: tuple[AcceptedEdit, ...]
+    aspect_ratio: AspectRatio
+    resolution: GenerateResolution
+    transformation: RefineTransformation
+    settings: BackgroundGenerationSettings
+    history_token: UndoToken | None
 
 
 GenerationSettingsProvider = Callable[[], BackgroundGenerationSettings]
@@ -138,15 +181,20 @@ class BackgroundWorkflow(QObject):
         self._temporary_directory.mkdir(parents=True, exist_ok=True)
         self._operation: WorkerOperation | None = None
         self._request_id: UUID | None = None
-        self._request_target: _GenerationTarget | None = None
-        self._pending_result: MfluxGenerateResult | None = None
+        self._request_target: _GenerationTarget | _RefineTarget | None = None
+        self._pending_result: MfluxGenerateResult | MfluxRefineResult | None = None
         self._close_requested = Event()
         self._invocation_active = Event()
         self._busy = False
+        self._active_operation: Literal["generate", "refine"] | None = None
 
     @property
     def busy(self) -> bool:
         return self._busy
+
+    @property
+    def active_operation(self) -> Literal["generate", "refine"] | None:
+        return self._active_operation
 
     def generate(self, card_id: UUID) -> WorkerOperation:
         """Generate and directly apply a background to the active revision."""
@@ -213,6 +261,7 @@ class BackgroundWorkflow(QObject):
             reference_image_paths=reference_image_paths,
         )
         cancellation = MfluxCancellationToken()
+        self._active_operation = "generate"
         self._set_busy(True, "Generating image...")
         operation = self.workers.run_mflux(
             lambda: self._mflux_generator.generate(
@@ -232,6 +281,148 @@ class BackgroundWorkflow(QObject):
         self._operation = operation
         operation.succeeded.connect(
             partial(self._generation_succeeded, request_id, target, asset_id)
+        )
+        operation.failed.connect(partial(self._operation_failed, request_id))
+        return operation
+
+    def available_refine_resolutions(
+        self,
+        card_id: UUID,
+    ) -> tuple[GenerateResolution, ...]:
+        """Return output presets larger than the current decoded background."""
+        card = self._card(self.controller.document, card_id)
+        revision = card.active_revision
+        background = revision.background
+        if background is None:
+            return ()
+        source_path = self._require_store().asset_path(background.image_path)
+        try:
+            width, height = readable_image_dimensions(source_path)
+        except UnreadableImageError as error:
+            raise BackgroundWorkflowError(
+                "the current image is unavailable or unreadable"
+            ) from error
+        return higher_output_resolutions(
+            width,
+            height,
+            self.controller.document.aspect_ratio,
+        )
+
+    def refine(
+        self,
+        card_id: UUID,
+        *,
+        transformation: RefineTransformation,
+        resolution: GenerateResolution,
+    ) -> WorkerOperation:
+        """Refine the current image into one automatic complete revision."""
+        self._require_ready(card_id)
+        if not self.session.flush():
+            raise BackgroundWorkflowError(
+                self.session.state.error or "the current stack could not be saved"
+            )
+        document = self.controller.document
+        card = self._card(document, card_id)
+        revision = card.active_revision
+        if not revision.description.strip():
+            raise BackgroundWorkflowError("enter a Description before refining")
+        background = revision.background
+        if background is None:
+            raise BackgroundWorkflowError("generate an image before refining")
+        store = self._require_store()
+        source_image_path = store.asset_path(background.image_path)
+        try:
+            source_width, source_height = readable_image_dimensions(
+                source_image_path
+            )
+        except UnreadableImageError as error:
+            raise BackgroundWorkflowError(
+                "the current image is unavailable or unreadable"
+            ) from error
+        available_resolutions = higher_output_resolutions(
+            source_width,
+            source_height,
+            document.aspect_ratio,
+        )
+        if not available_resolutions:
+            raise BackgroundWorkflowError(
+                "the current image is already at the maximum Refine resolution"
+            )
+        if resolution not in available_resolutions:
+            raise BackgroundWorkflowError(
+                "select a Refine resolution with more pixels than the current image"
+            )
+        settings = self._settings_provider()
+        style = self._style_snapshot(document, revision)
+        edit_lineage = image_edit_lineage(background.provenance)
+        render_prompt = compose_refine_prompt(
+            revision.description,
+            style,
+            edit_lineage,
+        )
+        source = ImageSourceSnapshot(
+            card_id=card.id,
+            revision_id=revision.id,
+            background_id=background.id,
+        )
+        width, height = output_dimensions(resolution, document.aspect_ratio)
+        request_id = uuid4()
+        asset_id = uuid4()
+        target = _RefineTarget(
+            stack_id=document.id,
+            card_id=card.id,
+            revision=revision.model_copy(deep=True),
+            bundle_path=store.bundle_path.resolve(),
+            style=style,
+            edit_lineage=edit_lineage,
+            aspect_ratio=document.aspect_ratio,
+            resolution=resolution,
+            transformation=transformation,
+            settings=settings,
+            history_token=self.controller.current_undo_token,
+        )
+        request = MfluxRefineRequest(
+            source=source,
+            source_image_path=source_image_path,
+            source_seed=image_operation_settings(background.provenance).seed,
+            description=revision.description,
+            style=style,
+            edit_lineage=edit_lineage,
+            render_prompt=render_prompt,
+            resolution=resolution,
+            transformation=transformation,
+            image_strength=transformation.strength,
+            output_path=self._temporary_directory / f"refined-{asset_id}.png",
+            model_identifier=settings.mflux_model,
+            aspect_ratio=document.aspect_ratio,
+            width=width,
+            height=height,
+            step_count=settings.step_count,
+            quantization=settings.quantization,
+        )
+        cancellation = MfluxCancellationToken()
+        self._request_id = request_id
+        self._request_target = target
+        self._active_operation = "refine"
+        self._set_busy(True, "Refining image...")
+        operation = self.workers.run_mflux(
+            lambda: self._mflux_generator.refine(
+                request,
+                progress=partial(
+                    self._generation_progress,
+                    request_id,
+                ),
+                cancellation=cancellation,
+            ),
+            stage="refining background image",
+            request_cancel=cancellation.cancel,
+            dispose_result=dispose_mflux_result,
+            invocation_started=self._invocation_active.set,
+            invocation_finished=self._invocation_finished,
+        )
+        self._operation = operation
+        operation.succeeded.connect(
+            partial(self._refine_succeeded, request_id, target, asset_id)
         )
         operation.failed.connect(partial(self._operation_failed, request_id))
         return operation
@@ -300,7 +491,14 @@ class BackgroundWorkflow(QObject):
         self._operation = None
         self._discard_pending_image()
         if self._busy:
-            self._set_busy(False, "Generation cancelled")
+            operation = self._active_operation
+            self._active_operation = None
+            self._set_busy(
+                False,
+                "Refine cancelled"
+                if operation == "refine"
+                else "Generation cancelled",
+            )
 
     def close(self) -> None:
         self._close_requested.set()
@@ -322,6 +520,15 @@ class BackgroundWorkflow(QObject):
     def is_generating_for(self, card_id: UUID) -> bool:
         return (
             self._busy
+            and self._active_operation == "generate"
+            and self._request_target is not None
+            and self._request_target.card_id == card_id
+        )
+
+    def is_refining_for(self, card_id: UUID) -> bool:
+        return (
+            self._busy
+            and self._active_operation == "refine"
             and self._request_target is not None
             and self._request_target.card_id == card_id
         )
@@ -396,7 +603,104 @@ class BackgroundWorkflow(QObject):
         self._operation = None
         self._request_id = None
         self._request_target = None
+        self._active_operation = None
         self._set_busy(False, "Image generated")
+
+    def _refine_succeeded(
+        self,
+        request_id: UUID,
+        target: _RefineTarget,
+        asset_id: UUID,
+        result: object,
+    ) -> None:
+        if request_id != self._request_id:
+            if isinstance(result, MfluxRefineResult):
+                result.dispose_output()
+            return
+        if not isinstance(result, MfluxRefineResult):
+            self._finish_with_error(
+                BackgroundWorkflowError("image refinement returned an unexpected result")
+            )
+            return
+        self._pending_result = result
+        if not self._refine_target_is_current(target):
+            self._finish_with_error(
+                BackgroundWorkflowError(
+                    "the stack or source revision changed before Refine completed"
+                )
+            )
+            return
+        store = self._require_store()
+        image_path = store.image_asset_path(target.card_id, asset_id)
+        background = GeneratedBackground(
+            id=asset_id,
+            image_path=image_path,
+            provenance=result.provenance,
+            created_at=result.provenance.settings.generated_at,
+        )
+        command = CreateRefinedRevisionCommand(
+            card_id=target.card_id,
+            source_revision_id=target.revision.id,
+            background=background,
+        )
+        before = self.controller.document
+        owned_assets: list[OwnedImageAsset] = []
+
+        def persist(candidate: Stack) -> None:
+            try:
+                stored = store.store_image_asset_and_save(
+                    result.output_path,
+                    destination_card_id=target.card_id,
+                    destination_asset_id=asset_id,
+                    previous_stack=before,
+                    changed_stack=candidate,
+                )
+            except StackStoreTransactionError as error:
+                if error.owned_asset is not None:
+                    owned_assets.append(
+                        self._owned_asset(
+                            store,
+                            target.card_id,
+                            asset_id,
+                            error.owned_asset,
+                        )
+                    )
+                raise
+            owned_assets.append(
+                self._owned_asset(
+                    store,
+                    target.card_id,
+                    asset_id,
+                    stored,
+                )
+            )
+
+        previous_token = self.controller.current_undo_token
+        try:
+            changed = self.session.execute_persisted(
+                command,
+                persist=persist,
+                owned_assets=owned_assets,
+            )
+        except (
+            CommandError,
+            DocumentMutationBlockedError,
+            DocumentSessionError,
+            StackStoreError,
+            ValidationError,
+        ) as error:
+            self._finish_with_error(error)
+            return
+        self.progress_changed.emit("Image refined")
+        self.document_changed.emit(changed)
+        self._emit_change_applied("Image refined", previous_token)
+        self._pending_result = None
+        result.dispose_output()
+        self._operation = None
+        self._request_id = None
+        self._request_target = None
+        self._active_operation = None
+        self._set_busy(False, "Image refined")
 
     def _apply_background(
         self,
@@ -461,11 +765,18 @@ class BackgroundWorkflow(QObject):
             self._finish_with_error(failure)
 
     def _finish_with_error(self, failure: object) -> None:
+        operation = self._active_operation
         self._operation = None
         self._request_id = None
         self._request_target = None
+        self._active_operation = None
         self._discard_pending_image()
-        self._set_busy(False, "Image generation failed")
+        self._set_busy(
+            False,
+            "Image refinement failed"
+            if operation == "refine"
+            else "Image generation failed",
+        )
         self.failed.emit(failure)
 
     def _discard_pending_image(self) -> None:
@@ -481,6 +792,11 @@ class BackgroundWorkflow(QObject):
     def _require_ready(self, card_id: UUID) -> None:
         if self._busy:
             raise BackgroundWorkflowError("background generation is already running")
+        if self.controller.mutation_blocked:
+            raise BackgroundWorkflowError(
+                self.controller.mutation_blocked_reason
+                or "save the stack before changing an image"
+            )
         if self.session.store is None:
             raise BackgroundWorkflowError("save the stack before changing an image")
         self._card(self.controller.document, card_id)
@@ -539,6 +855,52 @@ class BackgroundWorkflow(QObject):
             return self._resolve_references(document, card) == target.references
         except BackgroundWorkflowError:
             return False
+
+    def _refine_target_is_current(self, target: _RefineTarget) -> bool:
+        bundle_path = self.session.state.bundle_path
+        if bundle_path is None or bundle_path.resolve() != target.bundle_path:
+            return False
+        document = self.controller.document
+        if (
+            document.id != target.stack_id
+            or document.aspect_ratio != target.aspect_ratio
+            or self.controller.current_undo_token != target.history_token
+        ):
+            return False
+        card = next(
+            (card for card in document.cards if card.id == target.card_id),
+            None,
+        )
+        if card is None or card.active_revision_id != target.revision.id:
+            return False
+        revision = card.active_revision
+        if (
+            revision != target.revision
+            or self._style_snapshot(document, revision) != target.style
+            or revision.background is None
+            or image_edit_lineage(revision.background.provenance)
+            != target.edit_lineage
+        ):
+            return False
+        return self._settings_provider() == target.settings
+
+    @staticmethod
+    def _owned_asset(
+        store: StackStore,
+        card_id: UUID,
+        asset_id: UUID,
+        stored: StoredImageAsset,
+    ) -> OwnedImageAsset:
+        return OwnedImageAsset(
+            bundle_path=store.bundle_path,
+            relative_path=stored.relative_path,
+            card_id=card_id,
+            asset_id=asset_id,
+            device=stored.device,
+            inode=stored.inode,
+            directory_device=stored.directory_device,
+            directory_inode=stored.directory_inode,
+        )
 
     def _resolve_references(
         self,

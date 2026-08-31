@@ -5,6 +5,7 @@ import pytest
 from hotcards.domain.image_dimensions import (
     AspectRatio,
     GenerateResolution,
+    higher_output_resolutions,
     output_dimensions,
 )
 
@@ -48,3 +49,31 @@ def test_output_dimensions_reject_unsupported_resolutions(resolution: object) ->
 def test_output_dimensions_require_typed_aspect_ratio() -> None:
     with pytest.raises(ValueError, match="AspectRatio"):
         output_dimensions(512, "4:3")  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("aspect_ratio", tuple(AspectRatio))
+@pytest.mark.parametrize("source_resolution", tuple(GenerateResolution))
+def test_higher_output_resolutions_filters_by_actual_pixel_area(
+    aspect_ratio: AspectRatio,
+    source_resolution: GenerateResolution,
+) -> None:
+    width, height = output_dimensions(source_resolution, aspect_ratio)
+
+    assert higher_output_resolutions(width, height, aspect_ratio) == tuple(
+        resolution
+        for resolution in GenerateResolution
+        if resolution > source_resolution
+    )
+
+
+def test_higher_output_resolutions_handles_legacy_landscape_pixels() -> None:
+    assert higher_output_resolutions(
+        1024,
+        768,
+        AspectRatio.LANDSCAPE,
+    ) == (GenerateResolution.RESOLUTION_1024,)
+
+
+def test_higher_output_resolutions_rejects_invalid_source_dimensions() -> None:
+    with pytest.raises(ValueError, match="positive"):
+        higher_output_resolutions(0, 768, AspectRatio.LANDSCAPE)
