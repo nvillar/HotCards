@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import os
 from collections.abc import Iterator
 from pathlib import Path
@@ -176,6 +177,27 @@ def test_invocation_callback_failure_does_not_break_later_work(
     assert second.result == "second"
     assert "MFLUX invocation lifecycle cleanup failed" in caplog.text
     workers.shutdown(wait_milliseconds=500)
+
+
+def test_completed_invocation_does_not_retain_operation_callable() -> None:
+    class Operation:
+        def __call__(self) -> None:
+            return None
+
+    workers = AdapterWorkers(mflux_timeout_seconds=0.5)
+    callable_operation = Operation()
+    operation_ref = ref(callable_operation)
+    operation = workers.run_mflux(
+        callable_operation,
+        stage="generating collectable image",
+    )
+    wait_for(operation)
+    workers.shutdown(wait_milliseconds=500)
+
+    del callable_operation
+    gc.collect()
+
+    assert operation_ref() is None
 
 
 def test_startup_cleanup_failure_releases_slot_and_reports_original_error(

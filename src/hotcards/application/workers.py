@@ -212,9 +212,12 @@ class _InvocationThread:
         while True:
             task = self._tasks.get()
             try:
-                self._invoke(task)
-            except Exception:
-                logger.exception("MFLUX invocation lifecycle cleanup failed")
+                try:
+                    self._invoke(task)
+                except Exception:
+                    logger.exception("MFLUX invocation lifecycle cleanup failed")
+            finally:
+                del task
 
     @staticmethod
     def _invoke(task: _InvocationTask) -> None:
