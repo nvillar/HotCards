@@ -14,10 +14,11 @@ from hotcards.domain.models import (
     CURRENT_SCHEMA_VERSION,
     Card,
     CardRevision,
+    DirectGenerateProvenance,
     GeneratedBackground,
+    GenerateInputs,
     HotspotSet,
-    ImageGenerationInputs,
-    ImageGenerationMetadata,
+    ImageOperationSettings,
     Interaction,
     NavigateAction,
     Point,
@@ -37,19 +38,21 @@ def _generated_background(asset_id: UUID, image_path: str) -> GeneratedBackgroun
     return GeneratedBackground(
         id=asset_id,
         image_path=image_path,
-        generation_metadata=ImageGenerationMetadata(
-            inputs=ImageGenerationInputs(
+        provenance=DirectGenerateProvenance(
+            inputs=GenerateInputs(
                 description="A courtyard",
             ),
             render_prompt="A courtyard",
-            model_identifier="test",
-            mflux_version="test",
-            seed=1,
-            width=1024,
-            height=768,
-            step_count=4,
-            generated_at=generated_at,
-            duration_seconds=1,
+            settings=ImageOperationSettings(
+                model_identifier="test",
+                mflux_version="test",
+                seed=1,
+                width=1024,
+                height=768,
+                step_count=4,
+                generated_at=generated_at,
+                duration_seconds=1,
+            ),
         ),
         created_at=generated_at,
     )
@@ -108,7 +111,14 @@ def test_bundle_round_trip_preserves_document_and_relative_asset(tmp_path: Path)
     assert image_path is not None
     assert image_path.startswith("assets/cards/")
     assert not Path(image_path).is_absolute()
-    assert json.loads(store.stack_path.read_text())["schema_version"] == CURRENT_SCHEMA_VERSION
+    payload = json.loads(store.stack_path.read_text())
+    assert payload["schema_version"] == CURRENT_SCHEMA_VERSION
+    assert payload["aspect_ratio"] == "4:3"
+    assert "canvas" not in payload
+    assert (
+        payload["cards"][0]["revisions"][0]["background"]["provenance"]["operation"]
+        == "generate"
+    )
 
 
 def test_failed_replace_preserves_active_stack_and_removes_temporary_file(
@@ -262,8 +272,8 @@ def test_load_rejects_missing_unsupported_and_future_versions(
     for payload, message in [
         ({"name": "Missing"}, "schema_version"),
         ({"schema_version": 3, "name": "Legacy"}, "schema_version"),
-        ({"schema_version": 9, "name": "Previous"}, "schema_version"),
-        ({"schema_version": 11, "name": "Future"}, "schema_version"),
+        ({"schema_version": 10, "name": "Previous"}, "schema_version"),
+        ({"schema_version": 12, "name": "Future"}, "schema_version"),
     ]:
         store.stack_path.write_text(json.dumps(payload))
         with pytest.raises(StackStoreError, match=message):

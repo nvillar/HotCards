@@ -22,6 +22,7 @@ from hotcards.application.commands import (
     CreateCardCommand,
     DuplicateRevisionCommand,
     EditRevisionDescriptionCommand,
+    SetRevisionGenerateResolutionCommand,
     SetRevisionReferenceCommand,
     SetRevisionStyleCommand,
     UpdateStyleCommand,
@@ -29,11 +30,11 @@ from hotcards.application.commands import (
 from hotcards.application.document_controller import DocumentController, UndoToken
 from hotcards.application.document_session import DocumentSession
 from hotcards.application.generated_revision_change import GeneratedRevisionChange
+from hotcards.domain.image_dimensions import GenerateResolution
 from hotcards.domain.models import (
     Card,
     CardRevision,
     HotspotSet,
-    ImagePrompt,
     ImageReferenceSnapshot,
     Interaction,
     NavigateAction,
@@ -213,10 +214,12 @@ def test_generate_uses_description_and_preserves_result_lifecycle(
     assert revision.background is not None
     assert revision.description == "A garden"
     assert revision.hotspot_set is not None
-    metadata = revision.generation_metadata
-    assert metadata is not None
-    assert metadata.inputs.description == "A garden"
-    assert metadata.render_prompt == "A garden"
+    provenance = revision.provenance
+    assert provenance is not None
+    assert provenance.operation == "generate"
+    assert provenance.inputs.description == "A garden"
+    assert provenance.render_prompt == "A garden"
+    assert (provenance.settings.width, provenance.settings.height) == (592, 448)
     assert model.calls[-1]["prompt"] == "A garden"
     assert session.flush()
     assert StackStore(session.state.bundle_path).load() == controller.document
@@ -226,30 +229,6 @@ def test_generate_uses_description_and_preserves_result_lifecycle(
 
     assert controller.undo_if_current(applied[0].token)
     assert controller.document.cards[0].active_revision.background is None
-
-
-def test_generate_ignores_legacy_revision_image_prompt(tmp_path: Path) -> None:
-    workflow, controller, _session, workers, model, card = _bound_workflow(tmp_path)
-    revision = card.active_revision.model_copy(
-        update={
-            "image_prompt": ImagePrompt(
-                text="Legacy prepared prompt",
-                source_description="A garden",
-            )
-        }
-    )
-    changed_card = card.model_copy(
-        update={"revisions": (revision,), "active_revision_id": revision.id}
-    )
-    controller.replace_document(
-        controller.document.model_copy(update={"cards": (changed_card,)})
-    )
-
-    workflow.generate(card.id)
-    _complete_generation(workers)
-
-    assert model.calls[-1]["prompt"] == "A garden"
-    assert controller.document.cards[0].active_revision.image_prompt is not None
 
 
 def test_generate_appends_and_captures_selected_style(tmp_path: Path) -> None:
@@ -266,12 +245,36 @@ def test_generate_appends_and_captures_selected_style(tmp_path: Path) -> None:
     workflow.generate(card.id)
     _complete_generation(workers)
 
-    metadata = controller.document.cards[0].active_revision.generation_metadata
-    assert metadata is not None
-    assert metadata.inputs.style is not None
-    assert metadata.inputs.style.style_id == style.id
-    assert metadata.render_prompt == f"A garden.\n\n{style.prompt_text}"
-    assert model.calls[-1]["prompt"] == metadata.render_prompt
+    provenance = controller.document.cards[0].active_revision.provenance
+    assert provenance is not None
+    assert provenance.operation == "generate"
+    assert provenance.inputs.style is not None
+    assert provenance.inputs.style.style_id == style.id
+    assert provenance.render_prompt == f"A garden.\n\n{style.prompt_text}"
+    assert model.calls[-1]["prompt"] == provenance.render_prompt
+
+
+def test_generate_uses_revision_resolution_and_stack_aspect_ratio(
+    tmp_path: Path,
+) -> None:
+    workflow, controller, _session, workers, model, card = _bound_workflow(tmp_path)
+    controller.execute(
+        SetRevisionGenerateResolutionCommand(
+            card_id=card.id,
+            revision_id=card.active_revision.id,
+            resolution=GenerateResolution.RESOLUTION_1024,
+        )
+    )
+
+    workflow.generate(card.id)
+    _complete_generation(workers)
+
+    provenance = controller.document.cards[0].active_revision.provenance
+    assert provenance is not None
+    assert provenance.operation == "generate"
+    assert provenance.inputs.resolution is GenerateResolution.RESOLUTION_1024
+    assert (model.calls[-1]["width"], model.calls[-1]["height"]) == (1184, 880)
+    assert (provenance.settings.width, provenance.settings.height) == (1184, 880)
 
 
 def test_description_and_style_changes_suppress_in_flight_generation(
@@ -306,6 +309,17 @@ def test_description_and_style_changes_suppress_in_flight_generation(
             style_id=style.id,
             name=style.name,
             prompt_text=style.prompt_text + " More contrast.",
+        )
+    )
+    _complete_generation(workers)
+
+    assert controller.document.cards[0].active_revision.background is None
+    workflow.generate(card.id)
+    controller.execute(
+        SetRevisionGenerateResolutionCommand(
+            card_id=card.id,
+            revision_id=card.active_revision.id,
+            resolution=GenerateResolution.RESOLUTION_768,
         )
     )
     _complete_generation(workers)
@@ -361,9 +375,10 @@ def test_two_references_are_sent_once_in_stable_order(tmp_path: Path) -> None:
     workflow.generate(target.id)
     _complete_generation(workers)
 
-    metadata = controller.document.cards[0].active_revision.generation_metadata
-    assert metadata is not None
-    assert metadata.inputs.references == tuple(
+    provenance = controller.document.cards[0].active_revision.provenance
+    assert provenance is not None
+    assert provenance.operation == "generate"
+    assert provenance.inputs.references == tuple(
         ImageReferenceSnapshot(
             card_id=source.id,
             revision_id=source.active_revision.id,

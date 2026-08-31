@@ -5,28 +5,40 @@ from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
+from hotcards.domain.image_dimensions import (
+    AspectRatio,
+    GenerateResolution,
+)
 from hotcards.domain.models import (
     BUILT_IN_STYLES,
     CURRENT_SCHEMA_VERSION,
     HYPERCARD_STYLE_ID,
+    AcceptedEdit,
     CanvasSize,
     Card,
     CardRevision,
+    DirectGenerateProvenance,
+    EditPreserveOptions,
+    EditProvenance,
     GeneratedBackground,
+    GenerateInputs,
     HotspotConditions,
     HotspotKeyChanges,
     HotspotSet,
-    ImageGenerationInputs,
-    ImageGenerationMetadata,
-    ImagePrompt,
+    ImageOperationSettings,
+    ImageProvenance,
     ImageReferenceSnapshot,
+    ImageSourceSnapshot,
     Interaction,
     KeyDefinition,
+    LegacyGenerateProvenance,
     NavigateAction,
     Point,
     Polygon,
+    RefineProvenance,
+    RefineTransformation,
     ResolvedCardReference,
     RunOverlayMode,
     Stack,
@@ -36,12 +48,8 @@ from hotcards.domain.models import (
 )
 
 
-def image_metadata() -> ImageGenerationMetadata:
-    return ImageGenerationMetadata(
-        inputs=ImageGenerationInputs(
-            description="A moonlit courtyard",
-        ),
-        render_prompt="A moonlit courtyard",
+def image_settings() -> ImageOperationSettings:
+    return ImageOperationSettings(
         model_identifier="flux2-klein-4b",
         mflux_version="0.18.0",
         dependency_versions={"mlx": "0.31.2"},
@@ -54,16 +62,31 @@ def image_metadata() -> ImageGenerationMetadata:
     )
 
 
+def image_provenance() -> DirectGenerateProvenance:
+    return DirectGenerateProvenance(
+        inputs=GenerateInputs(
+            description="A moonlit courtyard",
+        ),
+        render_prompt="A moonlit courtyard",
+        settings=image_settings(),
+    )
+
+
 def test_stack_defaults_match_document_contract() -> None:
     stack = Stack(name="Castle")
 
     assert stack.schema_version == CURRENT_SCHEMA_VERSION
+    assert stack.aspect_ratio is AspectRatio.LANDSCAPE
     assert (stack.canvas.width, stack.canvas.height) == (1024, 768)
+    assert stack.model_dump(mode="json")["aspect_ratio"] == "4:3"
+    assert "canvas" not in stack.model_dump(mode="json")
     assert stack.run_overlay_mode is RunOverlayMode.HIDDEN
     assert stack.styles == BUILT_IN_STYLES
     assert stack.new_card_style_id == HYPERCARD_STYLE_ID
     assert stack.keys == ()
     assert stack.cards == ()
+    with pytest.raises(ValidationError, match="frozen"):
+        stack.aspect_ratio = AspectRatio.SQUARE
 
 
 def test_built_in_style_ids_remain_stable_across_product_renames() -> None:
@@ -112,40 +135,21 @@ def test_stack_style_references_use_stable_ids_and_unique_names() -> None:
         )
 
 
-def test_legacy_image_prompt_serializes_but_generation_uses_description() -> None:
-    reference = ImageReferenceSnapshot(
-        card_id=uuid4(),
-        revision_id=uuid4(),
-        background_id=uuid4(),
-    )
-    image_prompt = ImagePrompt(
-        text="A richer courtyard",
-        source_description="A courtyard",
-        references=(reference,),
-        model_identifier="qwen3.5:9b-mlx",
-        prompt_version="legacy-image-prompt-v1",
-    )
-    revision = CardRevision(
-        description="A courtyard",
-        image_prompt=image_prompt,
-    )
-
-    inputs = ImageGenerationInputs(
-        description=revision.description,
-        image_prompt=image_prompt.text,
-        references=(reference,),
-    )
-    assert inputs.effective_description == "A courtyard"
-    assert revision.image_prompt == image_prompt
-    assert CardRevision.model_validate(
-        revision.model_dump(mode="python")
-    ).image_prompt == image_prompt
-
-
-def test_new_generation_inputs_do_not_serialize_legacy_image_prompt() -> None:
-    inputs = ImageGenerationInputs(description="A courtyard")
-
-    assert "image_prompt" not in inputs.model_dump(mode="json")
+def test_obsolete_image_prompt_fields_are_rejected() -> None:
+    with pytest.raises(ValidationError, match="image_prompt"):
+        CardRevision.model_validate(
+            {
+                "description": "A courtyard",
+                "image_prompt": {"text": "Legacy prompt"},
+            }
+        )
+    with pytest.raises(ValidationError, match="image_prompt"):
+        GenerateInputs.model_validate(
+            {
+                "description": "A courtyard",
+                "image_prompt": "Legacy prompt",
+            }
+        )
 
 
 def test_stack_serializes_ordered_references() -> None:
@@ -392,7 +396,7 @@ def test_generation_inputs_capture_exact_reference_source_state() -> None:
         revision_id=uuid4(),
         background_id=uuid4(),
     )
-    inputs = ImageGenerationInputs(
+    inputs = GenerateInputs(
         description="Portrait at dusk",
         references=(snapshot,),
     )
@@ -406,12 +410,265 @@ def test_generation_inputs_capture_exact_style_snapshot() -> None:
         name="HyperCard",
         prompt_text="Pure black and white pixels.",
     )
-    inputs = ImageGenerationInputs(
+    inputs = GenerateInputs(
         description="Portrait at dusk",
         style=style,
     )
 
     assert inputs.style == style
+
+
+def test_generate_resolution_is_revision_local_and_strict() -> None:
+    revision = CardRevision()
+
+    assert revision.generate_resolution is GenerateResolution.RESOLUTION_512
+    assert revision.model_dump(mode="json")["generate_resolution"] == 512
+    with pytest.raises(ValidationError, match="generate_resolution"):
+        CardRevision.model_validate(
+            {"generate_resolution": 300},
+        )
+
+
+def test_image_provenance_union_is_discriminated_strict_and_round_trips() -> None:
+    source = ImageSourceSnapshot(
+        card_id=uuid4(),
+        revision_id=uuid4(),
+        background_id=uuid4(),
+    )
+    preserve = EditPreserveOptions(
+        subject_identity=True,
+        composition=True,
+    )
+    accepted_edit = AcceptedEdit(
+        instruction="Open the gate.",
+        preserve=preserve,
+        expanded_prompt="Open the gate. Preserve the subject and composition.",
+    )
+    provenances: tuple[ImageProvenance, ...] = (
+        image_provenance(),
+        LegacyGenerateProvenance(
+            render_prompt="Historical exact prompt",
+            settings=image_settings(),
+        ),
+        RefineProvenance(
+            source=source,
+            description="A moonlit courtyard",
+            edit_lineage=(accepted_edit,),
+            render_prompt="A moonlit courtyard. Open the gate.",
+            resolution=GenerateResolution.RESOLUTION_768,
+            transformation=RefineTransformation.BALANCED,
+            strength=0.50,
+            settings=image_settings(),
+        ),
+        EditProvenance(
+            source=source,
+            instruction=accepted_edit.instruction,
+            preserve=accepted_edit.preserve,
+            expanded_prompt=accepted_edit.expanded_prompt,
+            resolution=GenerateResolution.RESOLUTION_1024,
+            edit_lineage=(accepted_edit,),
+            settings=image_settings(),
+        ),
+    )
+    adapter = TypeAdapter(ImageProvenance)
+
+    for provenance in provenances:
+        assert adapter.validate_json(adapter.dump_json(provenance)) == provenance
+
+    with pytest.raises(ValidationError, match="union_tag_invalid"):
+        adapter.validate_python(
+            {
+                "operation": "unknown",
+                "render_prompt": "Prompt",
+                "settings": image_settings(),
+            }
+        )
+    with pytest.raises(ValidationError, match="extra_forbidden"):
+        adapter.validate_python(
+            {
+                **image_provenance().model_dump(mode="python"),
+                "instruction": "Not a Generate field",
+            }
+        )
+
+
+def test_direct_generate_provenance_requires_authored_inputs_and_aligned_output() -> None:
+    with pytest.raises(ValidationError, match="nonempty Description"):
+        GenerateInputs(description=" \n ")
+
+    values = image_settings().model_dump()
+    values["width"] = 1025
+    with pytest.raises(ValidationError, match="multiples of 16"):
+        ImageOperationSettings.model_validate(values)
+
+
+def test_refine_and_edit_provenance_enforce_operation_invariants() -> None:
+    source = ImageSourceSnapshot(
+        card_id=uuid4(),
+        revision_id=uuid4(),
+        background_id=uuid4(),
+    )
+    preserve = EditPreserveOptions(subject_identity=True)
+    accepted = AcceptedEdit(
+        instruction="Open the gate.",
+        preserve=preserve,
+        expanded_prompt="Open the gate. Preserve subject identity.",
+    )
+
+    with pytest.raises(ValidationError, match="balanced Refine strength"):
+        RefineProvenance(
+            source=source,
+            description="A courtyard",
+            render_prompt="A courtyard",
+            resolution=GenerateResolution.RESOLUTION_768,
+            transformation=RefineTransformation.BALANCED,
+            strength=0.25,
+            settings=image_settings(),
+        )
+    with pytest.raises(ValidationError, match="lineage"):
+        EditProvenance(
+            source=source,
+            instruction="Close the gate.",
+            preserve=preserve,
+            expanded_prompt="Close the gate. Preserve subject identity.",
+            resolution=GenerateResolution.RESOLUTION_768,
+            edit_lineage=(accepted,),
+            settings=image_settings(),
+        )
+
+
+def test_derived_provenance_requires_a_source_revision_in_the_declared_card() -> None:
+    source = CardRevision(background=GeneratedBackground(
+        image_path="assets/cards/source/image-source.png",
+        provenance=image_provenance(),
+        created_at=datetime.now(UTC),
+    ))
+    source_card = Card(name="Source", revisions=(source,))
+    derived = CardRevision(
+        background=GeneratedBackground(
+            image_path="assets/cards/derived/image-derived.png",
+            provenance=RefineProvenance(
+                source=ImageSourceSnapshot(
+                    card_id=source_card.id,
+                    revision_id=source.id,
+                    background_id=source.background.id,
+                ),
+                description="A refined courtyard",
+                render_prompt="A refined courtyard",
+                resolution=GenerateResolution.RESOLUTION_768,
+                transformation=RefineTransformation.PRESERVE,
+                strength=0.75,
+                settings=image_settings(),
+            ),
+            created_at=datetime.now(UTC),
+        )
+    )
+    dependent_card = Card(name="Dependent", revisions=(derived,))
+
+    Stack(name="Valid", cards=(source_card, dependent_card))
+    wrong_source = derived.provenance
+    assert isinstance(wrong_source, RefineProvenance)
+    invalid_provenance = wrong_source.model_copy(
+        update={
+            "source": wrong_source.source.model_copy(
+                update={"card_id": dependent_card.id}
+            )
+        }
+    )
+    invalid_derived = derived.model_copy(
+        update={
+            "background": derived.background.model_copy(
+                update={"provenance": invalid_provenance}
+            )
+        }
+    )
+    with pytest.raises(ValidationError, match="source card"):
+        Stack(
+            name="Invalid",
+            cards=(
+                source_card,
+                dependent_card.model_copy(update={"revisions": (invalid_derived,)}),
+            ),
+        )
+    mismatched_source = wrong_source.model_copy(
+        update={
+            "source": wrong_source.source.model_copy(
+                update={"background_id": uuid4()}
+            )
+        }
+    )
+    mismatched_derived = derived.model_copy(
+        update={
+            "background": derived.background.model_copy(
+                update={"provenance": mismatched_source}
+            )
+        }
+    )
+    with pytest.raises(ValidationError, match="source background"):
+        Stack(
+            name="Invalid",
+            cards=(
+                source_card,
+                dependent_card.model_copy(update={"revisions": (mismatched_derived,)}),
+            ),
+        )
+
+
+def test_derived_image_source_lineage_rejects_cycles() -> None:
+    first_card_id, second_card_id = uuid4(), uuid4()
+    first_revision_id, second_revision_id = uuid4(), uuid4()
+    first_background_id, second_background_id = uuid4(), uuid4()
+    first_revision = CardRevision(
+        id=first_revision_id,
+        background=GeneratedBackground(
+            id=first_background_id,
+            image_path="assets/cards/first.png",
+            provenance=RefineProvenance(
+                source=ImageSourceSnapshot(
+                    card_id=second_card_id,
+                    revision_id=second_revision_id,
+                    background_id=second_background_id,
+                ),
+                description="First",
+                render_prompt="First",
+                resolution=GenerateResolution.RESOLUTION_512,
+                transformation=RefineTransformation.BALANCED,
+                strength=0.50,
+                settings=image_settings(),
+            ),
+            created_at=datetime.now(UTC),
+        ),
+    )
+    second_revision = CardRevision(
+        id=second_revision_id,
+        background=GeneratedBackground(
+            id=second_background_id,
+            image_path="assets/cards/second.png",
+            provenance=RefineProvenance(
+                source=ImageSourceSnapshot(
+                    card_id=first_card_id,
+                    revision_id=first_revision_id,
+                    background_id=first_background_id,
+                ),
+                description="Second",
+                render_prompt="Second",
+                resolution=GenerateResolution.RESOLUTION_512,
+                transformation=RefineTransformation.BALANCED,
+                strength=0.50,
+                settings=image_settings(),
+            ),
+            created_at=datetime.now(UTC),
+        ),
+    )
+
+    with pytest.raises(ValidationError, match="lineage cannot contain cycles"):
+        Stack(
+            name="Invalid",
+            cards=(
+                Card(id=first_card_id, name="First", revisions=(first_revision,)),
+                Card(id=second_card_id, name="Second", revisions=(second_revision,)),
+            ),
+        )
 
 
 def test_hotspots_are_nested_in_their_image_revision() -> None:
@@ -435,7 +692,7 @@ def test_hotspots_are_nested_in_their_image_revision() -> None:
         background=GeneratedBackground(
             id=asset_id,
             image_path=f"assets/cards/card/image-{asset_id}.png",
-            generation_metadata=image_metadata(),
+            provenance=image_provenance(),
             created_at=datetime.now(UTC),
         ),
         hotspot_set=HotspotSet(interactions=(interaction,)),
@@ -459,7 +716,7 @@ def test_hotspots_are_nested_in_their_image_revision() -> None:
 
 
 def test_generated_background_requires_reproducibility_metadata() -> None:
-    with pytest.raises(ValidationError, match="generation_metadata"):
+    with pytest.raises(ValidationError, match="provenance"):
         GeneratedBackground(
             image_path="assets/cards/card/image-revision.png",
             created_at=datetime.now(UTC),
@@ -503,20 +760,15 @@ def test_hotspot_sets_are_copied_when_attached_to_revisions() -> None:
 
 
 def test_nonfinite_metadata_is_rejected_before_json_serialization() -> None:
-    values = image_metadata().model_dump()
+    values = image_settings().model_dump()
     values["duration_seconds"] = float("inf")
     with pytest.raises(ValidationError, match="finite"):
-        ImageGenerationMetadata.model_validate(values)
+        ImageOperationSettings.model_validate(values)
 
-    values = image_metadata().model_dump()
-    values["effective_settings"] = {"guidance": float("nan")}
+    values = image_settings().model_dump()
+    values["guidance"] = float("nan")
     with pytest.raises(ValidationError, match="finite"):
-        ImageGenerationMetadata.model_validate(values)
-
-    metadata = image_metadata()
-    metadata.effective_settings["nested"] = {"bad": float("nan")}
-    with pytest.raises(ValidationError, match="finite"):
-        metadata.model_dump_json()
+        ImageOperationSettings.model_validate(values)
 
 
 def test_duplicate_card_ids_and_dangling_resolved_targets_are_rejected() -> None:

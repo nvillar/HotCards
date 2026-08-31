@@ -49,10 +49,19 @@ for live MFLUX runs.
   in the evaluation harness. Do not fork generation behavior.
 - Keep each card's complete authoring state in one of its numbered revisions:
   Description, selected stack Style, optional background, ordered Reference
-  cards, and hotspot set. Visible revision numbers are positional; stable UUIDs
-  remain internal.
+  cards, selected Generate resolution, and hotspot set. Visible revision
+  numbers are positional; stable UUIDs remain internal.
+- Store one immutable stack aspect ratio using only Square 1:1, Landscape 4:3,
+  Portrait 3:4, or Widescreen 16:9. Generate resolution is revision-local,
+  defaults to 512, and permits only 256, 512, 768, or 1024 square-equivalent
+  pixels. Derive output dimensions with REM's area-preserving square-equivalent
+  formulas `width = sqrt(resolution² × ratio_w / ratio_h)` and
+  `height = sqrt(resolution² × ratio_h / ratio_w)`, then round each dimension
+  to the nearest multiple of 16, minimum 16. Continue storing exact actual
+  output width and height in image provenance.
 - Keep at least one revision per card. Duplicate a complete revision, including
-  its hotspot semantics and immutable background reference.
+  its Generate resolution, hotspot semantics, and immutable background
+  reference.
 - Keep an ordered collection of at most two optional Reference cards per
   revision and reject self-references and duplicates. Display slots as `1.` and
   `2.` under one References section; clearing slot 1 promotes slot 2. Resolve
@@ -71,6 +80,14 @@ for live MFLUX runs.
   background, project, revision, model, or mode changes must suppress an
   in-flight stale image result. Hotspots must not alter image-generation
   prompts.
+- Persist generated backgrounds with a strict discriminated provenance union
+  for direct Generate, externally patched legacy Generate, Refine, and Edit.
+  Keep operation-specific prompts and settings typed rather than accumulating
+  nullable fields. Refine and Edit identify their exact source revision and
+  background; retain ordered accepted Edit lineage where applicable. Block
+  source revision deletion while any retained revision derives from it. Whole
+  card deletion may remove dependencies wholly contained in that card, but
+  must reject dependencies from retained cards.
 - Keep one Description editor in the Background inspector. Place the Style
   selector above References and before Generate, show positional Reference
   guidance, and keep generation provenance in button tooltips. Keep inspector

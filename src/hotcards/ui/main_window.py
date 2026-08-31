@@ -1008,12 +1008,23 @@ class MainWindow(QMainWindow):
             and isinstance(interaction.action.target, ResolvedCardReference)
             and interaction.action.target.target_card_id == card.id
         )
-        if self.background_workflow is not None and self.background_workflow.is_generating_for(
-            card.id
-        ):
-            self._cancel_background_generation()
+        was_generating = (
+            self.background_workflow is not None
+            and self.background_workflow.is_generating_for(card.id)
+        )
         previous_token = self.controller.current_undo_token
-        self.card_sidebar.delete_card(card.id)
+        try:
+            self.card_sidebar.delete_card(card.id)
+        except CommandError as error:
+            self._show_error(
+                "card-error",
+                "Could not delete card",
+                detail=str(error),
+            )
+            return
+        if was_generating:
+            self._cancel_background_generation()
+        self.notification_bar.clear_notification("card-error")
         consequences: list[str] = []
         if inbound_link_count:
             noun = "link is" if inbound_link_count == 1 else "links are"

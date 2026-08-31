@@ -28,11 +28,12 @@ from hotcards.application.image_files import (
     require_readable_image,
 )
 from hotcards.application.workers import AdapterWorkers, WorkerOperation
+from hotcards.domain.image_dimensions import GenerateResolution, output_dimensions
 from hotcards.domain.models import (
     Card,
     CardRevision,
     GeneratedBackground,
-    ImageGenerationInputs,
+    GenerateInputs,
     ImageReferenceSnapshot,
     ResolvedCardReference,
     Stack,
@@ -73,6 +74,7 @@ class _GenerationTarget:
     bundle_path: Path
     references: tuple[_GenerationReferenceTarget, ...]
     style: StyleSnapshot | None
+    generate_resolution: GenerateResolution
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,10 +157,11 @@ class BackgroundWorkflow(QObject):
             for reference in references
         )
         settings = self._settings_provider()
-        inputs = ImageGenerationInputs(
+        inputs = GenerateInputs(
             description=revision.description,
             references=reference_snapshots,
             style=self._style_snapshot(document, revision),
+            resolution=revision.generate_resolution,
         )
         render_prompt = compose_generation_prompt(inputs)
         reference_image_paths = tuple(
@@ -171,6 +174,10 @@ class BackgroundWorkflow(QObject):
         self._request_id = request_id
         self._request_target = target
         output_path = self._temporary_directory / f"generated-{asset_id}.png"
+        width, height = output_dimensions(
+            revision.generate_resolution,
+            document.aspect_ratio,
+        )
         request = MfluxGenerationRequest(
             inputs=inputs,
             render_prompt=render_prompt,
@@ -179,8 +186,8 @@ class BackgroundWorkflow(QObject):
             seed=(
                 secrets.randbelow(2_147_483_648) if settings.random_seed else settings.fixed_seed
             ),
-            width=document.canvas.width,
-            height=document.canvas.height,
+            width=width,
+            height=height,
             step_count=settings.step_count,
             quantization=settings.quantization,
             reference_image_paths=reference_image_paths,
@@ -313,8 +320,8 @@ class BackgroundWorkflow(QObject):
             background = GeneratedBackground(
                 id=asset_id,
                 image_path=image_path,
-                generation_metadata=result.metadata,
-                created_at=result.metadata.generated_at,
+                provenance=result.provenance,
+                created_at=result.provenance.settings.generated_at,
             )
             self._apply_background(
                 target.card_id,
@@ -444,6 +451,7 @@ class BackgroundWorkflow(QObject):
             bundle_path=bundle_path.resolve(),
             references=references,
             style=self._style_snapshot(document, revision),
+            generate_resolution=revision.generate_resolution,
         )
 
     def _target_is_current(self, target: _GenerationTarget) -> bool:
@@ -465,6 +473,7 @@ class BackgroundWorkflow(QObject):
             and (revision.background.id if revision.background is not None else None)
             == target.background_id
             and self._style_snapshot(document, revision) == target.style
+            and revision.generate_resolution == target.generate_resolution
         ):
             return False
         try:

@@ -1,7 +1,7 @@
 """Focused tests for typed document commands."""
 
 from datetime import UTC, datetime
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from pydantic import ValidationError
@@ -15,6 +15,7 @@ from hotcards.application.commands import (
     ChangeHotspotDestinationCommand,
     CommandError,
     CreateCardCommand,
+    CreateGeneratedRevisionCommand,
     CreateKeyAndAddHotspotReferenceCommand,
     DeleteCardCommand,
     DeleteInteractionCommand,
@@ -34,26 +35,33 @@ from hotcards.application.commands import (
     ReplaceRevisionBackgroundCommand,
     SetHotspotConditionsCommand,
     SetHotspotKeyChangesCommand,
+    SetRevisionGenerateResolutionCommand,
     SetRevisionReferenceCommand,
     SetRevisionStyleCommand,
     SetStartCardCommand,
     UpdateStyleCommand,
 )
 from hotcards.application.document_controller import DocumentController
+from hotcards.domain.image_dependencies import image_source_dependencies
+from hotcards.domain.image_dimensions import AspectRatio, GenerateResolution
 from hotcards.domain.models import (
     Card,
     CardRevision,
+    DirectGenerateProvenance,
     GeneratedBackground,
+    GenerateInputs,
     HotspotConditions,
     HotspotKeyChanges,
     HotspotSet,
-    ImageGenerationInputs,
-    ImageGenerationMetadata,
+    ImageOperationSettings,
+    ImageSourceSnapshot,
     Interaction,
     KeyDefinition,
     NavigateAction,
     Point,
     Polygon,
+    RefineProvenance,
+    RefineTransformation,
     ResolvedCardReference,
     Stack,
     StyleDefinition,
@@ -93,6 +101,60 @@ def card_with_revision(*interactions: Interaction) -> tuple[Card, CardRevision]:
     )
 
 
+def operation_settings() -> ImageOperationSettings:
+    return ImageOperationSettings(
+        model_identifier="test",
+        mflux_version="test",
+        seed=1,
+        width=592,
+        height=448,
+        step_count=4,
+        generated_at=datetime.now(UTC),
+        duration_seconds=1,
+    )
+
+
+def generated_background(description: str = "A card") -> GeneratedBackground:
+    asset_id = uuid4()
+    return GeneratedBackground(
+        id=asset_id,
+        image_path=f"assets/cards/card/image-{asset_id}.png",
+        provenance=DirectGenerateProvenance(
+            inputs=GenerateInputs(description=description),
+            render_prompt=description,
+            settings=operation_settings(),
+        ),
+        created_at=datetime.now(UTC),
+    )
+
+
+def refined_background(
+    *,
+    source_card_id: UUID,
+    source_revision: CardRevision,
+) -> GeneratedBackground:
+    assert source_revision.background is not None
+    asset_id = uuid4()
+    return GeneratedBackground(
+        id=asset_id,
+        image_path=f"assets/cards/card/image-{asset_id}.png",
+        provenance=RefineProvenance(
+            source=ImageSourceSnapshot(
+                card_id=source_card_id,
+                revision_id=source_revision.id,
+                background_id=source_revision.background.id,
+            ),
+            description="Refined card",
+            render_prompt="Refined card",
+            resolution=GenerateResolution.RESOLUTION_768,
+            transformation=RefineTransformation.BALANCED,
+            strength=0.5,
+            settings=operation_settings(),
+        ),
+        created_at=datetime.now(UTC),
+    )
+
+
 def test_card_create_rename_reorder_and_start_selection() -> None:
     first = Card(name="First")
     document = Stack(name="Stack", cards=(first,))
@@ -112,6 +174,19 @@ def test_card_create_rename_reorder_and_start_selection() -> None:
     assert [card.name for card in document.cards] == ["First", "Renamed"]
     assert document.start_card_id == created_id
     assert SetStartCardCommand(card_id=None).apply(document).start_card_id is None
+
+
+def test_commands_preserve_immutable_stack_aspect_ratio() -> None:
+    document = Stack(name="Stack", aspect_ratio=AspectRatio.PORTRAIT)
+
+    changed = CreateCardCommand(name="Card").apply(document)
+    changed = RenameCardCommand(
+        card_id=changed.cards[0].id,
+        name="Renamed",
+    ).apply(changed)
+
+    assert changed.aspect_ratio is AspectRatio.PORTRAIT
+    assert changed.canvas == document.canvas
 
 
 def test_style_lifecycle_and_new_card_default_are_typed_changes() -> None:
@@ -221,9 +296,12 @@ def test_create_key_and_hotspot_reference_is_atomic() -> None:
     assert hotspot_set.interactions[0].key_changes.grant == (command.key_id,)
 
 
-def test_duplicate_revision_copies_style_selection() -> None:
+def test_revision_generate_resolution_is_typed_and_copied_completely() -> None:
     style = StyleDefinition(name="Ink", prompt_text="Rendered in ink")
-    revision = CardRevision(style_id=style.id)
+    revision = CardRevision(
+        style_id=style.id,
+        generate_resolution=GenerateResolution.RESOLUTION_768,
+    )
     card = Card(name="Card", revisions=(revision,))
     document = Stack(
         name="Stack",
@@ -232,12 +310,53 @@ def test_duplicate_revision_copies_style_selection() -> None:
         cards=(card,),
     )
 
+    changed = SetRevisionGenerateResolutionCommand(
+        card_id=card.id,
+        revision_id=revision.id,
+        resolution=GenerateResolution.RESOLUTION_1024,
+    ).apply(document)
     changed = DuplicateRevisionCommand(
         card_id=card.id,
         source_revision_id=revision.id,
-    ).apply(document)
+    ).apply(changed)
 
     assert changed.cards[0].active_revision.style_id == style.id
+    assert (
+        changed.cards[0].active_revision.generate_resolution
+        is GenerateResolution.RESOLUTION_1024
+    )
+
+
+def test_create_generated_revision_preserves_resolution_on_both_complete_versions() -> None:
+    previous = CardRevision(
+        description="Before",
+        generate_resolution=GenerateResolution.RESOLUTION_768,
+    )
+    generated = previous.model_copy(
+        update={
+            "description": "Generated",
+            "background": generated_background("Generated"),
+        }
+    )
+    card = Card(
+        name="Card",
+        revisions=(generated,),
+        active_revision_id=generated.id,
+    )
+    document = Stack(name="Stack", cards=(card,))
+
+    changed = CreateGeneratedRevisionCommand(
+        card_id=card.id,
+        revision_id=generated.id,
+        previous_revision=previous,
+    ).apply(document)
+
+    assert tuple(
+        revision.generate_resolution for revision in changed.cards[0].revisions
+    ) == (
+        GenerateResolution.RESOLUTION_768,
+        GenerateResolution.RESOLUTION_768,
+    )
 
 
 def test_revision_description_and_reference_edits_are_typed_changes() -> None:
@@ -335,6 +454,73 @@ def test_duplicate_and_delete_revisions_choose_safe_active_revision() -> None:
             card_id=card.id,
             revision_id=first.id,
         ).apply(document)
+
+
+def test_source_revision_deletion_is_blocked_by_derived_revision() -> None:
+    source = CardRevision(background=generated_background("Source"))
+    card_id = uuid4()
+    derived = CardRevision(
+        background=refined_background(
+            source_card_id=card_id,
+            source_revision=source,
+        )
+    )
+    card = Card(
+        id=card_id,
+        name="Evolution",
+        revisions=(source, derived),
+        active_revision_id=derived.id,
+    )
+    document = Stack(name="Stack", cards=(card,))
+
+    dependencies = image_source_dependencies(document, (source.id,))
+    assert [(item.dependent_revision_id, item.operation) for item in dependencies] == [
+        (derived.id, "refine")
+    ]
+    with pytest.raises(CommandError, match='Refine revision 2 on card "Evolution"'):
+        DeleteRevisionCommand(
+            card_id=card.id,
+            revision_id=source.id,
+        ).apply(document)
+
+
+def test_whole_card_deletion_removes_internal_lineage_but_blocks_external_dependents() -> None:
+    source = CardRevision(background=generated_background("Source"))
+    source_card_id = uuid4()
+    internal = CardRevision(
+        background=refined_background(
+            source_card_id=source_card_id,
+            source_revision=source,
+        )
+    )
+    source_card = Card(
+        id=source_card_id,
+        name="Source",
+        revisions=(source, internal),
+        active_revision_id=internal.id,
+    )
+    internal_document = Stack(name="Stack", cards=(source_card,))
+
+    assert DeleteCardCommand(card_id=source_card.id).apply(internal_document).cards == ()
+
+    dependent = Card(
+        name="Dependent",
+        revisions=(
+            CardRevision(
+                background=refined_background(
+                    source_card_id=source_card.id,
+                    source_revision=source,
+                )
+            ),
+        ),
+    )
+    external_document = Stack(
+        name="Stack",
+        cards=(source_card, dependent),
+    )
+
+    with pytest.raises(CommandError, match='card "Dependent" derives from it'):
+        DeleteCardCommand(card_id=source_card.id).apply(external_document)
 
 
 def test_polygon_destination_and_hotspot_order_changes() -> None:
@@ -539,19 +725,21 @@ def test_reference_assignment_and_background_replacement_are_guarded() -> None:
     background = GeneratedBackground(
         id=asset_id,
         image_path=f"assets/cards/{card.id}/image-{asset_id}.png",
-        generation_metadata=ImageGenerationMetadata(
-            inputs=ImageGenerationInputs(
+        provenance=DirectGenerateProvenance(
+            inputs=GenerateInputs(
                 description="A card",
             ),
             render_prompt="A card",
-            model_identifier="test",
-            mflux_version="test",
-            seed=1,
-            width=1024,
-            height=768,
-            step_count=4,
-            generated_at=generated_at,
-            duration_seconds=1,
+            settings=ImageOperationSettings(
+                model_identifier="test",
+                mflux_version="test",
+                seed=1,
+                width=1024,
+                height=768,
+                step_count=4,
+                generated_at=generated_at,
+                duration_seconds=1,
+            ),
         ),
         created_at=generated_at,
     )

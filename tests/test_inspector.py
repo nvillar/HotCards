@@ -657,32 +657,6 @@ def test_render_preserves_focused_description_draft(
     inspector.close()
 
 
-def test_legacy_image_prompt_state_is_not_rendered_or_edited(
-    application: QApplication,
-) -> None:
-    revision = CardRevision.model_validate(
-        {
-            "description": "A courtyard",
-            "image_prompt": {
-                "text": "Legacy prepared prompt",
-                "source_description": "A courtyard",
-            },
-        }
-    )
-    card = Card(name="Card", revisions=(revision,))
-    controller = DocumentController(Stack(name="Demo", cards=(card,)))
-    inspector = Inspector(controller)
-    inspector.render(controller.document, card.id)
-
-    assert inspector.description_edit.toPlainText() == "A courtyard"
-    assert "Using: Description" in inspector.generate_background_button.toolTip()
-    inspector.description_edit.setPlainText("A changed courtyard")
-    assert inspector.commit_revision_metadata()
-    current = controller.document.cards[0].active_revision
-    assert current.description == "A changed courtyard"
-    assert current.image_prompt == revision.image_prompt
-
-
 def test_switching_cards_shows_each_description(
     application: QApplication,
 ) -> None:

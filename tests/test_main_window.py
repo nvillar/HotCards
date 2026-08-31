@@ -29,21 +29,26 @@ from hotcards.application.document_controller import DocumentController
 from hotcards.application.document_session import DocumentSession, DocumentSessionState
 from hotcards.application.generated_revision_change import GeneratedRevisionChange
 from hotcards.application.workers import AdapterKind, AvailabilityDiagnostic
+from hotcards.domain.image_dimensions import AspectRatio, GenerateResolution
 from hotcards.domain.models import (
     HYPERCARD_STYLE_ID,
     Card,
     CardRevision,
+    DirectGenerateProvenance,
     GeneratedBackground,
+    GenerateInputs,
     HotspotConditions,
     HotspotKeyChanges,
     HotspotSet,
-    ImageGenerationInputs,
-    ImageGenerationMetadata,
+    ImageOperationSettings,
+    ImageSourceSnapshot,
     Interaction,
     KeyDefinition,
     NavigateAction,
     Point,
     Polygon,
+    RefineProvenance,
+    RefineTransformation,
     Stack,
     UnresolvedCardReference,
 )
@@ -200,19 +205,21 @@ def _generated_background(
     return GeneratedBackground(
         id=asset_id,
         image_path=image_path,
-        generation_metadata=ImageGenerationMetadata(
-            inputs=ImageGenerationInputs(
+        provenance=DirectGenerateProvenance(
+            inputs=GenerateInputs(
                 description=description,
             ),
             render_prompt=description,
-            model_identifier="test",
-            mflux_version="test",
-            seed=1,
-            width=1024,
-            height=768,
-            step_count=4,
-            generated_at=generated_at,
-            duration_seconds=1,
+            settings=ImageOperationSettings(
+                model_identifier="test",
+                mflux_version="test",
+                seed=1,
+                width=1024,
+                height=768,
+                step_count=4,
+                generated_at=generated_at,
+                duration_seconds=1,
+            ),
         ),
         created_at=generated_at,
     )
@@ -622,6 +629,48 @@ def test_card_delete_ignores_destinationless_hotspots(
     window._delete_card(destination.id)
 
     assert [card.id for card in controller.document.cards] == [source.id]
+
+
+def test_card_delete_reports_image_source_dependencies(
+    application: QApplication,
+) -> None:
+    source_background = _generated_background(
+        asset_id=uuid4(),
+        image_path="assets/cards/source.png",
+    )
+    source_revision = CardRevision(background=source_background)
+    source_card = Card(name="Source", revisions=(source_revision,))
+    derived_background = GeneratedBackground(
+        image_path="assets/cards/derived.png",
+        provenance=RefineProvenance(
+            source=ImageSourceSnapshot(
+                card_id=source_card.id,
+                revision_id=source_revision.id,
+                background_id=source_background.id,
+            ),
+            description="A refined source image",
+            render_prompt="A refined source image",
+            resolution=GenerateResolution.RESOLUTION_512,
+            transformation=RefineTransformation.BALANCED,
+            strength=0.50,
+            settings=source_background.provenance.settings,
+        ),
+        created_at=datetime.now(UTC),
+    )
+    derived_card = Card(
+        name="Derived",
+        revisions=(CardRevision(background=derived_background),),
+    )
+    window, controller, _workers, _background = _window(
+        Stack(name="Demo", cards=(source_card, derived_card))
+    )
+
+    window._delete_card(source_card.id)
+
+    assert controller.document.cards == (source_card, derived_card)
+    assert window.notification_bar.current_key == "card-error"
+    assert window.notification_bar.message_label.text() == "Could not delete card"
+    assert "Derived" in window.notification_bar.toolTip()
 
 
 def test_context_change_cancels_background_generation_without_prompt(
@@ -1340,7 +1389,10 @@ def test_new_stack_dialog_creates_one_blank_revision(
 ) -> None:
     dialog = NewStackDialog()
     assert not hasattr(dialog, "global_style_edit")
+    assert not hasattr(dialog, "width_spin")
+    assert not hasattr(dialog, "height_spin")
     stack = dialog.stack()
+    assert stack.aspect_ratio is AspectRatio.LANDSCAPE
     assert len(stack.cards) == 1
     assert len(stack.cards[0].revisions) == 1
     assert stack.cards[0].active_revision.style_id == HYPERCARD_STYLE_ID

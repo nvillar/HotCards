@@ -8,7 +8,7 @@ from pathlib import Path
 
 from pydantic import PositiveInt
 
-from hotcards.domain.models import DomainModel, ImageGenerationInputs, NonEmptyString
+from hotcards.domain.models import DomainModel, GenerateInputs, NonEmptyString
 from hotcards.evaluation.manifest import (
     EnvironmentProvider,
     RunLifecycle,
@@ -108,7 +108,7 @@ def run_smoke(
             "Restrained storybook ink and watercolor illustration with "
             "cool twilight shadows and warm lantern light."
         )
-        inputs = ImageGenerationInputs(
+        inputs = GenerateInputs(
             description=prompt,
         )
         render_prompt = compose_generation_prompt(inputs)

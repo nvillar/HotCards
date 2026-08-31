@@ -7,14 +7,12 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QFormLayout,
     QLineEdit,
-    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
 from hotcards.domain.models import (
     HYPERCARD_STYLE_ID,
-    CanvasSize,
     Card,
     CardRevision,
     Stack,
@@ -31,19 +29,9 @@ class NewStackDialog(QDialog):
 
         self.name_edit = QLineEdit("Untitled Stack")
         self.name_edit.setObjectName("newStackNameEdit")
-        self.width_spin = QSpinBox()
-        self.width_spin.setObjectName("newStackWidthSpin")
-        self.width_spin.setRange(64, 8192)
-        self.width_spin.setValue(1024)
-        self.height_spin = QSpinBox()
-        self.height_spin.setObjectName("newStackHeightSpin")
-        self.height_spin.setRange(64, 8192)
-        self.height_spin.setValue(768)
 
         form = QFormLayout()
         form.addRow("Name", self.name_edit)
-        form.addRow("Canvas width", self.width_spin)
-        form.addRow("Canvas height", self.height_spin)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Ok
@@ -65,10 +53,6 @@ class NewStackDialog(QDialog):
         )
         return Stack(
             name=self.name_edit.text(),
-            canvas=CanvasSize(
-                width=self.width_spin.value(),
-                height=self.height_spin.value(),
-            ),
             cards=(first_card,),
             start_card_id=first_card.id,
         )

@@ -5,7 +5,7 @@ from uuid import uuid4
 import pytest
 
 from hotcards.domain.models import (
-    ImageGenerationInputs,
+    GenerateInputs,
     ImageReferenceSnapshot,
     StyleSnapshot,
 )
@@ -15,10 +15,7 @@ from hotcards.generation.image_generation import compose_generation_prompt
 def test_description_is_delivered_without_hidden_rewriting() -> None:
     description = "A stone courtyard at dusk in detailed ink and watercolor."
 
-    inputs = ImageGenerationInputs(
-        description=description,
-        image_prompt="Legacy prepared text that must not be used.",
-    )
+    inputs = GenerateInputs(description=description)
 
     assert compose_generation_prompt(inputs) == description
 
@@ -32,7 +29,7 @@ def test_reference_does_not_add_role_instructions() -> None:
     description = "A red fox in crisp monochrome halftone linework using image 1."
 
     result = compose_generation_prompt(
-        ImageGenerationInputs(
+        GenerateInputs(
             description=description,
             references=(snapshot,),
         )
@@ -51,7 +48,7 @@ def test_selected_style_is_appended_after_the_description() -> None:
     )
 
     result = compose_generation_prompt(
-        ImageGenerationInputs(
+        GenerateInputs(
             description=description,
             style=style,
         )
@@ -64,7 +61,7 @@ def test_blank_selected_style_does_not_change_delivery() -> None:
     description = "A red fox beneath a tree."
 
     result = compose_generation_prompt(
-        ImageGenerationInputs(
+        GenerateInputs(
             description=description,
             style=StyleSnapshot(
                 style_id=uuid4(),
@@ -81,7 +78,7 @@ def test_blank_selected_style_does_not_change_delivery() -> None:
 def test_description_must_be_non_empty_for_composition(value: str) -> None:
     with pytest.raises(ValueError, match="Description"):
         compose_generation_prompt(
-            ImageGenerationInputs(
+            GenerateInputs(
                 description=value,
             )
         )

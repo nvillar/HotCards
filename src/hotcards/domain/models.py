@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
-from math import isfinite
 from typing import Annotated, Any, Literal
 from uuid import UUID, uuid4
 
@@ -14,31 +13,19 @@ from pydantic import (
     ConfigDict,
     Field,
     FiniteFloat,
-    JsonValue,
     PositiveInt,
     StringConstraints,
     field_validator,
     model_validator,
 )
 
-CURRENT_SCHEMA_VERSION = 10
+from hotcards.domain.image_dimensions import AspectRatio, GenerateResolution
+
+CURRENT_SCHEMA_VERSION = 11
 
 NonEmptyString = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 NormalizedCoordinate = Annotated[float, Field(ge=0.0, le=1.0)]
 NonNegativeFiniteFloat = Annotated[FiniteFloat, Field(ge=0.0)]
-
-
-def _reject_nonfinite_json_numbers(value: JsonValue) -> JsonValue:
-    """Reject values that cannot survive a standards-compliant JSON round trip."""
-    if isinstance(value, float) and not isfinite(value):
-        raise ValueError("JSON metadata numbers must be finite")
-    if isinstance(value, list):
-        for item in value:
-            _reject_nonfinite_json_numbers(item)
-    elif isinstance(value, dict):
-        for item in value.values():
-            _reject_nonfinite_json_numbers(item)
-    return value
 
 
 class DomainModel(BaseModel):
@@ -126,16 +113,6 @@ CardReference = Annotated[
     ResolvedCardReference | UnresolvedCardReference,
     Field(discriminator="type"),
 ]
-
-
-class ReferenceRole(StrEnum):
-    """One deterministic image-reference role."""
-
-    SUBJECT = "subject"
-    STYLE = "style"
-    SETTING = "setting"
-    IDENTITY = SUBJECT
-    VISUAL_STYLE = STYLE
 
 
 class NavigateAction(DomainModel):
@@ -342,79 +319,28 @@ class StyleSnapshot(DomainModel):
     prompt_text: str
 
 
-class ImageGenerationInputs(DomainModel):
-    """Author-controlled inputs captured for a generated image."""
+class GenerateInputs(DomainModel):
+    """Exact author-controlled inputs accepted by direct Generate."""
 
     description: str
-    image_prompt: NonEmptyString | None = Field(
-        default=None,
-        exclude_if=lambda value: value is None,
-    )
     references: tuple[ImageReferenceSnapshot, ...] = Field(
         default_factory=tuple,
         max_length=2,
     )
     style: StyleSnapshot | None = None
+    resolution: GenerateResolution = GenerateResolution.RESOLUTION_512
 
-    @property
-    def effective_description(self) -> str:
-        """Return the authored Description sent to image generation."""
-        return self.description
-
-
-class LegacyImageGenerationInputs(DomainModel):
-    """Exact schema-v5 inputs retained in historical generation metadata."""
-
-    description: str
-    enriched_description: str | None = None
-    subject_reference: ImageReferenceSnapshot | None = None
-    style_reference: ImageReferenceSnapshot | None = None
-    setting_reference: ImageReferenceSnapshot | None = None
-
-    @property
-    def effective_description(self) -> str:
-        """Return the one Description sent to image generation."""
-        return self.enriched_description or self.description
-
-    def references_by_role(
-        self,
-    ) -> tuple[tuple[ReferenceRole, ImageReferenceSnapshot], ...]:
-        """Return assigned references in deterministic role order."""
-        return tuple(
-            (role, reference)
-            for role in ReferenceRole
-            if (reference := getattr(self, f"{role.value}_reference")) is not None
-        )
-
-    def grouped_references(
-        self,
-    ) -> tuple[
-        tuple[ImageReferenceSnapshot, tuple[ReferenceRole, ...]],
-        ...,
-    ]:
-        """Group roles that use the same unique source background."""
-        groups: list[tuple[ImageReferenceSnapshot, list[ReferenceRole]]] = []
-        group_indexes: dict[tuple[UUID, UUID, UUID], int] = {}
-        for role, reference in self.references_by_role():
-            key = (
-                reference.card_id,
-                reference.revision_id,
-                reference.background_id,
-            )
-            index = group_indexes.get(key)
-            if index is None:
-                group_indexes[key] = len(groups)
-                groups.append((reference, [role]))
-            else:
-                groups[index][1].append(role)
-        return tuple((reference, tuple(roles)) for reference, roles in groups)
+    @field_validator("description")
+    @classmethod
+    def require_authored_description(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Generate requires a nonempty Description")
+        return value
 
 
-class ImageGenerationMetadata(DomainModel):
-    """Reproducibility metadata for an accepted generated image."""
+class ImageOperationSettings(DomainModel):
+    """Exact shared execution settings and measured result facts."""
 
-    inputs: ImageGenerationInputs | LegacyImageGenerationInputs
-    render_prompt: NonEmptyString
     model_identifier: NonEmptyString
     mflux_version: NonEmptyString
     dependency_versions: dict[str, str] = Field(default_factory=dict)
@@ -422,17 +348,137 @@ class ImageGenerationMetadata(DomainModel):
     width: PositiveInt
     height: PositiveInt
     step_count: PositiveInt
-    quantization: str | None = None
-    effective_settings: dict[str, JsonValue] = Field(default_factory=dict)
+    quantization: int | None = None
+    guidance: FiniteFloat = Field(default=1.0, gt=0.0)
+    scheduler: NonEmptyString = "flow_match_euler_discrete"
+    use_kv_cache: bool = False
     generated_at: AwareDatetime
     duration_seconds: NonNegativeFiniteFloat
 
-    @field_validator("effective_settings")
-    @classmethod
-    def require_json_safe_settings(cls, value: dict[str, JsonValue]) -> dict[str, JsonValue]:
-        """Ensure effective settings have a lossless JSON representation."""
-        _reject_nonfinite_json_numbers(value)
-        return value
+    @model_validator(mode="after")
+    def require_aligned_dimensions(self) -> ImageOperationSettings:
+        if self.width % 16 or self.height % 16:
+            raise ValueError("image dimensions must be multiples of 16")
+        return self
+
+
+class ImageSourceSnapshot(DomainModel):
+    """Exact source revision and background used by a derived operation."""
+
+    card_id: UUID
+    revision_id: UUID
+    background_id: UUID
+
+
+class EditPreserveOptions(DomainModel):
+    """Six deterministic preservation controls captured for Edit."""
+
+    subject_identity: bool = False
+    composition: bool = False
+    camera: bool = False
+    lighting: bool = False
+    color_palette: bool = False
+    visual_style: bool = False
+
+
+class AcceptedEdit(DomainModel):
+    """One accepted Edit instruction retained in chronological order."""
+
+    instruction: NonEmptyString
+    preserve: EditPreserveOptions
+    expanded_prompt: NonEmptyString
+
+
+class RefineTransformation(StrEnum):
+    """Named Refine transformations with fixed production strengths."""
+
+    REIMAGINE = "reimagine"
+    BALANCED = "balanced"
+    PRESERVE = "preserve"
+
+    @property
+    def strength(self) -> float:
+        """Return the fixed MFLUX img2img strength for this transformation."""
+        return {
+            RefineTransformation.REIMAGINE: 0.25,
+            RefineTransformation.BALANCED: 0.50,
+            RefineTransformation.PRESERVE: 0.75,
+        }[self]
+
+
+class DirectGenerateProvenance(DomainModel):
+    """Provenance for current direct Description generation."""
+
+    operation: Literal["generate"] = "generate"
+    inputs: GenerateInputs
+    render_prompt: NonEmptyString
+    settings: ImageOperationSettings
+
+
+class LegacyGenerateProvenance(DomainModel):
+    """Current-schema preservation of an externally patched historical Generate."""
+
+    operation: Literal["legacy_generate"] = "legacy_generate"
+    render_prompt: NonEmptyString
+    references: tuple[ImageReferenceSnapshot, ...] = Field(default_factory=tuple)
+    settings: ImageOperationSettings
+
+
+class RefineProvenance(DomainModel):
+    """Provenance for an accepted Refine derived from one source revision."""
+
+    operation: Literal["refine"] = "refine"
+    source: ImageSourceSnapshot
+    description: str
+    style: StyleSnapshot | None = None
+    edit_lineage: tuple[AcceptedEdit, ...] = Field(default_factory=tuple)
+    render_prompt: NonEmptyString
+    resolution: GenerateResolution
+    transformation: RefineTransformation
+    strength: FiniteFloat = Field(ge=0.0, le=1.0)
+    settings: ImageOperationSettings
+
+    @model_validator(mode="after")
+    def require_transformation_strength(self) -> RefineProvenance:
+        if self.strength != self.transformation.strength:
+            raise ValueError(
+                f"{self.transformation.value} Refine strength must be "
+                f"{self.transformation.strength:.2f}"
+            )
+        return self
+
+
+class EditProvenance(DomainModel):
+    """Provenance for an accepted Edit derived from one source revision."""
+
+    operation: Literal["edit"] = "edit"
+    source: ImageSourceSnapshot
+    instruction: NonEmptyString
+    preserve: EditPreserveOptions
+    expanded_prompt: NonEmptyString
+    resolution: GenerateResolution
+    edit_lineage: tuple[AcceptedEdit, ...] = Field(min_length=1)
+    settings: ImageOperationSettings
+
+    @model_validator(mode="after")
+    def require_current_edit_at_lineage_end(self) -> EditProvenance:
+        current = AcceptedEdit(
+            instruction=self.instruction,
+            preserve=self.preserve,
+            expanded_prompt=self.expanded_prompt,
+        )
+        if self.edit_lineage[-1] != current:
+            raise ValueError("Edit lineage must end with the accepted current Edit")
+        return self
+
+
+ImageProvenance = Annotated[
+    DirectGenerateProvenance
+    | LegacyGenerateProvenance
+    | RefineProvenance
+    | EditProvenance,
+    Field(discriminator="operation"),
+]
 
 
 class HotspotSet(DomainModel):
@@ -455,24 +501,11 @@ class GeneratedBackground(DomainModel):
     id: UUID = Field(default_factory=uuid4)
     type: Literal["generated"] = "generated"
     image_path: NonEmptyString
-    generation_metadata: ImageGenerationMetadata
+    provenance: ImageProvenance
     created_at: AwareDatetime
 
 
 Background = GeneratedBackground
-
-
-class ImagePrompt(DomainModel):
-    """Legacy serialized Image Prompt state retained until the next schema."""
-
-    text: NonEmptyString
-    source_description: str
-    references: tuple[ImageReferenceSnapshot, ...] = Field(
-        default_factory=tuple,
-        max_length=2,
-    )
-    model_identifier: NonEmptyString | None = None
-    prompt_version: NonEmptyString | None = None
 
 
 class CardRevision(DomainModel):
@@ -480,7 +513,6 @@ class CardRevision(DomainModel):
 
     id: UUID = Field(default_factory=uuid4)
     description: str = ""
-    image_prompt: ImagePrompt | None = None
     background: Background | None = None
     hotspot_set: HotspotSet | None = None
     references: tuple[CardReference, ...] = Field(
@@ -488,6 +520,7 @@ class CardRevision(DomainModel):
         max_length=2,
     )
     style_id: UUID | None = None
+    generate_resolution: GenerateResolution = GenerateResolution.RESOLUTION_512
 
     @field_validator("hotspot_set")
     @classmethod
@@ -501,9 +534,9 @@ class CardRevision(DomainModel):
         return self.background.image_path if self.background is not None else None
 
     @property
-    def generation_metadata(self) -> ImageGenerationMetadata | None:
+    def provenance(self) -> ImageProvenance | None:
         """Return generated-image provenance when available."""
-        return self.background.generation_metadata if self.background is not None else None
+        return self.background.provenance if self.background is not None else None
 
     @property
     def created_at(self) -> datetime:
@@ -589,7 +622,7 @@ class Stack(DomainModel):
     schema_version: int = Field(default=CURRENT_SCHEMA_VERSION, strict=True)
     id: UUID = Field(default_factory=uuid4)
     name: NonEmptyString
-    canvas: CanvasSize = Field(default_factory=CanvasSize)
+    aspect_ratio: AspectRatio = AspectRatio.LANDSCAPE
     run_overlay_mode: RunOverlayMode = RunOverlayMode.HIDDEN
     start_card_id: UUID | None = None
     styles: tuple[StyleDefinition, ...] = Field(default_factory=lambda: BUILT_IN_STYLES)
@@ -621,6 +654,17 @@ class Stack(DomainModel):
         revision_ids = [revision.id for card in self.cards for revision in card.revisions]
         if len(revision_ids) != len(set(revision_ids)):
             raise ValueError("revision IDs must be unique within a stack")
+        revisions_by_id = {
+            revision.id: revision
+            for card in self.cards
+            for revision in card.revisions
+        }
+        revision_card_ids = {
+            revision.id: card.id
+            for card in self.cards
+            for revision in card.revisions
+        }
+        derived_sources: dict[UUID, UUID] = {}
         style_ids = [style.id for style in self.styles]
         known_style_ids = set(style_ids)
         if len(style_ids) != len(known_style_ids):
@@ -642,6 +686,29 @@ class Stack(DomainModel):
             for revision in card.revisions:
                 if revision.style_id is not None and revision.style_id not in known_style_ids:
                     raise ValueError("revision style_id must identify a Style in this stack")
+                provenance = revision.provenance
+                if isinstance(provenance, (RefineProvenance, EditProvenance)):
+                    source = provenance.source
+                    if source.revision_id not in revision_card_ids:
+                        raise ValueError(
+                            "derived image sources must identify a revision in this stack"
+                        )
+                    if revision_card_ids[source.revision_id] != source.card_id:
+                        raise ValueError(
+                            "derived image source card must own the source revision"
+                        )
+                    if source.revision_id == revision.id:
+                        raise ValueError("a revision cannot derive from itself")
+                    source_background = revisions_by_id[source.revision_id].background
+                    if (
+                        source_background is None
+                        or source_background.id != source.background_id
+                    ):
+                        raise ValueError(
+                            "derived image source background must match the source "
+                            "revision"
+                        )
+                    derived_sources[revision.id] = source.revision_id
                 resolved_reference_ids: list[UUID] = []
                 for reference in revision.references:
                     if not isinstance(reference, ResolvedCardReference):
@@ -690,6 +757,14 @@ class Stack(DomainModel):
                             "label",
                             derived_label,
                         )
+        for revision_id in derived_sources:
+            visited: set[UUID] = set()
+            current_revision_id = revision_id
+            while current_revision_id in derived_sources:
+                if current_revision_id in visited:
+                    raise ValueError("derived image source lineage cannot contain cycles")
+                visited.add(current_revision_id)
+                current_revision_id = derived_sources[current_revision_id]
         return self
 
     def style_by_id(self, style_id: UUID | None) -> StyleDefinition | None:
@@ -701,3 +776,14 @@ class Stack(DomainModel):
     def key_by_id(self, key_id: UUID) -> KeyDefinition:
         """Return one validated stack-owned Key definition."""
         return next(key for key in self.keys if key.id == key_id)
+
+    @property
+    def canvas(self) -> CanvasSize:
+        """Return a fixed non-serialized logical canvas for UI geometry."""
+        width, height = {
+            AspectRatio.SQUARE: (1024, 1024),
+            AspectRatio.LANDSCAPE: (1024, 768),
+            AspectRatio.PORTRAIT: (768, 1024),
+            AspectRatio.WIDESCREEN: (1024, 576),
+        }[self.aspect_ratio]
+        return CanvasSize(width=width, height=height)

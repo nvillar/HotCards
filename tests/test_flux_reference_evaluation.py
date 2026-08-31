@@ -10,9 +10,10 @@ from PIL import Image
 from hotcards.domain.models import (
     Card,
     CardRevision,
+    DirectGenerateProvenance,
     GeneratedBackground,
-    ImageGenerationInputs,
-    ImageGenerationMetadata,
+    GenerateInputs,
+    ImageOperationSettings,
     Stack,
 )
 from hotcards.evaluation.flux_references import (
@@ -77,19 +78,21 @@ def _card_with_image(
         background=GeneratedBackground(
             id=background_id,
             image_path=image_path,
-            generation_metadata=ImageGenerationMetadata(
-                inputs=ImageGenerationInputs(
+            provenance=DirectGenerateProvenance(
+                inputs=GenerateInputs(
                     description=description,
                 ),
                 render_prompt=description,
-                model_identifier="test",
-                mflux_version="test",
-                seed=1,
-                width=1024,
-                height=768,
-                step_count=4,
-                generated_at=generated_at,
-                duration_seconds=1,
+                settings=ImageOperationSettings(
+                    model_identifier="test",
+                    mflux_version="test",
+                    seed=1,
+                    width=1024,
+                    height=768,
+                    step_count=4,
+                    generated_at=generated_at,
+                    duration_seconds=1,
+                ),
             ),
             created_at=generated_at,
         ),

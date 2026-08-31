@@ -21,12 +21,13 @@ from hotcards.application.run_session import RunSession
 from hotcards.domain.models import (
     Card,
     CardRevision,
+    DirectGenerateProvenance,
     GeneratedBackground,
+    GenerateInputs,
     HotspotConditions,
     HotspotKeyChanges,
     HotspotSet,
-    ImageGenerationInputs,
-    ImageGenerationMetadata,
+    ImageOperationSettings,
     Interaction,
     KeyDefinition,
     NavigateAction,
@@ -357,19 +358,21 @@ def build_run_window(
             background=GeneratedBackground(
                 id=asset_id,
                 image_path=image_path,
-                generation_metadata=ImageGenerationMetadata(
-                    inputs=ImageGenerationInputs(
+                provenance=DirectGenerateProvenance(
+                    inputs=GenerateInputs(
                         description=name,
                     ),
                     render_prompt=name,
-                    model_identifier="test",
-                    mflux_version="test",
-                    seed=1,
-                    width=1024,
-                    height=768,
-                    step_count=4,
-                    generated_at=generated_at,
-                    duration_seconds=1,
+                    settings=ImageOperationSettings(
+                        model_identifier="test",
+                        mflux_version="test",
+                        seed=1,
+                        width=1024,
+                        height=768,
+                        step_count=4,
+                        generated_at=generated_at,
+                        duration_seconds=1,
+                    ),
                 ),
                 created_at=generated_at,
             ),

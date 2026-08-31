@@ -15,7 +15,7 @@ from pydantic import Field, model_validator
 
 from hotcards.domain.models import (
     DomainModel,
-    ImageGenerationInputs,
+    GenerateInputs,
     NonEmptyString,
     PositiveInt,
     StyleSnapshot,
@@ -145,7 +145,7 @@ def load_style_preset_experiment(
 def compose_style_preset_prompt(description: str, prompt_text: str | None) -> str:
     """Append one Style treatment without changing the authored Description."""
     return compose_generation_prompt(
-        ImageGenerationInputs(
+        GenerateInputs(
             description=description,
             style=(
                 StyleSnapshot(
@@ -174,8 +174,8 @@ def _generation_record(
         "load_duration_seconds": generated.load_duration_seconds,
         "inference_duration_seconds": generated.generation_duration_seconds,
         "serialization_duration_seconds": generated.serialization_duration_seconds,
-        "total_duration_seconds": generated.metadata.duration_seconds,
-        "metadata": generated.metadata.model_dump(mode="json"),
+        "total_duration_seconds": generated.provenance.settings.duration_seconds,
+        "metadata": generated.provenance.model_dump(mode="json"),
     }
 
 
@@ -359,7 +359,7 @@ def _execute_style_preset_evaluation(
                 lifecycle.set_stage(stage)
                 output_path = outputs_dir / scene.case_id / f"seed-{seed}" / f"{style.style_id}.png"
                 request = MfluxGenerationRequest(
-                    inputs=ImageGenerationInputs(
+                    inputs=GenerateInputs(
                         description=scene.description,
                         style=style_snapshot,
                     ),

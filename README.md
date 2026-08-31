@@ -17,10 +17,15 @@ autosaved atomically after creation or opening. At startup, HotCards lists
 stacks in `~/Documents/HotCards` and offers Open, Create, and confirmed
 permanent Delete actions.
 Only the current schema is accepted; older and future schemas are rejected.
+Each stack stores one immutable fixed aspect ratio: Square 1:1, Landscape 4:3,
+Portrait 3:4, or Widescreen 16:9. New stacks currently use Landscape 4:3.
 
 Each card owns one or more numbered revisions. A revision contains its authored
 Description, selected stack Style, optional generated background, up to two
-ordered Reference cards, and hotspot set. The compact
+ordered Reference cards, selected Generate resolution, and hotspot set. Generate
+resolution is revision-local, defaults to 512 square-equivalent pixels, and is
+copied with the complete revision. The supported presets are 256, 512, 768, and
+1024. The compact
 header above the canvas edits the card name and selects, duplicates, or deletes
 revisions; the toolbar provides a single Author/Run mode toggle and manages
 hotspot visibility. An
@@ -40,7 +45,15 @@ in the Description. Each active Reference background is sent to MFLUX exactly
 once in that stable order, with no hidden role instructions, card-name alias
 translation, or source-card prose. The exact Description, ordered Reference
 snapshots, Style ID/name/text, and composed render prompt are retained in
-generated-image metadata.
+generated-image provenance.
+
+Image provenance is a strict typed operation record for direct Generate,
+externally patched historical Generate, Refine, or Edit. It retains exact
+prompts, model execution settings, seed, and actual output width and height;
+derived operations also identify their source revision and background. A source
+revision cannot be deleted while another retained revision derives from it.
+Deleting an entire card may remove an image-evolution chain contained wholly
+inside that card.
 
 Generated images are the only supported background source. Generate and image
 removal apply to the active revision through document commands. Completed

@@ -25,7 +25,7 @@ rewrites the prompt.
 Each revision accepts up to two ordered Reference cards. Their active
 backgrounds are sent exactly once as `image 1` and `image 2`; authors use those
 positional labels in the Description. Production adds no hidden role
-instructions, aliases, or source-card prose. Generation metadata captures the
+instructions, aliases, or source-card prose. Generation provenance captures the
 exact Description, Style snapshot, render prompt, and ordered source card,
 revision, and background IDs used by the request. Results are discarded if any
 captured generation input changes before completion.

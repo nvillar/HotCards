@@ -15,7 +15,7 @@ from typing import Protocol
 
 from PIL import Image
 
-from hotcards.domain.models import ImageGenerationInputs
+from hotcards.domain.models import GenerateInputs
 from hotcards.evaluation.manifest import (
     EnvironmentProvider,
     RunLifecycle,
@@ -574,7 +574,7 @@ def run_flux_reference_evaluation(
             case_id = str(case["case_id"])
             reference_keys = tuple(case["reference_keys"])
             prompt = compose_generation_prompt(
-                ImageGenerationInputs(description=str(case["scene"]))
+                GenerateInputs(description=str(case["scene"]))
             )
             stage = f"case:{case_id}"
             lifecycle.set_stage(stage)

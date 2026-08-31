@@ -7,7 +7,7 @@ from uuid import uuid4
 import pytest
 from PIL import Image
 
-from hotcards.domain.models import ImageGenerationInputs, ImageReferenceSnapshot
+from hotcards.domain.models import GenerateInputs, ImageReferenceSnapshot
 from hotcards.generation.errors import ImageGenerationError, ModelLoadError
 from hotcards.generation.mflux_generator import (
     MfluxGenerationRequest,
@@ -63,7 +63,7 @@ class CorruptGeneratedImage:
 
 def request(output_path: Path) -> MfluxGenerationRequest:
     return MfluxGenerationRequest(
-        inputs=ImageGenerationInputs(
+        inputs=GenerateInputs(
             description="A storybook watercolor courtyard",
         ),
         render_prompt="A storybook watercolor courtyard",
@@ -87,13 +87,13 @@ def test_mflux_adapter_loads_once_and_records_effective_metadata(tmp_path: Path)
     assert factory_calls == [("flux2-klein-4b", None)]
     assert len(model.calls) == 2
     with Image.open(first.output_path) as image:
-        assert image.size == (1024, 768)
+        assert image.size == (592, 448)
     assert second.output_path.is_file()
-    assert first.metadata.model_identifier == "flux2-klein-4b"
-    assert first.metadata.width == 1024
-    assert first.metadata.height == 768
-    assert first.metadata.step_count == 4
-    assert first.metadata.render_prompt == "A storybook watercolor courtyard"
+    assert first.provenance.settings.model_identifier == "flux2-klein-4b"
+    assert first.provenance.settings.width == 592
+    assert first.provenance.settings.height == 448
+    assert first.provenance.settings.step_count == 4
+    assert first.provenance.render_prompt == "A storybook watercolor courtyard"
     assert first.load_duration_seconds >= 0
     assert first.generation_duration_seconds >= 0
     assert first.serialization_duration_seconds >= 0
@@ -138,7 +138,7 @@ def test_reference_generation_uses_edit_model_and_kv_cache(
     )
     generation_request = request(tmp_path / "referenced.png").model_copy(
         update={
-            "inputs": ImageGenerationInputs(
+            "inputs": GenerateInputs(
                 description="A referenced portrait",
                 references=(snapshot,),
             ),
@@ -162,21 +162,32 @@ def test_reference_generation_uses_edit_model_and_kv_cache(
     assert edit_calls == [("flux2-klein-9b-kv", None)]
     assert edit_model.calls[0]["image_paths"] == [tmp_path / "identity.png"]
     assert edit_model.calls[0]["use_kv_cache"] is True
-    assert result.metadata.inputs.references == (snapshot,)
-    assert result.metadata.effective_settings["reference_count"] == 1
-    assert result.metadata.effective_settings["use_kv_cache"] is True
+    assert result.provenance.inputs.references == (snapshot,)
+    assert result.provenance.settings.use_kv_cache is True
 
 
 def test_reference_paths_must_match_snapshot_count(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="must match"):
         MfluxGenerationRequest(
-            inputs=ImageGenerationInputs(
+            inputs=GenerateInputs(
                 description="Missing snapshot",
             ),
             render_prompt="Missing snapshot",
             output_path=tmp_path / "invalid.png",
             reference_image_paths=(tmp_path / "reference.png",),
             seed=1,
+        )
+
+
+def test_generation_request_requires_aligned_dimensions(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="multiples of 16"):
+        MfluxGenerationRequest(
+            inputs=GenerateInputs(description="Invalid dimensions"),
+            render_prompt="Invalid dimensions",
+            output_path=tmp_path / "invalid.png",
+            seed=1,
+            width=593,
+            height=448,
         )
 
 
@@ -190,7 +201,7 @@ def test_one_reference_snapshot_requires_one_image_path(
     )
 
     generation_request = MfluxGenerationRequest(
-        inputs=ImageGenerationInputs(
+        inputs=GenerateInputs(
             description="Same castle",
             references=(snapshot,),
         ),
@@ -219,7 +230,7 @@ def test_two_reference_snapshots_require_two_ordered_image_paths(
     paths = (tmp_path / "first.png", tmp_path / "second.png")
 
     generation_request = MfluxGenerationRequest(
-        inputs=ImageGenerationInputs(
+        inputs=GenerateInputs(
             description="Use image 1 in image 2.",
             references=snapshots,
         ),
@@ -267,7 +278,7 @@ def test_switching_generation_modes_evicts_the_previous_model(
     generator.generate(request(tmp_path / "source-1.png"))
     generator.generate(
         MfluxGenerationRequest(
-            inputs=ImageGenerationInputs(
+            inputs=GenerateInputs(
                 description="Referenced scene",
                 references=(snapshot,),
             ),

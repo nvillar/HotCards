@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from typing import Literal, Protocol
 from uuid import UUID, uuid4
 
+from hotcards.domain.image_dependencies import image_source_dependencies
+from hotcards.domain.image_dimensions import GenerateResolution
 from hotcards.domain.models import (
     Background,
     Card,
@@ -242,6 +244,20 @@ class DeleteCardCommand:
     def apply(self, document: Stack) -> Stack:
         index = _card_index(document, self.card_id)
         deleted_card = document.cards[index]
+        deleted_revision_ids = tuple(revision.id for revision in deleted_card.revisions)
+        dependencies = image_source_dependencies(
+            document,
+            deleted_revision_ids,
+            excluding_revision_ids=deleted_revision_ids,
+        )
+        if dependencies:
+            dependent = dependencies[0]
+            raise CommandError(
+                f'cannot delete card "{deleted_card.name}" because '
+                f'{dependent.operation.title()} revision '
+                f'{dependent.dependent_revision_number} on card '
+                f'"{dependent.dependent_card_name}" derives from it'
+            )
         cards = tuple(
             _unresolve_inbound_references(
                 card,
@@ -522,6 +538,25 @@ class SetRevisionStyleCommand:
 
 
 @dataclass(frozen=True, slots=True)
+class SetRevisionGenerateResolutionCommand:
+    """Select the square-equivalent resolution for a revision's next Generate."""
+
+    card_id: UUID
+    revision_id: UUID
+    resolution: GenerateResolution
+
+    def apply(self, document: Stack) -> Stack:
+        card_index = _card_index(document, self.card_id)
+        card = document.cards[card_index]
+        revision_index = _revision_index(card, self.revision_id)
+        revision = card.revisions[revision_index].model_copy(
+            update={"generate_resolution": self.resolution}
+        )
+        card = _replace_revision(card, revision_index, revision)
+        return validated_copy(_replace_card(document, card_index, card))
+
+
+@dataclass(frozen=True, slots=True)
 class ActivateRevisionCommand:
     """Select a card's active revision."""
 
@@ -606,6 +641,15 @@ class DeleteRevisionCommand:
         revision_index = _revision_index(card, self.revision_id)
         if len(card.revisions) == 1:
             raise CommandError("a card must retain at least one revision")
+        dependencies = image_source_dependencies(document, (self.revision_id,))
+        if dependencies:
+            dependent = dependencies[0]
+            raise CommandError(
+                "cannot delete this source revision because "
+                f"{dependent.operation.title()} revision "
+                f'{dependent.dependent_revision_number} on card '
+                f'"{dependent.dependent_card_name}" derives from it'
+            )
         revisions = list(card.revisions)
         revisions.pop(revision_index)
         active_revision_id = card.active_revision_id
@@ -1012,6 +1056,7 @@ __all__ = [
     "SetHotspotConditionsCommand",
     "SetHotspotKeyChangesCommand",
     "SetRevisionReferenceCommand",
+    "SetRevisionGenerateResolutionCommand",
     "SetStartCardCommand",
     "UpdateStyleCommand",
 ]

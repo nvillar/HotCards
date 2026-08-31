@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from hotcards.domain.models import ImageGenerationInputs
+from hotcards.domain.models import GenerateInputs
 
 DIRECT_GENERATION_PROMPT_VERSION = "direct-generation-v1"
 
@@ -16,7 +16,7 @@ def _with_sentence_boundary(value: str) -> str:
     return f"{value}."
 
 
-def compose_generation_prompt(inputs: ImageGenerationInputs) -> str:
+def compose_generation_prompt(inputs: GenerateInputs) -> str:
     """Append the exact selected Style to the authored Description."""
     description = inputs.description.strip()
     if not description:

@@ -14,7 +14,7 @@ from pydantic import Field
 
 from hotcards.domain.models import (
     DomainModel,
-    ImageGenerationInputs,
+    GenerateInputs,
     NonEmptyString,
     PositiveInt,
 )
@@ -56,7 +56,7 @@ class ImageEvaluationCase(DomainModel):
 
     case_version: Literal["image-case-v3"] = IMAGE_CASE_VERSION
     case_id: SafeCaseId
-    inputs: ImageGenerationInputs
+    inputs: GenerateInputs
     required_visual_elements: tuple[NonEmptyString, ...] = Field(min_length=1)
     unwanted_artifacts: tuple[NonEmptyString, ...] = Field(default_factory=tuple)
 
@@ -110,8 +110,8 @@ def _generation_record(
         "load_duration_seconds": result.load_duration_seconds,
         "inference_duration_seconds": result.generation_duration_seconds,
         "serialization_duration_seconds": result.serialization_duration_seconds,
-        "total_duration_seconds": result.metadata.duration_seconds,
-        "metadata": result.metadata.model_dump(mode="json"),
+        "total_duration_seconds": result.provenance.settings.duration_seconds,
+        "metadata": result.provenance.model_dump(mode="json"),
     }
 
 

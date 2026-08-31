@@ -56,7 +56,9 @@ def test_smoke_runner_writes_cold_and_warm_stage_results(tmp_path: Path) -> None
         "Restrained storybook ink and watercolor illustration with cool "
         "twilight shadows and warm lantern light."
     )
-    assert result["stages"]["image_generation"]["cold"]["metadata"]["width"] == 1024
+    cold = result["stages"]["image_generation"]["cold"]
+    assert cold["provenance"]["operation"] == "generate"
+    assert cold["provenance"]["settings"]["width"] == 1024
     assert (output_dir / "generated-cold.png").is_file()
     assert (output_dir / "generated-warm.png").is_file()
     assert (output_dir / "manifest.json").is_file()

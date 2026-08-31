@@ -13,10 +13,12 @@ from typing import Protocol
 from PIL import Image, UnidentifiedImageError
 from pydantic import Field, FiniteFloat, model_validator
 
+from hotcards.domain.image_dimensions import AspectRatio, output_dimensions
 from hotcards.domain.models import (
+    DirectGenerateProvenance,
     DomainModel,
-    ImageGenerationInputs,
-    ImageGenerationMetadata,
+    GenerateInputs,
+    ImageOperationSettings,
     NonEmptyString,
     PositiveInt,
 )
@@ -70,6 +72,7 @@ class GeneratedImageProtocol(Protocol):
 MfluxModelFactory = Callable[[str, int | None], MfluxModelProtocol]
 MfluxEditModelFactory = Callable[[str, int | None], MfluxEditModelProtocol]
 MfluxProgressCallback = Callable[[int, int], None]
+_DEFAULT_WIDTH, _DEFAULT_HEIGHT = output_dimensions(512, AspectRatio.LANDSCAPE)
 
 
 class MfluxCallbackRegistryProtocol(Protocol):
@@ -134,13 +137,13 @@ def _release_model_cache() -> None:
 class MfluxGenerationRequest(DomainModel):
     """Effective request for one transient background candidate."""
 
-    inputs: ImageGenerationInputs
+    inputs: GenerateInputs
     render_prompt: NonEmptyString
     output_path: Path
     model_identifier: NonEmptyString = "flux2-klein-4b"
     seed: int
-    width: PositiveInt = 1024
-    height: PositiveInt = 768
+    width: PositiveInt = _DEFAULT_WIDTH
+    height: PositiveInt = _DEFAULT_HEIGHT
     step_count: PositiveInt = 4
     quantization: int | None = None
     guidance: FiniteFloat = Field(default=1.0, gt=0.0)
@@ -149,6 +152,8 @@ class MfluxGenerationRequest(DomainModel):
 
     @model_validator(mode="after")
     def require_matching_reference_inputs(self) -> MfluxGenerationRequest:
+        if self.width % 16 or self.height % 16:
+            raise ValueError("image dimensions must be multiples of 16")
         if len(self.inputs.references) != len(self.reference_image_paths):
             raise ValueError(
                 "reference image paths must match captured reference inputs"
@@ -160,7 +165,7 @@ class MfluxGenerationResult(DomainModel):
     """Generated candidate path and complete production metadata."""
 
     output_path: Path
-    metadata: ImageGenerationMetadata
+    provenance: DirectGenerateProvenance
     load_duration_seconds: float = Field(ge=0.0)
     generation_duration_seconds: float = Field(ge=0.0)
     serialization_duration_seconds: float = Field(ge=0.0)
@@ -353,32 +358,31 @@ class MfluxGenerator:
                 f"format={image_format!r}, size={image_size!r}, "
                 f"expected_size={(request.width, request.height)!r}"
             )
-        metadata = ImageGenerationMetadata(
+        provenance = DirectGenerateProvenance(
             inputs=request.inputs,
             render_prompt=request.render_prompt,
-            model_identifier=request.model_identifier,
-            mflux_version=_package_version("mflux"),
-            dependency_versions={"mlx": _package_version("mlx")},
-            seed=request.seed,
-            width=request.width,
-            height=request.height,
-            step_count=request.step_count,
-            quantization=str(request.quantization) if request.quantization is not None else None,
-            effective_settings={
-                "guidance": request.guidance,
-                "scheduler": request.scheduler,
-                "reference_count": len(request.reference_image_paths),
-                "use_kv_cache": (
+            settings=ImageOperationSettings(
+                model_identifier=request.model_identifier,
+                mflux_version=_package_version("mflux"),
+                dependency_versions={"mlx": _package_version("mlx")},
+                seed=request.seed,
+                width=request.width,
+                height=request.height,
+                step_count=request.step_count,
+                quantization=request.quantization,
+                guidance=request.guidance,
+                scheduler=request.scheduler,
+                use_kv_cache=(
                     request.model_identifier == "flux2-klein-9b-kv"
                     and bool(request.reference_image_paths)
                 ),
-            },
-            generated_at=generated_at,
-            duration_seconds=duration_seconds,
+                generated_at=generated_at,
+                duration_seconds=duration_seconds,
+            ),
         )
         return MfluxGenerationResult(
             output_path=request.output_path,
-            metadata=metadata,
+            provenance=provenance,
             load_duration_seconds=load_duration_seconds,
             generation_duration_seconds=generation_duration_seconds,
             serialization_duration_seconds=serialization_duration_seconds,

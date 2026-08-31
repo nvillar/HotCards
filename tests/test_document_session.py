@@ -20,9 +20,10 @@ from hotcards.application.document_session import DocumentSession, DocumentSessi
 from hotcards.domain.models import (
     Card,
     CardRevision,
+    DirectGenerateProvenance,
     GeneratedBackground,
-    ImageGenerationInputs,
-    ImageGenerationMetadata,
+    GenerateInputs,
+    ImageOperationSettings,
     Stack,
 )
 from hotcards.storage.stack_store import StackStore, StackStoreError
@@ -149,19 +150,21 @@ def test_save_as_copies_assets_and_rebinds_autosave(tmp_path: Path) -> None:
                 card_id=card.id,
                 asset_id=asset_id,
             ),
-            generation_metadata=ImageGenerationMetadata(
-                inputs=ImageGenerationInputs(
+            provenance=DirectGenerateProvenance(
+                inputs=GenerateInputs(
                     description="A garden",
                 ),
                 render_prompt="A garden",
-                model_identifier="test",
-                mflux_version="test",
-                seed=1,
-                width=1024,
-                height=768,
-                step_count=4,
-                generated_at=generated_at,
-                duration_seconds=1,
+                settings=ImageOperationSettings(
+                    model_identifier="test",
+                    mflux_version="test",
+                    seed=1,
+                    width=1024,
+                    height=768,
+                    step_count=4,
+                    generated_at=generated_at,
+                    duration_seconds=1,
+                ),
             ),
             created_at=generated_at,
         ),
