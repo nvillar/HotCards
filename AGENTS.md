@@ -145,10 +145,10 @@ for live MFLUX runs.
 - Route all production and evaluation Generate, Refine, and Edit inference
   through one typed MFLUX adapter. Plain Generate and Refine use the regular
   family; Reference-backed Generate and Edit use the Edit family. Serialize
-  model loading and inference through one process-local boundary, cache at most
-  one compatible family/model/quantization configuration, and release it when
-  switching configuration. Cancellation while queued or running must publish
-  no output; interrupted active models must not be reused.
+  model loading and inference through one stable process-local invocation
+  thread, cache at most one compatible family/model/quantization configuration,
+  and release it when switching configuration. Cancellation while queued or
+  running must publish no output; interrupted active models must not be reused.
 - Keep one Description editor in the Generate inspector. Place the Style
   selector above References, place revision-local Resolution after References
   and before Generate, show exact output dimensions and positional Reference

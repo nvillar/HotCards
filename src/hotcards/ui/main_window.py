@@ -1729,16 +1729,17 @@ class MainWindow(QMainWindow):
         detail = failure.message if isinstance(failure, WorkerFailure) else str(failure)
         if title == "Image editing failed":
             self.inspector.set_edit_error(detail)
+        message = f"{title}: {detail}" if detail else title
         if isinstance(failure, WorkerFailure):
             self._show_error(
                 "background-error",
-                title,
+                message,
                 detail=detail,
             )
         else:
             self._show_error(
                 "background-error",
-                title,
+                message,
                 detail=detail,
             )
         self._update_generation_actions()

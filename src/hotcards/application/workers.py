@@ -176,6 +176,70 @@ class _Timeout:
     pass
 
 
+@dataclass(frozen=True, slots=True)
+class _InvocationTask:
+    operation: Callable[[], Any]
+    dispose_result: Callable[[Any], None] | None
+    invocation_finished: Callable[[], None] | None
+    cancellation: _CancellationControl
+    invocation_slots: BoundedSemaphore
+    outcomes: Queue[_Success | _Error]
+
+
+_STOP_INVOCATIONS = object()
+
+
+class _InvocationThread:
+    """Keep thread-affine adapter state on one daemon thread."""
+
+    def __init__(self) -> None:
+        self._tasks: Queue[_InvocationTask | object] = Queue()
+        self._lock = Lock()
+        self._closed = False
+        self._thread = Thread(
+            target=self._run,
+            name="hotcards-mflux-invocations",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def submit(self, task: _InvocationTask) -> None:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("adapter invocation thread is shut down")
+            self._tasks.put(task)
+
+    def shutdown(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._tasks.put(_STOP_INVOCATIONS)
+
+    def _run(self) -> None:
+        while True:
+            task = self._tasks.get()
+            if task is _STOP_INVOCATIONS:
+                return
+            assert isinstance(task, _InvocationTask)
+            try:
+                try:
+                    outcome: _Success | _Error = _Success(
+                        task.operation(),
+                        task.dispose_result,
+                    )
+                except Exception as error:
+                    outcome = _Error(error)
+                if not isinstance(outcome, _Success) or task.cancellation.offer_success(outcome):
+                    task.outcomes.put(outcome)
+            finally:
+                try:
+                    if task.invocation_finished is not None:
+                        task.invocation_finished()
+                finally:
+                    task.invocation_slots.release()
+
+
 class _CancellationControl:
     def __init__(
         self,
@@ -254,6 +318,7 @@ class _BoundedRunnable(QRunnable):
         cancellation: _CancellationControl,
         start_lock: Lock,
         invocation_slots: BoundedSemaphore,
+        invocation_thread: _InvocationThread,
         dispatcher: _CompletionDispatcher,
     ) -> None:
         super().__init__()
@@ -266,6 +331,7 @@ class _BoundedRunnable(QRunnable):
         self._cancellation = cancellation
         self._start_lock = start_lock
         self._invocation_slots = invocation_slots
+        self._invocation_thread = invocation_thread
         self._dispatcher = dispatcher
 
     def run(self) -> None:
@@ -293,26 +359,6 @@ class _BoundedRunnable(QRunnable):
 
         outcomes: Queue[_Success | _Error] = Queue(maxsize=1)
 
-        def invoke() -> None:
-            try:
-                try:
-                    outcome: _Success | _Error = _Success(
-                        self._operation(),
-                        self._dispose_result,
-                    )
-                except Exception as error:
-                    outcome = _Error(error)
-                if not isinstance(outcome, _Success) or self._cancellation.offer_success(
-                    outcome
-                ):
-                    outcomes.put(outcome)
-            finally:
-                try:
-                    if self._invocation_finished is not None:
-                        self._invocation_finished()
-                finally:
-                    self._invocation_slots.release()
-
         with self._start_lock:
             if self._cancellation.event.is_set() or self._deadline <= monotonic():
                 self._cancellation.request()
@@ -322,11 +368,16 @@ class _BoundedRunnable(QRunnable):
             try:
                 if self._invocation_started is not None:
                     self._invocation_started()
-                Thread(
-                    target=invoke,
-                    name=f"hotcards-adapter-{self._operation_id}",
-                    daemon=True,
-                ).start()
+                self._invocation_thread.submit(
+                    _InvocationTask(
+                        operation=self._operation,
+                        dispose_result=self._dispose_result,
+                        invocation_finished=self._invocation_finished,
+                        cancellation=self._cancellation,
+                        invocation_slots=self._invocation_slots,
+                        outcomes=outcomes,
+                    )
+                )
             except Exception as error:
                 if self._invocation_finished is not None:
                     self._invocation_finished()
@@ -341,9 +392,7 @@ class _BoundedRunnable(QRunnable):
                 break
             try:
                 outcome = outcomes.get(timeout=min(remaining, 0.05))
-                if isinstance(outcome, _Success) and not self._cancellation.claim_success(
-                    outcome
-                ):
+                if isinstance(outcome, _Success) and not self._cancellation.claim_success(outcome):
                     outcome.dispose()
                     outcome = _Timeout()
                 break
@@ -371,6 +420,7 @@ class AdapterWorkers(QObject):
         self._invocation_slots = {
             AdapterKind.MFLUX: BoundedSemaphore(1),
         }
+        self._invocation_thread = _InvocationThread()
         self._dispatcher = _CompletionDispatcher(self)
         self._dispatcher.completed.connect(self._complete)
         self._deadline_timer = QTimer(self)
@@ -440,6 +490,7 @@ class AdapterWorkers(QObject):
         self._mflux_pool.clear()
         self._records.clear()
         self._deadline_timer.stop()
+        self._invocation_thread.shutdown()
         if wait_milliseconds > 0:
             self._mflux_pool.waitForDone(wait_milliseconds)
 
@@ -497,6 +548,7 @@ class AdapterWorkers(QObject):
                 cancellation=cancellation,
                 start_lock=start_lock,
                 invocation_slots=self._invocation_slots[adapter],
+                invocation_thread=self._invocation_thread,
                 dispatcher=self._dispatcher,
             )
             self._mflux_pool.start(runnable)

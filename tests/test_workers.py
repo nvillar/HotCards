@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from collections.abc import Iterator
 from pathlib import Path
-from threading import Event, Lock, get_ident
+from threading import Event, Lock, current_thread, get_ident
 from time import monotonic, sleep
 from types import SimpleNamespace
 from weakref import ref
@@ -72,6 +72,76 @@ def test_mflux_success_runs_off_the_main_thread() -> None:
 
     assert operation.status is OperationStatus.SUCCEEDED
     assert operation.result[0] != main_thread
+    workers.shutdown(wait_milliseconds=500)
+
+
+def test_mflux_operations_share_one_stable_invocation_thread() -> None:
+    workers = AdapterWorkers(mflux_timeout_seconds=0.5)
+    first = workers.run_mflux(
+        current_thread,
+        stage="generating first image",
+    )
+    wait_for(first)
+    second = workers.run_mflux(
+        current_thread,
+        stage="generating second image",
+    )
+    wait_for(second)
+
+    assert first.status is OperationStatus.SUCCEEDED
+    assert second.status is OperationStatus.SUCCEEDED
+    assert second.result is first.result
+    workers.shutdown(wait_milliseconds=500)
+
+
+def test_cached_mflux_model_is_reused_on_its_creation_thread(
+    tmp_path: Path,
+) -> None:
+    class GeneratedImage:
+        def save(self, path: Path, *, overwrite: bool) -> None:
+            assert not overwrite
+            Image.new("RGB", (512, 384), "navy").save(path, format="PNG")
+
+    class ThreadAffineModel:
+        def __init__(self) -> None:
+            self.owner = current_thread()
+
+        def generate_image(self, **_kwargs: object) -> GeneratedImage:
+            if current_thread() is not self.owner:
+                raise RuntimeError("cached model used from a different thread")
+            return GeneratedImage()
+
+    models: list[ThreadAffineModel] = []
+
+    def model_factory(*_args: object) -> ThreadAffineModel:
+        model = ThreadAffineModel()
+        models.append(model)
+        return model
+
+    generator = MfluxGenerator(model_factory=model_factory)  # type: ignore[arg-type]
+    workers = AdapterWorkers(mflux_timeout_seconds=0.5)
+    operations = []
+    for name in ("first", "second"):
+        request = MfluxGenerateRequest(
+            output_path=tmp_path / f"{name}.png",
+            inputs=GenerateInputs(description=f"{name} image"),
+            render_prompt=f"{name} image",
+            seed=42,
+        )
+        operation = workers.run_mflux(
+            lambda request=request: generator.generate(request),
+            stage=f"generating {name} image",
+            dispose_result=dispose_mflux_result,
+        )
+        wait_for(operation)
+        operations.append(operation)
+
+    assert [operation.status for operation in operations] == [
+        OperationStatus.SUCCEEDED,
+        OperationStatus.SUCCEEDED,
+    ]
+    assert len(models) == 1
+    generator.release()
     workers.shutdown(wait_milliseconds=500)
 
 

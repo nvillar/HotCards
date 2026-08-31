@@ -2082,6 +2082,7 @@ def test_edit_tab_wires_current_image_defaults_errors_and_cancellation(
     window._background_progress_changed("Image editing failed")
     window._background_failed(RuntimeError("513 model tokens; the limit is 512"))
     assert "513 model tokens" in window.inspector.edit_instruction_error.text()
+    assert "513 model tokens" in window.notification_bar.message_label.text()
 
 
 def test_notification_undo_expires_after_another_command(
