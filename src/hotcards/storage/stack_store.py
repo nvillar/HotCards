@@ -87,6 +87,32 @@ class StoredStackDocument:
     sha256: str
 
 
+@dataclass(frozen=True, slots=True)
+class StoredImageSnapshot:
+    """Private immutable copy of one securely opened bundle image."""
+
+    relative_path: str
+    source_device: int
+    source_inode: int
+    source_size: int
+    source_sha256: str
+    source_directory_device: int
+    source_directory_inode: int
+    snapshot_path: Path
+    snapshot_device: int
+    snapshot_inode: int
+    width: int
+    height: int
+
+    def dispose(self) -> bool:
+        """Remove only the exact private snapshot inode."""
+        return _dispose_owned_private_file(
+            self.snapshot_path,
+            device=self.snapshot_device,
+            inode=self.snapshot_inode,
+        )
+
+
 def _io_checkpoint(_name: str) -> None:
     """Fault-injection seam around durable transaction boundaries."""
 
@@ -122,6 +148,8 @@ def _secure_open_flags(*, directory: bool = False) -> int:
     flags = os.O_RDONLY | nofollow
     if directory:
         flags |= directory_flag
+    else:
+        flags |= getattr(os, "O_NONBLOCK", 0)
     return flags
 
 
@@ -170,24 +198,30 @@ def _copy_all(source_fd: int, destination_fd: int) -> None:
         _write_all(destination_fd, chunk)
 
 
-def _validate_png_fd(fd: int, source_label: str) -> None:
+def _sha256_fd(fd: int) -> str:
+    os.lseek(fd, 0, os.SEEK_SET)
+    digest = hashlib.sha256()
+    while chunk := os.read(fd, 1024 * 1024):
+        digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _validate_png_fd(fd: int, source_label: str) -> tuple[int, int]:
     try:
         os.lseek(fd, 0, os.SEEK_SET)
         with os.fdopen(os.dup(fd), "rb") as image_file:
             with Image.open(image_file) as image:
                 if image.format != "PNG":
-                    raise StackStoreError(
-                        f"image asset must be a PNG: {source_label}"
-                    )
+                    raise StackStoreError(f"image asset must be a PNG: {source_label}")
                 image.verify()
         os.lseek(fd, 0, os.SEEK_SET)
         with os.fdopen(os.dup(fd), "rb") as image_file:
             with Image.open(image_file) as image:
                 image.load()
+                dimensions = image.size
     except (OSError, UnidentifiedImageError) as error:
-        raise StackStoreError(
-            f"could not decode image asset {source_label}: {error}"
-        ) from error
+        raise StackStoreError(f"could not decode image asset {source_label}: {error}") from error
+    return dimensions
 
 
 def _file_at_matches(
@@ -216,6 +250,160 @@ def _file_at_matches(
         )
     finally:
         os.close(candidate_fd)
+
+
+def _dispose_owned_private_file(
+    path: Path,
+    *,
+    device: int,
+    inode: int,
+) -> bool:
+    parent_fd: int | None = None
+    quarantine_name: str | None = None
+    try:
+        try:
+            parent_fd = os.open(
+                path.parent,
+                _secure_open_flags(directory=True),
+            )
+            current = os.stat(
+                path.name,
+                dir_fd=parent_fd,
+                follow_symlinks=False,
+            )
+            if (
+                not stat.S_ISREG(current.st_mode)
+                or (current.st_dev, current.st_ino) != (device, inode)
+            ):
+                return False
+            quarantine_name = f".refine-cleanup-{uuid4()}"
+            os.rename(
+                path.name,
+                quarantine_name,
+                src_dir_fd=parent_fd,
+                dst_dir_fd=parent_fd,
+            )
+        except FileNotFoundError:
+            return True
+        except OSError:
+            return False
+
+        def restore_quarantine() -> None:
+            try:
+                os.link(
+                    quarantine_name,
+                    path.name,
+                    src_dir_fd=parent_fd,
+                    dst_dir_fd=parent_fd,
+                    follow_symlinks=False,
+                )
+            except OSError:
+                return
+            try:
+                os.unlink(quarantine_name, dir_fd=parent_fd)
+            except OSError:
+                pass
+
+        try:
+            candidate_fd = os.open(
+                quarantine_name,
+                _secure_open_flags(),
+                dir_fd=parent_fd,
+            )
+            try:
+                current = os.fstat(candidate_fd)
+            finally:
+                os.close(candidate_fd)
+        except OSError:
+            restore_quarantine()
+            return False
+        if (current.st_dev, current.st_ino) != (device, inode):
+            restore_quarantine()
+            return False
+        try:
+            os.unlink(quarantine_name, dir_fd=parent_fd)
+        except FileNotFoundError:
+            return True
+        except OSError:
+            return False
+        return True
+    finally:
+        if parent_fd is not None:
+            os.close(parent_fd)
+
+
+def _require_image_asset_unchanged_at(
+    bundle_fd: int,
+    snapshot: StoredImageSnapshot,
+    *,
+    card_id: UUID,
+    asset_id: UUID,
+) -> None:
+    source_path = _relative_asset_path(snapshot.relative_path)
+    expected_path = _image_asset_path(card_id, asset_id)
+    if source_path != expected_path:
+        raise StackStoreError(
+            f"image asset path {source_path} does not match its card and "
+            f"asset IDs; expected {expected_path}"
+        )
+    with ExitStack() as descriptors:
+        assets_fd = _open_directory_at(bundle_fd, "assets")
+        descriptors.callback(os.close, assets_fd)
+        cards_fd = _open_directory_at(assets_fd, "cards")
+        descriptors.callback(os.close, cards_fd)
+        card_fd = _open_directory_at(cards_fd, str(card_id))
+        descriptors.callback(os.close, card_fd)
+        card_stat = os.fstat(card_fd)
+        source_fd = os.open(
+            source_path.name,
+            _secure_open_flags(),
+            dir_fd=card_fd,
+        )
+        descriptors.callback(os.close, source_fd)
+        source_stat = os.fstat(source_fd)
+        if not stat.S_ISREG(source_stat.st_mode):
+            raise StackStoreError(
+                f"Refine source is no longer a regular file: {source_path}"
+            )
+        if (
+            card_stat.st_dev,
+            card_stat.st_ino,
+            source_stat.st_dev,
+            source_stat.st_ino,
+            source_stat.st_size,
+            _sha256_fd(source_fd),
+        ) != (
+            snapshot.source_directory_device,
+            snapshot.source_directory_inode,
+            snapshot.source_device,
+            snapshot.source_inode,
+            snapshot.source_size,
+            snapshot.source_sha256,
+        ):
+            raise StackStoreError(
+                "the current image changed while Refine was running"
+            )
+        current_fd = os.open(
+            source_path.name,
+            _secure_open_flags(),
+            dir_fd=card_fd,
+        )
+        descriptors.callback(os.close, current_fd)
+        current_stat = os.fstat(current_fd)
+        if (
+            current_stat.st_dev,
+            current_stat.st_ino,
+            current_stat.st_size,
+            _sha256_fd(current_fd),
+        ) != (
+            snapshot.source_device,
+            snapshot.source_inode,
+            snapshot.source_size,
+            snapshot.source_sha256,
+        ):
+            raise StackStoreError(
+                "the current image changed while Refine was running"
+            )
 
 
 def _open_matching_directory_at(
@@ -270,9 +458,7 @@ def _quarantine_owned_file_at(
     except FileNotFoundError:
         return False
     except OSError as error:
-        raise StackStoreError(
-            f"could not securely open owned image {name!r}: {error}"
-        ) from error
+        raise StackStoreError(f"could not securely open owned image {name!r}: {error}") from error
     try:
         candidate_stat = os.fstat(candidate_fd)
         if (
@@ -280,9 +466,7 @@ def _quarantine_owned_file_at(
             or candidate_stat.st_dev != device
             or candidate_stat.st_ino != inode
         ):
-            raise StackStoreError(
-                f"refusing to remove image asset whose identity changed: {name}"
-            )
+            raise StackStoreError(f"refusing to remove image asset whose identity changed: {name}")
         _io_checkpoint("owned-file-cleanup-prechecked")
         quarantine_name = _quarantine_name(name, "owned-file")
         try:
@@ -293,9 +477,7 @@ def _quarantine_owned_file_at(
                 dst_dir_fd=parent_fd,
             )
         except OSError as error:
-            raise StackStoreError(
-                f"could not quarantine owned image {name!r}: {error}"
-            ) from error
+            raise StackStoreError(f"could not quarantine owned image {name!r}: {error}") from error
         try:
             quarantine_fd = os.open(
                 quarantine_name,
@@ -325,8 +507,7 @@ def _quarantine_owned_file_at(
             os.fsync(parent_fd)
         except OSError as error:
             raise StackStoreError(
-                f"could not remove owned image quarantine {quarantine_name!r}: "
-                f"{error}"
+                f"could not remove owned image quarantine {quarantine_name!r}: {error}"
             ) from error
         return True
     finally:
@@ -355,9 +536,7 @@ def _quarantine_owned_directory_if_empty(
             raise StackStoreError(
                 f"could not inspect owned asset directory {name!r}: {error}"
             ) from error
-        raise StackStoreError(
-            f"refusing to remove asset directory whose identity changed: {name}"
-        )
+        raise StackStoreError(f"refusing to remove asset directory whose identity changed: {name}")
     try:
         if os.listdir(candidate_fd):
             return False
@@ -404,8 +583,7 @@ def _quarantine_owned_directory_if_empty(
             os.fsync(parent_fd)
         except OSError as error:
             raise StackStoreError(
-                f"could not remove owned directory quarantine "
-                f"{quarantine_name!r}: {error}"
+                f"could not remove owned directory quarantine {quarantine_name!r}: {error}"
             ) from error
         return True
     finally:
@@ -558,8 +736,7 @@ def _recover_previous_manifest(
         else:
             rollback_errors.append(
                 StackStoreError(
-                    "observed stack document matches neither the previous nor "
-                    "duplicate state"
+                    "observed stack document matches neither the previous nor duplicate state"
                 )
             )
     except (OSError, ValidationError) as error:
@@ -671,9 +848,7 @@ class StackStore:
             descriptor = os.open(self.stack_path, _secure_open_flags())
             before = os.fstat(descriptor)
             if not stat.S_ISREG(before.st_mode):
-                raise StackStoreError(
-                    f"stack document is not a regular file: {self.stack_path}"
-                )
+                raise StackStoreError(f"stack document is not a regular file: {self.stack_path}")
             chunks: list[bytes] = []
             while chunk := os.read(descriptor, 1024 * 1024):
                 chunks.append(chunk)
@@ -689,9 +864,7 @@ class StackStore:
                 after.st_size,
                 after.st_mtime_ns,
             ):
-                raise StackStoreError(
-                    f"stack document changed while being read: {self.stack_path}"
-                )
+                raise StackStoreError(f"stack document changed while being read: {self.stack_path}")
             raw_payload = b"".join(chunks)
             payload = json.loads(raw_payload.decode("utf-8"))
         except FileNotFoundError as error:
@@ -753,6 +926,241 @@ class StackStore:
     def create(self, stack: Stack) -> None:
         """Atomically create `stack.json` without replacing an existing document."""
         self._write_stack(stack, replace=False)
+
+    @_serialized_bundle_mutation
+    def image_asset_dimensions(
+        self,
+        relative_path: str,
+        *,
+        card_id: UUID,
+        asset_id: UUID,
+    ) -> tuple[int, int]:
+        """Decode one exact bundle PNG through no-follow descriptors."""
+        source_path = _relative_asset_path(relative_path)
+        expected_path = _image_asset_path(card_id, asset_id)
+        if source_path != expected_path:
+            raise StackStoreError(
+                f"image asset path {source_path} does not match its card and "
+                f"asset IDs; expected {expected_path}"
+            )
+        try:
+            with ExitStack() as descriptors:
+                bundle_fd = os.open(
+                    self.bundle_path,
+                    _secure_open_flags(directory=True),
+                )
+                descriptors.callback(os.close, bundle_fd)
+                assets_fd = _open_directory_at(bundle_fd, "assets")
+                descriptors.callback(os.close, assets_fd)
+                cards_fd = _open_directory_at(assets_fd, "cards")
+                descriptors.callback(os.close, cards_fd)
+                card_fd = _open_directory_at(cards_fd, str(card_id))
+                descriptors.callback(os.close, card_fd)
+                source_fd = os.open(
+                    source_path.name,
+                    _secure_open_flags(),
+                    dir_fd=card_fd,
+                )
+                descriptors.callback(os.close, source_fd)
+                before = os.fstat(source_fd)
+                if not stat.S_ISREG(before.st_mode):
+                    raise StackStoreError(
+                        f"source image is not a regular file: {source_path}"
+                    )
+                dimensions = _validate_png_fd(source_fd, source_path.as_posix())
+                after = os.fstat(source_fd)
+                if (
+                    before.st_dev,
+                    before.st_ino,
+                    before.st_size,
+                    before.st_mtime_ns,
+                ) != (
+                    after.st_dev,
+                    after.st_ino,
+                    after.st_size,
+                    after.st_mtime_ns,
+                ):
+                    raise StackStoreError(
+                        f"source image changed while being decoded: {source_path}"
+                    )
+                return dimensions
+        except StackStoreError:
+            raise
+        except OSError as error:
+            raise StackStoreError(
+                f"could not securely decode source image {source_path}: {error}"
+            ) from error
+
+    @_serialized_bundle_mutation
+    def snapshot_image_asset(
+        self,
+        relative_path: str,
+        *,
+        card_id: UUID,
+        asset_id: UUID,
+        destination_directory: Path,
+    ) -> StoredImageSnapshot:
+        """Securely pin one bundle image into a private immutable PNG."""
+        source_path = _relative_asset_path(relative_path)
+        expected_path = _image_asset_path(card_id, asset_id)
+        if source_path != expected_path:
+            raise StackStoreError(
+                f"image asset path {source_path} does not match its card and "
+                f"asset IDs; expected {expected_path}"
+            )
+
+        snapshot_name = f".refine-source-{uuid4()}.png"
+        snapshot_path = destination_directory / snapshot_name
+        snapshot_fd: int | None = None
+        snapshot_directory_fd: int | None = None
+        snapshot_owned = False
+        snapshot_identity: tuple[int, int] | None = None
+        try:
+            with ExitStack() as descriptors:
+                bundle_fd = os.open(
+                    self.bundle_path,
+                    _secure_open_flags(directory=True),
+                )
+                descriptors.callback(os.close, bundle_fd)
+                assets_fd = _open_directory_at(bundle_fd, "assets")
+                descriptors.callback(os.close, assets_fd)
+                cards_fd = _open_directory_at(assets_fd, "cards")
+                descriptors.callback(os.close, cards_fd)
+                card_fd = _open_directory_at(cards_fd, str(card_id))
+                descriptors.callback(os.close, card_fd)
+                card_stat = os.fstat(card_fd)
+                source_fd = os.open(
+                    source_path.name,
+                    _secure_open_flags(),
+                    dir_fd=card_fd,
+                )
+                descriptors.callback(os.close, source_fd)
+                source_before = os.fstat(source_fd)
+                if not stat.S_ISREG(source_before.st_mode):
+                    raise StackStoreError(f"source image is not a regular file: {source_path}")
+
+                snapshot_directory_fd = os.open(
+                    destination_directory,
+                    _secure_open_flags(directory=True),
+                )
+                snapshot_fd = os.open(
+                    snapshot_name,
+                    os.O_RDWR | os.O_CREAT | os.O_EXCL | _secure_open_flags(),
+                    0o600,
+                    dir_fd=snapshot_directory_fd,
+                )
+                snapshot_owned = True
+                created_snapshot_stat = os.fstat(snapshot_fd)
+                snapshot_identity = (
+                    created_snapshot_stat.st_dev,
+                    created_snapshot_stat.st_ino,
+                )
+                digest = hashlib.sha256()
+                while chunk := os.read(source_fd, 1024 * 1024):
+                    digest.update(chunk)
+                    _write_all(snapshot_fd, chunk)
+                source_after = os.fstat(source_fd)
+                if (
+                    source_before.st_dev,
+                    source_before.st_ino,
+                    source_before.st_size,
+                    source_before.st_mtime_ns,
+                ) != (
+                    source_after.st_dev,
+                    source_after.st_ino,
+                    source_after.st_size,
+                    source_after.st_mtime_ns,
+                ):
+                    raise StackStoreError(f"source image changed while being copied: {source_path}")
+                os.fsync(snapshot_fd)
+                width, height = _validate_png_fd(
+                    snapshot_fd,
+                    source_path.as_posix(),
+                )
+                snapshot_stat = os.fstat(snapshot_fd)
+                source_sha256 = digest.hexdigest()
+
+                current_fd = os.open(
+                    source_path.name,
+                    _secure_open_flags(),
+                    dir_fd=card_fd,
+                )
+                descriptors.callback(os.close, current_fd)
+                current_stat = os.fstat(current_fd)
+                if (
+                    current_stat.st_dev,
+                    current_stat.st_ino,
+                    current_stat.st_size,
+                    _sha256_fd(current_fd),
+                ) != (
+                    source_before.st_dev,
+                    source_before.st_ino,
+                    source_before.st_size,
+                    source_sha256,
+                ):
+                    raise StackStoreError(f"source image changed while being copied: {source_path}")
+                stored_snapshot = StoredImageSnapshot(
+                    relative_path=source_path.as_posix(),
+                    source_device=source_before.st_dev,
+                    source_inode=source_before.st_ino,
+                    source_size=source_before.st_size,
+                    source_sha256=source_sha256,
+                    source_directory_device=card_stat.st_dev,
+                    source_directory_inode=card_stat.st_ino,
+                    snapshot_path=snapshot_path,
+                    snapshot_device=snapshot_stat.st_dev,
+                    snapshot_inode=snapshot_stat.st_ino,
+                    width=width,
+                    height=height,
+                )
+                snapshot_owned = False
+                return stored_snapshot
+        except StackStoreError:
+            raise
+        except OSError as error:
+            raise StackStoreError(
+                f"could not securely snapshot source image {source_path}: {error}"
+            ) from error
+        finally:
+            if snapshot_fd is not None:
+                os.close(snapshot_fd)
+            if snapshot_directory_fd is not None:
+                os.close(snapshot_directory_fd)
+            if snapshot_owned and snapshot_identity is not None:
+                _dispose_owned_private_file(
+                    snapshot_path,
+                    device=snapshot_identity[0],
+                    inode=snapshot_identity[1],
+                )
+
+    @_serialized_bundle_mutation
+    def require_image_asset_unchanged(
+        self,
+        snapshot: StoredImageSnapshot,
+        *,
+        card_id: UUID,
+        asset_id: UUID,
+    ) -> None:
+        """Reject a Refine result when its logical source image changed."""
+        try:
+            with ExitStack() as descriptors:
+                bundle_fd = os.open(
+                    self.bundle_path,
+                    _secure_open_flags(directory=True),
+                )
+                descriptors.callback(os.close, bundle_fd)
+                _require_image_asset_unchanged_at(
+                    bundle_fd,
+                    snapshot,
+                    card_id=card_id,
+                    asset_id=asset_id,
+                )
+        except StackStoreError:
+            raise
+        except OSError as error:
+            raise StackStoreError(
+                f"the current image changed or became unavailable while Refine was running: {error}"
+            ) from error
 
     @_serialized_bundle_mutation
     def _write_stack(self, stack: Stack, *, replace: bool) -> None:
@@ -889,6 +1297,9 @@ class StackStore:
         destination_asset_id: UUID,
         previous_stack: Stack,
         changed_stack: Stack,
+        expected_source_snapshot: StoredImageSnapshot | None = None,
+        expected_source_card_id: UUID | None = None,
+        expected_source_asset_id: UUID | None = None,
     ) -> StoredImageAsset:
         """Atomically import one PNG and commit the manifest that references it."""
         return self._store_image_asset_and_save(
@@ -900,6 +1311,9 @@ class StackStore:
             destination_asset_id=destination_asset_id,
             previous_stack=previous_stack,
             changed_stack=changed_stack,
+            expected_source_snapshot=expected_source_snapshot,
+            expected_source_card_id=expected_source_card_id,
+            expected_source_asset_id=expected_source_asset_id,
         )
 
     @_serialized_bundle_mutation
@@ -914,20 +1328,30 @@ class StackStore:
         destination_asset_id: UUID,
         previous_stack: Stack,
         changed_stack: Stack,
+        expected_source_snapshot: StoredImageSnapshot | None = None,
+        expected_source_card_id: UUID | None = None,
+        expected_source_asset_id: UUID | None = None,
     ) -> StoredImageAsset:
         if (source_relative_path is None) == (source_file_path is None):
             raise StackStoreError("exactly one image source must be provided")
+        expected_source_values = (
+            expected_source_snapshot,
+            expected_source_card_id,
+            expected_source_asset_id,
+        )
+        if any(value is not None for value in expected_source_values) and any(
+            value is None for value in expected_source_values
+        ):
+            raise StackStoreError(
+                "expected Refine source snapshot and IDs must be provided together"
+            )
         source_path: PurePosixPath | None = None
         if source_relative_path is not None:
             if source_card_id is None or source_asset_id is None:
-                raise StackStoreError(
-                    "bundle image copies require source card and asset IDs"
-                )
+                raise StackStoreError("bundle image copies require source card and asset IDs")
             source_path = _relative_asset_path(source_relative_path)
         elif source_card_id is not None or source_asset_id is not None:
-            raise StackStoreError(
-                "external image imports cannot specify bundle source IDs"
-            )
+            raise StackStoreError("external image imports cannot specify bundle source IDs")
         if source_path is not None:
             assert source_card_id is not None
             assert source_asset_id is not None
@@ -953,16 +1377,13 @@ class StackStore:
             for card in changed_stack.cards
             if card.id == destination_card_id
             for revision in card.revisions
-            if revision.background is not None
-            and revision.background.id == destination_asset_id
+            if revision.background is not None and revision.background.id == destination_asset_id
         ]
         if (
             len(matching_backgrounds) != 1
             or matching_backgrounds[0].image_path != destination_path.as_posix()
         ):
-            raise StackStoreError(
-                "changed stack does not reference the reserved duplicate asset"
-            )
+            raise StackStoreError("changed stack does not reference the reserved duplicate asset")
 
         changed_payload = changed_stack.model_dump_json(indent=2).encode() + b"\n"
         rollback_errors: list[Exception] = []
@@ -1003,13 +1424,9 @@ class StackStore:
             try:
                 persisted_stack = Stack.model_validate_json(persisted_payload)
             except ValidationError as error:
-                raise StackStoreError(
-                    f"invalid current stack document: {error}"
-                ) from error
+                raise StackStoreError(f"invalid current stack document: {error}") from error
             if persisted_stack != previous_stack:
-                raise StackStoreError(
-                    "current stack document changed before duplication"
-                )
+                raise StackStoreError("current stack document changed before duplication")
             previous_payload = persisted_payload
 
             if source_path is None:
@@ -1030,8 +1447,7 @@ class StackStore:
                     os.fsync(bundle_fd)
                 except OSError as error:
                     raise StackStoreError(
-                        "could not durably create the image asset namespace: "
-                        f"{error}"
+                        f"could not durably create the image asset namespace: {error}"
                     ) from error
             else:
                 assets_fd = _open_directory_at(bundle_fd, "assets")
@@ -1062,15 +1478,12 @@ class StackStore:
                     )
                 except OSError as error:
                     raise StackStoreError(
-                        f"could not securely open source image "
-                        f"{source_file_path}: {error}"
+                        f"could not securely open source image {source_file_path}: {error}"
                     ) from error
             stack.callback(os.close, source_fd)
             source_stat = os.fstat(source_fd)
             if not stat.S_ISREG(source_stat.st_mode):
-                raise StackStoreError(
-                    f"source image is not a regular file: {source_label}"
-                )
+                raise StackStoreError(f"source image is not a regular file: {source_label}")
             _io_checkpoint("source-opened")
 
             try:
@@ -1091,10 +1504,7 @@ class StackStore:
             try:
                 destination_fd = os.open(
                     destination_name,
-                    os.O_RDWR
-                    | os.O_CREAT
-                    | os.O_EXCL
-                    | _secure_open_flags(),
+                    os.O_RDWR | os.O_CREAT | os.O_EXCL | _secure_open_flags(),
                     0o600,
                     dir_fd=destination_card_fd,
                 )
@@ -1123,6 +1533,18 @@ class StackStore:
             def mark_changed_manifest_durable() -> None:
                 nonlocal changed_manifest_durable
                 changed_manifest_durable = True
+
+            def require_expected_source() -> None:
+                if expected_source_snapshot is None:
+                    return
+                assert expected_source_card_id is not None
+                assert expected_source_asset_id is not None
+                _require_image_asset_unchanged_at(
+                    bundle_fd,
+                    expected_source_snapshot,
+                    card_id=expected_source_card_id,
+                    asset_id=expected_source_asset_id,
+                )
 
             try:
                 _io_checkpoint("destination-created")
@@ -1176,9 +1598,7 @@ class StackStore:
                         current_source_stat.st_size,
                         current_source_stat.st_mtime_ns,
                     ):
-                        raise StackStoreError(
-                            "source image changed during the transaction"
-                        )
+                        raise StackStoreError("source image changed during the transaction")
                 current_destination_card_fd = _open_directory_at(
                     current_cards_fd,
                     str(destination_card_id),
@@ -1202,12 +1622,14 @@ class StackStore:
                         "duplicate image namespace changed during the transaction"
                     )
 
+                require_expected_source()
                 manifest_temporary_name = _write_manifest_at(
                     bundle_fd,
                     changed_payload,
                     prefix=".stack-duplicate-",
                     checkpoints=True,
                 )
+                require_expected_source()
                 _replace_manifest_at(
                     bundle_fd,
                     manifest_temporary_name,
@@ -1216,6 +1638,7 @@ class StackStore:
                     on_directory_fsynced=mark_changed_manifest_durable,
                 )
                 manifest_temporary_name = None
+                require_expected_source()
                 if not _asset_path_matches(
                     bundle_fd,
                     card_id=destination_card_id,
@@ -1223,9 +1646,7 @@ class StackStore:
                     device=stored_asset.device,
                     inode=stored_asset.inode,
                 ):
-                    raise StackStoreError(
-                        "image namespace changed before transaction completion"
-                    )
+                    raise StackStoreError("image namespace changed before transaction completion")
                 if source_path is not None:
                     assert source_card_id is not None
                     if not _asset_path_matches(
@@ -1239,9 +1660,7 @@ class StackStore:
                             "image namespace changed before transaction completion"
                         )
                 if not changed_manifest_durable:
-                    raise StackStoreError(
-                        "duplicate manifest durability was not established"
-                    )
+                    raise StackStoreError("duplicate manifest durability was not established")
             except Exception as operation_error:
                 if manifest_temporary_name is not None:
                     try:
@@ -1251,14 +1670,12 @@ class StackStore:
                     except OSError as error:
                         rollback_errors.append(error)
                 if changed_manifest_replaced:
-                    previous_manifest_durable, observed_stack = (
-                        _recover_previous_manifest(
-                            bundle_fd,
-                            previous_payload=previous_payload,
-                            previous_stack=previous_stack,
-                            changed_stack=changed_stack,
-                            rollback_errors=rollback_errors,
-                        )
+                    previous_manifest_durable, observed_stack = _recover_previous_manifest(
+                        bundle_fd,
+                        previous_payload=previous_payload,
+                        previous_stack=previous_stack,
+                        changed_stack=changed_stack,
+                        rollback_errors=rollback_errors,
                     )
                 else:
                     previous_manifest_durable = True
@@ -1295,9 +1712,7 @@ class StackStore:
                 raise StackStoreTransactionError(
                     operation_error,
                     tuple(rollback_errors),
-                    persisted_stack=(
-                        previous_stack if previous_manifest_durable else None
-                    ),
+                    persisted_stack=(previous_stack if previous_manifest_durable else None),
                     observed_stack=observed_stack,
                     durability_indeterminate=not previous_manifest_durable,
                     owned_asset=retained_asset,
@@ -1345,13 +1760,9 @@ class StackStore:
             try:
                 persisted_stack = Stack.model_validate_json(previous_payload)
             except ValidationError as error:
-                raise StackStoreError(
-                    f"invalid current stack document: {error}"
-                ) from error
+                raise StackStoreError(f"invalid current stack document: {error}") from error
             if persisted_stack != previous_stack:
-                raise StackStoreError(
-                    "current stack document changed before duplication"
-                )
+                raise StackStoreError("current stack document changed before duplication")
             changed_manifest_replaced = False
             changed_manifest_durable = False
 
@@ -1379,9 +1790,7 @@ class StackStore:
                 )
                 manifest_temporary_name = None
                 if not changed_manifest_durable:
-                    raise StackStoreError(
-                        "duplicate manifest durability was not established"
-                    )
+                    raise StackStoreError("duplicate manifest durability was not established")
             except Exception as operation_error:
                 if manifest_temporary_name is not None:
                     try:
@@ -1391,14 +1800,12 @@ class StackStore:
                     except OSError as error:
                         rollback_errors.append(error)
                 if changed_manifest_replaced:
-                    previous_manifest_durable, observed_stack = (
-                        _recover_previous_manifest(
-                            bundle_fd,
-                            previous_payload=previous_payload,
-                            previous_stack=previous_stack,
-                            changed_stack=changed_stack,
-                            rollback_errors=rollback_errors,
-                        )
+                    previous_manifest_durable, observed_stack = _recover_previous_manifest(
+                        bundle_fd,
+                        previous_payload=previous_payload,
+                        previous_stack=previous_stack,
+                        changed_stack=changed_stack,
+                        rollback_errors=rollback_errors,
                     )
                 else:
                     previous_manifest_durable = True
@@ -1406,9 +1813,7 @@ class StackStore:
                 raise StackStoreTransactionError(
                     operation_error,
                     tuple(rollback_errors),
-                    persisted_stack=(
-                        previous_stack if previous_manifest_durable else None
-                    ),
+                    persisted_stack=(previous_stack if previous_manifest_durable else None),
                     observed_stack=observed_stack,
                     durability_indeterminate=not previous_manifest_durable,
                 ) from operation_error
@@ -1435,15 +1840,12 @@ class StackStore:
         if self.stack_path.is_file():
             documents.append(self.load())
         if any(
-            revision.background is not None
-            and revision.background.image_path == relative_path
+            revision.background is not None and revision.background.image_path == relative_path
             for document in documents
             for card in document.cards
             for revision in card.revisions
         ):
-            raise StackStoreError(
-                f"refusing to remove referenced image asset: {relative_path}"
-            )
+            raise StackStoreError(f"refusing to remove referenced image asset: {relative_path}")
         destination = self._resolved_asset(parsed_path)
         try:
             if not destination.exists():
@@ -1500,9 +1902,7 @@ class StackStore:
             stack.callback(os.close, image_fd)
             image_stat = os.fstat(image_fd)
             if not stat.S_ISREG(image_stat.st_mode):
-                raise StackStoreError(
-                    f"owned image is not a regular file: {parsed_path}"
-                )
+                raise StackStoreError(f"owned image is not a regular file: {parsed_path}")
             card_stat = os.fstat(card_fd)
             return StoredImageAsset(
                 relative_path=relative_path,
@@ -1582,9 +1982,7 @@ class StackStore:
 
         def clone() -> StackStore:
             if destination.exists():
-                raise StackStoreError(
-                    f"refusing to overwrite existing bundle: {destination}"
-                )
+                raise StackStoreError(f"refusing to overwrite existing bundle: {destination}")
             temporary_bundle: Path | None = None
             try:
                 _mkdir_durable(destination.parent)
@@ -1610,9 +2008,7 @@ class StackStore:
                         copied_paths.add(background.image_path)
                 temporary_store.save(stack)
                 if destination.exists():
-                    raise StackStoreError(
-                        f"refusing to overwrite existing bundle: {destination}"
-                    )
+                    raise StackStoreError(f"refusing to overwrite existing bundle: {destination}")
                 os.rename(temporary_bundle, destination)
                 _fsync_directory(destination.parent)
             except (OSError, StackStoreError) as error:
@@ -1620,9 +2016,7 @@ class StackStore:
                     shutil.rmtree(temporary_bundle, ignore_errors=True)
                 if isinstance(error, StackStoreError):
                     raise
-                raise StackStoreError(
-                    f"could not create bundle {destination}: {error}"
-                ) from error
+                raise StackStoreError(f"could not create bundle {destination}: {error}") from error
             return destination_store
 
         return destination_store.run_locked(

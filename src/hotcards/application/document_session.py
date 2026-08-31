@@ -13,7 +13,13 @@ from hotcards.application.document_controller import (
     DocumentController,
     OwnedImageAsset,
 )
-from hotcards.domain.models import DuplicateProvenance, Stack
+from hotcards.domain.models import (
+    DirectGenerateProvenance,
+    DuplicateProvenance,
+    EditProvenance,
+    RefineProvenance,
+    Stack,
+)
 from hotcards.storage.stack_store import (
     StackStore,
     StackStoreError,
@@ -93,9 +99,7 @@ class DocumentSession(QObject):
     def create(self, stack: Stack, bundle_path: Path) -> Stack:
         """Create, save, and bind a new bundle before exposing its document."""
         try:
-            if bundle_path.exists() and (
-                not bundle_path.is_dir() or any(bundle_path.iterdir())
-            ):
+            if bundle_path.exists() and (not bundle_path.is_dir() or any(bundle_path.iterdir())):
                 raise DocumentSessionError(f"bundle already exists: {bundle_path}")
         except OSError as error:
             raise DocumentSessionError(
@@ -118,17 +122,14 @@ class DocumentSession(QObject):
         """Validate a bundle, preserve the current session on failure, then bind it."""
         store = StackStore(bundle_path)
         reopening_active_bundle = (
-            self._store is not None
-            and self._store.bundle_path.resolve() == bundle_path.resolve()
+            self._store is not None and self._store.bundle_path.resolve() == bundle_path.resolve()
         )
         if reopening_active_bundle and not self.flush():
             raise DocumentSessionError(self._error or "current document could not be saved")
         if not reopening_active_bundle:
             self._preflight_binding(store)
             if not self.flush():
-                raise DocumentSessionError(
-                    self._error or "current document could not be saved"
-                )
+                raise DocumentSessionError(self._error or "current document could not be saved")
         return self._bind_latest(store, replace_document=True)
 
     def save_as(self, bundle_path: Path) -> Stack:
@@ -170,12 +171,9 @@ class DocumentSession(QObject):
             )
         except StackStoreError as error:
             persisted_stack = getattr(error, "persisted_stack", None)
-            durability_indeterminate = bool(
-                getattr(error, "durability_indeterminate", False)
-            )
+            durability_indeterminate = bool(getattr(error, "durability_indeterminate", False))
             committed = (
-                self.controller.document != before
-                and persisted_stack == self.controller.document
+                self.controller.document != before and persisted_stack == self.controller.document
             )
             if committed:
                 self._pending_snapshot = None
@@ -285,10 +283,8 @@ class DocumentSession(QObject):
             stored_document = store.load_document()
             document = stored_document.stack
             if expected_document is not None and document != expected_document:
-                raise StackStoreError(
-                    "candidate stack document changed before binding"
-                )
-            owned_assets = self._duplicate_owned_assets(store, document)
+                raise StackStoreError("candidate stack document changed before binding")
+            owned_assets = self._app_owned_assets(store, document)
         except StackStoreError as error:
             raise DocumentSessionError(str(error)) from error
         return _BindingCandidate(
@@ -304,9 +300,7 @@ class DocumentSession(QObject):
             expected_document=candidate.document,
         )
         if confirmed.stored_document != candidate.stored_document:
-            raise DocumentSessionError(
-                "candidate stack document identity changed before binding"
-            )
+            raise DocumentSessionError("candidate stack document identity changed before binding")
         if confirmed.owned_assets != candidate.owned_assets:
             raise DocumentSessionError(
                 "candidate duplicate-owned asset identity changed before binding"
@@ -381,24 +375,33 @@ class DocumentSession(QObject):
             self._error = None
 
     @staticmethod
-    def _duplicate_owned_assets(
+    def _app_owned_assets(
         store: StackStore,
         document: Stack,
     ) -> tuple[OwnedImageAsset, ...]:
         assets: list[OwnedImageAsset] = []
+        seen_paths: set[str] = set()
         for card in document.cards:
             for revision in card.revisions:
                 background = revision.background
                 if background is None or not isinstance(
                     background.provenance,
-                    DuplicateProvenance,
+                    (
+                        DirectGenerateProvenance,
+                        RefineProvenance,
+                        EditProvenance,
+                        DuplicateProvenance,
+                    ),
                 ):
+                    continue
+                if background.image_path in seen_paths:
                     continue
                 stored = store.stored_image_asset(
                     background.image_path,
                     card_id=card.id,
                     asset_id=background.id,
                 )
+                seen_paths.add(background.image_path)
                 assets.append(
                     OwnedImageAsset(
                         bundle_path=store.bundle_path,

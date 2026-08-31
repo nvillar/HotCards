@@ -14,18 +14,29 @@ from PIL import Image
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
-from hotcards.application.commands import CreateCardCommand, RenameCardCommand
+from hotcards.application.commands import (
+    CreateCardCommand,
+    RenameCardCommand,
+    ReplaceRevisionBackgroundCommand,
+)
 from hotcards.application.document_controller import DocumentController, OwnedImageAsset
 from hotcards.application.document_session import DocumentSession, DocumentSessionError
+from hotcards.domain.image_dimensions import GenerateResolution
 from hotcards.domain.models import (
+    AcceptedEdit,
     Card,
     CardRevision,
     DirectGenerateProvenance,
     DuplicateProvenance,
+    EditPreserveOptions,
+    EditProvenance,
     GeneratedBackground,
     GenerateInputs,
     ImageOperationSettings,
     ImageSourceSnapshot,
+    LegacyGenerateProvenance,
+    RefineProvenance,
+    RefineTransformation,
     Stack,
 )
 from hotcards.storage.stack_store import StackStore, StackStoreError
@@ -97,6 +108,136 @@ def _duplicate_bundle(
         target.symlink_to(Path("..") / ".." / "alternate.png")
     assert store.load() == stack
     return store, stack
+
+
+def _owned_bundle(
+    tmp_path: Path,
+    *,
+    name: str,
+    operation: str,
+) -> tuple[StackStore, Stack, Path]:
+    store = StackStore(tmp_path / f"{name}.hotcards")
+    card = Card(name=name)
+    asset_id = uuid4()
+    generated_at = datetime.now(UTC)
+    derived_operation = operation in {"refine", "edit"}
+    direct_settings = ImageOperationSettings(
+        model_identifier="test",
+        mflux_version="test",
+        seed=7,
+        width=592,
+        height=448,
+        step_count=4,
+        generated_at=generated_at,
+        duration_seconds=1,
+    )
+    settings = ImageOperationSettings(
+        model_identifier="test",
+        mflux_version="test",
+        seed=7,
+        width=880 if derived_operation else 592,
+        height=672 if derived_operation else 448,
+        step_count=4,
+        generated_at=generated_at,
+        duration_seconds=1,
+    )
+    source_png = tmp_path / f"{name}.png"
+    Image.new("RGB", (19, 13), (12, 34, 56)).save(source_png, format="PNG")
+    image_path = store.store_image_asset(
+        source_png,
+        card_id=card.id,
+        asset_id=asset_id,
+    )
+    direct = DirectGenerateProvenance(
+        inputs=GenerateInputs(description=name),
+        render_prompt=name,
+        settings=direct_settings,
+    )
+    source_revision: CardRevision | None = None
+    if derived_operation:
+        source_asset_id = uuid4()
+        source_image_path = store.store_image_asset(
+            source_png,
+            card_id=card.id,
+            asset_id=source_asset_id,
+        )
+        source_revision = CardRevision(
+            background=GeneratedBackground(
+                id=source_asset_id,
+                image_path=source_image_path,
+                provenance=direct,
+                created_at=generated_at,
+            )
+        )
+        source = ImageSourceSnapshot(
+            card_id=card.id,
+            revision_id=source_revision.id,
+            background_id=source_asset_id,
+        )
+    else:
+        source = ImageSourceSnapshot(
+            card_id=uuid4(),
+            revision_id=uuid4(),
+            background_id=uuid4(),
+        )
+    if operation == "generate":
+        provenance = direct
+    elif operation == "legacy_generate":
+        provenance = LegacyGenerateProvenance(
+            render_prompt=name,
+            settings=settings,
+        )
+    elif operation == "refine":
+        provenance = RefineProvenance(
+            source=source,
+            description=name,
+            render_prompt=name,
+            resolution=GenerateResolution.RESOLUTION_768,
+            transformation=RefineTransformation.BALANCED,
+            strength=0.5,
+            settings=settings,
+        )
+    elif operation == "edit":
+        accepted = AcceptedEdit(
+            instruction="Add a lantern",
+            preserve=EditPreserveOptions(subject_identity=True),
+            expanded_prompt="Add a lantern",
+        )
+        provenance = EditProvenance(
+            source=source,
+            instruction=accepted.instruction,
+            preserve=accepted.preserve,
+            expanded_prompt=accepted.expanded_prompt,
+            resolution=GenerateResolution.RESOLUTION_768,
+            edit_lineage=(accepted,),
+            settings=settings,
+        )
+    elif operation == "duplicate":
+        provenance = DuplicateProvenance(
+            source=source,
+            original_provenance=direct,
+        )
+    else:
+        raise AssertionError(f"unsupported operation: {operation}")
+    revision = CardRevision(
+        background=GeneratedBackground(
+            id=asset_id,
+            image_path=image_path,
+            provenance=provenance,
+            created_at=generated_at,
+        )
+    )
+    card = card.model_copy(
+        update={
+            "revisions": (
+                (source_revision, revision) if source_revision is not None else (revision,)
+            ),
+            "active_revision_id": revision.id,
+        }
+    )
+    stack = Stack(name=name, cards=(card,), start_card_id=card.id)
+    store.save(stack)
+    return store, stack, store.asset_path(image_path)
 
 
 def test_create_binds_bundle_before_mutations_and_flushes_autosave(
@@ -252,7 +393,7 @@ def test_candidate_owned_asset_changed_after_early_preflight_is_rejected(
         tmp_path,
         symlink_owned_image=False,
     )
-    real_classifier = session._duplicate_owned_assets
+    real_classifier = session._app_owned_assets
     candidate_classifications = 0
 
     def swap_after_first_classification(
@@ -275,7 +416,7 @@ def test_candidate_owned_asset_changed_after_early_preflight_is_rejected(
 
     monkeypatch.setattr(
         session,
-        "_duplicate_owned_assets",
+        "_app_owned_assets",
         swap_after_first_classification,
     )
 
@@ -294,6 +435,125 @@ def test_candidate_owned_asset_changed_after_early_preflight_is_rejected(
     assert controller.current_undo_token == before_token
 
 
+@pytest.mark.parametrize(
+    "operation",
+    ("generate", "refine", "edit", "duplicate"),
+)
+def test_open_registers_all_current_app_owned_backgrounds(
+    tmp_path: Path,
+    operation: str,
+) -> None:
+    store, stack, asset_path = _owned_bundle(
+        tmp_path,
+        name=operation,
+        operation=operation,
+    )
+    controller = DocumentController(Stack(name="Welcome"))
+    session = DocumentSession(controller)
+
+    session.open(store.bundle_path)
+
+    background = stack.cards[0].active_revision.background
+    assert background is not None
+    assert (
+        store.bundle_path,
+        background.image_path,
+    ) in controller._owned_assets
+    controller.clear_history()
+    assert asset_path.is_file()
+    assert session.close_history()
+    assert asset_path.is_file()
+
+
+@pytest.mark.parametrize("operation", ("generate", "refine"))
+def test_reopened_owned_background_is_removed_only_after_history_discards_it(
+    tmp_path: Path,
+    operation: str,
+) -> None:
+    store, stack, asset_path = _owned_bundle(
+        tmp_path,
+        name=operation,
+        operation=operation,
+    )
+    unrelated = asset_path.parent / "unrelated.png"
+    unrelated.write_bytes(b"unrelated")
+    controller = DocumentController(Stack(name="Welcome"))
+    session = DocumentSession(controller)
+    session.open(store.bundle_path)
+    card = controller.document.cards[0]
+    revision = card.active_revision
+
+    controller.execute(
+        ReplaceRevisionBackgroundCommand(
+            card_id=card.id,
+            revision_id=revision.id,
+            background=None,
+        )
+    )
+    assert session.flush()
+    assert asset_path.is_file()
+    controller.clear_history()
+
+    assert not asset_path.exists()
+    assert unrelated.read_bytes() == b"unrelated"
+    assert store.load().cards[0].active_revision.background is None
+
+
+def test_reopened_owned_background_is_removed_when_session_history_closes(
+    tmp_path: Path,
+) -> None:
+    store, _stack, asset_path = _owned_bundle(
+        tmp_path,
+        name="refine-close",
+        operation="refine",
+    )
+    controller = DocumentController(Stack(name="Welcome"))
+    session = DocumentSession(controller)
+    session.open(store.bundle_path)
+    card = controller.document.cards[0]
+    revision = card.active_revision
+    controller.execute(
+        ReplaceRevisionBackgroundCommand(
+            card_id=card.id,
+            revision_id=revision.id,
+            background=None,
+        )
+    )
+    assert session.flush()
+
+    assert session.close_history()
+    assert not asset_path.exists()
+
+
+def test_reopened_legacy_background_is_never_registered_or_reclaimed(
+    tmp_path: Path,
+) -> None:
+    store, _stack, asset_path = _owned_bundle(
+        tmp_path,
+        name="legacy",
+        operation="legacy_generate",
+    )
+    controller = DocumentController(Stack(name="Welcome"))
+    session = DocumentSession(controller)
+    session.open(store.bundle_path)
+    assert controller._owned_assets == {}
+    card = controller.document.cards[0]
+    revision = card.active_revision
+
+    controller.execute(
+        ReplaceRevisionBackgroundCommand(
+            card_id=card.id,
+            revision_id=revision.id,
+            background=None,
+        )
+    )
+    assert session.flush()
+    controller.clear_history()
+    assert session.close_history()
+
+    assert asset_path.is_file()
+
+
 def test_open_reloads_candidate_changed_during_active_flush(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -309,9 +569,7 @@ def test_open_reloads_candidate_changed_during_active_flush(
     session.create(active, tmp_path / "Active.hotcards")
     assert session.store is not None
     active_store = session.store
-    controller.execute(
-        RenameCardCommand(card_id=active_card.id, name="Pending active edit")
-    )
+    controller.execute(RenameCardCommand(card_id=active_card.id, name="Pending active edit"))
 
     candidate_store = StackStore(tmp_path / "Candidate.hotcards")
     candidate_card = Card(name="Candidate v1")
@@ -323,9 +581,7 @@ def test_open_reloads_candidate_changed_during_active_flush(
     candidate_v2 = candidate_v1.model_copy(
         update={
             "name": "Candidate v2",
-            "cards": (
-                candidate_card.model_copy(update={"name": "Candidate v2 card"}),
-            ),
+            "cards": (candidate_card.model_copy(update={"name": "Candidate v2 card"}),),
         }
     )
     candidate_store.save(candidate_v1)
@@ -348,9 +604,7 @@ def test_open_reloads_candidate_changed_during_active_flush(
     assert not session.state.dirty
     assert replaced == [candidate_v2]
 
-    controller.execute(
-        RenameCardCommand(card_id=candidate_card.id, name="Candidate v2 edited")
-    )
+    controller.execute(RenameCardCommand(card_id=candidate_card.id, name="Candidate v2 edited"))
     assert session.flush()
     persisted = candidate_store.load()
     assert persisted.name == "Candidate v2"
@@ -372,18 +626,14 @@ def test_open_rejects_candidate_made_invalid_during_active_flush(
     session.create(active, tmp_path / "Active.hotcards")
     assert session.store is not None
     active_store = session.store
-    controller.execute(
-        RenameCardCommand(card_id=active_card.id, name="Persisted active edit")
-    )
+    controller.execute(RenameCardCommand(card_id=active_card.id, name="Persisted active edit"))
     candidate_store, candidate_stack = _duplicate_bundle(
         tmp_path,
         symlink_owned_image=False,
     )
     background = candidate_stack.cards[0].active_revision.background
     assert background is not None
-    owned_path = candidate_store.bundle_path.joinpath(
-        *background.image_path.split("/")
-    )
+    owned_path = candidate_store.bundle_path.joinpath(*background.image_path.split("/"))
     alternate = candidate_store.bundle_path / "assets" / "alternate.png"
     real_active_save = active_store.save
 
@@ -411,9 +661,7 @@ def test_open_rejects_candidate_made_invalid_during_active_flush(
     assert candidate_store.load() == candidate_stack
 
     monkeypatch.setattr(active_store, "save", real_active_save)
-    controller.execute(
-        RenameCardCommand(card_id=active_card.id, name="Still active after failure")
-    )
+    controller.execute(RenameCardCommand(card_id=active_card.id, name="Still active after failure"))
     assert session.flush()
     assert active_store.load().cards[0].name == "Still active after failure"
     assert candidate_store.load() == candidate_stack
@@ -521,9 +769,7 @@ def test_save_as_refuses_destination_created_during_active_flush(
     session.create(active, tmp_path / "Active.hotcards")
     assert session.store is not None
     active_store = session.store
-    controller.execute(
-        RenameCardCommand(card_id=active_card.id, name="Pending active edit")
-    )
+    controller.execute(RenameCardCommand(card_id=active_card.id, name="Pending active edit"))
     destination = tmp_path / "Copy.hotcards"
     competing = Stack(name="External newer target")
     real_active_save = active_store.save
@@ -544,9 +790,7 @@ def test_save_as_refuses_destination_created_during_active_flush(
     assert StackStore(destination).load() == competing
 
     monkeypatch.setattr(active_store, "save", real_active_save)
-    controller.execute(
-        RenameCardCommand(card_id=active_card.id, name="Still active after race")
-    )
+    controller.execute(RenameCardCommand(card_id=active_card.id, name="Still active after race"))
     assert session.flush()
     assert active_store.load().cards[0].name == "Still active after race"
     assert StackStore(destination).load() == competing

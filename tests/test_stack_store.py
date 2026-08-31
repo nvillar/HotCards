@@ -2,6 +2,7 @@
 
 import errno
 import json
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -120,8 +121,7 @@ def test_bundle_round_trip_preserves_document_and_relative_asset(tmp_path: Path)
     assert payload["aspect_ratio"] == "4:3"
     assert "canvas" not in payload
     assert (
-        payload["cards"][0]["revisions"][0]["background"]["provenance"]["operation"]
-        == "generate"
+        payload["cards"][0]["revisions"][0]["background"]["provenance"]["operation"] == "generate"
     )
 
 
@@ -153,6 +153,345 @@ def test_create_never_replaces_existing_stack_document(tmp_path: Path) -> None:
         store.create(Stack(name="Replacement"))
 
     assert store.load().name == "Existing"
+
+
+def test_secure_image_snapshot_pins_bytes_and_revalidates_source(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.png"
+    Image.new("RGB", (41, 29), "navy").save(source, format="PNG")
+    store = StackStore(tmp_path / "Snapshot.hotcards")
+    card_id = uuid4()
+    asset_id = uuid4()
+    relative_path = store.store_image_asset(
+        source,
+        card_id=card_id,
+        asset_id=asset_id,
+    )
+    store.create(Stack(name="Snapshot"))
+    snapshots = tmp_path / "private"
+    snapshots.mkdir(mode=0o700)
+
+    snapshot = store.snapshot_image_asset(
+        relative_path,
+        card_id=card_id,
+        asset_id=asset_id,
+        destination_directory=snapshots,
+    )
+
+    assert snapshot.snapshot_path.parent == snapshots
+    assert snapshot.snapshot_path != store.asset_path(relative_path)
+    assert snapshot.snapshot_path.read_bytes() == store.asset_path(relative_path).read_bytes()
+    assert (snapshot.width, snapshot.height) == (41, 29)
+    store.require_image_asset_unchanged(
+        snapshot,
+        card_id=card_id,
+        asset_id=asset_id,
+    )
+    assert snapshot.dispose()
+    assert not snapshot.snapshot_path.exists()
+
+
+def test_secure_image_snapshot_rejects_symlink_source(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "outside.png"
+    _write_png(outside)
+    store = StackStore(tmp_path / "Snapshot.hotcards")
+    card_id = uuid4()
+    asset_id = uuid4()
+    relative_path = store.image_asset_path(card_id, asset_id)
+    source = store.bundle_path.joinpath(*relative_path.split("/"))
+    source.parent.mkdir(parents=True)
+    source.symlink_to(outside)
+    store.create(Stack(name="Snapshot"))
+    snapshots = tmp_path / "private"
+    snapshots.mkdir()
+
+    with pytest.raises(
+        StackStoreError,
+        match="securely (snapshot|open asset directory)",
+    ):
+        store.snapshot_image_asset(
+            relative_path,
+            card_id=card_id,
+            asset_id=asset_id,
+            destination_directory=snapshots,
+        )
+
+    assert list(snapshots.iterdir()) == []
+    assert outside.is_file()
+
+
+def test_secure_image_snapshot_rejects_swapped_card_directory(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.png"
+    _write_png(source)
+    store = StackStore(tmp_path / "Snapshot.hotcards")
+    card_id = uuid4()
+    asset_id = uuid4()
+    relative_path = store.store_image_asset(
+        source,
+        card_id=card_id,
+        asset_id=asset_id,
+    )
+    store.create(Stack(name="Snapshot"))
+    card_directory = store.asset_path(relative_path).parent
+    owned_directory = card_directory.with_name(f"{card_directory.name}-owned")
+    card_directory.rename(owned_directory)
+    outside_directory = tmp_path / "outside-card"
+    outside_directory.mkdir()
+    _write_png(outside_directory / Path(relative_path).name)
+    card_directory.symlink_to(outside_directory, target_is_directory=True)
+    snapshots = tmp_path / "private"
+    snapshots.mkdir()
+
+    with pytest.raises(
+        StackStoreError,
+        match="securely (snapshot|open asset directory)",
+    ):
+        store.snapshot_image_asset(
+            relative_path,
+            card_id=card_id,
+            asset_id=asset_id,
+            destination_directory=snapshots,
+        )
+
+    assert (outside_directory / Path(relative_path).name).is_file()
+    assert list(snapshots.iterdir()) == []
+
+
+def test_secure_image_snapshot_detects_source_namespace_replacement(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.png"
+    replacement = tmp_path / "replacement.png"
+    Image.new("RGB", (32, 24), "navy").save(source, format="PNG")
+    Image.new("RGB", (32, 24), "gold").save(replacement, format="PNG")
+    store = StackStore(tmp_path / "Snapshot.hotcards")
+    card_id = uuid4()
+    asset_id = uuid4()
+    relative_path = store.store_image_asset(
+        source,
+        card_id=card_id,
+        asset_id=asset_id,
+    )
+    store.create(Stack(name="Snapshot"))
+    snapshots = tmp_path / "private"
+    snapshots.mkdir()
+    snapshot = store.snapshot_image_asset(
+        relative_path,
+        card_id=card_id,
+        asset_id=asset_id,
+        destination_directory=snapshots,
+    )
+    logical_source = store.asset_path(relative_path)
+    logical_source.unlink()
+    replacement.replace(logical_source)
+
+    with pytest.raises(StackStoreError, match="changed while Refine"):
+        store.require_image_asset_unchanged(
+            snapshot,
+            card_id=card_id,
+            asset_id=asset_id,
+        )
+
+    assert snapshot.snapshot_path.is_file()
+    assert snapshot.dispose()
+
+
+def test_source_revalidation_reopens_namespace_after_hash(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.png"
+    replacement = tmp_path / "replacement.png"
+    Image.new("RGB", (32, 24), "navy").save(source, format="PNG")
+    Image.new("RGB", (32, 24), "navy").save(replacement, format="PNG")
+    store = StackStore(tmp_path / "Snapshot.hotcards")
+    card_id = uuid4()
+    asset_id = uuid4()
+    relative_path = store.store_image_asset(
+        source,
+        card_id=card_id,
+        asset_id=asset_id,
+    )
+    store.create(Stack(name="Snapshot"))
+    snapshots = tmp_path / "private"
+    snapshots.mkdir()
+    snapshot = store.snapshot_image_asset(
+        relative_path,
+        card_id=card_id,
+        asset_id=asset_id,
+        destination_directory=snapshots,
+    )
+    logical_source = store.asset_path(relative_path)
+    real_sha256_fd = stack_store_module._sha256_fd
+    replaced = False
+
+    def replace_after_hash(fd: int) -> str:
+        nonlocal replaced
+        digest = real_sha256_fd(fd)
+        if not replaced:
+            replaced = True
+            os.replace(replacement, logical_source)
+        return digest
+
+    monkeypatch.setattr(stack_store_module, "_sha256_fd", replace_after_hash)
+
+    with pytest.raises(StackStoreError, match="changed while Refine"):
+        store.require_image_asset_unchanged(
+            snapshot,
+            card_id=card_id,
+            asset_id=asset_id,
+        )
+
+    assert replaced
+    assert snapshot.dispose()
+
+
+def test_secure_image_snapshot_rejects_source_swapped_during_copy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.png"
+    replacement = tmp_path / "replacement.png"
+    Image.new("RGB", (32, 24), "navy").save(source, format="PNG")
+    Image.new("RGB", (32, 24), "gold").save(replacement, format="PNG")
+    store = StackStore(tmp_path / "Snapshot.hotcards")
+    card_id = uuid4()
+    asset_id = uuid4()
+    relative_path = store.store_image_asset(
+        source,
+        card_id=card_id,
+        asset_id=asset_id,
+    )
+    store.create(Stack(name="Snapshot"))
+    logical_source = store.asset_path(relative_path)
+    snapshots = tmp_path / "private"
+    snapshots.mkdir()
+    real_write_all = stack_store_module._write_all
+    swapped = False
+
+    def swap_source_after_copy_write(fd: int, payload: bytes) -> None:
+        nonlocal swapped
+        real_write_all(fd, payload)
+        if not swapped:
+            swapped = True
+            logical_source.unlink()
+            replacement.replace(logical_source)
+
+    monkeypatch.setattr(stack_store_module, "_write_all", swap_source_after_copy_write)
+
+    with pytest.raises(StackStoreError, match="changed while being copied"):
+        store.snapshot_image_asset(
+            relative_path,
+            card_id=card_id,
+            asset_id=asset_id,
+            destination_directory=snapshots,
+        )
+
+    assert swapped
+    assert list(snapshots.iterdir()) == []
+
+
+def test_snapshot_disposal_preserves_replacement_inode(tmp_path: Path) -> None:
+    source = tmp_path / "source.png"
+    _write_png(source)
+    store = StackStore(tmp_path / "Snapshot.hotcards")
+    card_id = uuid4()
+    asset_id = uuid4()
+    relative_path = store.store_image_asset(
+        source,
+        card_id=card_id,
+        asset_id=asset_id,
+    )
+    store.create(Stack(name="Snapshot"))
+    snapshots = tmp_path / "private"
+    snapshots.mkdir()
+    snapshot = store.snapshot_image_asset(
+        relative_path,
+        card_id=card_id,
+        asset_id=asset_id,
+        destination_directory=snapshots,
+    )
+    owned_backup = snapshots / "owned-backup.png"
+    snapshot.snapshot_path.rename(owned_backup)
+    snapshot.snapshot_path.write_bytes(b"foreign")
+
+    assert not snapshot.dispose()
+    assert snapshot.snapshot_path.read_bytes() == b"foreign"
+    assert owned_backup.is_file()
+
+
+def test_snapshot_disposal_does_not_quarantine_foreign_symlink(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.png"
+    _write_png(source)
+    store = StackStore(tmp_path / "Snapshot.hotcards")
+    card_id = uuid4()
+    asset_id = uuid4()
+    relative_path = store.store_image_asset(
+        source,
+        card_id=card_id,
+        asset_id=asset_id,
+    )
+    store.create(Stack(name="Snapshot"))
+    snapshots = tmp_path / "private"
+    snapshots.mkdir()
+    snapshot = store.snapshot_image_asset(
+        relative_path,
+        card_id=card_id,
+        asset_id=asset_id,
+        destination_directory=snapshots,
+    )
+    owned_backup = snapshots / "owned-backup.png"
+    snapshot.snapshot_path.rename(owned_backup)
+    foreign = tmp_path / "foreign"
+    foreign.write_bytes(b"foreign")
+    snapshot.snapshot_path.symlink_to(foreign)
+
+    assert not snapshot.dispose()
+    assert snapshot.snapshot_path.is_symlink()
+    assert snapshot.snapshot_path.resolve() == foreign
+    assert list(snapshots.glob(".refine-cleanup-*")) == []
+    assert owned_backup.is_file()
+
+
+def test_source_revalidation_rejects_fifo_without_blocking(tmp_path: Path) -> None:
+    source = tmp_path / "source.png"
+    _write_png(source)
+    store = StackStore(tmp_path / "Snapshot.hotcards")
+    card_id = uuid4()
+    asset_id = uuid4()
+    relative_path = store.store_image_asset(
+        source,
+        card_id=card_id,
+        asset_id=asset_id,
+    )
+    store.create(Stack(name="Snapshot"))
+    snapshots = tmp_path / "private"
+    snapshots.mkdir()
+    snapshot = store.snapshot_image_asset(
+        relative_path,
+        card_id=card_id,
+        asset_id=asset_id,
+        destination_directory=snapshots,
+    )
+    logical_source = store.asset_path(relative_path)
+    logical_source.unlink()
+    os.mkfifo(logical_source)
+
+    with pytest.raises(StackStoreError, match="no longer a regular file"):
+        store.require_image_asset_unchanged(
+            snapshot,
+            card_id=card_id,
+            asset_id=asset_id,
+        )
+
+    assert snapshot.dispose()
 
 
 @pytest.mark.parametrize(
@@ -400,11 +739,14 @@ def test_external_image_and_manifest_commit_as_one_transaction(
 
     assert store.load() == changed
     assert stored.relative_path == image_path
-    assert store.stored_image_asset(
-        image_path,
-        card_id=card.id,
-        asset_id=asset_id,
-    ) == stored
+    assert (
+        store.stored_image_asset(
+            image_path,
+            card_id=card.id,
+            asset_id=asset_id,
+        )
+        == stored
+    )
 
 
 def test_external_image_transaction_rolls_back_manifest_and_asset(

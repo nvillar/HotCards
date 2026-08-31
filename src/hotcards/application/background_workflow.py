@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import secrets
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
-from threading import Event
+from threading import Event, Lock
 from typing import Literal
 from uuid import UUID, uuid4
 
@@ -36,7 +37,6 @@ from hotcards.application.document_session import (
 from hotcards.application.generated_revision_change import GeneratedRevisionChange
 from hotcards.application.image_files import (
     UnreadableImageError,
-    readable_image_dimensions,
     require_readable_image,
 )
 from hotcards.application.workers import AdapterWorkers, WorkerOperation
@@ -81,7 +81,10 @@ from hotcards.storage.stack_store import (
     StackStoreError,
     StackStoreTransactionError,
     StoredImageAsset,
+    StoredImageSnapshot,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class BackgroundWorkflowError(ValueError):
@@ -134,6 +137,8 @@ class _RefineTarget:
     transformation: RefineTransformation
     settings: BackgroundGenerationSettings
     history_token: UndoToken | None
+    source_snapshot: StoredImageSnapshot
+    source_background_id: UUID
 
 
 GenerationSettingsProvider = Callable[[], BackgroundGenerationSettings]
@@ -143,6 +148,7 @@ class BackgroundWorkflow(QObject):
     """Generate, clear, and manage complete card revisions."""
 
     busy_changed = Signal(bool)
+    invocation_active_changed = Signal(bool)
     progress_changed = Signal(str)
     generation_progress_changed = Signal(int, int)
     failed = Signal(object)
@@ -185,6 +191,10 @@ class BackgroundWorkflow(QObject):
         self._pending_result: MfluxGenerateResult | MfluxRefineResult | None = None
         self._close_requested = Event()
         self._invocation_active = Event()
+        self._source_snapshot_lock = Lock()
+        self._source_snapshot: StoredImageSnapshot | None = None
+        self._snapshot_cleanup_in_progress = False
+        self._temporary_cleanup_blocked = False
         self._busy = False
         self._active_operation: Literal["generate", "refine"] | None = None
 
@@ -195,6 +205,18 @@ class BackgroundWorkflow(QObject):
     @property
     def active_operation(self) -> Literal["generate", "refine"] | None:
         return self._active_operation
+
+    @property
+    def invocation_active(self) -> bool:
+        with self._source_snapshot_lock:
+            return (
+                self._invocation_active.is_set()
+                or self._snapshot_cleanup_in_progress
+                or (
+                    self._source_snapshot is not None
+                    and self._temporary_cleanup_blocked
+                )
+            )
 
     def generate(self, card_id: UUID) -> WorkerOperation:
         """Generate and directly apply a background to the active revision."""
@@ -211,7 +233,7 @@ class BackgroundWorkflow(QObject):
                 raise BackgroundWorkflowError(
                     "cannot replace this source background because "
                     f"{dependent.operation.title()} revision "
-                    f'{dependent.dependent_revision_number} on card '
+                    f"{dependent.dependent_revision_number} on card "
                     f'"{dependent.dependent_card_name}" derives from it'
                 )
         references = self._resolve_references(document, card)
@@ -275,7 +297,7 @@ class BackgroundWorkflow(QObject):
             stage="generating background image",
             request_cancel=cancellation.cancel,
             dispose_result=dispose_mflux_result,
-            invocation_started=self._invocation_active.set,
+            invocation_started=self._invocation_started,
             invocation_finished=self._invocation_finished,
         )
         self._operation = operation
@@ -295,10 +317,13 @@ class BackgroundWorkflow(QObject):
         background = revision.background
         if background is None:
             return ()
-        source_path = self._require_store().asset_path(background.image_path)
         try:
-            width, height = readable_image_dimensions(source_path)
-        except UnreadableImageError as error:
+            width, height = self._require_store().image_asset_dimensions(
+                background.image_path,
+                card_id=card.id,
+                asset_id=background.id,
+            )
+        except StackStoreError as error:
             raise BackgroundWorkflowError(
                 "the current image is unavailable or unreadable"
             ) from error
@@ -330,29 +355,46 @@ class BackgroundWorkflow(QObject):
         if background is None:
             raise BackgroundWorkflowError("generate an image before refining")
         store = self._require_store()
-        source_image_path = store.asset_path(background.image_path)
         try:
-            source_width, source_height = readable_image_dimensions(
-                source_image_path
+            source_snapshot = store.snapshot_image_asset(
+                background.image_path,
+                card_id=card.id,
+                asset_id=background.id,
+                destination_directory=self._temporary_directory,
             )
-        except UnreadableImageError as error:
+        except StackStoreError as error:
             raise BackgroundWorkflowError(
                 "the current image is unavailable or unreadable"
             ) from error
+        try:
+            self._track_source_snapshot(source_snapshot)
+        except Exception:
+            if not source_snapshot.dispose():
+                logger.warning(
+                    "Refine source snapshot cleanup preserved a changed file: %s",
+                    source_snapshot.snapshot_path,
+                )
+            raise
         available_resolutions = higher_output_resolutions(
-            source_width,
-            source_height,
+            source_snapshot.width,
+            source_snapshot.height,
             document.aspect_ratio,
         )
         if not available_resolutions:
+            self._cleanup_source_snapshot_if_idle()
             raise BackgroundWorkflowError(
                 "the current image is already at the maximum Refine resolution"
             )
         if resolution not in available_resolutions:
+            self._cleanup_source_snapshot_if_idle()
             raise BackgroundWorkflowError(
                 "select a Refine resolution with more pixels than the current image"
             )
-        settings = self._settings_provider()
+        try:
+            settings = self._settings_provider()
+        except Exception:
+            self._cleanup_source_snapshot_if_idle()
+            raise
         style = self._style_snapshot(document, revision)
         edit_lineage = image_edit_lineage(background.provenance)
         render_prompt = compose_refine_prompt(
@@ -380,10 +422,12 @@ class BackgroundWorkflow(QObject):
             transformation=transformation,
             settings=settings,
             history_token=self.controller.current_undo_token,
+            source_snapshot=source_snapshot,
+            source_background_id=background.id,
         )
         request = MfluxRefineRequest(
             source=source,
-            source_image_path=source_image_path,
+            source_image_path=source_snapshot.snapshot_path,
             source_seed=image_operation_settings(background.provenance).seed,
             description=revision.description,
             style=style,
@@ -405,25 +449,31 @@ class BackgroundWorkflow(QObject):
         self._request_target = target
         self._active_operation = "refine"
         self._set_busy(True, "Refining image...")
-        operation = self.workers.run_mflux(
-            lambda: self._mflux_generator.refine(
-                request,
-                progress=partial(
-                    self._generation_progress,
-                    request_id,
+        try:
+            operation = self.workers.run_mflux(
+                lambda: self._mflux_generator.refine(
+                    request,
+                    progress=partial(
+                        self._generation_progress,
+                        request_id,
+                    ),
+                    cancellation=cancellation,
                 ),
-                cancellation=cancellation,
-            ),
-            stage="refining background image",
-            request_cancel=cancellation.cancel,
-            dispose_result=dispose_mflux_result,
-            invocation_started=self._invocation_active.set,
-            invocation_finished=self._invocation_finished,
-        )
+                stage="refining background image",
+                request_cancel=cancellation.cancel,
+                dispose_result=dispose_mflux_result,
+                invocation_started=self._invocation_started,
+                invocation_finished=self._invocation_finished,
+            )
+        except Exception:
+            self._request_id = None
+            self._request_target = None
+            self._active_operation = None
+            self._cleanup_source_snapshot_if_idle()
+            self._set_busy(False, "Image refinement failed")
+            raise
         self._operation = operation
-        operation.succeeded.connect(
-            partial(self._refine_succeeded, request_id, target, asset_id)
-        )
+        operation.succeeded.connect(partial(self._refine_succeeded, request_id, target, asset_id))
         operation.failed.connect(partial(self._operation_failed, request_id))
         return operation
 
@@ -490,14 +540,13 @@ class BackgroundWorkflow(QObject):
         self._request_target = None
         self._operation = None
         self._discard_pending_image()
+        self._cleanup_source_snapshot_if_idle()
         if self._busy:
             operation = self._active_operation
             self._active_operation = None
             self._set_busy(
                 False,
-                "Refine cancelled"
-                if operation == "refine"
-                else "Generation cancelled",
+                "Refine cancelled" if operation == "refine" else "Generation cancelled",
             )
 
     def close(self) -> None:
@@ -506,15 +555,21 @@ class BackgroundWorkflow(QObject):
         if (
             self._owned_temporary_directory is not None
             and not self._invocation_active.is_set()
+            and not self._temporary_cleanup_blocked
         ):
             self._owned_temporary_directory.cleanup()
 
     def _invocation_finished(self) -> None:
         self._invocation_active.clear()
+        self._cleanup_source_snapshot_if_idle()
+        self.invocation_active_changed.emit(self.invocation_active)
         if not self._close_requested.is_set():
             return
         self._mflux_generator.release()
-        if self._owned_temporary_directory is not None:
+        if (
+            self._owned_temporary_directory is not None
+            and not self._temporary_cleanup_blocked
+        ):
             self._owned_temporary_directory.cleanup()
 
     def is_generating_for(self, card_id: UUID) -> bool:
@@ -565,6 +620,11 @@ class BackgroundWorkflow(QObject):
                 card_id=target.card_id,
                 asset_id=asset_id,
             )
+            stored_asset = store.stored_image_asset(
+                stored_image_path,
+                card_id=target.card_id,
+                asset_id=asset_id,
+            )
             background = GeneratedBackground(
                 id=asset_id,
                 image_path=stored_image_path,
@@ -577,6 +637,14 @@ class BackgroundWorkflow(QObject):
                 background,
                 "Image generated",
                 generated=True,
+                owned_assets=(
+                    self._owned_asset(
+                        store,
+                        target.card_id,
+                        asset_id,
+                        stored_asset,
+                    ),
+                ),
             )
         except (
             CommandError,
@@ -654,6 +722,9 @@ class BackgroundWorkflow(QObject):
                     destination_asset_id=asset_id,
                     previous_stack=before,
                     changed_stack=candidate,
+                    expected_source_snapshot=target.source_snapshot,
+                    expected_source_card_id=target.card_id,
+                    expected_source_asset_id=target.source_background_id,
                 )
             except StackStoreTransactionError as error:
                 if error.owned_asset is not None:
@@ -677,10 +748,12 @@ class BackgroundWorkflow(QObject):
 
         previous_token = self.controller.current_undo_token
         try:
-            changed = self.session.execute_persisted(
-                command,
-                persist=persist,
-                owned_assets=owned_assets,
+            changed = store.run_locked(
+                lambda: self.session.execute_persisted(
+                    command,
+                    persist=persist,
+                    owned_assets=owned_assets,
+                )
             )
         except (
             CommandError,
@@ -689,6 +762,8 @@ class BackgroundWorkflow(QObject):
             StackStoreError,
             ValidationError,
         ) as error:
+            if self.controller.document != before:
+                self.document_changed.emit(self.controller.document)
             self._finish_with_error(error)
             return
         self.progress_changed.emit("Image refined")
@@ -700,6 +775,7 @@ class BackgroundWorkflow(QObject):
         self._request_id = None
         self._request_target = None
         self._active_operation = None
+        self._cleanup_source_snapshot_if_idle()
         self._set_busy(False, "Image refined")
 
     def _apply_background(
@@ -710,6 +786,7 @@ class BackgroundWorkflow(QObject):
         message: str,
         *,
         generated: bool = False,
+        owned_assets: tuple[OwnedImageAsset, ...] = (),
     ) -> Stack:
         previous_token = self.controller.current_undo_token
         previous_revision = next(
@@ -724,6 +801,7 @@ class BackgroundWorkflow(QObject):
                 background=background,
             )
         )
+        self.controller.register_owned_assets(owned_assets)
         self.progress_changed.emit(message)
         self.document_changed.emit(changed)
         self._emit_change_applied(
@@ -771,11 +849,10 @@ class BackgroundWorkflow(QObject):
         self._request_target = None
         self._active_operation = None
         self._discard_pending_image()
+        self._cleanup_source_snapshot_if_idle()
         self._set_busy(
             False,
-            "Image refinement failed"
-            if operation == "refine"
-            else "Image generation failed",
+            "Image refinement failed" if operation == "refine" else "Image generation failed",
         )
         self.failed.emit(failure)
 
@@ -784,18 +861,57 @@ class BackgroundWorkflow(QObject):
             self._pending_result.dispose_output()
             self._pending_result = None
 
+    def _invocation_started(self) -> None:
+        self._invocation_active.set()
+        self.invocation_active_changed.emit(True)
+
+    def _track_source_snapshot(self, snapshot: StoredImageSnapshot) -> None:
+        with self._source_snapshot_lock:
+            if self._source_snapshot is not None:
+                raise BackgroundWorkflowError("a Refine source snapshot is already active")
+            self._source_snapshot = snapshot
+
+    def _cleanup_source_snapshot_if_idle(self) -> bool:
+        if self._invocation_active.is_set():
+            return False
+        with self._source_snapshot_lock:
+            snapshot = self._source_snapshot
+            if snapshot is None:
+                return True
+            self._snapshot_cleanup_in_progress = True
+        disposed = snapshot.dispose()
+        with self._source_snapshot_lock:
+            self._snapshot_cleanup_in_progress = False
+            if disposed:
+                self._source_snapshot = None
+                self._temporary_cleanup_blocked = False
+            else:
+                self._temporary_cleanup_blocked = True
+        if not disposed:
+            with self._source_snapshot_lock:
+                assert self._source_snapshot is snapshot
+            logger.warning(
+                "Refine source snapshot cleanup preserved a changed file: %s",
+                snapshot.snapshot_path,
+            )
+        return disposed
+
     def _set_busy(self, busy: bool, progress: str) -> None:
         self._busy = busy
         self.busy_changed.emit(busy)
         self.progress_changed.emit(progress)
 
     def _require_ready(self, card_id: UUID) -> None:
-        if self._busy:
+        if self._busy or self._invocation_active.is_set():
             raise BackgroundWorkflowError("background generation is already running")
+        with self._source_snapshot_lock:
+            if self._source_snapshot is not None:
+                raise BackgroundWorkflowError(
+                    "the previous Refine source snapshot could not be cleaned up"
+                )
         if self.controller.mutation_blocked:
             raise BackgroundWorkflowError(
-                self.controller.mutation_blocked_reason
-                or "save the stack before changing an image"
+                self.controller.mutation_blocked_reason or "save the stack before changing an image"
             )
         if self.session.store is None:
             raise BackgroundWorkflowError("save the stack before changing an image")
@@ -878,8 +994,7 @@ class BackgroundWorkflow(QObject):
             revision != target.revision
             or self._style_snapshot(document, revision) != target.style
             or revision.background is None
-            or image_edit_lineage(revision.background.provenance)
-            != target.edit_lineage
+            or image_edit_lineage(revision.background.provenance) != target.edit_lineage
         ):
             return False
         return self._settings_provider() == target.settings
@@ -914,9 +1029,7 @@ class BackgroundWorkflow(QObject):
         ):
             if isinstance(assignment, UnresolvedCardReference):
                 name = assignment.target_name or "unknown card"
-                raise BackgroundWorkflowError(
-                    f"Reference {position} {name!r} is unresolved"
-                )
+                raise BackgroundWorkflowError(f"Reference {position} {name!r} is unresolved")
             assert isinstance(assignment, ResolvedCardReference)
             source = next(
                 (
@@ -927,9 +1040,7 @@ class BackgroundWorkflow(QObject):
                 None,
             )
             if source is None:
-                raise BackgroundWorkflowError(
-                    f"Reference {position} card no longer exists"
-                )
+                raise BackgroundWorkflowError(f"Reference {position} card no longer exists")
             source_revision = source.active_revision
             if source_revision.background is None:
                 raise BackgroundWorkflowError(

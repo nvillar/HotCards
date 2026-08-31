@@ -96,8 +96,10 @@ for live MFLUX runs.
   img2img; never resend its Generate References. Offer Reimagine 0.25,
   Balanced 0.50, and Preserve 0.75, plus only resolution presets whose derived
   pixel area is strictly greater than the decoded source image. Reuse the
-  source operation seed after flattening duplicate provenance. Compose the
-  exact Refine prompt from current Description, selected Style text, then
+  source operation seed after flattening duplicate provenance. Pass MFLUX a
+  private immutable snapshot copied from a securely opened source asset, and
+  reject the result if that logical asset changes before acceptance. Compose
+  the exact Refine prompt from current Description, selected Style text, then
   ordered authored accepted Edit instructions. State that the source already
   contains those edits, preserve them unless they conflict, and make current
   Description authoritative. On success atomically store the image and append
@@ -164,6 +166,8 @@ for live MFLUX runs.
   synchronization and same-revision edits must not discard a valid more
   specific selection. Enable geometry gestures and authoring overlays only
   while the Hotspots tab is active; leaving it cancels an unfinished polygon.
+  Starting image processing must explicitly cancel an unfinished polygon and
+  keep geometry editing disabled until the native invocation has unwound.
   Silently ignore draft vertex clicks that overlap an existing vertex, except
   that clicking the first vertex closes a draft once it has at least three
   vertices.
