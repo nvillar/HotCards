@@ -5,6 +5,11 @@ from hotcards.application.background_workflow import (
     BackgroundWorkflow,
     BackgroundWorkflowError,
 )
+from hotcards.application.card_duplication import (
+    CardDuplicationError,
+    CardDuplicationWorkflow,
+    DuplicatedCardChange,
+)
 from hotcards.application.commands import (
     ActivateRevisionCommand,
     AddInteractionCommand,
@@ -16,6 +21,7 @@ from hotcards.application.commands import (
     DeleteCardCommand,
     DeleteRevisionCommand,
     DocumentCommand,
+    DuplicateCardCommand,
     DuplicateRevisionCommand,
     EditRevisionDescriptionCommand,
     RenameCardCommand,
@@ -25,14 +31,17 @@ from hotcards.application.commands import (
     ReplaceInteractionPolygonsCommand,
     ReplacePolygonCommand,
     ReplaceRevisionBackgroundCommand,
-    SetRevisionImagePromptCommand,
+    SetRevisionGenerateOutputSizeCommand,
     SetRevisionReferenceCommand,
     SetRunOverlayModeCommand,
     SetStartCardCommand,
 )
 from hotcards.application.document_controller import (
+    PENDING_DURABILITY_MESSAGE,
     AutosaveHook,
     DocumentController,
+    DocumentMutationBlockedError,
+    OwnedImageAsset,
     UndoToken,
 )
 from hotcards.application.document_session import (
@@ -41,10 +50,6 @@ from hotcards.application.document_session import (
     DocumentSessionState,
 )
 from hotcards.application.generated_revision_change import GeneratedRevisionChange
-from hotcards.application.image_prompt_workflow import (
-    ImagePromptWorkflow,
-    ImagePromptWorkflowError,
-)
 from hotcards.application.workers import (
     AdapterKind,
     AdapterWorkers,
@@ -65,6 +70,8 @@ __all__ = [
     "BackgroundGenerationSettings",
     "BackgroundWorkflow",
     "BackgroundWorkflowError",
+    "CardDuplicationError",
+    "CardDuplicationWorkflow",
     "ChangeHotspotDestinationCommand",
     "CommandError",
     "CreateCardAndResolveCommand",
@@ -74,14 +81,18 @@ __all__ = [
     "DeleteRevisionCommand",
     "DocumentCommand",
     "DocumentController",
+    "DocumentMutationBlockedError",
     "DocumentSession",
     "DocumentSessionError",
     "DocumentSessionState",
     "DuplicateRevisionCommand",
+    "DuplicateCardCommand",
+    "DuplicatedCardChange",
     "EditRevisionDescriptionCommand",
     "GeneratedRevisionChange",
-    "SetRevisionImagePromptCommand",
     "OperationStatus",
+    "OwnedImageAsset",
+    "PENDING_DURABILITY_MESSAGE",
     "RenameCardCommand",
     "ReorderCardCommand",
     "ReorderHotspotCommand",
@@ -90,10 +101,9 @@ __all__ = [
     "ReplacePolygonCommand",
     "ReplaceRevisionBackgroundCommand",
     "SetRunOverlayModeCommand",
+    "SetRevisionGenerateOutputSizeCommand",
     "SetRevisionReferenceCommand",
     "SetStartCardCommand",
-    "ImagePromptWorkflow",
-    "ImagePromptWorkflowError",
     "UndoToken",
     "WorkerFailure",
     "WorkerFailureKind",

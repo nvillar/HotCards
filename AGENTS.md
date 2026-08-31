@@ -18,14 +18,6 @@ uv run ruff check .
 uv run ruff format .
 uv run hotcards-eval smoke
 uv run hotcards-eval images
-uv run hotcards-eval image-prompts --validate-only
-uv run hotcards-eval image-prompts
-uv run hotcards-eval image-prompts-two-stage --validate-only
-uv run hotcards-eval image-prompts-two-stage
-uv run hotcards-eval image-prompts-evidence-gate --validate-only
-uv run hotcards-eval image-prompts-evidence-gate
-uv run hotcards-eval inline-references --validate-only
-uv run hotcards-eval inline-references
 uv run hotcards-eval style-presets --validate-only
 uv run hotcards-eval style-presets
 uv run hotcards-eval flux-references --stack /path/to/Stack.hotcards
@@ -33,7 +25,7 @@ uv run hotcards-eval flux-references --stack /path/to/Stack.hotcards
 
 Ordinary automated tests must not require live model calls. Use recorded
 responses and fakes in `pytest`; use `hotcards-eval` or explicit smoke commands
-for live Ollama and MFLUX runs.
+for live MFLUX runs.
 
 ## Repository layout
 
@@ -55,51 +47,145 @@ for live Ollama and MFLUX runs.
 - Keep image actions, model actions, and storage out of widgets.
 - Reuse production prompt builders, schemas, adapters, and geometry validation
   in the evaluation harness. Do not fork generation behavior.
-- Keep the maintained Image Prompt benchmark self-contained under
-  `evals/cases/image_prompts/`: freeze permitted Reference assets with checksums
-  and provenance, score observable criteria rather than exact prose, and never
-  read a mutable authoring stack during benchmark runs.
 - Keep each card's complete authoring state in one of its numbered revisions:
-  Description, selected stack Style, prepared Image Prompt with input provenance,
-  optional background, ordered Reference cards, and hotspot set. Visible
-  revision numbers are positional; stable UUIDs remain internal.
+  Description, selected stack Style, optional background, ordered Reference
+  cards, selected Generate output size, and hotspot set. Visible revision
+  numbers are positional; stable UUIDs remain internal.
+- Store one immutable stack aspect ratio using only Square 1:1, Landscape 4:3,
+  Portrait 3:4, or Widescreen 16:9. Generate output size is revision-local and
+  defaults to Medium. Use named long-edge tiers only: Small 256 px, Medium
+  512 px, Large 768 px, and Full 1024 px. Square uses the tier on both edges;
+  landscape and widescreen use it as width; portrait uses it as height. Derive
+  the shorter edge from the aspect ratio and round it to the nearest multiple
+  of 16, minimum 16. Continue storing exact actual output width and height in
+  image provenance.
 - Keep at least one revision per card. Duplicate a complete revision, including
-  its hotspot semantics and immutable background reference.
+  its Generate output size, hotspot semantics, and immutable background
+  reference.
+- Duplicate the selected card from only its active complete revision and insert
+  it immediately after the source as one undoable change. Mint new card,
+  revision, background, and Interaction IDs; remap self-navigation to the new
+  card and preserve other destinations, References, Keys, Style selection, and
+  Generate output size. Copy exact background bytes into the duplicate card's
+  own validated asset namespace through one rollback-safe asset/manifest
+  transaction. Bind copy and cleanup to securely opened bundle objects and the
+  owned file identity; never follow asset symlinks. Retain duplicate-owned bytes
+  while reachable from the current document or Undo/Redo history, then reclaim
+  them when that history is discarded. Flatten duplicate provenance to the
+  original non-duplicate operation while recording the immediate source
+  informationally, so deleting the source never invalidates the duplicate.
 - Keep an ordered collection of at most two optional Reference cards per
   revision and reject self-references and duplicates. Display slots as `1.` and
   `2.` under one References section; clearing slot 1 promotes slot 2. Resolve
-  each active accepted background for both Image Prompt preparation and image
-  generation. Send each Reference once to Ollama and MFLUX in stable order as
-  `image 1` and `image 2`; image 1 takes precedence where the Description does
-  not resolve ambiguity. Keep all required roles, continuity, and edit
-  instructions visible in the reviewed Image Prompt rather than adding hidden
-  role instructions or complete source-card prose.
+  each active accepted background for image generation. Require user-facing
+  guidance to use positional `image 1` and `image 2` labels; do not translate
+  card names or aliases. Send each Reference exactly once to MFLUX in stable
+  order without hidden role instructions or complete source-card prose.
 - Keep an ordered, stack-owned library of editable named Styles with stable
   UUIDs. Store the selected Style on each revision and persist the last explicit
   Style or No Style selection as the default for new cards. Deleting a Style
   clears its revision selections through one undoable command.
-- Compose background prompts deterministically from the current reviewed Image
-  Prompt followed by the selected Style text. Do not send Style to Image Prompt
-  preparation. Capture the exact Style ID, name, text, and composed prompt in
-  generated-image provenance; changing Style must suppress an in-flight stale
-  image result without making the prepared Image Prompt stale. Hotspots must
-  not alter image prompts.
-- Keep one Description editor in the Background inspector. Show conditional
-  native Description/Image Prompt radio controls below it, default to Image
-  Prompt when it exists, place the Style selector above Reference and before
-  Prepare Image Prompt and Generate, and keep generation provenance in button
-  tooltips. Keep inspector tabs ordered Image, Styles, Hotspots, Keys.
-  Keep Styles and Keys as stack-global list managers with compact remove/add
-  controls and vertically stacked full-width fields. Encode Image
-  Prompt freshness in the preparation action from the Description, exact usable
-  ordered Reference backgrounds, selected Ollama model, and preparation prompt version:
-  current is a disabled completed state and stale is Update Image Prompt.
-  Treat a non-empty direct user edit as a reviewed refresh against those current
-  inputs so generation can proceed without another model call. Clearing the
-  Image Prompt editor removes that derived value. Require a current Image Prompt
-  for image generation.
+- Compose background prompts deterministically from the current nonempty
+  Description followed by the selected Style text. Capture the exact
+  Description, ordered Reference snapshots, Style ID, name, text, and composed
+  prompt in generated-image provenance. Description, Style, Reference,
+  background, project, revision, model, or mode changes must suppress an
+  in-flight stale image result. Hotspots must not alter image-generation
+  prompts.
+- In Generate, Reinterpret, and Edit resolution selectors, show only the named tier
+  names and expose exact dimensions in tooltips. Insert one selectable Current
+  row for an aligned nonstandard current image. On card or revision entry,
+  select the current image size in all three controls. Generate offers every
+  named tier; Reinterpret and Edit offer only the current size and higher-area
+  tiers. Treat resolution selection as a passive setting change without a
+  notification.
+- Reinterpret (the persisted `refine` operation) only the readable current
+  background through regular Flux2Klein
+  img2img; never resend its Generate References. Offer Reimagine 0.25,
+  Balanced 0.50, and Preserve 0.75 as Source Similarity choices with
+  user-facing descriptions but no numeric values, default output to the exact
+  current size, and offer only higher named tiers.
+  Reuse the
+  source operation seed after flattening duplicate provenance. Pass MFLUX a
+  private immutable snapshot copied from a securely opened source asset, and
+  reject the result if that logical asset changes before acceptance. Compose
+  the exact Reinterpret prompt from current Description, selected Style text, then
+  ordered authored accepted Edit instructions. State that the source already
+  contains those edits, preserve them unless they conflict, and make current
+  Description authoritative. On success atomically store the image and append
+  and activate one complete copied revision through one Undo boundary; do not
+  expose Keep/Create New Version for Reinterpret.
+- Edit only the readable current background through Flux2KleinEdit with one
+  direct authored Edit Instruction. Treat the source image as authoritative for
+  everything not explicitly changed: request only the authored change and the
+  minimum accompanying changes needed for visual coherence, preserve unrelated
+  details, and prohibit unrelated additions, removals, or reinterpretations.
+  Keep legacy Preserve metadata readable, but do not expose or apply Preserve
+  controls to new edits. Validate the deterministic expanded prompt against the
+  FLUX Edit tokenizer's hard 512-token budget without rewriting or truncation,
+  use a fresh random seed, and never send Description, Style, or Generate
+  References. Default output to the source image's exact decoded dimensions and
+  additionally offer only higher-area presets. Pass
+  MFLUX a private immutable no-follow source snapshot and reject replacement
+  races before acceptance. Append the accepted Edit to inherited flattened
+  lineage, atomically store the image, and append and activate one complete
+  copied revision through one Undo boundary. Clear the instruction only after
+  definitive durable success; do not expose Keep/Create New Version for Edit.
+- Persist generated backgrounds with a strict discriminated provenance union
+  for direct Generate, externally patched legacy Generate, Refine, Edit, and
+  independent card duplication.
+  Keep operation-specific prompts and settings typed rather than accumulating
+  nullable fields. Refine and Edit identify their exact source revision and
+  background. A Refine inherits its source revision's accepted Edit lineage
+  unchanged; an Edit appends exactly its accepted current Edit to that source
+  lineage. Current Generate and Refine dimensions must match their typed
+  output-size selection. Preset output must match the stack aspect ratio;
+  exact Generate output must be positive, 16-aligned, and aspect-compatible;
+  current Refine/Edit output must equal its resolved source dimensions. Edit
+  preset dimensions must match its named tier and stack aspect ratio. Legacy
+  Generate preserves its exact historical prompt and dimensions without
+  imposing a modern preset. Block
+  source revision deletion or background replacement while any retained
+  revision derives from it. Whole card deletion may remove dependencies wholly
+  contained in that card, but must reject dependencies from retained cards.
+- Route all production and evaluation Generate, Reinterpret, and Edit inference
+  through one typed MFLUX adapter. Plain Generate and Reinterpret use the regular
+  family; Reference-backed Generate and Edit use the Edit family. Serialize
+  model loading and inference through one stable process-local invocation
+  thread, cache at most one compatible family/model/quantization configuration,
+  and release it when switching configuration. Cancellation while queued or
+  running must publish no output; interrupted active models must not be reused.
+- Keep one Description editor in the Generate inspector. Place the Style
+  selector above References, place revision-local Resolution after References
+  and before Generate, expose exact output dimensions and positional Reference
+  guidance in tooltips, and keep generation provenance in the Generate button
+  tooltip. Keep Reinterpret and Edit button tooltips to one concise action
+  sentence plus a disabled-state reason when needed. Keep inspector tabs ordered
+  Generate, Transform, Hotspots. In Transform, stack a compact Reinterpret
+  section above Edit using normal label typography rather than native group-box
+  titles. Reinterpret contains Source Similarity, Resolution, and Reinterpret;
+  Edit contains Edit Instruction, Resolution, and Edit.
+  The current canvas/header is the implicit source for both. Open
+  Styles and Keys from right-aligned Author-toolbar actions into separate
+  modeless singleton utility windows. Keep them as stack-global list managers
+  backed by the authoritative controller, with compact remove/add controls and
+  vertically stacked full-width fields. Hide the manager actions and windows in
+  Run mode, and close or rebind them on project replacement. Require a nonempty
+  Description for image generation.
+- In Hotspots, keep When and Then as normal labels outside untitled grouped
+  panels using the same native treatment as the Reinterpret and Edit sections.
+  Keep the list, ordering controls, labels, and grouped panels on one inset
+  scrollable content surface matching Transform; do not nest a separate
+  zero-margin rule viewport.
+- Create stacks with one native format selector containing exactly Square 1:1,
+  Landscape 4:3, Portrait 3:4, and Widescreen 16:9, defaulting to Landscape.
+  Do not expose arbitrary dimensions or a post-creation aspect-ratio setting.
+  Fit and center every complete background inside the stack's logical card
+  geometry with aspect-preserving scaling and letterboxing or pillarboxing as
+  needed. Use the fitted image bounds for all normalized hotspot rendering,
+  gestures, and Run hit testing; bars are noninteractive.
 - Support generated backgrounds only; do not add image import. Apply Generate
-  and Clear directly through document commands. Keep an existing image visible
+  directly through document commands. Keep an existing image visible
   until replacement succeeds. After Description or image generation succeeds,
   expose Create New Version and Undo bound to the exact current history token;
   an explicit Keep action retains the result on the current revision. Creating
@@ -110,36 +196,11 @@ for live Ollama and MFLUX runs.
   bar; keep field validation beside its input and the status bar passive. Use a
   blocking decision dialog only when proceeding could lose persisted work and
   Undo cannot recover it.
-- Image Prompt preparation requires authored Description text. Without References it is
-  text-only; with readable active Reference backgrounds it is one multimodal
-  Ollama request containing them in numbered order. The target Description is
-  authoritative and the existing
-  Image Prompt is never preparation input. Use the immutable effective prompt
-  captured in the exact Reference background's generation metadata, including a
-  reviewed Image Prompt or legacy enriched text, as the primary semantic source
-  for applicable identity and style language; use the image as visual evidence
-  and to fill gaps rather than relabeling explicit authored treatment. Preserve
-  the meaning of every explicit target visual property without special keywords
-  or required wording. For Reference-backed preparation, translate user-facing
-  aliases and exact selected card names into canonical `image 1` and `image 2`
-  labels, preserve explicit and inferable entity relationships, apply image 1
-  precedence where ambiguity remains, and produce a direct editing instruction
-  rather than a standalone caption. Keep that instruction concise:
-  name only stable identity, construction, material, distinguishing-component,
-  or visual-treatment properties needed for continuity; do not preserve
-  target-overridden pose, action, state, viewpoint, crop, framing, composition,
-  setting, weather, time, or lighting, and do not inventory unrelated Reference
-  details or add unrequested blanket preservation. Allow a plausible concrete
-  proposal for ambiguity rather than adding clarification state. Store only the
-  final Image Prompt through one undoable command; private deliberation must not
-  enter the stack. Track source Description, exact Reference provenance, Ollama
-  model, and prompt version so freshness is strict. Reject recognized authored
-  object-state reversals, invented or altered affirmative quoted visible text,
-  and violations of explicit quoted-text exclusions after one constrained
-  repair attempt.
 - Store each hotspot set under exactly one complete card revision. Replacing a
   background preserves its hotspots so the author can review and adjust them
   manually.
+- Keep the canvas automatically fitted to the complete image. Do not expose
+  zoom, pan, manual fit, or image-clear controls.
 - Hotspots may have no polygons. Derive their labels from Remove, Grant, then
   destination actions and display long labels on at most two lines. Area-less
   hotspots retain all semantics in storage and are ignored by Run-mode hit
@@ -149,26 +210,23 @@ for live Ollama and MFLUX runs.
   synchronization and same-revision edits must not discard a valid more
   specific selection. Enable geometry gestures and authoring overlays only
   while the Hotspots tab is active; leaving it cancels an unfinished polygon.
+  Starting image processing must explicitly cancel an unfinished polygon and
+  keep geometry editing disabled until the native invocation has unwound.
   Silently ignore draft vertex clicks that overlap an existing vertex, except
   that clicking the first vertex closes a draft once it has at least three
   vertices.
-- Suppress stale Image Prompt results after relevant target revision,
-  Description, Reference assignment, source revision/background, project, or
-  mode changes. Editing source text without regenerating its referenced
-  background must not stale generation-time provenance.
-- Check local AI services on entry to Author mode, with concurrent checks
-  deduplicated. Entering Run mode must not start AI work and must suppress
-  pending AI results. Enter Run on the current Author card, keep the configured
-  start card as Restart's target, and do not show a redundant Run-entry
-  notification. Use one action-oriented mode button labeled Run in Author mode
-  and Author in Run mode. Show standard-size Back, Restart, and overlay controls
-  only in Run mode; hide the card name, version authoring header, and bottom
-  model selectors there.
-- Keep LLM and image-model selectors in the status bar and persist them through
-  Qt settings. List only installed Ollama models that advertise vision support;
-  offer FLUX.2 Klein 4B and FLUX.2 Klein 9B KV. Keep model fields out of
-  Advanced Settings. Disable both selectors while image generation is running;
-  changing either model must cancel work using the previous setting.
+- Check the selected local MFLUX model on entry to Author mode, with concurrent
+  checks deduplicated. Entering Run mode must not start AI work and must
+  suppress pending AI results. Enter Run on the current Author card, keep the
+  configured start card as Restart's target, and do not show a redundant
+  Run-entry notification. Use one action-oriented mode button labeled Run in
+  Author mode and Author in Run mode. Show standard-size Back, Restart, and
+  overlay controls only in Run mode; hide the card name, version authoring
+  header, and bottom model selectors there.
+- Keep the image-model selector in the status bar and persist it through Qt
+  settings. Offer FLUX.2 Klein 4B and FLUX.2 Klein 9B KV. Keep the model field
+  out of Advanced Settings. Disable the selector while any image operation is
+  running; changing the model must cancel work using the previous setting.
 - Represent a revision's applied hotspot set as `HotspotSet | None`.
   `None` means no set has been applied; an empty `HotspotSet` means an applied
   set currently contains no interactions.
@@ -180,8 +238,9 @@ for live Ollama and MFLUX runs.
 - Keep an ordered, stack-owned catalog of free-form named binary Keys with
   stable UUIDs. Key names are trimmed, nonempty, and case-insensitively unique.
   Renaming preserves references; block deletion while any hotspot in any
-  revision references the Key. Keep the Keys inspector after Hotspots and show
-  every reference grouped by hotspot revision and semantic role.
+  revision references the Key. Keep Key assignment controls in Hotspots and
+  show every reference grouped by hotspot revision and semantic role in the
+  Keys utility window.
 - Keep hotspot state behavior closed and typed: all required Keys must be
   present, all forbidden Keys absent, and explicit Remove and Grant sets must be
   disjoint. Do not add clear-all behavior, values, counters, expressions,

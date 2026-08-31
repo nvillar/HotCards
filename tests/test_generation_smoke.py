@@ -6,7 +6,8 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from hotcards.evaluation.cli import run_cli
+from hotcards.domain.image_dimensions import AspectRatio, ResolutionTier
+from hotcards.evaluation.cli import build_parser, run_cli
 from hotcards.evaluation.smoke import SmokeSettings, SmokeStageError, run_smoke
 from hotcards.generation.mflux_generator import MfluxGenerator
 
@@ -56,12 +57,26 @@ def test_smoke_runner_writes_cold_and_warm_stage_results(tmp_path: Path) -> None
         "Restrained storybook ink and watercolor illustration with cool "
         "twilight shadows and warm lantern light."
     )
-    assert result["stages"]["image_generation"]["cold"]["metadata"]["width"] == 1024
+    cold = result["stages"]["image_generation"]["cold"]
+    assert cold["provenance"]["operation"] == "generate"
+    assert (
+        cold["provenance"]["settings"]["width"],
+        cold["provenance"]["settings"]["height"],
+    ) == (1024, 768)
+    assert cold["provenance"]["inputs"]["output_size"] == {
+        "mode": "preset",
+        "tier": 1024,
+    }
     assert (output_dir / "generated-cold.png").is_file()
     assert (output_dir / "generated-warm.png").is_file()
     assert (output_dir / "manifest.json").is_file()
     assert (output_dir / "summary.csv").is_file()
     assert (output_dir / "report.html").is_file()
+
+
+def test_smoke_settings_reject_obsolete_arbitrary_dimensions(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="width"):
+        SmokeSettings(output_dir=tmp_path / "run", width=512)  # type: ignore[call-arg]
 
 
 def test_smoke_runner_records_actionable_generation_failure(
@@ -88,6 +103,9 @@ def test_smoke_runner_records_actionable_generation_failure(
     ("option", "value"),
     [
         ("--quantization", "not-an-integer"),
+        ("--tier", "300"),
+        ("--aspect-ratio", "3:2"),
+        ("--width", "512"),
     ],
 )
 def test_smoke_cli_rejects_invalid_numeric_values(option: str, value: str) -> None:
@@ -95,3 +113,10 @@ def test_smoke_cli_rejects_invalid_numeric_values(option: str, value: str) -> No
         run_cli(["smoke", option, value])
 
     assert caught.value.code == 2
+
+
+def test_smoke_cli_accepts_typed_generation_dimensions() -> None:
+    args = build_parser().parse_args(["smoke", "--tier", "Large", "--aspect-ratio", "16:9"])
+
+    assert args.tier is ResolutionTier.LARGE
+    assert args.aspect_ratio is AspectRatio.WIDESCREEN

@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
+from hotcards.domain.image_dimensions import AspectRatio, ResolutionTier
 from hotcards.evaluation.cli import build_parser, run_cli
 from hotcards.evaluation.style_presets import (
     DEFAULT_STYLE_PRESET_EXPERIMENT,
@@ -70,6 +71,19 @@ def test_style_prompt_composition_preserves_control_and_appends_treatment() -> N
     )
 
 
+def test_style_settings_reject_obsolete_arbitrary_dimensions(
+    tmp_path: Path,
+) -> None:
+    settings = StylePresetSettings(output_dir=tmp_path / "default")
+    assert settings.tier is ResolutionTier.FULL
+    assert settings.aspect_ratio is AspectRatio.LANDSCAPE
+    with pytest.raises(ValueError, match="width"):
+        StylePresetSettings(
+            output_dir=tmp_path / "run",
+            width=512,  # type: ignore[call-arg]
+        )
+
+
 def test_style_suite_renders_complete_matrix_and_review_sheets(
     tmp_path: Path,
 ) -> None:
@@ -79,8 +93,8 @@ def test_style_suite_renders_complete_matrix_and_review_sheets(
     result_path = run_style_preset_evaluation(
         StylePresetSettings(
             output_dir=output_dir,
-            width=48,
-            height=32,
+            tier=ResolutionTier.SMALL,
+            aspect_ratio=AspectRatio.LANDSCAPE,
         ),
         generator_factory=lambda: MfluxGenerator(model_factory=lambda *_: FakeMfluxModel(requests)),
         environment_provider=lambda: {"git_sha": "test"},
@@ -91,6 +105,7 @@ def test_style_suite_renders_complete_matrix_and_review_sheets(
     assert len(result["results"]) == 22
     assert len(requests) == 22
     assert {request["seed"] for request in requests} == {42}
+    assert {(request["width"], request["height"]) for request in requests} == {(256, 192)}
     assert all(not request.get("image_paths") for request in requests)
     assert len(list((output_dir / "outputs").rglob("*.png"))) == 22
     assert len(list((output_dir / "review").glob("scene-*.png"))) == 2
@@ -122,7 +137,11 @@ def test_style_suite_marks_empty_style_sheet_unavailable(tmp_path: Path) -> None
     output_dir = tmp_path / "run"
 
     result_path = run_style_preset_evaluation(
-        StylePresetSettings(output_dir=output_dir, width=48, height=32),
+        StylePresetSettings(
+            output_dir=output_dir,
+            tier=ResolutionTier.SMALL,
+            aspect_ratio=AspectRatio.LANDSCAPE,
+        ),
         generator_factory=lambda: MfluxGenerator(
             model_factory=lambda *_: FakeMfluxModel(
                 [],
@@ -145,7 +164,11 @@ def test_style_suite_fails_when_no_image_can_be_generated(tmp_path: Path) -> Non
 
     with pytest.raises(ImageGenerationError, match="produced no images"):
         run_style_preset_evaluation(
-            StylePresetSettings(output_dir=output_dir, width=48, height=32),
+            StylePresetSettings(
+                output_dir=output_dir,
+                tier=ResolutionTier.SMALL,
+                aspect_ratio=AspectRatio.LANDSCAPE,
+            ),
             generator_factory=lambda: MfluxGenerator(
                 model_factory=lambda *_: FakeMfluxModel(
                     [],
@@ -171,12 +194,18 @@ def test_cli_exposes_style_preset_options() -> None:
             "11",
             "--seed",
             "12",
+            "--tier",
+            "Large",
+            "--aspect-ratio",
+            "16:9",
         ]
     )
 
     assert args.command == "style-presets"
     assert args.mflux_model == "flux2-klein-4b"
     assert args.seeds == [11, 12]
+    assert args.tier is ResolutionTier.LARGE
+    assert args.aspect_ratio is AspectRatio.WIDESCREEN
 
 
 def test_cli_validates_style_experiment_without_model_calls(

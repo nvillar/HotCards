@@ -20,4 +20,18 @@ def require_readable_image(path: Path) -> None:
         raise UnreadableImageError(str(error)) from error
 
 
-__all__ = ["UnreadableImageError", "require_readable_image"]
+def readable_image_dimensions(path: Path) -> tuple[int, int]:
+    """Return exact decoded image dimensions or raise for an unreadable file."""
+    require_readable_image(path)
+    try:
+        with Image.open(path) as image:
+            return image.size
+    except (OSError, UnidentifiedImageError) as error:
+        raise UnreadableImageError(str(error)) from error
+
+
+__all__ = [
+    "UnreadableImageError",
+    "readable_image_dimensions",
+    "require_readable_image",
+]

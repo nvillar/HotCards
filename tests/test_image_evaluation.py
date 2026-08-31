@@ -7,6 +7,7 @@ import pytest
 from PIL import Image
 from pydantic import ValidationError
 
+from hotcards.domain.image_dimensions import AspectRatio, ResolutionTier
 from hotcards.evaluation.images import (
     DEFAULT_MFLUX_MODELS,
     ImageEvaluationCase,
@@ -56,7 +57,6 @@ def _write_case(case_dir: Path) -> None:
                 "case_id": "one",
                 "inputs": {
                     "description": "A storybook watercolor courtyard",
-                    "image_prompt": "A storybook watercolor courtyard",
                 },
                 "required_visual_elements": ["gate"],
                 "unwanted_artifacts": ["text"],
@@ -87,6 +87,19 @@ def test_image_case_id_is_safe_for_artifact_paths() -> None:
         )
 
 
+def test_image_settings_reject_obsolete_arbitrary_dimensions(
+    tmp_path: Path,
+) -> None:
+    settings = ImageEvaluationSettings(output_dir=tmp_path / "default")
+    assert settings.tier is ResolutionTier.FULL
+    assert settings.aspect_ratio is AspectRatio.LANDSCAPE
+    with pytest.raises(ValidationError, match="height"):
+        ImageEvaluationSettings(
+            output_dir=tmp_path / "run",
+            height=384,  # type: ignore[call-arg]
+        )
+
+
 def test_image_suite_uses_deterministic_prompts_for_mflux_candidates(
     tmp_path: Path,
 ) -> None:
@@ -95,7 +108,12 @@ def test_image_suite_uses_deterministic_prompts_for_mflux_candidates(
     requests: list[dict[str, object]] = []
 
     result_path = run_image_evaluation(
-        ImageEvaluationSettings(output_dir=tmp_path / "run", case_dir=case_dir),
+        ImageEvaluationSettings(
+            output_dir=tmp_path / "run",
+            case_dir=case_dir,
+            tier=ResolutionTier.SMALL,
+            aspect_ratio=AspectRatio.PORTRAIT,
+        ),
         mflux_factory=lambda: MfluxGenerator(model_factory=lambda *_: FakeMfluxModel(requests)),
     )
 
@@ -108,8 +126,11 @@ def test_image_suite_uses_deterministic_prompts_for_mflux_candidates(
     assert {row["render_prompt"] for row in result["mflux_axis"]} == {
         "A storybook watercolor courtyard"
     }
-    assert {request["prompt"] for request in requests} == {
-        "A storybook watercolor courtyard"
+    assert {request["prompt"] for request in requests} == {"A storybook watercolor courtyard"}
+    assert {(request["width"], request["height"]) for request in requests} == {(192, 256)}
+    assert result["mflux_axis"][0]["cold"]["metadata"]["inputs"]["output_size"] == {
+        "mode": "preset",
+        "tier": 256,
     }
     assert result["mflux_axis"][0]["cold"]["metadata"]["render_prompt"] == (
         "A storybook watercolor courtyard"
@@ -119,9 +140,7 @@ def test_image_suite_uses_deterministic_prompts_for_mflux_candidates(
     assert len(list((tmp_path / "run" / "images" / "mflux-axis").rglob("*.png"))) == 4
     summary = json.loads((tmp_path / "run" / "summary.json").read_text())
     assert {row["axis"] for row in summary["rows"]} == {"mflux"}
-    assert {row["render_prompt"] for row in summary["rows"]} == {
-        "A storybook watercolor courtyard"
-    }
+    assert {row["render_prompt"] for row in summary["rows"]} == {"A storybook watercolor courtyard"}
 
 
 def test_image_suite_isolates_mflux_candidate_failure(tmp_path: Path) -> None:
@@ -137,7 +156,12 @@ def test_image_suite_isolates_mflux_candidate_failure(tmp_path: Path) -> None:
         )
 
     result_path = run_image_evaluation(
-        ImageEvaluationSettings(output_dir=tmp_path / "run", case_dir=case_dir),
+        ImageEvaluationSettings(
+            output_dir=tmp_path / "run",
+            case_dir=case_dir,
+            tier=ResolutionTier.SMALL,
+            aspect_ratio=AspectRatio.LANDSCAPE,
+        ),
         mflux_factory=mflux_factory,
         environment_provider=lambda: {"git_sha": "test"},
     )

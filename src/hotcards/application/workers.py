@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
@@ -18,16 +19,15 @@ from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Signal, Slot
 from hotcards.generation.errors import (
     ImageGenerationError,
     ModelLoadError,
-    ModelResponseError,
     ModelUnavailableError,
-    ServiceUnavailableError,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class AdapterKind(StrEnum):
     """Production adapter families supported by the worker boundary."""
 
-    OLLAMA = "ollama"
     MFLUX = "mflux"
 
 
@@ -35,9 +35,7 @@ class WorkerFailureKind(StrEnum):
     """Stable failure categories suitable for UI decisions."""
 
     TIMEOUT = "timeout"
-    SERVICE_UNAVAILABLE = "service_unavailable"
     MODEL_UNAVAILABLE = "model_unavailable"
-    MODEL_RESPONSE = "model_response"
     MODEL_LOAD = "model_load"
     IMAGE_GENERATION = "image_generation"
     ADAPTER_ERROR = "adapter_error"
@@ -85,12 +83,12 @@ class WorkerOperation(QObject):
     def __init__(
         self,
         operation_id: UUID,
-        cancel_event: Event,
+        cancellation: _CancellationControl,
         start_lock: Lock,
     ) -> None:
         super().__init__()
         self._operation_id = operation_id
-        self._cancel_event = cancel_event
+        self._cancellation = cancellation
         self._start_lock = start_lock
         self._lock = Lock()
         self._status = OperationStatus.PENDING
@@ -128,7 +126,7 @@ class WorkerOperation(QObject):
                 if self._status is not OperationStatus.PENDING:
                     return
                 self._status = OperationStatus.CANCELLED
-                self._cancel_event.set()
+                self._cancellation.request()
         self.cancelled.emit()
         self.finished.emit()
 
@@ -151,9 +149,28 @@ class WorkerOperation(QObject):
         self.finished.emit()
 
 
-@dataclass(frozen=True, slots=True)
 class _Success:
-    value: Any
+    def __init__(
+        self,
+        value: Any,
+        disposer: Callable[[Any], None] | None,
+    ) -> None:
+        self.value = value
+        self._disposer = disposer
+        self._lock = Lock()
+        self._disposed = False
+
+    def dispose(self) -> None:
+        with self._lock:
+            if self._disposed:
+                return
+            try:
+                if self._disposer is not None:
+                    self._disposer(self.value)
+            except Exception:
+                logger.exception("Could not dispose a discarded adapter result")
+                return
+            self._disposed = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,6 +183,116 @@ class _Timeout:
     pass
 
 
+@dataclass(frozen=True, slots=True)
+class _InvocationTask:
+    operation: Callable[[], Any]
+    dispose_result: Callable[[Any], None] | None
+    invocation_finished: Callable[[], None] | None
+    cancellation: _CancellationControl
+    invocation_slots: BoundedSemaphore
+    outcomes: Queue[_Success | _Error]
+
+
+class _InvocationThread:
+    """Keep thread-affine adapter state on one daemon thread."""
+
+    def __init__(self) -> None:
+        self._tasks: Queue[_InvocationTask] = Queue()
+        self._thread = Thread(
+            target=self._run,
+            name="hotcards-mflux-invocations",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def submit(self, task: _InvocationTask) -> None:
+        self._tasks.put(task)
+
+    def _run(self) -> None:
+        while True:
+            task = self._tasks.get()
+            try:
+                try:
+                    self._invoke(task)
+                except Exception:
+                    logger.exception("MFLUX invocation lifecycle cleanup failed")
+            finally:
+                del task
+
+    @staticmethod
+    def _invoke(task: _InvocationTask) -> None:
+        try:
+            if task.cancellation.event.is_set():
+                return
+            try:
+                outcome: _Success | _Error = _Success(
+                    task.operation(),
+                    task.dispose_result,
+                )
+            except Exception as error:
+                outcome = _Error(error)
+            if not isinstance(outcome, _Success) or task.cancellation.offer_success(outcome):
+                task.outcomes.put(outcome)
+        finally:
+            try:
+                if task.invocation_finished is not None:
+                    task.invocation_finished()
+            finally:
+                task.invocation_slots.release()
+
+
+_PROCESS_MFLUX_INVOCATIONS = _InvocationThread()
+_PROCESS_MFLUX_INVOCATION_SLOT = BoundedSemaphore(1)
+
+
+class _CancellationControl:
+    def __init__(
+        self,
+        request_adapter_cancel: Callable[[], None] | None,
+    ) -> None:
+        self.event = Event()
+        self._request_adapter_cancel = request_adapter_cancel
+        self._lock = Lock()
+        self._requested = False
+        self._pending_success: _Success | None = None
+
+    def request(self) -> None:
+        pending: _Success | None
+        request_adapter_cancel: Callable[[], None] | None
+        with self._lock:
+            if self._requested:
+                return
+            self._requested = True
+            self.event.set()
+            pending = self._pending_success
+            self._pending_success = None
+            request_adapter_cancel = self._request_adapter_cancel
+        try:
+            if request_adapter_cancel is not None:
+                request_adapter_cancel()
+        finally:
+            if pending is not None:
+                pending.dispose()
+
+    def offer_success(self, success: _Success) -> bool:
+        with self._lock:
+            if self._requested:
+                accepted = False
+            else:
+                self._pending_success = success
+                accepted = True
+        if not accepted:
+            success.dispose()
+        return accepted
+
+    def claim_success(self, success: _Success) -> bool:
+        with self._lock:
+            if self._requested or self._pending_success is not success:
+                return False
+            self._pending_success = None
+            return True
+
+
 @dataclass(slots=True)
 class _OperationRecord:
     handle: WorkerOperation
@@ -174,7 +301,7 @@ class _OperationRecord:
     timeout_seconds: float
     availability_check: bool
     emit_availability: bool
-    cancel_event: Event
+    cancellation: _CancellationControl
     start_lock: Lock
     deadline: float
 
@@ -189,33 +316,44 @@ class _BoundedRunnable(QRunnable):
         *,
         operation_id: UUID,
         operation: Callable[[], Any],
+        dispose_result: Callable[[Any], None] | None,
+        invocation_started: Callable[[], None] | None,
+        invocation_finished: Callable[[], None] | None,
         deadline: float,
-        cancel_event: Event,
+        cancellation: _CancellationControl,
         start_lock: Lock,
         invocation_slots: BoundedSemaphore,
+        invocation_thread: _InvocationThread,
         dispatcher: _CompletionDispatcher,
     ) -> None:
         super().__init__()
         self._operation_id = operation_id
         self._operation = operation
+        self._dispose_result = dispose_result
+        self._invocation_started = invocation_started
+        self._invocation_finished = invocation_finished
         self._deadline = deadline
-        self._cancel_event = cancel_event
+        self._cancellation = cancellation
         self._start_lock = start_lock
         self._invocation_slots = invocation_slots
+        self._invocation_thread = invocation_thread
         self._dispatcher = dispatcher
 
     def run(self) -> None:
-        if self._cancel_event.is_set():
+        if self._cancellation.event.is_set():
+            self._cancellation.request()
             self._dispatcher.completed.emit(self._operation_id, _Timeout())
             return
         remaining = self._deadline - monotonic()
         if remaining <= 0:
+            self._cancellation.request()
             self._dispatcher.completed.emit(self._operation_id, _Timeout())
             return
 
-        while not self._cancel_event.is_set():
+        while not self._cancellation.event.is_set():
             remaining = self._deadline - monotonic()
             if remaining <= 0:
+                self._cancellation.request()
                 self._dispatcher.completed.emit(self._operation_id, _Timeout())
                 return
             if self._invocation_slots.acquire(timeout=min(remaining, 0.05)):
@@ -226,38 +364,46 @@ class _BoundedRunnable(QRunnable):
 
         outcomes: Queue[_Success | _Error] = Queue(maxsize=1)
 
-        def invoke() -> None:
-            try:
-                try:
-                    outcome: _Success | _Error = _Success(self._operation())
-                except Exception as error:
-                    outcome = _Error(error)
-                outcomes.put(outcome)
-            finally:
-                self._invocation_slots.release()
-
         with self._start_lock:
-            if self._cancel_event.is_set() or self._deadline <= monotonic():
+            if self._cancellation.event.is_set() or self._deadline <= monotonic():
+                self._cancellation.request()
                 self._invocation_slots.release()
                 self._dispatcher.completed.emit(self._operation_id, _Timeout())
                 return
             try:
-                Thread(
-                    target=invoke,
-                    name=f"hotcards-adapter-{self._operation_id}",
-                    daemon=True,
-                ).start()
+                if self._invocation_started is not None:
+                    self._invocation_started()
+                self._invocation_thread.submit(
+                    _InvocationTask(
+                        operation=self._operation,
+                        dispose_result=self._dispose_result,
+                        invocation_finished=self._invocation_finished,
+                        cancellation=self._cancellation,
+                        invocation_slots=self._invocation_slots,
+                        outcomes=outcomes,
+                    )
+                )
             except Exception as error:
-                self._invocation_slots.release()
+                try:
+                    if self._invocation_finished is not None:
+                        self._invocation_finished()
+                except Exception:
+                    logger.exception("MFLUX invocation startup cleanup failed")
+                finally:
+                    self._invocation_slots.release()
                 self._dispatcher.completed.emit(self._operation_id, _Error(error))
                 return
         while True:
             remaining = self._deadline - monotonic()
-            if remaining <= 0 or self._cancel_event.is_set():
+            if remaining <= 0 or self._cancellation.event.is_set():
+                self._cancellation.request()
                 outcome: _Success | _Error | _Timeout = _Timeout()
                 break
             try:
                 outcome = outcomes.get(timeout=min(remaining, 0.05))
+                if isinstance(outcome, _Success) and not self._cancellation.claim_success(outcome):
+                    outcome.dispose()
+                    outcome = _Timeout()
                 break
             except Empty:
                 continue
@@ -265,36 +411,25 @@ class _BoundedRunnable(QRunnable):
 
 
 class AdapterWorkers(QObject):
-    """Run bounded Ollama and serialized MFLUX operations away from the UI thread."""
+    """Run serialized MFLUX operations away from the UI thread."""
 
     availability_changed = Signal(object)
 
     def __init__(
         self,
         *,
-        ollama_timeout_seconds: float = 300.0,
         mflux_timeout_seconds: float = 600.0,
-        ollama_max_concurrency: int = 4,
     ) -> None:
         super().__init__()
         self._timeouts = {
-            AdapterKind.OLLAMA: _validate_timeout(ollama_timeout_seconds),
             AdapterKind.MFLUX: _validate_timeout(mflux_timeout_seconds),
         }
-        if (
-            not isinstance(ollama_max_concurrency, int)
-            or isinstance(ollama_max_concurrency, bool)
-            or ollama_max_concurrency <= 0
-        ):
-            raise ValueError("Ollama worker concurrency must be a positive integer")
-        self._ollama_pool = QThreadPool(self)
-        self._ollama_pool.setMaxThreadCount(ollama_max_concurrency)
         self._mflux_pool = QThreadPool(self)
         self._mflux_pool.setMaxThreadCount(1)
         self._invocation_slots = {
-            AdapterKind.OLLAMA: BoundedSemaphore(ollama_max_concurrency),
-            AdapterKind.MFLUX: BoundedSemaphore(1),
+            AdapterKind.MFLUX: _PROCESS_MFLUX_INVOCATION_SLOT,
         }
+        self._invocation_thread = _PROCESS_MFLUX_INVOCATIONS
         self._dispatcher = _CompletionDispatcher(self)
         self._dispatcher.completed.connect(self._complete)
         self._deadline_timer = QTimer(self)
@@ -304,26 +439,8 @@ class AdapterWorkers(QObject):
         self._closed = False
         self._records: dict[UUID, _OperationRecord] = {}
         self._availability: dict[AdapterKind, bool | None] = {
-            AdapterKind.OLLAMA: None,
             AdapterKind.MFLUX: None,
         }
-
-    def run_ollama(
-        self,
-        operation: Callable[[], Any],
-        *,
-        stage: str,
-        timeout_seconds: float | None = None,
-    ) -> WorkerOperation:
-        """Submit any synchronous Ollama adapter operation."""
-        return self._submit(
-            AdapterKind.OLLAMA,
-            operation,
-            stage=stage,
-            timeout_seconds=timeout_seconds,
-            availability_check=False,
-            emit_availability=True,
-        )
 
     def run_mflux(
         self,
@@ -331,6 +448,10 @@ class AdapterWorkers(QObject):
         *,
         stage: str,
         timeout_seconds: float | None = None,
+        request_cancel: Callable[[], None] | None = None,
+        dispose_result: Callable[[Any], None] | None = None,
+        invocation_started: Callable[[], None] | None = None,
+        invocation_finished: Callable[[], None] | None = None,
     ) -> WorkerOperation:
         """Submit a synchronous MFLUX operation to the serialized queue."""
         return self._submit(
@@ -340,24 +461,10 @@ class AdapterWorkers(QObject):
             timeout_seconds=timeout_seconds,
             availability_check=False,
             emit_availability=True,
-        )
-
-    def check_ollama(
-        self,
-        check: Callable[[], Any],
-        *,
-        stage: str = "checking Ollama model availability",
-        timeout_seconds: float | None = None,
-        emit_diagnostic: bool = True,
-    ) -> WorkerOperation:
-        """Run a bounded list/show-style Ollama availability check."""
-        return self._submit(
-            AdapterKind.OLLAMA,
-            check,
-            stage=stage,
-            timeout_seconds=timeout_seconds,
-            availability_check=True,
-            emit_availability=emit_diagnostic,
+            request_cancel=request_cancel,
+            dispose_result=dispose_result,
+            invocation_started=invocation_started,
+            invocation_finished=invocation_finished,
         )
 
     def check_mflux(
@@ -376,6 +483,10 @@ class AdapterWorkers(QObject):
             timeout_seconds=timeout_seconds,
             availability_check=True,
             emit_availability=emit_diagnostic,
+            request_cancel=None,
+            dispose_result=None,
+            invocation_started=None,
+            invocation_finished=None,
         )
 
     def shutdown(self, *, wait_milliseconds: int = 0) -> None:
@@ -385,12 +496,10 @@ class AdapterWorkers(QObject):
             records = tuple(self._records.values())
         for record in records:
             record.handle.cancel()
-        self._ollama_pool.clear()
         self._mflux_pool.clear()
         self._records.clear()
         self._deadline_timer.stop()
         if wait_milliseconds > 0:
-            self._ollama_pool.waitForDone(wait_milliseconds)
             self._mflux_pool.waitForDone(wait_milliseconds)
 
     def _submit(
@@ -402,6 +511,10 @@ class AdapterWorkers(QObject):
         timeout_seconds: float | None,
         availability_check: bool,
         emit_availability: bool,
+        request_cancel: Callable[[], None] | None,
+        dispose_result: Callable[[Any], None] | None,
+        invocation_started: Callable[[], None] | None,
+        invocation_finished: Callable[[], None] | None,
     ) -> WorkerOperation:
         if not callable(operation):
             raise TypeError("worker operation must be callable")
@@ -414,9 +527,9 @@ class AdapterWorkers(QObject):
             else _validate_timeout(timeout_seconds)
         )
         operation_id = uuid4()
-        cancel_event = Event()
+        cancellation = _CancellationControl(request_cancel)
         start_lock = Lock()
-        handle = WorkerOperation(operation_id, cancel_event, start_lock)
+        handle = WorkerOperation(operation_id, cancellation, start_lock)
         deadline = monotonic() + timeout
         with self._state_lock:
             if self._closed:
@@ -428,7 +541,7 @@ class AdapterWorkers(QObject):
                 timeout_seconds=timeout,
                 availability_check=availability_check,
                 emit_availability=emit_availability,
-                cancel_event=cancel_event,
+                cancellation=cancellation,
                 start_lock=start_lock,
                 deadline=deadline,
             )
@@ -436,14 +549,17 @@ class AdapterWorkers(QObject):
             runnable = _BoundedRunnable(
                 operation_id=operation_id,
                 operation=operation,
+                dispose_result=dispose_result,
+                invocation_started=invocation_started,
+                invocation_finished=invocation_finished,
                 deadline=deadline,
-                cancel_event=cancel_event,
+                cancellation=cancellation,
                 start_lock=start_lock,
                 invocation_slots=self._invocation_slots[adapter],
+                invocation_thread=self._invocation_thread,
                 dispatcher=self._dispatcher,
             )
-            pool = self._mflux_pool if adapter is AdapterKind.MFLUX else self._ollama_pool
-            pool.start(runnable)
+            self._mflux_pool.start(runnable)
         self._schedule_deadline()
         return handle
 
@@ -451,22 +567,27 @@ class AdapterWorkers(QObject):
     def _complete(self, operation_id: UUID, outcome: object) -> None:
         record = self._records.pop(operation_id, None)
         if record is None:
+            if isinstance(outcome, _Success):
+                outcome.dispose()
             return
         self._schedule_deadline()
         if record.handle.status is OperationStatus.CANCELLED:
+            if isinstance(outcome, _Success):
+                outcome.dispose()
             return
         if isinstance(outcome, _Success):
             record.handle._succeed(outcome.value)
             if record.emit_availability:
                 self._mark_available(record)
             return
+        if isinstance(outcome, _Timeout):
+            record.cancellation.request()
         failure = _failure_for(record, outcome)
         record.handle._fail(failure)
         if record.emit_availability and (
             record.availability_check
             or failure.kind
             in {
-                WorkerFailureKind.SERVICE_UNAVAILABLE,
                 WorkerFailureKind.MODEL_UNAVAILABLE,
                 WorkerFailureKind.MODEL_LOAD,
             }
@@ -487,7 +608,7 @@ class AdapterWorkers(QObject):
             if record is None:
                 continue
             with record.start_lock:
-                record.cancel_event.set()
+                record.cancellation.request()
             if record.handle.status is OperationStatus.CANCELLED:
                 continue
             failure = _failure_for(record, _Timeout())
@@ -547,7 +668,7 @@ def _validate_timeout(timeout_seconds: float) -> float:
 
 
 def _adapter_name(adapter: AdapterKind) -> str:
-    return "Ollama" if adapter is AdapterKind.OLLAMA else "MFLUX"
+    return "MFLUX"
 
 
 def _failure_for(record: _OperationRecord, outcome: object) -> WorkerFailure:
@@ -569,9 +690,7 @@ def _failure_for(record: _OperationRecord, outcome: object) -> WorkerFailure:
     assert isinstance(outcome, _Error)
     error = outcome.error
     kinds = (
-        (ServiceUnavailableError, WorkerFailureKind.SERVICE_UNAVAILABLE),
         (ModelUnavailableError, WorkerFailureKind.MODEL_UNAVAILABLE),
-        (ModelResponseError, WorkerFailureKind.MODEL_RESPONSE),
         (ModelLoadError, WorkerFailureKind.MODEL_LOAD),
         (ImageGenerationError, WorkerFailureKind.IMAGE_GENERATION),
     )

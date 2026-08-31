@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 from datetime import UTC, datetime
 from pathlib import Path
+from threading import Event
+from time import monotonic
 from types import SimpleNamespace
 from typing import Any
 from uuid import UUID, uuid4
@@ -12,42 +14,72 @@ from uuid import UUID, uuid4
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
+from PIL import Image
 from PySide6.QtCore import QObject, QSize, Qt, Signal
-from PySide6.QtGui import QCloseEvent, QColor, QPixmap
+from PySide6.QtGui import QCloseEvent, QColor, QKeySequence, QPixmap
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel
 
+import hotcards.generation.mflux_generator as mflux_module
 import hotcards.ui.main_window as main_window_module
+from hotcards.application.background_workflow import (
+    BackgroundGenerationSettings,
+    BackgroundWorkflow,
+)
 from hotcards.application.commands import (
     ActivateRevisionCommand,
+    CreateCardCommand,
+    CreateRefinedRevisionCommand,
     DeleteRevisionCommand,
     DuplicateRevisionCommand,
     RenameCardCommand,
     ReplaceRevisionBackgroundCommand,
-    SetRevisionImagePromptCommand,
 )
 from hotcards.application.document_controller import DocumentController
-from hotcards.application.document_session import DocumentSession, DocumentSessionState
+from hotcards.application.document_session import (
+    DocumentSession,
+    DocumentSessionError,
+    DocumentSessionState,
+)
 from hotcards.application.generated_revision_change import GeneratedRevisionChange
-from hotcards.application.workers import AdapterKind, AvailabilityDiagnostic
+from hotcards.application.workers import (
+    AdapterKind,
+    AdapterWorkers,
+    AvailabilityDiagnostic,
+)
+from hotcards.domain.image_dimensions import AspectRatio, ResolutionTier
 from hotcards.domain.models import (
     HYPERCARD_STYLE_ID,
     Card,
     CardRevision,
+    CurrentSourceSize,
+    DirectGenerateProvenance,
     GeneratedBackground,
+    GenerateInputs,
     HotspotConditions,
     HotspotKeyChanges,
     HotspotSet,
-    ImageGenerationInputs,
-    ImageGenerationMetadata,
-    ImagePrompt,
+    ImageOperationSettings,
+    ImageSourceSnapshot,
     Interaction,
     KeyDefinition,
     NavigateAction,
     Point,
     Polygon,
+    PresetOutputSize,
+    RefineProvenance,
+    RefineTransformation,
+    ResolvedCardReference,
     Stack,
+    StyleDefinition,
     UnresolvedCardReference,
+)
+from hotcards.generation.errors import ImageGenerationCancelled
+from hotcards.generation.mflux_generator import MfluxGenerator
+from hotcards.storage.stack_store import (
+    StackStore,
+    StackStoreError,
+    StackStoreTransactionError,
 )
 from hotcards.ui.card_sidebar import CardSidebar
 from hotcards.ui.main_window import MainWindow
@@ -91,20 +123,8 @@ class FakeWorkers(QObject):
 
     def __init__(self) -> None:
         super().__init__()
-        self.ollama_operations: list[FakeOperation] = []
         self.mflux_operations: list[FakeOperation] = []
         self.shutdown_calls = 0
-
-    def check_ollama(
-        self,
-        _check: object,
-        *,
-        emit_diagnostic: bool = True,
-    ) -> FakeOperation:
-        assert not emit_diagnostic
-        operation = FakeOperation()
-        self.ollama_operations.append(operation)
-        return operation
 
     def check_mflux(
         self,
@@ -117,34 +137,54 @@ class FakeWorkers(QObject):
         self.mflux_operations.append(operation)
         return operation
 
-    def run_ollama(self, _work: object, *, stage: str) -> FakeOperation:
-        assert stage == "preparing Image Prompt"
-        return FakeOperation()
-
     def shutdown(self, *, wait_milliseconds: int = 0) -> None:
         self.shutdown_calls += 1
 
 
 class FakeBackgroundWorkflow(QObject):
     busy_changed = Signal(bool)
+    invocation_active_changed = Signal(bool)
     progress_changed = Signal(str)
     generation_progress_changed = Signal(int, int)
     failed = Signal(object)
     document_changed = Signal(object)
     change_applied = Signal(str, object)
     generation_applied = Signal(object)
+    edit_instruction_clear_requested = Signal()
 
     def __init__(self, controller: DocumentController) -> None:
         super().__init__()
         self.controller = controller
         self.busy = False
+        self.invocation_active = False
+        self.active_operation: str | None = None
         self.generate_calls: list[object] = []
+        self.refine_calls: list[tuple[object, object, object]] = []
+        self.edit_calls: list[tuple[object, object, object]] = []
         self.clear_calls: list[object] = []
         self.cancel_calls = 0
         self.closed = False
 
     def generate(self, card_id: object) -> None:
         self.generate_calls.append(card_id)
+
+    def refine(
+        self,
+        card_id: object,
+        *,
+        transformation: object,
+        output_size: object,
+    ) -> None:
+        self.refine_calls.append((card_id, transformation, output_size))
+
+    def edit(
+        self,
+        card_id: object,
+        *,
+        instruction: object,
+        output_size: object,
+    ) -> None:
+        self.edit_calls.append((card_id, instruction, output_size))
 
     def clear_background(self, card_id: object) -> None:
         self.clear_calls.append(card_id)
@@ -182,11 +222,18 @@ class FakeBackgroundWorkflow(QObject):
             self.change_applied.emit("Revision deleted", token)
 
     def is_generating_for(self, _card_id: object) -> bool:
-        return self.busy
+        return self.busy and self.active_operation in {None, "generate"}
+
+    def is_refining_for(self, _card_id: object) -> bool:
+        return self.busy and self.active_operation == "refine"
+
+    def is_editing_for(self, _card_id: object) -> bool:
+        return self.busy and self.active_operation == "edit"
 
     def cancel(self) -> None:
         self.cancel_calls += 1
         self.busy = False
+        self.active_operation = None
 
     def close(self) -> None:
         self.closed = True
@@ -198,14 +245,8 @@ def application() -> QApplication:
 
 
 def _stack() -> Stack:
-    first = CardRevision(
-        description="First",
-        image_prompt=ImagePrompt(text="First prompt", source_description="First"),
-    )
-    second = CardRevision(
-        description="Second",
-        image_prompt=ImagePrompt(text="Second prompt", source_description="Second"),
-    )
+    first = CardRevision(description="First")
+    second = CardRevision(description="Second")
     card = Card(
         name="Foyer",
         revisions=(first, second),
@@ -224,20 +265,21 @@ def _generated_background(
     return GeneratedBackground(
         id=asset_id,
         image_path=image_path,
-        generation_metadata=ImageGenerationMetadata(
-            inputs=ImageGenerationInputs(
+        provenance=DirectGenerateProvenance(
+            inputs=GenerateInputs(
                 description=description,
-                image_prompt=description,
             ),
             render_prompt=description,
-            model_identifier="test",
-            mflux_version="test",
-            seed=1,
-            width=1024,
-            height=768,
-            step_count=4,
-            generated_at=generated_at,
-            duration_seconds=1,
+            settings=ImageOperationSettings(
+                model_identifier="test",
+                mflux_version="test",
+                seed=1,
+                width=512,
+                height=384,
+                step_count=4,
+                generated_at=generated_at,
+                duration_seconds=1,
+            ),
         ),
         created_at=generated_at,
     )
@@ -254,7 +296,6 @@ def _window(
         workers,  # type: ignore[arg-type]
         FakeSettings(),
         availability_checks={
-            AdapterKind.OLLAMA: lambda: None,
             AdapterKind.MFLUX: lambda: None,
         },
         background_workflow=background,  # type: ignore[arg-type]
@@ -278,6 +319,176 @@ def test_card_header_and_toolbar_match_revision_hierarchy(
     assert window.revision_combo.width() < 100
 
 
+def test_author_utility_windows_are_modeless_singletons_and_reopen(
+    application: QApplication,
+) -> None:
+    window, _controller, _workers, _background = _window()
+    window.show()
+    application.processEvents()
+
+    window.styles_button.click()
+    application.processEvents()
+    first_style_window = window.style_manager_window
+    assert first_style_window is not None
+    assert first_style_window.isVisible()
+    assert first_style_window.windowModality() == Qt.WindowModality.NonModal
+    assert window.save_action in first_style_window.actions()
+    shortcut_triggers: list[None] = []
+    window.save_action.triggered.connect(lambda: shortcut_triggers.append(None))
+    window.save_action.setEnabled(True)
+    first_style_window.name_edit.setFocus()
+    application.processEvents()
+    QTest.keySequence(
+        first_style_window.name_edit,
+        window.save_action.shortcut(),
+    )
+    application.processEvents()
+    assert shortcut_triggers == [None]
+
+    window.styles_button.click()
+    application.processEvents()
+    assert window.style_manager_window is first_style_window
+
+    first_style_window.close()
+    application.processEvents()
+    assert window.style_manager_window is None
+    assert MainWindow._STYLE_MANAGER_GEOMETRY_KEY in window.settings.values
+
+    window.styles_button.click()
+    window.keys_button.click()
+    application.processEvents()
+    assert window.style_manager_window is not None
+    assert window.style_manager_window is not first_style_window
+    assert window.key_manager_window is not None
+    assert window.key_manager_window.windowModality() == Qt.WindowModality.NonModal
+    window.close()
+    application.processEvents()
+
+
+def test_pending_durability_disables_utility_manager_mutations(
+    application: QApplication,
+) -> None:
+    key = KeyDefinition(name="Old")
+    window, controller, _workers, _background = _window(
+        Stack(name="Demo", keys=(key,), cards=(Card(name="Card"),))
+    )
+    window._show_style_manager()
+    window._show_key_manager()
+    style_manager = window.style_manager_window
+    key_manager = window.key_manager_window
+    assert style_manager is not None
+    assert key_manager is not None
+    key_manager.name_edit.setFocus()
+    application.processEvents()
+    key_manager.name_edit.setText("Draft")
+
+    def fail_indeterminate(candidate: Stack) -> None:
+        raise StackStoreTransactionError(
+            RuntimeError("manifest fsync failed"),
+            observed_stack=candidate,
+            durability_indeterminate=True,
+        )
+
+    with pytest.raises(StackStoreTransactionError):
+        controller.execute_persisted(
+            CreateCardCommand(name="Observed"),
+            fail_indeterminate,
+        )
+
+    window._session_state_changed(
+        DocumentSessionState(
+            bundle_path=Path("/tmp/Demo.hotcards"),
+            dirty=True,
+            error="save pending",
+            mutation_blocked=True,
+        )
+    )
+
+    assert not window.styles_button.isEnabled()
+    assert not window.keys_button.isEnabled()
+    assert not style_manager.add_button.isEnabled()
+    assert not style_manager.name_edit.isEnabled()
+    assert not key_manager.add_button.isEnabled()
+    assert not key_manager.name_edit.isEnabled()
+    assert key_manager.name_edit.text() == "Draft"
+    assert key_manager.error_label.isVisible()
+    window._close_utility_windows(commit_pending=False)
+    window.close()
+    application.processEvents()
+
+
+def test_utility_windows_close_on_project_replacement_without_stale_draft(
+    application: QApplication,
+) -> None:
+    window, controller, _workers, _background = _window()
+    window._show_style_manager()
+    manager = window.style_manager_window
+    assert manager is not None
+    manager.show()
+    manager.name_edit.setFocus()
+    application.processEvents()
+    manager.name_edit.setText("Old project draft")
+
+    existing_style = controller.document.styles[0]
+    replacement_style = StyleDefinition(
+        id=existing_style.id,
+        name="Replacement",
+        prompt_text="Replacement treatment.",
+    )
+    replacement = Stack(
+        name="Replacement",
+        styles=(replacement_style,),
+        new_card_style_id=None,
+        cards=(Card(name="New card"),),
+    )
+    controller.replace_document(replacement)
+    window._document_replaced(replacement)
+    application.processEvents()
+
+    assert window.style_manager_window is None
+    assert controller.document.styles == (replacement_style,)
+    window.close()
+    application.processEvents()
+
+
+def test_style_manager_updates_generate_selector_and_cancels_active_work(
+    application: QApplication,
+) -> None:
+    selected_style = StyleDefinition(
+        name="Ink",
+        prompt_text="Rendered in ink.",
+    )
+    card = Card(
+        name="Card",
+        revisions=(CardRevision(description="Scene", style_id=selected_style.id),),
+    )
+    window, controller, _workers, background = _window(
+        Stack(
+            name="Demo",
+            styles=(selected_style,),
+            new_card_style_id=selected_style.id,
+            cards=(card,),
+        )
+    )
+    background.busy = True
+    background.active_operation = "generate"
+    window._show_style_manager()
+    manager = window.style_manager_window
+    assert manager is not None
+
+    manager.show()
+    manager.name_edit.setFocus()
+    application.processEvents()
+    manager.name_edit.setText("Updated Style")
+    assert background.cancel_calls == 1
+    assert manager.commit_pending_edits(render_change=True)
+
+    assert controller.document.style_by_id(selected_style.id).name == "Updated Style"
+    assert window.inspector.style_combo.currentText() == "Updated Style"
+    window.close()
+    application.processEvents()
+
+
 def test_hotspot_rule_editor_scrolls_without_growing_the_window(
     application: QApplication,
 ) -> None:
@@ -292,23 +503,22 @@ def test_hotspot_rule_editor_scrolls_without_growing_the_window(
     )
     card = Card(
         name="Card",
-        revisions=(
-            CardRevision(hotspot_set=HotspotSet(interactions=(interaction,))),
-        ),
+        revisions=(CardRevision(hotspot_set=HotspotSet(interactions=(interaction,))),),
     )
     window, _controller, _workers, _background = _window(
         Stack(name="Demo", keys=keys, cards=(card,))
     )
-    window.inspector.inspector_tabs.setCurrentIndex(
-        window.inspector._hotspots_tab_index
-    )
-    window.resize(1180, 760)
+    window.inspector.inspector_tabs.setCurrentIndex(window.inspector._hotspots_tab_index)
+    window.resize(1180, 700)
     window.show()
     application.processEvents()
     try:
-        assert window.minimumSizeHint().height() <= 760
-        assert window.height() == 760
-        assert window.inspector.hotspot_rule_scroll.verticalScrollBar().maximum() > 0
+        assert window.minimumSizeHint().height() <= 700
+        assert window.height() == 700
+        assert window.inspector.hotspot_scroll.verticalScrollBar().maximum() > 0
+        assert window.card_sidebar.card_list.geometry().right() == (
+            window.card_sidebar.add_button.geometry().right()
+        )
     finally:
         window.close()
         application.processEvents()
@@ -322,6 +532,7 @@ def test_hotspot_rule_editor_scrolls_without_growing_the_window(
     )
     assert window.overlay_label.text() == "Hotspots"
     assert window.toolbar_leading_spacer.width() == 8
+    assert window.toolbar_trailing_spacer.width() == window.toolbar_leading_spacer.width()
     assert window.mode_button.text() == "Run"
     assert window.mode_button.toolTip() == "Switch to Run mode"
     toolbar_actions = window.authoring_toolbar.actions()
@@ -337,23 +548,33 @@ def test_hotspot_rule_editor_scrolls_without_growing_the_window(
     assert toolbar_actions.index(window.overlay_label_action) < (
         toolbar_actions.index(window.overlay_selector_action)
     )
-    assert window.back_button.font().pointSizeF() == (
-        window.mode_button.font().pointSizeF()
+    assert toolbar_actions.index(window.overlay_selector_action) < (
+        toolbar_actions.index(window.styles_button_action)
     )
-    assert window.restart_button.font().pointSizeF() == (
-        window.mode_button.font().pointSizeF()
+    assert toolbar_actions.index(window.mode_button_action) < (
+        toolbar_actions.index(window.author_action_spacer_action)
     )
-    assert window.back_button.sizeHint().height() >= (
-        window.mode_button.sizeHint().height()
+    assert toolbar_actions.index(window.author_action_spacer_action) < (
+        toolbar_actions.index(window.styles_button_action)
     )
-    assert window.restart_button.sizeHint().height() >= (
-        window.mode_button.sizeHint().height()
+    assert toolbar_actions.index(window.styles_button_action) < (
+        toolbar_actions.index(window.keys_button_action)
     )
+    assert toolbar_actions.index(window.keys_button_action) < (
+        toolbar_actions.index(window.toolbar_trailing_spacer_action)
+    )
+    assert window.back_button.font().pointSizeF() == (window.mode_button.font().pointSizeF())
+    assert window.restart_button.font().pointSizeF() == (window.mode_button.font().pointSizeF())
+    assert window.back_button.sizeHint().height() >= (window.mode_button.sizeHint().height())
+    assert window.restart_button.sizeHint().height() >= (window.mode_button.sizeHint().height())
     assert not window.run_controls_separator.isVisible()
     assert not window.run_overlay_separator.isVisible()
     assert not window.overlay_label_action.isVisible()
     assert not window.overlay_selector_action.isVisible()
-    assert not hasattr(window, "styles_button")
+    assert window.styles_button.text() == "Styles"
+    assert window.keys_button.text() == "Keys"
+    assert window.styles_button_action.isVisible()
+    assert window.keys_button_action.isVisible()
     assert not hasattr(window, "document_status_label")
     assert window.generation_progress_container.isHidden()
     margins = window.generation_progress_layout.contentsMargins()
@@ -361,14 +582,9 @@ def test_hotspot_rule_editor_scrolls_without_growing_the_window(
     assert margins.right() == 8
     assert window.generation_progress_layout.indexOf(
         window.generation_progress_bar
-    ) < window.generation_progress_layout.indexOf(
-        window.cancel_generation_button
-    )
+    ) < window.generation_progress_layout.indexOf(window.cancel_generation_button)
     cancel_spacing = window.generation_progress_layout.itemAt(
-        window.generation_progress_layout.indexOf(
-            window.cancel_generation_button
-        )
-        - 1
+        window.generation_progress_layout.indexOf(window.cancel_generation_button) - 1
     ).spacerItem()
     assert cancel_spacing is not None
     assert cancel_spacing.sizeHint().width() == 8
@@ -378,8 +594,9 @@ def test_hotspot_rule_editor_scrolls_without_growing_the_window(
     assert central_layout.indexOf(window.pane_splitter) < (
         central_layout.indexOf(window.notification_bar)
     )
-    assert window.inspector.inspector_tabs.tabText(0) == "Image"
-    assert window.fit_canvas_button.size() == window.clear_background_button.size()
+    assert window.inspector.inspector_tabs.tabText(0) == "Generate"
+    assert not hasattr(window, "fit_canvas_button")
+    assert not hasattr(window, "clear_background_button")
 
 
 def test_card_browser_uses_thumbnails_and_compact_action_row(
@@ -398,55 +615,488 @@ def test_card_browser_uses_thumbnails_and_compact_action_row(
         )
     )
     card = Card(name="Preview", revisions=(revision,))
-    controller = DocumentController(
-        Stack(name="Demo", cards=(card,), start_card_id=card.id)
-    )
+    controller = DocumentController(Stack(name="Demo", cards=(card,), start_card_id=card.id))
     sidebar = CardSidebar(
         controller,
         image_path_resolver=lambda _path: thumbnail_path,
     )
 
-    assert not any(
-        label.text() == "Cards" for label in sidebar.findChildren(QLabel)
-    )
+    assert not any(label.text() == "Cards" for label in sidebar.findChildren(QLabel))
     item = sidebar.card_list.item(0)
     icon = item.icon().pixmap(QSize(72, 48))
     assert icon.size() == QSize(72, 48)
     assert icon.toImage().pixelColor(10, 10) == QColor("red")
     assert not sidebar.start_button.icon().isNull()
-    assert sidebar.start_button.toolTip() == (
-        "Make the selected card the start card"
-    )
+    duplicate_icon = sidebar.duplicate_button.icon().pixmap(QSize(20, 20)).toImage()
+    assert duplicate_icon.pixelColor(4, 4).alpha() > 0
+    assert duplicate_icon.pixelColor(11, 11).alpha() == 0
+    assert duplicate_icon.pixelColor(16, 16).alpha() > 0
+    assert sidebar.start_button.toolTip() == ("Make the selected card the start card")
     assert sidebar.add_button.toolTip() == "Add a new card"
+    assert sidebar.duplicate_button.toolTip() == "Duplicate the selected card"
     assert sidebar.delete_button.toolTip() == "Delete the selected card"
     assert sidebar.card_actions.indexOf(sidebar.move_up_button) == 0
     assert sidebar.card_actions.indexOf(sidebar.move_down_button) == 1
     assert sidebar.card_actions.indexOf(sidebar.start_button) == 3
-    assert sidebar.card_actions.indexOf(sidebar.delete_button) == 4
-    assert sidebar.card_actions.indexOf(sidebar.add_button) == 5
+    assert sidebar.card_actions.indexOf(sidebar.duplicate_button) == 4
+    assert sidebar.card_actions.indexOf(sidebar.delete_button) == 5
+    assert sidebar.card_actions.indexOf(sidebar.add_button) == 6
     control_sizes = {
         button.size()
         for button in (
             sidebar.move_up_button,
             sidebar.move_down_button,
             sidebar.start_button,
+            sidebar.duplicate_button,
             sidebar.add_button,
             sidebar.delete_button,
         )
     }
     assert len(control_sizes) == 1
-    assert sidebar.add_button.font().pointSizeF() > (
-        sidebar.move_up_button.font().pointSizeF()
+    assert sidebar.add_button.font().pointSizeF() > (sidebar.move_up_button.font().pointSizeF())
+
+
+def test_duplicate_card_sidebar_action_commits_cancels_and_restores_selection(
+    application: QApplication,
+    tmp_path: Path,
+) -> None:
+    leading = Card(name="Leading")
+    source = Card(name="Source")
+    stack = Stack(
+        name="Demo",
+        cards=(leading, source),
+        start_card_id=leading.id,
     )
+    controller = DocumentController(stack)
+    session = DocumentSession(controller)
+    session.create(stack, tmp_path / "Demo.hotcards")
+    workers = FakeWorkers()
+    background = FakeBackgroundWorkflow(controller)
+    window = MainWindow(
+        controller,
+        workers,  # type: ignore[arg-type]
+        FakeSettings(),
+        availability_checks={AdapterKind.MFLUX: lambda: None},
+        document_session=session,
+        background_workflow=background,  # type: ignore[arg-type]
+        start_diagnostics=False,
+    )
+    window.select_card(source.id)
+    window.canvas_card_name.setText("Renamed")
+    window.inspector.description_edit.setPlainText("Committed before copy")
+    background.busy = True
+
+    window.card_sidebar.duplicate_button.click()
+
+    changed = controller.document
+    assert [card.name for card in changed.cards] == [
+        "Leading",
+        "Renamed",
+        "Renamed Copy",
+    ]
+    duplicate = changed.cards[2]
+    assert duplicate.active_revision.description == "Committed before copy"
+    assert background.cancel_calls == 1
+    assert window.card_sidebar.selected_card_id == duplicate.id
+    assert window.notification_bar.message_label.text() == "Card duplicated"
+    assert not window.notification_bar.primary_button.isHidden()
+    duplicate_id = duplicate.id
+
+    window.notification_bar.primary_button.click()
+    assert [card.name for card in controller.document.cards] == [
+        "Leading",
+        "Renamed",
+    ]
+    assert window.card_sidebar.selected_card_id == source.id
+
+    window.redo()
+    assert controller.document.cards[2].id == duplicate_id
+    assert window.card_sidebar.selected_card_id == duplicate_id
+    window.close()
+
+
+def test_duplicate_card_shortcut_is_author_only(
+    application: QApplication,
+    tmp_path: Path,
+) -> None:
+    source = Card(name="Source")
+    stack = Stack(name="Demo", cards=(source,), start_card_id=source.id)
+    controller = DocumentController(stack)
+    session = DocumentSession(controller)
+    session.create(stack, tmp_path / "Demo.hotcards")
+    window = MainWindow(
+        controller,
+        FakeWorkers(),  # type: ignore[arg-type]
+        FakeSettings(),
+        availability_checks={AdapterKind.MFLUX: lambda: None},
+        document_session=session,
+        background_workflow=FakeBackgroundWorkflow(controller),  # type: ignore[arg-type]
+        start_diagnostics=False,
+    )
+
+    assert (
+        window.duplicate_card_action.shortcut().toString(QKeySequence.SequenceFormat.PortableText)
+        == "Ctrl+D"
+    )
+    assert window.duplicate_card_action.isEnabled()
+    window.duplicate_card_action.trigger()
+    assert [card.name for card in controller.document.cards] == [
+        "Source",
+        "Source Copy",
+    ]
+
+    window.mode_button.click()
+    assert window._is_running
+    assert not window.duplicate_card_action.isEnabled()
+    assert window.card_sidebar.isHidden()
+    window.duplicate_card_action.trigger()
+    assert len(controller.document.cards) == 2
+    window.close()
+
+
+def test_pending_duplicate_durability_blocks_ui_until_save_retry(
+    application: QApplication,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = Card(name="Source")
+    stack = Stack(name="Demo", cards=(source,), start_card_id=source.id)
+    controller = DocumentController(stack)
+    session = DocumentSession(controller)
+    session.create(stack, tmp_path / "Demo.hotcards")
+    window = MainWindow(
+        controller,
+        FakeWorkers(),  # type: ignore[arg-type]
+        FakeSettings(),
+        availability_checks={AdapterKind.MFLUX: lambda: None},
+        document_session=session,
+        background_workflow=FakeBackgroundWorkflow(controller),  # type: ignore[arg-type]
+        start_diagnostics=False,
+    )
+
+    def fail_indeterminate(candidate: Stack) -> None:
+        raise StackStoreTransactionError(
+            RuntimeError("manifest directory fsync failed"),
+            observed_stack=candidate,
+            durability_indeterminate=True,
+        )
+
+    with pytest.raises(DocumentSessionError, match="durability remains indeterminate"):
+        session.execute_persisted(
+            CreateCardCommand(name="Source Copy"),
+            persist=fail_indeterminate,
+        )
+    window.render_document()
+
+    assert controller.mutation_blocked
+    assert session.state.mutation_blocked
+    assert session.state.dirty
+    assert window.notification_bar.message_label.text() == "Save required before editing"
+    assert not window.undo_action.isEnabled()
+    assert not window.redo_action.isEnabled()
+    assert not window.duplicate_card_action.isEnabled()
+    assert not window.card_sidebar.add_button.isEnabled()
+    assert not window.card_sidebar.delete_button.isEnabled()
+    assert not window.inspector.isEnabled()
+    assert window.canvas_card_name.isReadOnly()
+    assert not window.revision_combo.isEnabled()
+    assert not window.add_revision_button.isEnabled()
+    assert not window.inspector.generate_background_button.isEnabled()
+    assert window.card_sidebar.card_list.isEnabled()
+    window.card_sidebar.card_list.setCurrentRow(1)
+    assert window.card_sidebar.selected_card_id == controller.document.cards[1].id
+
+    pending_document = controller.document
+    window.undo()
+    assert controller.document == pending_document
+    assert window.notification_bar.message_label.text() == "Save required before editing"
+
+    replacement_store = StackStore(tmp_path / "Replacement.hotcards")
+    replacement_store.create(Stack(name="Replacement"))
+    assert session.store is not None
+    real_save = session.store.save
+
+    def fail_save(_stack: Stack) -> None:
+        raise StackStoreError("retry storage unavailable")
+
+    monkeypatch.setattr(session.store, "save", fail_save)
+    with pytest.raises(DocumentSessionError, match="retry storage unavailable"):
+        session.open(replacement_store.bundle_path)
+    assert controller.document == pending_document
+    assert controller.mutation_blocked
+
+    monkeypatch.setattr(window, "_ask_retry_failed_close_save", lambda _message: False)
+    close_event = QCloseEvent()
+    window.closeEvent(close_event)
+    assert not close_event.isAccepted()
+    assert controller.mutation_blocked
+
+    monkeypatch.setattr(session.store, "save", real_save)
+    assert window.save_document()
+    assert not controller.mutation_blocked
+    assert not session.state.mutation_blocked
+    assert not session.state.dirty
+    assert window.undo_action.isEnabled()
+    assert window.duplicate_card_action.isEnabled()
+    assert window.inspector.isEnabled()
+    assert not window.canvas_card_name.isReadOnly()
+    window.close()
+
+
+def test_save_resolves_pending_then_persists_utility_draft(
+    application: QApplication,
+    tmp_path: Path,
+) -> None:
+    stack = Stack(name="Demo", cards=(Card(name="Source"),))
+    controller = DocumentController(stack)
+    session = DocumentSession(controller)
+    session.create(stack, tmp_path / "Demo.hotcards")
+    window = MainWindow(
+        controller,
+        FakeWorkers(),  # type: ignore[arg-type]
+        FakeSettings(),
+        availability_checks={AdapterKind.MFLUX: lambda: None},
+        document_session=session,
+        background_workflow=FakeBackgroundWorkflow(controller),  # type: ignore[arg-type]
+        start_diagnostics=False,
+    )
+    window._show_style_manager()
+    manager = window.style_manager_window
+    assert manager is not None
+    manager.name_edit.setFocus()
+    application.processEvents()
+    manager.name_edit.setText("Draft Style")
+
+    def fail_indeterminate(candidate: Stack) -> None:
+        raise StackStoreTransactionError(
+            RuntimeError("manifest fsync failed"),
+            observed_stack=candidate,
+            durability_indeterminate=True,
+        )
+
+    with pytest.raises(DocumentSessionError, match="durability remains indeterminate"):
+        session.execute_persisted(
+            CreateCardCommand(name="Observed"),
+            persist=fail_indeterminate,
+        )
+
+    assert controller.mutation_blocked
+    assert manager.name_edit.text() == "Draft Style"
+    assert window.save_document()
+
+    assert not controller.mutation_blocked
+    assert controller.document.styles[0].name == "Draft Style"
+    assert session.store is not None
+    assert session.store.load().styles[0].name == "Draft Style"
+    window.close()
+
+
+def test_pending_refine_renders_authoritative_revision_and_promotes_undo(
+    application: QApplication,
+    tmp_path: Path,
+) -> None:
+    store = StackStore(tmp_path / "Refine.hotcards")
+    card = Card(name="Source")
+    source_asset_id = uuid4()
+    source_png = tmp_path / "source.png"
+    Image.new("RGB", (512, 384), "navy").save(source_png, format="PNG")
+    source_image_path = store.store_image_asset(
+        source_png,
+        card_id=card.id,
+        asset_id=source_asset_id,
+    )
+    source_revision = CardRevision(
+        description="Source description",
+        background=_generated_background(
+            asset_id=source_asset_id,
+            image_path=source_image_path,
+        ),
+    )
+    card = card.model_copy(
+        update={
+            "revisions": (source_revision,),
+            "active_revision_id": source_revision.id,
+        }
+    )
+    stack = Stack(name="Demo", cards=(card,), start_card_id=card.id)
+    store.create(stack)
+    controller = DocumentController(Stack(name="Welcome"))
+    session = DocumentSession(controller)
+    session.open(store.bundle_path)
+    background = FakeBackgroundWorkflow(controller)
+    window = MainWindow(
+        controller,
+        FakeWorkers(),  # type: ignore[arg-type]
+        FakeSettings(),
+        availability_checks={AdapterKind.MFLUX: lambda: None},
+        document_session=session,
+        background_workflow=background,  # type: ignore[arg-type]
+        start_diagnostics=False,
+    )
+    refined_asset_id = uuid4()
+    refined_png = tmp_path / "refined.png"
+    Image.new("RGB", (768, 576), "teal").save(refined_png, format="PNG")
+    refined_image_path = store.store_image_asset(
+        refined_png,
+        card_id=card.id,
+        asset_id=refined_asset_id,
+    )
+    direct = source_revision.background
+    assert direct is not None
+    refined_background = GeneratedBackground(
+        id=refined_asset_id,
+        image_path=refined_image_path,
+        provenance=RefineProvenance(
+            source=ImageSourceSnapshot(
+                card_id=card.id,
+                revision_id=source_revision.id,
+                background_id=source_asset_id,
+            ),
+            description=source_revision.description,
+            render_prompt=source_revision.description,
+            output_size=PresetOutputSize(tier=ResolutionTier.LARGE),
+            transformation=RefineTransformation.BALANCED,
+            strength=0.5,
+            settings=direct.provenance.settings.model_copy(update={"width": 768, "height": 576}),
+        ),
+        created_at=direct.created_at,
+    )
+
+    def fail_indeterminate(candidate: Stack) -> None:
+        raise StackStoreTransactionError(
+            RuntimeError("manifest directory fsync failed"),
+            observed_stack=candidate,
+            durability_indeterminate=True,
+        )
+
+    with pytest.raises(DocumentSessionError, match="durability remains indeterminate"):
+        session.execute_persisted(
+            CreateRefinedRevisionCommand(
+                card_id=card.id,
+                source_revision_id=source_revision.id,
+                background=refined_background,
+            ),
+            persist=fail_indeterminate,
+        )
+    background.document_changed.emit(controller.document)
+
+    assert controller.mutation_blocked
+    assert window.revision_combo.currentText() == "2"
+    assert window.inspector.description_edit.toPlainText() == source_revision.description
+    assert window.card_canvas._current_image == store.asset_path(refined_image_path).resolve()
+    assert not window.undo_action.isEnabled()
+
+    assert window.save_document()
+    assert not controller.mutation_blocked
+    assert window.revision_combo.currentText() == "2"
+    assert window.undo_action.isEnabled()
+    window.undo()
+    assert controller.document.cards[0].active_revision == source_revision
+    assert window.revision_combo.currentText() == "1"
+    window.close()
+
+
+def test_open_candidate_validation_failure_preserves_active_ui_session(
+    application: QApplication,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = Card(name="First")
+    second = Card(name="Second")
+    stack = Stack(
+        name="Active",
+        cards=(first, second),
+        start_card_id=first.id,
+    )
+    controller = DocumentController(stack)
+    session = DocumentSession(controller)
+    session.create(stack, tmp_path / "Active.hotcards")
+    window = MainWindow(
+        controller,
+        FakeWorkers(),  # type: ignore[arg-type]
+        FakeSettings(),
+        availability_checks={AdapterKind.MFLUX: lambda: None},
+        document_session=session,
+        background_workflow=FakeBackgroundWorkflow(controller),  # type: ignore[arg-type]
+        start_diagnostics=False,
+    )
+    window.select_card(second.id)
+    controller.execute(RenameCardCommand(card_id=first.id, name="Pending edit"))
+    window.render_document()
+    before_document = controller.document
+    before_store = session.store
+    before_state = session.state
+    before_token = controller.current_undo_token
+    before_selection = window.card_sidebar.selected_card_id
+    candidate_path = tmp_path / "Candidate.hotcards"
+
+    monkeypatch.setattr(
+        main_window_module.QFileDialog,
+        "getExistingDirectory",
+        lambda *_args, **_kwargs: str(candidate_path),
+    )
+
+    def reject_candidate(_path: Path) -> Stack:
+        raise DocumentSessionError(
+            "could not securely open owned image: symbolic links are not allowed"
+        )
+
+    monkeypatch.setattr(session, "open", reject_candidate)
+
+    window.open_stack()
+
+    assert controller.document == before_document
+    assert controller.current_undo_token == before_token
+    assert session.store is before_store
+    assert session.state == before_state
+    assert window.card_sidebar.selected_card_id == before_selection
+    assert window.notification_bar.message_label.text() == "Could Not Open Stack"
+    notification = window.notification_bar.current_notification
+    assert notification is not None
+    assert "symbolic links are not allowed" in notification.detail
+
+    controller.execute(RenameCardCommand(card_id=second.id, name="Still active"))
+    assert session.flush()
+    assert before_store is not None
+    assert before_store.load() == controller.document
+    window.close()
+
+
+def test_close_reports_owned_asset_cleanup_failure_without_blocking(
+    application: QApplication,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = Card(name="Source")
+    stack = Stack(name="Demo", cards=(source,), start_card_id=source.id)
+    controller = DocumentController(stack)
+    session = DocumentSession(controller)
+    session.create(stack, tmp_path / "Demo.hotcards")
+    background = FakeBackgroundWorkflow(controller)
+    window = MainWindow(
+        controller,
+        FakeWorkers(),  # type: ignore[arg-type]
+        FakeSettings(),
+        availability_checks={AdapterKind.MFLUX: lambda: None},
+        document_session=session,
+        background_workflow=background,  # type: ignore[arg-type]
+        start_diagnostics=False,
+    )
+    monkeypatch.setattr(session, "close_history", lambda: False)
+    event = QCloseEvent()
+
+    window.closeEvent(event)
+
+    assert event.isAccepted()
+    assert background.closed
+    assert window.notification_bar.message_label.text() == ("Could Not Clean Up Stack")
 
 
 def test_selecting_scrolled_card_survives_focus_out_render(
     application: QApplication,
 ) -> None:
     cards = tuple(Card(name=f"Card {number}") for number in range(20))
-    window, _controller, _workers, _background = _window(
-        Stack(name="Demo", cards=cards)
-    )
+    window, _controller, _workers, _background = _window(Stack(name="Demo", cards=cards))
     window.resize(900, 500)
     window.show()
     application.processEvents()
@@ -601,6 +1251,55 @@ def test_revision_selection_duplicate_delete_and_undo(
     assert card.id == controller.document.cards[0].id
 
 
+def test_revision_selection_synchronizes_generate_output_size(
+    application: QApplication,
+) -> None:
+    first = CardRevision(generate_output_size=PresetOutputSize(tier=ResolutionTier.SMALL))
+    second = CardRevision(generate_output_size=PresetOutputSize(tier=ResolutionTier.FULL))
+    card = Card(
+        name="Card",
+        revisions=(first, second),
+        active_revision_id=first.id,
+    )
+    window, controller, _workers, _background = _window(Stack(name="Demo", cards=(card,)))
+
+    assert window.inspector.resolution_combo.currentData() == PresetOutputSize(
+        tier=ResolutionTier.SMALL
+    )
+    window.revision_combo.setCurrentIndex(1)
+
+    assert controller.document.cards[0].active_revision_id == second.id
+    assert window.inspector.resolution_combo.currentData() == PresetOutputSize(
+        tier=ResolutionTier.FULL
+    )
+
+
+def test_revision_copy_and_notification_mutations_cancel_generation(
+    application: QApplication,
+) -> None:
+    window, controller, _workers, background = _window()
+
+    background.busy = True
+    window.add_revision_button.click()
+    assert background.cancel_calls == 1
+
+    original_resolution = controller.document.cards[0].active_revision.generate_output_size
+    window.inspector.resolution_combo.setCurrentIndex(
+        window.inspector._combo_index_for_data(
+            window.inspector.resolution_combo,
+            PresetOutputSize(tier=ResolutionTier.FULL),
+        )
+    )
+    token = controller.current_undo_token
+    assert token is not None
+    window._show_undo_notification("Generate output size changed", token)
+    background.busy = True
+    window._undo_notification()
+
+    assert background.cancel_calls == 2
+    assert controller.document.cards[0].active_revision.generate_output_size == original_resolution
+
+
 def test_final_revision_cannot_be_deleted(
     application: QApplication,
 ) -> None:
@@ -631,11 +1330,7 @@ def test_card_delete_ignores_destinationless_hotspots(
     destination = Card(name="Destination")
     source = Card(
         name="Source",
-        revisions=(
-            CardRevision(
-                hotspot_set=HotspotSet(interactions=(Interaction(),))
-            ),
-        ),
+        revisions=(CardRevision(hotspot_set=HotspotSet(interactions=(Interaction(),))),),
     )
     window, controller, _workers, _background = _window(
         Stack(
@@ -650,6 +1345,48 @@ def test_card_delete_ignores_destinationless_hotspots(
     assert [card.id for card in controller.document.cards] == [source.id]
 
 
+def test_card_delete_reports_image_source_dependencies(
+    application: QApplication,
+) -> None:
+    source_background = _generated_background(
+        asset_id=uuid4(),
+        image_path="assets/cards/source.png",
+    )
+    source_revision = CardRevision(background=source_background)
+    source_card = Card(name="Source", revisions=(source_revision,))
+    derived_background = GeneratedBackground(
+        image_path="assets/cards/derived.png",
+        provenance=RefineProvenance(
+            source=ImageSourceSnapshot(
+                card_id=source_card.id,
+                revision_id=source_revision.id,
+                background_id=source_background.id,
+            ),
+            description="A refined source image",
+            render_prompt="A refined source image",
+            output_size=PresetOutputSize(tier=ResolutionTier.MEDIUM),
+            transformation=RefineTransformation.BALANCED,
+            strength=0.50,
+            settings=source_background.provenance.settings,
+        ),
+        created_at=datetime.now(UTC),
+    )
+    derived_card = Card(
+        name="Derived",
+        revisions=(CardRevision(background=derived_background),),
+    )
+    window, controller, _workers, _background = _window(
+        Stack(name="Demo", cards=(source_card, derived_card))
+    )
+
+    window._delete_card(source_card.id)
+
+    assert controller.document.cards == (source_card, derived_card)
+    assert window.notification_bar.current_key == "card-error"
+    assert window.notification_bar.message_label.text() == "Could not delete card"
+    assert "Derived" in window.notification_bar.toolTip()
+
+
 def test_context_change_cancels_background_generation_without_prompt(
     application: QApplication,
 ) -> None:
@@ -659,6 +1396,89 @@ def test_context_change_cancels_background_generation_without_prompt(
     window._cancel_background_generation()
     assert background.cancel_calls == 1
     assert not background.busy
+
+
+def test_resolution_change_cancels_in_flight_generation(
+    application: QApplication,
+) -> None:
+    window, controller, _workers, background = _window()
+    background.busy = True
+
+    window.inspector.resolution_combo.setCurrentIndex(
+        window.inspector._combo_index_for_data(
+            window.inspector.resolution_combo,
+            PresetOutputSize(tier=ResolutionTier.FULL),
+        )
+    )
+
+    assert background.cancel_calls == 1
+    assert not background.busy
+    assert controller.document.cards[0].active_revision.generate_output_size == PresetOutputSize(
+        tier=ResolutionTier.FULL
+    )
+    assert isinstance(window.settings, FakeSettings)
+    assert all("resolution" not in key for key in window.settings.values)
+
+
+def test_description_style_and_reference_changes_cancel_in_flight_generation(
+    application: QApplication,
+) -> None:
+    style = StyleDefinition(name="Ink", prompt_text="Rendered in ink.")
+    source = Card(name="Source")
+    reference = Card(name="Reference")
+    window, controller, _workers, background = _window(
+        Stack(
+            name="Demo",
+            styles=(style,),
+            new_card_style_id=None,
+            cards=(source, reference),
+        )
+    )
+
+    background.busy = True
+    window.inspector.description_edit.setPlainText("Changed")
+    background.busy = True
+    window.inspector.style_combo.setCurrentIndex(
+        window.inspector._combo_index_for_data(
+            window.inspector.style_combo,
+            style.id,
+        )
+    )
+    background.busy = True
+    window.inspector.reference_combo.setCurrentIndex(
+        window.inspector._combo_index_for_data(
+            window.inspector.reference_combo,
+            reference.id,
+        )
+    )
+
+    revision = controller.document.cards[0].active_revision
+    assert background.cancel_calls == 3
+    assert revision.style_id == style.id
+    assert revision.references == (ResolvedCardReference(target_card_id=reference.id),)
+
+
+def test_card_and_revision_changes_cancel_in_flight_generation(
+    application: QApplication,
+) -> None:
+    first = Card(
+        name="First",
+        revisions=(CardRevision(), CardRevision()),
+    )
+    second = Card(name="Second")
+    window, _controller, _workers, background = _window(Stack(name="Demo", cards=(first, second)))
+    background.busy = True
+
+    window.select_card(second.id)
+
+    assert background.cancel_calls == 1
+    background.busy = True
+    window.select_card(first.id)
+    revision_id = first.revisions[1].id
+    background.busy = True
+    window._activate_revision(revision_id)
+
+    assert background.cancel_calls == 3
 
 
 def test_successful_save_as_cancels_generation_and_expires_undo(
@@ -694,17 +1514,9 @@ def test_successful_save_as_cancels_generation_and_expires_undo(
             "HotCards Stack (*.hotcards)",
         ),
     )
-    prompt_cancellations: list[bool] = []
-    monkeypatch.setattr(
-        window.image_prompt_workflow,
-        "cancel",
-        lambda: prompt_cancellations.append(True),
-    )
-
     window.save_as()
 
     assert background.cancel_calls == 1
-    assert prompt_cancellations == [True]
     assert window.notification_bar.current_key != "undo"
     assert not controller.can_undo
 
@@ -740,21 +1552,26 @@ def test_failed_style_focus_commit_blocks_save(
         flush=lambda: flush_calls.append(True) or True,
     )
     style = controller.document.styles[0]
-    window.inspector.inspector_tabs.setCurrentIndex(
-        window.inspector._styles_tab_index
-    )
-    window.inspector.style_name_edit.setFocus()
-    window.inspector.style_name_edit.setText("")
+    window._show_style_manager()
+    manager = window.style_manager_window
+    assert manager is not None
+    manager.name_edit.setFocus()
+    manager.name_edit.setText("")
 
-    window.inspector._style_editing_finished(
+    manager._editing_finished(
         window,
-        Qt.FocusReason.MouseFocusReason,
+        Qt.FocusReason.ActiveWindowFocusReason,
     )
 
-    assert window.inspector.style_name_edit.text() == ""
+    assert manager.name_edit.text() == ""
     assert not window.save_document()
     assert flush_calls == []
     assert controller.document.style_by_id(style.id) == style
+    manager.name_edit.setText(style.name)
+    assert manager.commit_pending_edits(render_change=False)
+    window.document_session = None
+    window.close()
+    application.processEvents()
 
 
 def test_author_and_run_modes_apply_consistent_read_only_chrome(
@@ -789,10 +1606,14 @@ def test_author_and_run_modes_apply_consistent_read_only_chrome(
     assert window.overlay_label_action.isVisible()
     assert window.overlay_selector_action.isVisible()
     assert not window.overlay_selector.isHidden()
-    assert window.llm_model_label.isHidden()
-    assert window.llm_model_combo.isHidden()
+    assert not hasattr(window, "llm_model_label")
+    assert not hasattr(window, "llm_model_combo")
     assert window.image_model_label.isHidden()
     assert window.image_model_combo.isHidden()
+    assert window.styles_button.isHidden()
+    assert window.keys_button.isHidden()
+    assert window.style_manager_window is None
+    assert window.key_manager_window is None
 
     window.mode_button.click()
     application.processEvents()
@@ -804,10 +1625,10 @@ def test_author_and_run_modes_apply_consistent_read_only_chrome(
     assert not window.revision_combo.isHidden()
     assert window.revision_combo.isEnabled()
     assert not window.add_revision_button.isHidden()
-    assert not window.llm_model_label.isHidden()
-    assert not window.llm_model_combo.isHidden()
     assert not window.image_model_label.isHidden()
     assert not window.image_model_combo.isHidden()
+    assert not window.styles_button.isHidden()
+    assert not window.keys_button.isHidden()
     assert not window.run_controls_separator.isVisible()
     assert not window.run_overlay_separator.isVisible()
     assert not window.back_action.isVisible()
@@ -828,23 +1649,16 @@ def test_status_bar_is_passive_and_ai_recovery_uses_notification_bar(
     window, controller, _workers, _background = _window()
     window.apply_availability_diagnostic(
         AvailabilityDiagnostic(
-            adapter=AdapterKind.OLLAMA,
-            available=False,
-            message="Ollama is unavailable",
-        )
-    )
-    window.apply_availability_diagnostic(
-        AvailabilityDiagnostic(
             adapter=AdapterKind.MFLUX,
-            available=True,
-            message="MFLUX is available",
+            available=False,
+            message="MFLUX is unavailable",
         )
     )
 
     assert not hasattr(window, "check_services_button")
     assert not hasattr(window, "review_settings_button")
     assert not hasattr(window, "service_status_label")
-    assert "Ollama is unavailable" in window.llm_model_combo.toolTip()
+    assert "MFLUX is unavailable" in window.image_model_combo.toolTip()
     assert window.notification_bar.current_key == "ai-services"
     assert window.notification_bar.primary_button.text() == "Settings"
     assert window.notification_bar.secondary_button.text() == "Check Again"
@@ -852,16 +1666,16 @@ def test_status_bar_is_passive_and_ai_recovery_uses_notification_bar(
     window.notification_bar.dismiss_current()
     window.apply_availability_diagnostic(
         AvailabilityDiagnostic(
-            adapter=AdapterKind.OLLAMA,
+            adapter=AdapterKind.MFLUX,
             available=True,
-            message="Ollama is available",
+            message="MFLUX is available",
         )
     )
     window.apply_availability_diagnostic(
         AvailabilityDiagnostic(
-            adapter=AdapterKind.OLLAMA,
+            adapter=AdapterKind.MFLUX,
             available=False,
-            message="Ollama is unavailable again",
+            message="MFLUX is unavailable again",
         )
     )
     assert window.notification_bar.current_key == "ai-services"
@@ -882,80 +1696,177 @@ def test_bottom_model_selectors_persist_and_follow_operation_state(
     settings = window.settings
     assert isinstance(settings, FakeSettings)
 
-    window._availability_check_succeeded(
-        AdapterKind.OLLAMA,
-        window._diagnostic_generation,
-        ("llama3.2:latest", "qwen3.5:9b-mlx"),
-    )
-    assert [
-        window.llm_model_combo.itemData(index)
-        for index in range(window.llm_model_combo.count())
-    ] == ["llama3.2:latest", "qwen3.5:9b-mlx"]
-    window.llm_model_combo.setCurrentIndex(
-        window.llm_model_combo.findData("llama3.2:latest")
-    )
-    assert settings.values["services/ollama_model"] == "llama3.2:latest"
-
-    window.image_model_combo.setCurrentIndex(
-        window.image_model_combo.findData("flux2-klein-9b-kv")
-    )
+    window.image_model_combo.setCurrentIndex(window.image_model_combo.findData("flux2-klein-9b-kv"))
     assert settings.values["generation/mflux_model"] == "flux2-klein-9b-kv"
     assert window.image_model_combo.currentText() == "FLUX.2 Klein 9B KV"
-    assert window.image_model_combo.toolTip() == window.llm_model_combo.toolTip()
-
-    background.busy = True
-    window.image_prompt_workflow._busy = False
-    window._update_generation_actions()
-    assert not window.llm_model_combo.isEnabled()
-    assert not window.image_model_combo.isEnabled()
-
-    window._availability_check_succeeded(
-        AdapterKind.OLLAMA,
-        window._diagnostic_generation,
-        ("qwen3.5:9b-mlx",),
-    )
     assert background.cancel_calls == 1
-    assert settings.values["services/ollama_model"] == "qwen3.5:9b-mlx"
 
-    window._availability_check_succeeded(
-        AdapterKind.OLLAMA,
-        window._diagnostic_generation,
-        ("llama3.2:latest", "qwen3.5:9b-mlx"),
-    )
     background.busy = True
-    window._llm_model_changed(
-        window.llm_model_combo.findData("llama3.2:latest")
-    )
-    assert background.cancel_calls == 2
-    assert settings.values["services/ollama_model"] == "llama3.2:latest"
+    window._update_generation_actions()
+    assert not window.image_model_combo.isEnabled()
 
     background.busy = False
-    window.image_prompt_workflow._busy = False
     window.mode_button.click()
-    assert not window.llm_model_combo.isEnabled()
     assert not window.image_model_combo.isEnabled()
 
 
-def test_generation_failure_keeps_current_image_prompt_reusable(
+def test_timed_out_mflux_model_change_and_window_close_never_block_qt_thread(
     application: QApplication,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    revision = CardRevision(
-        description="A courtyard",
-        image_prompt=ImagePrompt(
-            text="A prepared courtyard",
-            source_description="A courtyard",
-            model_identifier="qwen3.5:9b-mlx",
-            prompt_version=main_window_module.IMAGE_PROMPT_PREPARATION_VERSION,
+    entered = Event()
+    release = Event()
+    unwound = Event()
+    cache_released = Event()
+
+    class CallbackRegistry:
+        def __init__(self) -> None:
+            self.registered: list[object] = []
+
+        def register(self, callback: object) -> None:
+            self.registered.append(callback)
+
+    class BlockingModel:
+        def __init__(self) -> None:
+            self.callbacks = CallbackRegistry()
+
+        def generate_image(self, **kwargs: object) -> object:
+            config = SimpleNamespace(num_inference_steps=kwargs["num_inference_steps"])
+            for callback in self.callbacks.registered:
+                callback.call_before_loop(config=config)
+            entered.set()
+            try:
+                assert release.wait(2)
+                for callback in self.callbacks.registered:
+                    callback.call_in_loop()
+            except ImageGenerationCancelled:
+                raise
+            finally:
+                unwound.set()
+            raise AssertionError("cancelled MFLUX inference returned")
+
+    def release_cache() -> None:
+        assert unwound.is_set()
+        cache_released.set()
+
+    monkeypatch.setattr(mflux_module, "_CACHED_MODEL", None)
+    mflux_module._DEFERRED_RELEASES.clear()
+    monkeypatch.setattr(mflux_module, "_release_model_cache", release_cache)
+    revision = CardRevision(description="A blocked image")
+    card = Card(name="Blocked", revisions=(revision,))
+    controller = DocumentController(Stack(name="Blocked", cards=(card,)))
+    session = DocumentSession(controller)
+    session.create(controller.document, tmp_path / "Blocked.hotcards")
+    workers = AdapterWorkers(mflux_timeout_seconds=0.05)
+    workflow = BackgroundWorkflow(
+        controller,
+        session,
+        workers,
+        lambda: BackgroundGenerationSettings(
+            mflux_model="flux2-klein-4b",
+            step_count=4,
+            quantization=None,
+            random_seed=False,
+            fixed_seed=42,
+        ),
+        mflux_generator=MfluxGenerator(model_factory=lambda *_: BlockingModel()),
+    )
+    temporary_directory = workflow._temporary_directory
+    window = MainWindow(
+        controller,
+        workers,
+        FakeSettings(),
+        document_session=session,
+        background_workflow=workflow,
+        start_diagnostics=False,
+        owns_workers=True,
+    )
+    failures: list[object] = []
+    workflow.failed.connect(failures.append)
+    workflow.generate(card.id)
+    assert entered.wait(0.5)
+    deadline = monotonic() + 1
+    while workflow.busy and monotonic() < deadline:
+        application.processEvents()
+        QTest.qWait(10)
+    assert not workflow.busy
+    assert len(failures) == 1
+
+    changed_started = monotonic()
+    window.image_model_combo.setCurrentIndex(window.image_model_combo.findData("flux2-klein-9b-kv"))
+    assert monotonic() - changed_started < 0.25
+
+    close_event = QCloseEvent()
+    close_started = monotonic()
+    window.closeEvent(close_event)
+    assert monotonic() - close_started < 0.5
+    assert close_event.isAccepted()
+    assert temporary_directory.is_dir()
+    assert not list(temporary_directory.glob("generated-*.png"))
+
+    release.set()
+    assert cache_released.wait(0.5)
+    deadline = monotonic() + 1
+    while temporary_directory.exists() and monotonic() < deadline:
+        QTest.qWait(10)
+
+    assert not temporary_directory.exists()
+    assert mflux_module._CACHED_MODEL is None
+    assert mflux_module._DEFERRED_RELEASES == []
+
+
+def test_normal_window_close_releases_idle_mflux_and_temporary_directory(
+    application: QApplication,
+    tmp_path: Path,
+) -> None:
+    assert application is not None
+    revision = CardRevision(description="An idle image")
+    card = Card(name="Idle", revisions=(revision,))
+    controller = DocumentController(Stack(name="Idle", cards=(card,)))
+    session = DocumentSession(controller)
+    session.create(controller.document, tmp_path / "Idle.hotcards")
+    workers = AdapterWorkers(mflux_timeout_seconds=0.5)
+    workflow = BackgroundWorkflow(
+        controller,
+        session,
+        workers,
+        lambda: BackgroundGenerationSettings(
+            mflux_model="flux2-klein-4b",
+            step_count=4,
+            quantization=None,
+            random_seed=False,
+            fixed_seed=42,
         ),
     )
-    card = Card(name="Card", revisions=(revision,))
-    window, _controller, _workers, background = _window(
-        Stack(name="Demo", cards=(card,))
+    temporary_directory = workflow._temporary_directory
+    window = MainWindow(
+        controller,
+        workers,
+        FakeSettings(),
+        document_session=session,
+        background_workflow=workflow,
+        start_diagnostics=False,
+        owns_workers=True,
     )
-    window._availability[AdapterKind.OLLAMA] = True
+
+    close_event = QCloseEvent()
+    close_started = monotonic()
+    window.closeEvent(close_event)
+
+    assert monotonic() - close_started < 0.5
+    assert close_event.isAccepted()
+    assert not temporary_directory.exists()
+
+
+def test_generation_failure_keeps_description_reusable(
+    application: QApplication,
+) -> None:
+    revision = CardRevision(description="A courtyard")
+    card = Card(name="Card", revisions=(revision,))
+    window, _controller, _workers, background = _window(Stack(name="Demo", cards=(card,)))
     window._availability[AdapterKind.MFLUX] = True
     window._update_generation_actions()
-    assert window.inspector.has_current_image_prompt()
     assert window.inspector.generate_background_button.isEnabled()
 
     background.busy = True
@@ -963,114 +1874,8 @@ def test_generation_failure_keeps_current_image_prompt_reusable(
     background.busy = False
     background.failed.emit(RuntimeError("transient MFLUX failure"))
 
-    assert window.inspector.has_current_image_prompt()
-    assert window.inspector.enrich_button.text() == "Image Prompt Current"
+    assert window.inspector.description_edit.toPlainText() == "A courtyard"
     assert window.inspector.generate_background_button.isEnabled()
-
-
-def test_manual_image_prompt_edit_reenables_generation_after_description_change(
-    application: QApplication,
-) -> None:
-    revision = CardRevision(
-        description="A courtyard",
-        image_prompt=ImagePrompt(
-            text="A prepared courtyard",
-            source_description="A courtyard",
-            model_identifier="qwen3.5:9b-mlx",
-            prompt_version=main_window_module.IMAGE_PROMPT_PREPARATION_VERSION,
-        ),
-    )
-    card = Card(name="Card", revisions=(revision,))
-    window, controller, _workers, background = _window(Stack(name="Demo", cards=(card,)))
-    window._availability[AdapterKind.OLLAMA] = True
-    window._availability[AdapterKind.MFLUX] = True
-    window._update_generation_actions()
-
-    window.inspector.description_edit.setPlainText("A moonlit courtyard")
-    assert window.inspector.commit_revision_metadata()
-    assert not window.inspector.generate_background_button.isEnabled()
-
-    window.inspector.image_prompt_button.click()
-    window.inspector.description_edit.setPlainText("A manually revised moonlit courtyard")
-
-    assert window.inspector.generate_background_button.isEnabled()
-    window._generate_background()
-
-    assert background.generate_calls == [card.id]
-    image_prompt = controller.document.cards[0].active_revision.image_prompt
-    assert image_prompt is not None
-    assert image_prompt.text == "A manually revised moonlit courtyard"
-    assert image_prompt.source_description == "A moonlit courtyard"
-    assert image_prompt.model_identifier == "qwen3.5:9b-mlx"
-    assert image_prompt.prompt_version == (main_window_module.IMAGE_PROMPT_PREPARATION_VERSION)
-    window.close()
-
-
-def test_ollama_selector_disables_when_no_vision_model_is_installed(
-    application: QApplication,
-) -> None:
-    window, _controller, _workers, _background = _window()
-
-    window._availability_check_succeeded(
-        AdapterKind.OLLAMA,
-        window._diagnostic_generation,
-        (),
-    )
-
-    assert window.llm_model_combo.count() == 1
-    assert window.llm_model_combo.currentData() is None
-    assert window.llm_model_combo.currentText() == (
-        "No vision-capable models installed"
-    )
-    assert not window.llm_model_combo.isEnabled()
-    assert not window.inspector.enrich_button.isEnabled()
-
-
-def test_changing_llm_model_re_enables_image_prompt_preparation(
-    application: QApplication,
-) -> None:
-    revision = CardRevision(
-        description="A courtyard",
-        image_prompt=ImagePrompt(
-            text="A richly detailed courtyard",
-            source_description="A courtyard",
-            model_identifier="qwen3.5:9b-mlx",
-            prompt_version=main_window_module.IMAGE_PROMPT_PREPARATION_VERSION,
-        ),
-    )
-    card = Card(name="Card", revisions=(revision,))
-    window, _controller, _workers, _background = _window(
-        Stack(name="Demo", cards=(card,))
-    )
-    models = ("llama3.2:latest", "qwen3.5:9b-mlx")
-    window._availability_check_succeeded(
-        AdapterKind.OLLAMA,
-        window._diagnostic_generation,
-        models,
-    )
-    assert window.inspector.enrich_button.text() == (
-        "Image Prompt Current"
-    )
-    assert not window.inspector.enrich_button.isEnabled()
-
-    window.llm_model_combo.setCurrentIndex(
-        window.llm_model_combo.findData("llama3.2:latest")
-    )
-    assert window.inspector.enrich_button.text() == (
-        "Update Image Prompt"
-    )
-    assert not window.inspector.enrich_button.isEnabled()
-
-    window._availability_check_succeeded(
-        AdapterKind.OLLAMA,
-        window._diagnostic_generation,
-        models,
-    )
-
-    assert window.inspector.enrich_button.text() == (
-        "Update Image Prompt"
-    )
-    assert window.inspector.enrich_button.isEnabled()
 
 
 def test_generate_replacement_starts_without_a_second_confirmation(
@@ -1096,39 +1901,184 @@ def test_generate_replacement_starts_without_a_second_confirmation(
         )
     )
     window.render_document()
-    assert window.inspector.generate_background_button.text() == (
-        "Re-generate Image"
-    )
-    assert window.clear_background_button.isEnabled()
-    assert window.clear_background_button.text() == ""
-    assert not window.clear_background_button.icon().isNull()
-    assert window.canvas_fit_controls.indexOf(window.clear_background_button) == (
-        window.canvas_fit_controls.indexOf(window.fit_canvas_button) + 1
-    )
-    window.clear_background_button.click()
-    assert background.clear_calls == [card_id]
+    assert window.inspector.generate_background_button.text() == ("Re-generate Image")
 
     window._generate_background()
     assert background.generate_calls == [card_id, card_id]
 
 
-def test_generate_is_disabled_without_description_even_with_image_prompt(
+def test_generate_is_disabled_without_description(
     application: QApplication,
 ) -> None:
-    revision = CardRevision(
-        image_prompt=ImagePrompt(
-            text="A richly detailed courtyard",
-            source_description="",
-        ),
-    )
+    revision = CardRevision()
     card = Card(name="Card", revisions=(revision,))
-    window, _controller, _workers, background = _window(
-        Stack(name="Demo", cards=(card,))
-    )
+    window, _controller, _workers, background = _window(Stack(name="Demo", cards=(card,)))
     window._availability[AdapterKind.MFLUX] = True
     window._update_generation_actions()
 
     assert not window.inspector.generate_background_button.isEnabled()
+
+
+def test_refine_tab_wires_current_image_options_and_cancels_live_changes(
+    application: QApplication,
+    tmp_path: Path,
+) -> None:
+    bundle = tmp_path / "Refine.hotcards"
+    store = StackStore(bundle)
+    card = Card(name="Card")
+    asset_id = uuid4()
+    source = tmp_path / "source.png"
+    Image.new("RGB", (512, 384), "navy").save(source)
+    image_path = store.store_image_asset(
+        source,
+        card_id=card.id,
+        asset_id=asset_id,
+    )
+    revision = CardRevision(
+        description="A courtyard",
+        background=_generated_background(
+            asset_id=asset_id,
+            image_path=image_path,
+            description="A courtyard",
+        ),
+    )
+    card = card.model_copy(
+        update={
+            "revisions": (revision,),
+            "active_revision_id": revision.id,
+        }
+    )
+    stack = Stack(name="Demo", cards=(card,), start_card_id=card.id)
+    store.save(stack)
+    controller = DocumentController(Stack(name="Welcome"))
+    session = DocumentSession(controller)
+    session.open(bundle)
+    background = FakeBackgroundWorkflow(controller)
+    window = MainWindow(
+        controller,
+        FakeWorkers(),  # type: ignore[arg-type]
+        FakeSettings(),
+        document_session=session,
+        background_workflow=background,  # type: ignore[arg-type]
+        start_diagnostics=False,
+    )
+    window._availability[AdapterKind.MFLUX] = True
+    window._update_generation_actions()
+
+    assert window.inspector.inspector_tabs.tabText(1) == "Transform"
+    assert window.inspector.refine_background_button.isEnabled()
+    assert window.inspector.refine_resolution_combo.currentData() == CurrentSourceSize(
+        width=512, height=384
+    )
+    assert window.inspector.refine_background_button.toolTip() == (
+        "Create a new version using the current image, Description."
+    )
+    window.inspector.refine_background_button.click()
+    assert background.refine_calls == [
+        (
+            card.id,
+            RefineTransformation.BALANCED,
+            CurrentSourceSize(width=512, height=384),
+        )
+    ]
+
+    background.busy = True
+    background.active_operation = "refine"
+    window._update_generation_actions()
+    assert window.inspector.refine_background_button.text() == "Reinterpreting…"
+    assert not window.inspector.generate_background_button.isEnabled()
+    assert not window.image_model_combo.isEnabled()
+    window.inspector.refine_transformation_combo.setCurrentIndex(
+        window.inspector._combo_index_for_data(
+            window.inspector.refine_transformation_combo,
+            RefineTransformation.PRESERVE,
+        )
+    )
+    assert background.cancel_calls == 1
+
+    background.busy = True
+    background.active_operation = "refine"
+    window.mode_button.click()
+    assert background.cancel_calls == 2
+    assert not window.inspector.isVisible()
+
+
+def test_edit_tab_wires_current_image_defaults_errors_and_cancellation(
+    application: QApplication,
+    tmp_path: Path,
+) -> None:
+    bundle = tmp_path / "Edit.hotcards"
+    store = StackStore(bundle)
+    card = Card(name="Card")
+    asset_id = uuid4()
+    source = tmp_path / "source.png"
+    Image.new("RGB", (1024, 768), "navy").save(source)
+    image_path = store.store_image_asset(
+        source,
+        card_id=card.id,
+        asset_id=asset_id,
+    )
+    revision = CardRevision(
+        description="A courtyard",
+        background=_generated_background(
+            asset_id=asset_id,
+            image_path=image_path,
+            description="A courtyard",
+        ),
+    )
+    card = card.model_copy(
+        update={
+            "revisions": (revision,),
+            "active_revision_id": revision.id,
+        }
+    )
+    stack = Stack(name="Demo", cards=(card,), start_card_id=card.id)
+    store.save(stack)
+    controller = DocumentController(Stack(name="Welcome"))
+    session = DocumentSession(controller)
+    session.open(bundle)
+    background = FakeBackgroundWorkflow(controller)
+    window = MainWindow(
+        controller,
+        FakeWorkers(),  # type: ignore[arg-type]
+        FakeSettings(),
+        document_session=session,
+        background_workflow=background,  # type: ignore[arg-type]
+        start_diagnostics=False,
+    )
+    window._availability[AdapterKind.MFLUX] = True
+    window._update_generation_actions()
+
+    assert window.inspector.inspector_tabs.tabText(1) == "Transform"
+    assert not window.inspector.edit_background_button.isEnabled()
+    assert window.inspector.edit_resolution_combo.count() == 1
+    assert window.inspector.edit_resolution_combo.itemText(0) == "Full"
+    window.inspector.edit_instruction_edit.setPlainText("Open the gate.")
+    assert window.inspector.edit_background_button.isEnabled()
+    window.inspector.edit_background_button.click()
+
+    assert len(background.edit_calls) == 1
+    card_id, instruction, output_size = background.edit_calls[0]
+    assert card_id == card.id
+    assert instruction == "Open the gate."
+    assert output_size == CurrentSourceSize(width=1024, height=768)
+
+    background.busy = True
+    background.active_operation = "edit"
+    window._update_generation_actions()
+    assert window.inspector.edit_background_button.text() == "Editing…"
+    assert not window.inspector.generate_background_button.isEnabled()
+    window.inspector.edit_instruction_edit.setPlainText("Close the gate.")
+    assert background.cancel_calls == 1
+
+    window.inspector.edit_instruction_edit.setPlainText("Keep this draft.")
+    background.edit_instruction_clear_requested.emit()
+    assert window.inspector.edit_instruction_edit.toPlainText() == ""
+
+    window._background_progress_changed("Image editing failed")
+    window._background_failed(RuntimeError("513 model tokens; the limit is 512"))
+    assert "513 model tokens" in window.inspector.edit_instruction_error.text()
+    assert "513 model tokens" in window.notification_bar.message_label.text()
 
 
 def test_notification_undo_expires_after_another_command(
@@ -1150,74 +2100,15 @@ def test_notification_undo_expires_after_another_command(
     assert controller.document.cards[0].name == "Second"
 
 
-def test_re_enrich_click_is_not_consumed_by_description_commit(
-    application: QApplication,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    revision = CardRevision(
-        description="A courtyard",
-        image_prompt=ImagePrompt(
-            text="A richly detailed courtyard",
-            source_description="A courtyard",
-        ),
-    )
-    card = Card(name="Card", revisions=(revision,))
-    window, _controller, _workers, _background = _window(
-        Stack(name="Demo", cards=(card,))
-    )
-    window.show()
-    window._availability[AdapterKind.OLLAMA] = True
-    window._update_generation_actions()
-    window.inspector.description_button.click()
-    window.inspector.description_edit.setPlainText("A changed courtyard")
-    window.inspector.description_edit.setFocus()
-    application.processEvents()
-    starts: list[object] = []
-    monkeypatch.setattr(
-        window.image_prompt_workflow,
-        "start",
-        starts.append,
-    )
-
-    QTest.mousePress(
-        window.inspector.enrich_button,
-        Qt.MouseButton.LeftButton,
-    )
-    application.processEvents()
-    assert starts == []
-    assert _controller.document.cards[0].active_revision.description == (
-        "A changed courtyard"
-    )
-    QTest.mouseRelease(
-        window.inspector.enrich_button,
-        Qt.MouseButton.LeftButton,
-    )
-
-    assert starts == [card.id]
-    window.close()
-
-
-@pytest.mark.parametrize("mode", ["description", "image_prompt"])
 def test_mouse_focus_commit_does_not_render_before_button_release(
     application: QApplication,
     monkeypatch: pytest.MonkeyPatch,
-    mode: str,
 ) -> None:
-    revision = CardRevision(
-        description="A courtyard",
-        image_prompt=ImagePrompt(
-            text="A detailed courtyard",
-            source_description="A courtyard",
-        ),
-    )
+    revision = CardRevision(description="A courtyard")
     card = Card(name="Card", revisions=(revision,))
-    window, controller, _workers, _background = _window(
-        Stack(name="Demo", cards=(card,))
-    )
+    window, controller, _workers, _background = _window(Stack(name="Demo", cards=(card,)))
     window.show()
-    if mode == "image_prompt":
-        window.inspector.image_prompt_button.click()
-    draft = f"A changed {mode}"
+    draft = "A changed courtyard"
     window.inspector.description_edit.setPlainText(draft)
     window.inspector.description_edit.setFocus()
     application.processEvents()
@@ -1234,11 +2125,7 @@ def test_mouse_focus_commit_does_not_render_before_button_release(
     )
 
     changed_revision = controller.document.cards[0].active_revision
-    if mode == "description":
-        assert changed_revision.description == draft
-    else:
-        assert changed_revision.image_prompt is not None
-        assert changed_revision.image_prompt.text == draft
+    assert changed_revision.description == draft
     assert renders == []
     window.close()
 
@@ -1259,17 +2146,17 @@ def test_generated_result_can_move_to_a_new_complete_version(
         hotspot_set=hotspot_set,
     )
     card = Card(name="Card", revisions=(original,))
-    window, controller, _workers, _background = _window(
-        Stack(name="Demo", cards=(card,))
+    window, controller, _workers, background_workflow = _window(Stack(name="Demo", cards=(card,)))
+    background = _generated_background(
+        asset_id=uuid4(),
+        image_path=f"assets/cards/{card.id}/generated.png",
+        description=original.description,
     )
     changed = controller.execute(
-        SetRevisionImagePromptCommand(
+        ReplaceRevisionBackgroundCommand(
             card_id=card.id,
             revision_id=original.id,
-            value=ImagePrompt(
-                text="A richly detailed courtyard",
-                source_description=original.description,
-            ),
+            background=background,
         )
     )
     window.render_document(changed)
@@ -1277,7 +2164,7 @@ def test_generated_result_can_move_to_a_new_complete_version(
     assert token is not None
     window._show_generated_revision_notification(
         GeneratedRevisionChange(
-            message="Image Prompt prepared",
+            message="Image generated",
             token=token,
             card_id=card.id,
             revision_id=original.id,
@@ -1286,25 +2173,24 @@ def test_generated_result_can_move_to_a_new_complete_version(
     )
 
     assert window.notification_bar.message_label.text() == (
-        "Image Prompt prepared on the current version"
+        "Image generated on the current version"
     )
     assert window.notification_bar.primary_button.text() == "Create New Version"
     assert window.notification_bar.secondary_button.text() == "Undo"
     assert window.notification_bar.dismiss_button.text() == "Keep"
+    background_workflow.busy = True
     window.notification_bar.primary_button.click()
 
+    assert background_workflow.cancel_calls == 1
     changed_card = controller.document.cards[0]
     assert len(changed_card.revisions) == 2
     assert changed_card.revisions[0].id == original.id
-    assert changed_card.revisions[0].image_prompt is None
+    assert changed_card.revisions[0].background is None
     assert changed_card.revisions[0].hotspot_set == original.hotspot_set
     assert changed_card.active_revision.id != original.id
     assert changed_card.active_revision.description == original.description
     assert changed_card.active_revision.hotspot_set == original.hotspot_set
-    assert changed_card.active_revision.image_prompt is not None
-    assert changed_card.active_revision.image_prompt.text == (
-        "A richly detailed courtyard"
-    )
+    assert changed_card.active_revision.background == background
     assert window.notification_bar.message_label.text() == "New version created"
     assert window.notification_bar.primary_button.text() == "Undo"
     assert window.notification_bar.secondary_button.isHidden()
@@ -1313,63 +2199,7 @@ def test_generated_result_can_move_to_a_new_complete_version(
     restored_card = controller.document.cards[0]
     assert len(restored_card.revisions) == 1
     assert restored_card.active_revision.id == original.id
-    assert restored_card.active_revision.image_prompt is not None
-    assert restored_card.active_revision.image_prompt.text == (
-        "A richly detailed courtyard"
-    )
-
-
-def test_preparation_completion_selects_image_prompt(
-    application: QApplication,
-) -> None:
-    previous = CardRevision(
-        description="A changed courtyard",
-        image_prompt=ImagePrompt(
-            text="An older Image Prompt",
-            source_description="A courtyard",
-        ),
-    )
-    card = Card(name="Card", revisions=(previous,))
-    window, controller, _workers, _background = _window(
-        Stack(name="Demo", cards=(card,))
-    )
-    window.inspector.description_button.click()
-    assert window.inspector.description_button.isChecked()
-    changed = controller.execute(
-        SetRevisionImagePromptCommand(
-            card_id=card.id,
-            revision_id=previous.id,
-            value=ImagePrompt(
-                text="A newly prepared courtyard",
-                source_description=previous.description,
-            ),
-        )
-    )
-    window.render_document(changed)
-    assert window.inspector.description_button.isChecked()
-    window.inspector.description_edit.setFocus()
-    application.processEvents()
-    token = controller.current_undo_token
-    assert token is not None
-
-    window.image_prompt_workflow.generation_applied.emit(
-        GeneratedRevisionChange(
-            message="Image Prompt prepared",
-            token=token,
-            card_id=card.id,
-            revision_id=previous.id,
-            previous_revision=previous,
-        )
-    )
-
-    assert window.inspector.image_prompt_button.isChecked()
-    assert window.inspector.description_edit.toPlainText() == (
-        "A newly prepared courtyard"
-    )
-    assert window.notification_bar.message_label.text() == (
-        "Image Prompt prepared on the current version"
-    )
-    window.close()
+    assert restored_card.active_revision.background == background
 
 
 def test_dismissing_generated_result_keeps_it_on_current_version(
@@ -1377,17 +2207,17 @@ def test_dismissing_generated_result_keeps_it_on_current_version(
 ) -> None:
     original = CardRevision(description="A courtyard")
     card = Card(name="Card", revisions=(original,))
-    window, controller, _workers, _background = _window(
-        Stack(name="Demo", cards=(card,))
+    window, controller, _workers, _background = _window(Stack(name="Demo", cards=(card,)))
+    background = _generated_background(
+        asset_id=uuid4(),
+        image_path=f"assets/cards/{card.id}/generated.png",
+        description=original.description,
     )
     changed = controller.execute(
-        SetRevisionImagePromptCommand(
+        ReplaceRevisionBackgroundCommand(
             card_id=card.id,
             revision_id=original.id,
-            value=ImagePrompt(
-                text="A richly detailed courtyard",
-                source_description=original.description,
-            ),
+            background=background,
         )
     )
     window.render_document(changed)
@@ -1395,7 +2225,7 @@ def test_dismissing_generated_result_keeps_it_on_current_version(
     assert token is not None
     window._show_generated_revision_notification(
         GeneratedRevisionChange(
-            message="Image Prompt prepared",
+            message="Image generated",
             token=token,
             card_id=card.id,
             revision_id=original.id,
@@ -1407,37 +2237,9 @@ def test_dismissing_generated_result_keeps_it_on_current_version(
 
     revision = controller.document.cards[0].active_revision
     assert revision.id == original.id
-    assert revision.image_prompt is not None
-    assert revision.image_prompt.text == "A richly detailed courtyard"
+    assert revision.background == background
     assert controller.current_undo_token == token
     assert window._generated_revision_change is None
-
-
-def test_description_edits_and_notification_undo_cancel_preparation(
-    application: QApplication,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    window, controller, _workers, _background = _window()
-    cancellations: list[bool] = []
-    monkeypatch.setattr(
-        window.image_prompt_workflow,
-        "cancel",
-        lambda: cancellations.append(True),
-    )
-
-    window.inspector.description_edit.setPlainText("Edited draft")
-    assert cancellations == [True]
-
-    card = controller.document.cards[0]
-    changed = controller.execute(RenameCardCommand(card_id=card.id, name="Renamed"))
-    window.render_document(changed)
-    token = controller.current_undo_token
-    assert token is not None
-    window._show_undo_notification("Renamed", token)
-    window._undo_notification()
-
-    assert cancellations == [True, True]
-    assert controller.document.cards[0].name == "Foyer"
 
 
 def test_notification_undo_cannot_mutate_document_in_run_mode(
@@ -1460,13 +2262,14 @@ def test_notification_undo_cannot_mutate_document_in_run_mode(
 def test_new_workflow_progress_clears_stale_failure_notification(
     application: QApplication,
 ) -> None:
-    window, controller, _workers, _background = _window()
+    window, controller, _workers, background = _window()
     window._show_error(
-        "image-prompt-error",
-        "Image Prompt preparation failed",
+        "background-error",
+        "Image generation failed",
         detail="Old failure",
     )
-    window._image_prompt_progress_changed("Preparing Image Prompt…")
+    background.busy = True
+    background.progress_changed.emit("Generating image…")
 
     card = controller.document.cards[0]
     controller.execute(RenameCardCommand(card_id=card.id, name="Renamed"))
@@ -1476,28 +2279,12 @@ def test_new_workflow_progress_clears_stale_failure_notification(
     assert window.notification_bar.current_key == "undo"
 
 
-def test_generation_progress_bar_is_indeterminate_for_text_and_uses_image_steps(
+def test_generation_progress_bar_uses_image_steps(
     application: QApplication,
 ) -> None:
     window, _controller, _workers, background = _window()
     progress_container = window.generation_progress_container
     progress = window.generation_progress_bar
-
-    window.image_prompt_workflow._busy = True
-    window.image_prompt_workflow.progress_changed.emit(
-        "Preparing Image Prompt..."
-    )
-    assert not progress_container.isHidden()
-    assert progress.minimum() == 0
-    assert progress.maximum() == 0
-    assert not progress.isTextVisible()
-    assert window.generation_step_label.text() == (
-        "Preparing Image Prompt..."
-    )
-
-    window.image_prompt_workflow._busy = False
-    window.image_prompt_workflow.progress_changed.emit("Image Prompt prepared")
-    assert progress_container.isHidden()
 
     background.busy = True
     background.progress_changed.emit("Generating image...")
@@ -1508,14 +2295,6 @@ def test_generation_progress_bar_is_indeterminate_for_text_and_uses_image_steps(
 
     background.generation_progress_changed.emit(1, 4)
     assert progress.minimum() == 0
-    assert progress.maximum() == 4
-    assert progress.value() == 1
-
-    window.image_prompt_workflow._busy = True
-    window.image_prompt_workflow.progress_changed.emit(
-        "Preparing Image Prompt..."
-    )
-    assert window.generation_step_label.text() == "Generating image..."
     assert progress.maximum() == 4
     assert progress.value() == 1
 
@@ -1531,49 +2310,18 @@ def test_generation_progress_bar_is_indeterminate_for_text_and_uses_image_steps(
 
     background.busy = False
     background.progress_changed.emit("Image generated")
-    assert not progress_container.isHidden()
-    assert progress.minimum() == 0
-    assert progress.maximum() == 0
-
-    window.image_prompt_workflow._busy = False
-    window.image_prompt_workflow.progress_changed.emit("Image Prompt prepared")
     assert progress_container.isHidden()
     assert window.generation_step_label.text() == ""
 
 
 def test_generation_cancel_button_cancels_the_active_process(
     application: QApplication,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     window, _controller, _workers, background = _window()
-    prompt_cancellations: list[bool] = []
-    monkeypatch.setattr(
-        window.image_prompt_workflow,
-        "cancel",
-        lambda: prompt_cancellations.append(True),
-    )
-
-    window.image_prompt_workflow._busy = True
-    window.image_prompt_workflow.progress_changed.emit(
-        "Preparing Image Prompt..."
-    )
-    assert not window.cancel_generation_button.isHidden()
-
-    window.cancel_generation_button.click()
-
-    assert prompt_cancellations == [True]
-    assert background.cancel_calls == 0
-    assert (
-        window.notification_bar.message_label.text()
-        == "Image Prompt preparation cancelled"
-    )
-
-    window.image_prompt_workflow._busy = False
     background.busy = True
     background.progress_changed.emit("Generating image...")
     window.cancel_generation_button.click()
 
-    assert prompt_cancellations == [True]
     assert background.cancel_calls == 1
     assert not background.busy
 
@@ -1595,8 +2343,8 @@ def test_document_replacement_clears_document_specific_notifications(
     window, _controller, _workers, background = _window()
     background.busy = True
     window._show_error(
-        "image-prompt-error",
-        "Image Prompt preparation failed",
+        "background-error",
+        "Image generation failed",
     )
     window._set_canvas_card_name_error("Invalid card name")
     window.inspector.set_hotspot_error("Invalid hotspot")
@@ -1698,6 +2446,7 @@ def test_hotspot_editing_is_scoped_to_hotspots_tab(
     )
     asset_id = uuid4()
     revision = CardRevision(
+        description="A doorway",
         background=_generated_background(
             asset_id=asset_id,
             image_path=f"assets/cards/card/image-{asset_id}.png",
@@ -1705,11 +2454,12 @@ def test_hotspot_editing_is_scoped_to_hotspots_tab(
         hotspot_set=HotspotSet(interactions=(interaction,)),
     )
     card = Card(name="Card", revisions=(revision,))
-    window, _controller, _workers, _background = _window(
-        Stack(name="Demo", cards=(card,))
-    )
+    window, _controller, _workers, _background = _window(Stack(name="Demo", cards=(card,)))
     window.document_session = SimpleNamespace(
-        store=SimpleNamespace(asset_path=lambda _path: image_path),
+        store=SimpleNamespace(
+            asset_path=lambda _path: image_path,
+            image_asset_dimensions=lambda *_args, **_kwargs: (1024, 768),
+        ),
         state=DocumentSessionState(bundle_path=None, dirty=False, error=None),
     )
     window.render_document()
@@ -1718,9 +2468,7 @@ def test_hotspot_editing_is_scoped_to_hotspots_tab(
     assert not window.card_canvas._editable
     assert window.card_canvas._overlay_items == []
 
-    window.inspector.inspector_tabs.setCurrentIndex(
-        window.inspector._hotspots_tab_index
-    )
+    window.inspector.inspector_tabs.setCurrentIndex(window.inspector._hotspots_tab_index)
     assert window.inspector.hotspots_active
     assert window.card_canvas._editable
     assert window.card_canvas._overlay_items
@@ -1736,16 +2484,105 @@ def test_hotspot_editing_is_scoped_to_hotspots_tab(
     assert window.card_canvas._overlay_items == []
 
 
+def test_image_operation_explicitly_cancels_and_blocks_hotspot_draft(
+    application: QApplication,
+    tmp_path: Path,
+) -> None:
+    image_path = tmp_path / "background.png"
+    image = QPixmap(1024, 768)
+    image.fill(QColor("navy"))
+    assert image.save(str(image_path))
+    interaction = Interaction(
+        label="Door",
+        action=NavigateAction(target=UnresolvedCardReference()),
+    )
+    asset_id = uuid4()
+    revision = CardRevision(
+        description="A doorway",
+        background=_generated_background(
+            asset_id=asset_id,
+            image_path=f"assets/cards/card/image-{asset_id}.png",
+        ),
+        hotspot_set=HotspotSet(interactions=(interaction,)),
+    )
+    card = Card(name="Card", revisions=(revision,))
+    window, _controller, _workers, background = _window(Stack(name="Demo", cards=(card,)))
+    window.document_session = SimpleNamespace(
+        store=SimpleNamespace(
+            asset_path=lambda _path: image_path,
+            image_asset_dimensions=lambda *_args, **_kwargs: (1024, 768),
+        ),
+        state=DocumentSessionState(bundle_path=None, dirty=False, error=None),
+    )
+    window.render_document()
+    window.apply_availability_diagnostic(
+        AvailabilityDiagnostic(
+            adapter=AdapterKind.MFLUX,
+            available=True,
+            message="MFLUX is available",
+        )
+    )
+    assert window.inspector.refine_background_button.isEnabled()
+    window.inspector.inspector_tabs.setCurrentIndex(window.inspector._hotspots_tab_index)
+    window.card_canvas.begin_polygon(
+        interaction.id,
+        initial_point=Point(x=0.3, y=0.3),
+    )
+    assert window.card_canvas.drawing
+
+    background.busy = True
+    background.active_operation = "refine"
+    background.busy_changed.emit(True)
+
+    assert not window.card_canvas.drawing
+    assert not window.card_canvas._editable
+    assert (
+        window.notification_bar.message_label.text()
+        == "Unfinished hotspot area cancelled before image processing"
+    )
+    window.card_canvas.begin_polygon(
+        interaction.id,
+        initial_point=Point(x=0.4, y=0.4),
+    )
+    assert not window.card_canvas.drawing
+
+    background.busy = False
+    background.invocation_active = True
+    background.busy_changed.emit(False)
+    background.invocation_active_changed.emit(True)
+    assert not window.card_canvas._editable
+    assert not window.inspector.refine_background_button.isEnabled()
+
+    background.invocation_active = False
+    background.invocation_active_changed.emit(False)
+    assert window.card_canvas._editable
+
+
 def test_new_stack_dialog_creates_one_blank_revision(
     application: QApplication,
 ) -> None:
     dialog = NewStackDialog()
     assert not hasattr(dialog, "global_style_edit")
+    assert not hasattr(dialog, "width_spin")
+    assert not hasattr(dialog, "height_spin")
+    assert [
+        dialog.format_combo.itemText(index) for index in range(dialog.format_combo.count())
+    ] == [
+        "Square 1:1",
+        "Landscape 4:3",
+        "Portrait 3:4",
+        "Widescreen 16:9",
+    ]
     stack = dialog.stack()
+    assert stack.aspect_ratio is AspectRatio.LANDSCAPE
     assert len(stack.cards) == 1
     assert len(stack.cards[0].revisions) == 1
     assert stack.cards[0].active_revision.style_id == HYPERCARD_STYLE_ID
     assert stack.new_card_style_id == HYPERCARD_STYLE_ID
+
+    for aspect_ratio in AspectRatio:
+        dialog.format_combo.setCurrentIndex(dialog.format_combo.findData(aspect_ratio))
+        assert dialog.stack().aspect_ratio is aspect_ratio
 
 
 def test_empty_stack_has_clear_first_card_path(

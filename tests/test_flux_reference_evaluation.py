@@ -5,18 +5,21 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
+import pytest
 from PIL import Image
 
+from hotcards.domain.image_dimensions import AspectRatio, ResolutionTier
 from hotcards.domain.models import (
     Card,
     CardRevision,
+    DirectGenerateProvenance,
     GeneratedBackground,
-    ImageGenerationInputs,
-    ImageGenerationMetadata,
+    GenerateInputs,
+    ImageOperationSettings,
     Stack,
 )
+from hotcards.evaluation.cli import build_parser
 from hotcards.evaluation.flux_references import (
-    _model_config,
     run_flux_reference_evaluation,
 )
 from hotcards.storage.stack_store import StackStore
@@ -77,20 +80,21 @@ def _card_with_image(
         background=GeneratedBackground(
             id=background_id,
             image_path=image_path,
-            generation_metadata=ImageGenerationMetadata(
-                inputs=ImageGenerationInputs(
+            provenance=DirectGenerateProvenance(
+                inputs=GenerateInputs(
                     description=description,
-                    image_prompt=description,
                 ),
                 render_prompt=description,
-                model_identifier="test",
-                mflux_version="test",
-                seed=1,
-                width=1024,
-                height=768,
-                step_count=4,
-                generated_at=generated_at,
-                duration_seconds=1,
+                settings=ImageOperationSettings(
+                    model_identifier="test",
+                    mflux_version="test",
+                    seed=1,
+                    width=512,
+                    height=384,
+                    step_count=4,
+                    generated_at=generated_at,
+                    duration_seconds=1,
+                ),
             ),
             created_at=generated_at,
         ),
@@ -103,15 +107,13 @@ def _card_with_image(
     )
 
 
-def _write_reference_stack(tmp_path: Path) -> tuple[Path, Path]:
+def _write_reference_stack(tmp_path: Path) -> Path:
     bundle = tmp_path / "References.hotcards"
     store = StackStore(bundle)
     map_source = tmp_path / "map.png"
     castle_source = tmp_path / "castle.png"
-    graphic_source = tmp_path / "graphic.png"
     _write_png(map_source, "lightblue")
     _write_png(castle_source, "gray")
-    _write_png(graphic_source, "gold")
     map_card = _card_with_image(
         store=store,
         source=map_source,
@@ -125,29 +127,35 @@ def _write_reference_stack(tmp_path: Path) -> tuple[Path, Path]:
         description="A pencil drawing of a castle.",
     )
     store.save(Stack(name="References", cards=(map_card, castle_card)))
-    return bundle, graphic_source
+    return bundle
 
 
-def test_reference_model_config_selects_every_supported_variant() -> None:
-    assert _model_config("flux2-klein-4b", edit=True).model_name.endswith("klein-4B")
-    assert _model_config("flux2-klein-9b", edit=True).model_name.endswith("klein-9B")
-    assert _model_config("flux2-klein-9b-kv", edit=True).model_name.endswith("klein-9b-kv")
-    assert _model_config("flux2-klein-9b-kv", edit=False).model_name.endswith("klein-9B")
+def test_reference_cli_rejects_obsolete_arbitrary_dimensions() -> None:
+    defaults = build_parser().parse_args(["flux-references", "--stack", "Stack.hotcards"])
+    assert defaults.tier is ResolutionTier.FULL
+    assert defaults.aspect_ratio is AspectRatio.LANDSCAPE
+    with pytest.raises(SystemExit) as caught:
+        build_parser().parse_args(["flux-references", "--stack", "Stack.hotcards", "--width", "48"])
+
+    assert caught.value.code == 2
+    with pytest.raises(SystemExit) as caught:
+        build_parser().parse_args(["flux-references", "--stack", "Stack.hotcards", "--kv-cache"])
+
+    assert caught.value.code == 2
 
 
 def test_reference_suite_preserves_order_prompts_and_provenance(
     tmp_path: Path,
 ) -> None:
-    stack_path, graphic_style_path = _write_reference_stack(tmp_path)
+    stack_path = _write_reference_stack(tmp_path)
     requests: list[dict[str, object]] = []
     output_dir = tmp_path / "run"
 
     result_path = run_flux_reference_evaluation(
         output_dir=output_dir,
         stack_path=stack_path,
-        graphic_style_path=graphic_style_path,
-        width=48,
-        height=32,
+        tier=ResolutionTier.SMALL,
+        aspect_ratio=AspectRatio.LANDSCAPE,
         model_factory=lambda *_: FakeReferenceModel(requests),
         source_model_factory=lambda *_: FakeReferenceModel(requests),
         environment_provider=lambda: {"git_sha": "test"},
@@ -155,7 +163,11 @@ def test_reference_suite_preserves_order_prompts_and_provenance(
 
     result = json.loads(result_path.read_text())
     assert result["status"] == "success"
-    assert len(requests) == 10
+    assert len(requests) == 8
+    assert {(request["width"], request["height"]) for request in requests} == {(256, 192)}
+    assert result["settings"]["tier"] == "Small"
+    assert result["settings"]["long_edge"] == 256
+    assert result["settings"]["aspect_ratio"] == "4:3"
     assert "image_paths" not in requests[0]
     combined = next(case for case in result["cases"] if case["case_id"] == "character-plus-style")
     assert combined["reference_keys"] == ["character_identity", "map_style"]
@@ -163,10 +175,8 @@ def test_reference_suite_preserves_order_prompts_and_provenance(
         "character_identity.png",
         "map_style.png",
     ]
-    assert str(combined["prompt"]).startswith(str(combined["scene"]))
-    assert combined["prompt"].index("Use image 1 as follows:") < combined[
-        "prompt"
-    ].index("Use image 2 as follows:")
+    assert combined["prompt"] == combined["scene"]
+    assert combined["prompt"].index("image 1") < combined["prompt"].index("image 2")
     assert "REFERENCE IMAGE" not in combined["prompt"]
     assert "SCENE\n" not in combined["prompt"]
     assert [
@@ -177,9 +187,9 @@ def test_reference_suite_preserves_order_prompts_and_provenance(
     assert result["sources"]["map_style"]["revision_id"]
     assert result["sources"]["map_style"]["description"] == ("A hand-drawn fantasy map.")
     assert (output_dir / "inputs" / "map_style.png").is_file()
-    assert len(list((output_dir / "outputs").glob("*.png"))) == 9
+    assert len(list((output_dir / "outputs").glob("*.png"))) == 7
     assert (output_dir / "contact-sheet.png").is_file()
-    assert len(list((output_dir / "comparisons").glob("*.png"))) == 9
+    assert len(list((output_dir / "comparisons").glob("*.png"))) == 7
     assert result["model_load"]["source"]["duration_seconds"] >= 0
     assert result["model_load"]["edit"]["duration_seconds"] >= 0
     manifest = json.loads((output_dir / "manifest.json").read_text())
@@ -190,16 +200,15 @@ def test_reference_suite_preserves_order_prompts_and_provenance(
 def test_reference_suite_isolates_failure_and_failed_dependency(
     tmp_path: Path,
 ) -> None:
-    stack_path, graphic_style_path = _write_reference_stack(tmp_path)
+    stack_path = _write_reference_stack(tmp_path)
     requests: list[dict[str, object]] = []
     output_dir = tmp_path / "run"
 
     result_path = run_flux_reference_evaluation(
         output_dir=output_dir,
         stack_path=stack_path,
-        graphic_style_path=graphic_style_path,
-        width=48,
-        height=32,
+        tier=ResolutionTier.SMALL,
+        aspect_ratio=AspectRatio.LANDSCAPE,
         model_factory=lambda *_: FakeReferenceModel(
             requests,
             fail_prompt_fragment="rear garden at ground level",
@@ -215,14 +224,14 @@ def test_reference_suite_isolates_failure_and_failed_dependency(
         for case in result["cases"]
         if case["generation"]["status"] == "failed"
     }
-    assert failed["building-new-view"] == "candidate failed"
+    assert failed["building-new-view"].endswith("candidate failed")
     assert "building-new-view" in failed["building-two-views"]
     failed_dependency = next(
         case for case in result["cases"] if case["case_id"] == "building-two-views"
     )
     assert failed_dependency["reference_paths"] == []
-    assert len(requests) == 9
-    assert (output_dir / "outputs" / "reference-count-4.png").is_file()
-    assert len(list((output_dir / "outputs").glob("*.png"))) == 7
+    assert len(requests) == 7
+    assert (output_dir / "outputs" / "reference-count-2.png").is_file()
+    assert len(list((output_dir / "outputs").glob("*.png"))) == 5
     manifest = json.loads((output_dir / "manifest.json").read_text())
     assert manifest["status"] == "completed_with_failures"

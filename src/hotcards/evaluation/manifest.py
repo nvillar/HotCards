@@ -16,14 +16,10 @@ from pathlib import Path
 from time import monotonic
 from typing import Any
 
-import httpx
-
 from hotcards.generation.errors import (
     ImageGenerationError,
     ModelLoadError,
-    ModelResponseError,
     ModelUnavailableError,
-    ServiceUnavailableError,
 )
 
 MANIFEST_VERSION = "eval-run-manifest-v1"
@@ -81,11 +77,9 @@ def default_environment() -> Mapping[str, Any]:
     dependencies = {
         name: _package_version(name)
         for name in (
-            "httpx",
             "hotcards",
             "mflux",
             "mlx",
-            "ollama",
             "pillow",
             "pydantic",
             "pyside6",
@@ -109,10 +103,6 @@ def default_environment() -> Mapping[str, Any]:
             "executable": sys.executable,
         },
         "dependencies": dependencies,
-        "ollama": {
-            "python_package": dependencies["ollama"],
-            "cli": _command_version(["ollama", "--version"]),
-        },
         "mflux": {
             "package": dependencies["mflux"],
             "mlx": dependencies["mlx"],
@@ -158,12 +148,10 @@ def classify_failure(error: BaseException) -> str:
     """Map adapter failures to stable report classifications."""
     cause: BaseException | None = error
     while cause is not None:
-        if isinstance(cause, (TimeoutError, httpx.TimeoutException)):
+        if isinstance(cause, TimeoutError):
             return "timeout"
         cause = cause.__cause__
-    if isinstance(error, ModelResponseError):
-        return "structured_output_validation"
-    if isinstance(error, (ServiceUnavailableError, ModelUnavailableError)):
+    if isinstance(error, ModelUnavailableError):
         return "transport_or_service"
     if isinstance(error, (ImageGenerationError, ModelLoadError)):
         return "image_generation"

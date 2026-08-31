@@ -7,13 +7,13 @@ from uuid import UUID
 
 from pydantic import ValidationError
 from PySide6.QtCore import QSignalBlocker, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QFocusEvent
+from PySide6.QtGui import QFocusEvent, QStandardItemModel
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
-    QButtonGroup,
     QComboBox,
     QFrame,
+    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QInputDialog,
@@ -23,7 +23,6 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QPlainTextEdit,
     QPushButton,
-    QRadioButton,
     QScrollArea,
     QStackedWidget,
     QStyle,
@@ -36,41 +35,47 @@ from PySide6.QtWidgets import (
 
 from hotcards.application.commands import (
     AddInteractionCommand,
-    AddKeyCommand,
-    AddStyleCommand,
     ChangeHotspotDestinationCommand,
     CommandError,
     CreateCardAndResolveCommand,
     CreateKeyAndAddHotspotReferenceCommand,
     DeleteInteractionCommand,
-    DeleteKeyCommand,
-    DeleteStyleCommand,
     DocumentCommand,
     EditRevisionDescriptionCommand,
-    RenameKeyCommand,
     ReorderHotspotCommand,
     SetHotspotConditionsCommand,
     SetHotspotKeyChangesCommand,
-    SetRevisionImagePromptCommand,
+    SetRevisionGenerateOutputSizeCommand,
     SetRevisionReferenceCommand,
     SetRevisionStyleCommand,
-    UpdateStyleCommand,
 )
-from hotcards.application.document_controller import DocumentController
-from hotcards.application.image_prompt_workflow import (
-    image_prompt_reference_snapshots,
+from hotcards.application.document_controller import (
+    DocumentController,
+    DocumentMutationBlockedError,
+)
+from hotcards.domain.image_dimensions import (
+    AspectRatio,
+    ResolutionTier,
+    higher_output_tiers,
+    output_dimensions,
+    validate_exact_output_dimensions,
 )
 from hotcards.domain.models import (
     Card,
     CardRevision,
+    CurrentSourceSize,
+    EditOutputSize,
+    ExactOutputSize,
+    GenerateOutputSize,
     HotspotConditions,
     HotspotKeyChanges,
     Interaction,
-    KeyDefinition,
+    PresetOutputSize,
+    RefineTransformation,
     ResolvedCardReference,
     Stack,
-    StyleDefinition,
     UnresolvedCardReference,
+    selected_output_dimensions,
 )
 
 
@@ -98,39 +103,23 @@ def _configure_rule_table(
 ) -> None:
     table.setHorizontalHeaderLabels(headers)
     table.verticalHeader().setVisible(False)
-    table.horizontalHeader().setSectionResizeMode(
-        stretch_column, QHeaderView.ResizeMode.Stretch
-    )
+    table.horizontalHeader().setSectionResizeMode(stretch_column, QHeaderView.ResizeMode.Stretch)
     for column in range(2):
         if column != stretch_column:
             table.horizontalHeader().setSectionResizeMode(
                 column, QHeaderView.ResizeMode.ResizeToContents
             )
-    table.horizontalHeader().setSectionResizeMode(
-        2, QHeaderView.ResizeMode.Fixed
-    )
+    table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
     table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
     table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
     table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
     table.setFrameShape(QFrame.Shape.NoFrame)
 
 
-def _rule_panel(object_name: str) -> tuple[QFrame, QVBoxLayout]:
-    panel = QFrame()
+def _rule_panel(object_name: str) -> tuple[QGroupBox, QVBoxLayout]:
+    panel = QGroupBox()
     panel.setObjectName(object_name)
-    panel.setFrameShape(QFrame.Shape.StyledPanel)
-    panel.setStyleSheet(
-        f"""
-        QFrame#{object_name} {{
-            background-color: palette(base);
-            border: 1px solid palette(mid);
-            border-radius: 4px;
-        }}
-        """
-    )
     layout = QVBoxLayout(panel)
-    layout.setContentsMargins(8, 8, 8, 8)
-    layout.setSpacing(8)
     return panel, layout
 
 
@@ -180,14 +169,113 @@ def _centered_cell_widget(widget: QWidget) -> QWidget:
     return container
 
 
+_SOURCE_SIMILARITY_TOOLTIPS = {
+    RefineTransformation.REIMAGINE: (
+        "Give the Description the most freedom to change the current image's "
+        "content and composition."
+    ),
+    RefineTransformation.BALANCED: ("Balance the Description with the current image."),
+    RefineTransformation.PRESERVE: (
+        "Keep the current image's content and composition as close as possible "
+        "while applying the Description."
+    ),
+}
+
+
+def _tier_label(tier: ResolutionTier) -> str:
+    return tier.label
+
+
+def _current_tier(
+    source_size: tuple[int, int] | None,
+    aspect_ratio: AspectRatio,
+) -> ResolutionTier | None:
+    if source_size is None:
+        return None
+    return next(
+        (tier for tier in ResolutionTier if output_dimensions(tier, aspect_ratio) == source_size),
+        None,
+    )
+
+
+def _sort_size_rows(
+    rows: list[tuple[str, object, tuple[int, int]]],
+) -> list[tuple[str, object, tuple[int, int]]]:
+    return sorted(
+        rows,
+        key=lambda row: (
+            row[2][0] * row[2][1],
+            row[2][0],
+            row[2][1],
+            row[0],
+        ),
+    )
+
+
+def _exact_size_error(
+    source_size: tuple[int, int] | None,
+    aspect_ratio: AspectRatio,
+) -> str | None:
+    if source_size is None:
+        return None
+    try:
+        validate_exact_output_dimensions(
+            source_size[0],
+            source_size[1],
+            aspect_ratio,
+        )
+    except ValueError as error:
+        return str(error)
+    return None
+
+
+def _add_resolution_item(
+    combo: QComboBox,
+    *,
+    label: str,
+    value: object,
+    dimensions: tuple[int, int],
+    unavailable_reason: str | None = None,
+) -> None:
+    combo.addItem(label, value)
+    model = combo.model()
+    if not isinstance(model, QStandardItemModel):
+        return
+    item = model.item(combo.count() - 1)
+    if item is None:
+        return
+    dimensions_text = f"{dimensions[0]} × {dimensions[1]}"
+    if unavailable_reason is None:
+        item.setToolTip(dimensions_text)
+        return
+    item.setEnabled(False)
+    item.setToolTip(f"{dimensions_text}\nUnavailable: {unavailable_reason}")
+
+
+def _sync_combo_tooltip(combo: QComboBox) -> None:
+    tooltip = combo.itemData(combo.currentIndex(), Qt.ItemDataRole.ToolTipRole)
+    combo.setToolTip(tooltip if isinstance(tooltip, str) else "")
+
+
+def _first_selectable_combo_index(combo: QComboBox) -> int:
+    model = combo.model()
+    if not isinstance(model, QStandardItemModel):
+        return 0 if combo.count() else -1
+    for index in range(combo.count()):
+        item = model.item(index)
+        if item is not None and item.isEnabled():
+            return index
+    return -1
+
+
 class Inspector(QWidget):
     """Render the selected active revision and issue typed commands."""
 
     document_changed = Signal(object)
     generate_background_requested = Signal()
-    prepare_image_prompt_requested = Signal()
+    refine_background_requested = Signal(object, object)
+    edit_background_requested = Signal(str, object)
     hotspot_selected = Signal(object)
-    hotspot_usage_requested = Signal(object, object, object)
     change_applied = Signal(str, object)
     render_inputs_changed = Signal()
 
@@ -200,20 +288,14 @@ class Inspector(QWidget):
         self.controller = controller
         self.selected_card_id: UUID | None = None
         self._rendered_revision_id: UUID | None = None
-        self._selected_style_id: UUID | None = None
-        self._rendered_style_id: UUID | None = None
-        self._selected_key_id: UUID | None = None
-        self._rendered_key_id: UUID | None = None
-        self._description_mode = "description"
-        self._enrich_using_text = ""
         self._generate_using_text = ""
-        self._enrich_reason = ""
         self._generate_reason = ""
-        self._can_enrich = False
-        self._image_prompt_busy = False
-        self._image_prompt_current: bool | None = None
-        self._image_prompt_model_identifier: str | None = None
-        self._image_prompt_prompt_version: str | None = None
+        self._refine_using_text = ""
+        self._refine_reason = ""
+        self._refine_source_size: tuple[int, int] | None = None
+        self._edit_using_text = ""
+        self._edit_reason = ""
+        self._edit_source_size: tuple[int, int] | None = None
         self._rendering = False
         self.setObjectName("inspector")
         self.setMinimumWidth(300)
@@ -238,9 +320,8 @@ class Inspector(QWidget):
         root.addWidget(self.pages, 1)
 
         self._build_background_tab()
-        self._build_styles_tab()
+        self._build_transform_tab()
         self._build_hotspots_tab()
-        self._build_keys_tab()
         self._connect_signals()
 
     def _build_background_tab(self) -> None:
@@ -257,7 +338,9 @@ class Inspector(QWidget):
         layout.addWidget(self.description_label)
         self.description_edit = _CommitPlainTextEdit()
         self.description_edit.setObjectName("descriptionEdit")
-        self.description_edit.setPlaceholderText("Description")
+        self.description_edit.setPlaceholderText(
+            "Describe the image to generate. Refer to selected References as image 1 and image 2."
+        )
         self.description_edit.setAccessibleName("Description")
         editor_height = round((self.description_edit.fontMetrics().lineSpacing() * 10 + 20) * 1.25)
         self.description_edit.setMinimumHeight(editor_height)
@@ -268,25 +351,6 @@ class Inspector(QWidget):
         self.description_error.setVisible(False)
         layout.addWidget(self.description_error)
 
-        self.description_toggle = QWidget()
-        self.description_toggle.setObjectName("descriptionToggle")
-        toggle_layout = QHBoxLayout(self.description_toggle)
-        toggle_layout.setContentsMargins(0, 0, 0, 0)
-        self.description_button = QRadioButton("Description")
-        self.description_button.setObjectName("descriptionButton")
-        self.description_button.setToolTip("Display and edit the authored Description")
-        self.image_prompt_button = QRadioButton("Image Prompt")
-        self.image_prompt_button.setObjectName("imagePromptButton")
-        self.image_prompt_button.setToolTip("Display and edit the prepared Image Prompt")
-        self.description_button_group = QButtonGroup(self)
-        self.description_button_group.setExclusive(True)
-        self.description_button_group.addButton(self.description_button)
-        self.description_button_group.addButton(self.image_prompt_button)
-        toggle_layout.addWidget(self.description_button)
-        toggle_layout.addWidget(self.image_prompt_button)
-        toggle_layout.addStretch(1)
-        layout.addWidget(self.description_toggle)
-
         layout.addSpacing(8)
         self.style_label = QLabel("Style")
         self.style_label.setObjectName("styleLabel")
@@ -295,9 +359,14 @@ class Inspector(QWidget):
         self.style_combo.setObjectName("styleCombo")
         self.style_combo.setAccessibleName("Style")
         self.style_combo.setToolTip(
-            "Rendering treatment appended to the Image Prompt during generation"
+            "Rendering treatment appended to the Description during generation"
         )
         layout.addWidget(self.style_combo)
+        self.style_selection_error = QLabel()
+        self.style_selection_error.setObjectName("styleSelectionValidationError")
+        self.style_selection_error.setWordWrap(True)
+        self.style_selection_error.setVisible(False)
+        layout.addWidget(self.style_selection_error)
 
         layout.addSpacing(8)
         self.reference_label = QLabel("References")
@@ -336,101 +405,137 @@ class Inspector(QWidget):
         layout.addWidget(self.reference_panel)
 
         layout.addSpacing(8)
-        self.enrich_button = QPushButton("Prepare Image Prompt")
-        self.enrich_button.setObjectName("enrichButton")
-        layout.addWidget(self.enrich_button)
+        self.resolution_label = QLabel("Resolution")
+        self.resolution_label.setObjectName("resolutionLabel")
+        layout.addWidget(self.resolution_label)
+        self.resolution_combo = QComboBox()
+        self.resolution_combo.setObjectName("resolutionCombo")
+        self.resolution_combo.setAccessibleName("Generate output size")
+        self.resolution_combo.setToolTip("Generate output tier or exact current-image size")
+        layout.addWidget(self.resolution_combo)
 
         layout.addSpacing(8)
         self.generate_background_button = QPushButton("Generate Image")
         self.generate_background_button.setObjectName("generateBackgroundButton")
         layout.addWidget(self.generate_background_button)
         self._focus_commit_targets = {
-            self.description_button,
-            self.image_prompt_button,
-            self.enrich_button,
             self.generate_background_button,
         }
 
         scroll.setWidget(page)
-        self.inspector_tabs.addTab(scroll, "Image")
+        self.inspector_tabs.addTab(scroll, "Generate")
 
-    def _build_styles_tab(self) -> None:
+    def _build_transform_tab(self) -> None:
+        scroll = QScrollArea()
+        scroll.setObjectName("transformInspectorTab")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
         page = QWidget()
-        page.setObjectName("stylesInspectorTab")
+        page.setObjectName("transformInspectorContent")
         layout = QVBoxLayout(page)
 
-        self.styles_placeholder = QLabel("No Styles yet.")
-        self.styles_placeholder.setWordWrap(True)
-        layout.addWidget(self.styles_placeholder)
-        self.style_list = QListWidget()
-        self.style_list.setObjectName("styleList")
-        self.style_list.setAccessibleName("Stack Styles")
-        layout.addWidget(self.style_list, 1)
+        self.reinterpret_section_label = QLabel("Reinterpret")
+        self.reinterpret_section_label.setObjectName("reinterpretSectionLabel")
+        layout.addWidget(self.reinterpret_section_label)
+        refine_group = QGroupBox()
+        refine_group.setObjectName("refineTransformGroup")
+        refine_layout = QVBoxLayout(refine_group)
 
-        controls = QHBoxLayout()
-        controls.addStretch(1)
-        self.delete_style_button = _compact_text_button(
-            "−",
-            object_name="deleteStyleButton",
-            accessible_name="Delete Style",
-            tooltip="Delete Style",
+        self.refine_transformation_label = QLabel("Source Similarity")
+        refine_layout.addWidget(self.refine_transformation_label)
+        self.refine_transformation_combo = QComboBox()
+        self.refine_transformation_combo.setObjectName("refineTransformationCombo")
+        self.refine_transformation_combo.setAccessibleName("Reinterpret source similarity")
+        for transformation in RefineTransformation:
+            self.refine_transformation_combo.addItem(
+                transformation.value.title(),
+                transformation,
+            )
+            self.refine_transformation_combo.setItemData(
+                self.refine_transformation_combo.count() - 1,
+                _SOURCE_SIMILARITY_TOOLTIPS[transformation],
+                Qt.ItemDataRole.ToolTipRole,
+            )
+        self.refine_transformation_combo.setCurrentIndex(
+            self._combo_index_for_data(
+                self.refine_transformation_combo,
+                RefineTransformation.BALANCED,
+            )
         )
-        self.add_style_button = _compact_text_button(
-            "+",
-            object_name="addStyleButton",
-            accessible_name="Add Style",
-            tooltip="Add Style",
-        )
-        style_control_extent = max(
-            self.delete_style_button.sizeHint().width(),
-            self.delete_style_button.sizeHint().height(),
-            self.add_style_button.sizeHint().width(),
-            self.add_style_button.sizeHint().height(),
-        )
-        self.delete_style_button.setFixedSize(
-            style_control_extent,
-            style_control_extent,
-        )
-        self.add_style_button.setFixedSize(
-            style_control_extent,
-            style_control_extent,
-        )
-        controls.addWidget(self.delete_style_button)
-        controls.addWidget(self.add_style_button)
-        layout.addLayout(controls)
+        _sync_combo_tooltip(self.refine_transformation_combo)
+        refine_layout.addWidget(self.refine_transformation_combo)
 
-        self.style_name_label = QLabel("Name")
-        self.style_name_label.setObjectName("styleNameLabel")
-        layout.addWidget(self.style_name_label)
-        self.style_name_edit = _CommitLineEdit()
-        self.style_name_edit.setObjectName("styleNameEdit")
-        self.style_name_edit.setAccessibleName("Style name")
-        layout.addWidget(self.style_name_edit)
+        self.refine_resolution_label = QLabel("Resolution")
+        refine_layout.addWidget(self.refine_resolution_label)
+        self.refine_resolution_combo = QComboBox()
+        self.refine_resolution_combo.setObjectName("refineResolutionCombo")
+        self.refine_resolution_combo.setAccessibleName("Reinterpret resolution")
+        refine_layout.addWidget(self.refine_resolution_combo)
+        self.refine_error = QLabel()
+        self.refine_error.setObjectName("refineValidationError")
+        self.refine_error.setWordWrap(True)
+        self.refine_error.setVisible(False)
+        refine_layout.addWidget(self.refine_error)
 
-        self.style_prompt_label = QLabel("Style Text")
-        self.style_prompt_label.setObjectName("stylePromptLabel")
-        layout.addWidget(self.style_prompt_label)
-        self.style_prompt_edit = _CommitPlainTextEdit()
-        self.style_prompt_edit.setObjectName("stylePromptEdit")
-        self.style_prompt_edit.setAccessibleName("Style text")
-        self.style_prompt_edit.setPlaceholderText(
-            "Describe the visual treatment appended during generation"
-        )
-        self.style_prompt_edit.setMinimumHeight(
-            self.style_prompt_edit.fontMetrics().lineSpacing() * 7 + 20
-        )
-        layout.addWidget(self.style_prompt_edit)
+        self.refine_background_button = QPushButton("Reinterpret")
+        self.refine_background_button.setObjectName("refineBackgroundButton")
+        refine_layout.addWidget(self.refine_background_button)
+        self._focus_commit_targets.add(self.refine_background_button)
+        layout.addWidget(refine_group)
 
-        self.style_error = QLabel()
-        self.style_error.setObjectName("styleValidationError")
-        self.style_error.setWordWrap(True)
-        self.style_error.setVisible(False)
-        layout.addWidget(self.style_error)
-        self._styles_tab_index = self.inspector_tabs.addTab(page, "Styles")
+        layout.addSpacing(8)
+        self.edit_section_label = QLabel("Edit")
+        self.edit_section_label.setObjectName("editSectionLabel")
+        layout.addWidget(self.edit_section_label)
+        edit_group = QGroupBox()
+        edit_group.setObjectName("editTransformGroup")
+        edit_layout = QVBoxLayout(edit_group)
+        self.edit_instruction_label = QLabel("Edit Instruction")
+        edit_layout.addWidget(self.edit_instruction_label)
+        self.edit_instruction_edit = QPlainTextEdit()
+        self.edit_instruction_edit.setObjectName("editInstructionEdit")
+        self.edit_instruction_edit.setAccessibleName("Edit Instruction")
+        self.edit_instruction_edit.setPlaceholderText(
+            "Describe the change to make, everything else will be preserved"
+        )
+        self.edit_instruction_edit.setMaximumHeight(110)
+        edit_layout.addWidget(self.edit_instruction_edit)
+        self.edit_instruction_error = QLabel()
+        self.edit_instruction_error.setObjectName("editInstructionValidationError")
+        self.edit_instruction_error.setWordWrap(True)
+        self.edit_instruction_error.setVisible(False)
+        edit_layout.addWidget(self.edit_instruction_error)
+
+        self.edit_resolution_label = QLabel("Resolution")
+        edit_layout.addWidget(self.edit_resolution_label)
+        self.edit_resolution_combo = QComboBox()
+        self.edit_resolution_combo.setObjectName("editResolutionCombo")
+        self.edit_resolution_combo.setAccessibleName("Edit resolution")
+        edit_layout.addWidget(self.edit_resolution_combo)
+        self.edit_output_error = QLabel()
+        self.edit_output_error.setObjectName("editOutputValidationError")
+        self.edit_output_error.setWordWrap(True)
+        self.edit_output_error.setVisible(False)
+        edit_layout.addWidget(self.edit_output_error)
+
+        self.edit_background_button = QPushButton("Edit")
+        self.edit_background_button.setObjectName("editBackgroundButton")
+        edit_layout.addWidget(self.edit_background_button)
+        self._focus_commit_targets.add(self.edit_background_button)
+        layout.addWidget(edit_group)
+        layout.addStretch(1)
+
+        scroll.setWidget(page)
+        self._transform_tab_index = self.inspector_tabs.addTab(scroll, "Transform")
 
     def _build_hotspots_tab(self) -> None:
+        scroll = QScrollArea()
+        scroll.setObjectName("hotspotsInspectorTab")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         page = QWidget()
-        page.setObjectName("hotspotsInspectorTab")
+        page.setObjectName("hotspotsInspectorContent")
         layout = QVBoxLayout(page)
 
         self.hotspots_placeholder = QLabel("No hotspots yet.")
@@ -439,7 +544,8 @@ class Inspector(QWidget):
         self.hotspot_list = QListWidget()
         self.hotspot_list.setObjectName("hotspotList")
         self.hotspot_list.setWordWrap(True)
-        layout.addWidget(self.hotspot_list, 1)
+        self.hotspot_list.setFixedHeight(120)
+        layout.addWidget(self.hotspot_list)
 
         controls = QHBoxLayout()
         self.move_hotspot_up_button = _compact_icon_button(
@@ -503,21 +609,9 @@ class Inspector(QWidget):
         controls.addWidget(self.add_hotspot_button)
         layout.addLayout(controls)
 
-        self.hotspot_rule_scroll = QScrollArea()
-        self.hotspot_rule_scroll.setObjectName("hotspotRuleScroll")
-        self.hotspot_rule_scroll.setWidgetResizable(True)
-        self.hotspot_rule_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self.hotspot_rule_scroll.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
-        )
-        rule_content = QWidget()
-        rule_content.setObjectName("hotspotRuleContent")
-        rule_layout = QVBoxLayout(rule_content)
-        rule_layout.setContentsMargins(0, 0, 0, 0)
-
         self.hotspot_when_label = QLabel("When")
         self.hotspot_when_label.setObjectName("hotspotWhenLabel")
-        rule_layout.addWidget(self.hotspot_when_label)
+        layout.addWidget(self.hotspot_when_label)
         self.hotspot_when_panel, when_layout = _rule_panel("hotspotWhenPanel")
         self.condition_table = QTableWidget(0, 3)
         self.condition_table.setObjectName("hotspotConditionTable")
@@ -538,11 +632,11 @@ class Inspector(QWidget):
             0,
             Qt.AlignmentFlag.AlignLeft,
         )
-        rule_layout.addWidget(self.hotspot_when_panel)
+        layout.addWidget(self.hotspot_when_panel)
 
         self.hotspot_then_label = QLabel("Then")
         self.hotspot_then_label.setObjectName("hotspotThenLabel")
-        rule_layout.addWidget(self.hotspot_then_label)
+        layout.addWidget(self.hotspot_then_label)
         self.hotspot_then_panel, then_layout = _rule_panel("hotspotThenPanel")
         self.key_change_table = QTableWidget(0, 3)
         self.key_change_table.setObjectName("hotspotKeyChangeTable")
@@ -571,87 +665,17 @@ class Inspector(QWidget):
         self.hotspot_destination_combo.setObjectName("hotspotDestinationCombo")
         self.hotspot_destination_combo.setAccessibleName("Hotspot destination")
         then_layout.addWidget(self.hotspot_destination_combo)
-        rule_layout.addWidget(self.hotspot_then_panel)
-
-        self.hotspot_summary = QLabel()
-        self.hotspot_summary.setObjectName("hotspotSummary")
-        self.hotspot_summary.setWordWrap(True)
-        rule_layout.addWidget(self.hotspot_summary)
+        layout.addWidget(self.hotspot_then_panel)
 
         self.hotspot_error = QLabel()
         self.hotspot_error.setObjectName("hotspotValidationError")
         self.hotspot_error.setWordWrap(True)
         self.hotspot_error.setVisible(False)
-        rule_layout.addWidget(self.hotspot_error)
-        rule_layout.addStretch(1)
-        self.hotspot_rule_scroll.setWidget(rule_content)
-        layout.addWidget(self.hotspot_rule_scroll, 2)
-        self._hotspots_tab_index = self.inspector_tabs.addTab(page, "Hotspots")
-
-    def _build_keys_tab(self) -> None:
-        page = QWidget()
-        page.setObjectName("keysInspectorTab")
-        layout = QVBoxLayout(page)
-
-        self.keys_placeholder = QLabel("No Keys yet.")
-        self.keys_placeholder.setWordWrap(True)
-        layout.addWidget(self.keys_placeholder)
-        self.key_list = QListWidget()
-        self.key_list.setObjectName("keyList")
-        self.key_list.setAccessibleName("Stack Keys")
-        layout.addWidget(self.key_list, 1)
-
-        controls = QHBoxLayout()
-        controls.addStretch(1)
-        self.delete_key_button = _compact_text_button(
-            "−",
-            object_name="deleteKeyButton",
-            accessible_name="Delete Key",
-            tooltip="Delete unused Key",
-        )
-        self.add_key_button = _compact_text_button(
-            "+",
-            object_name="addKeyButton",
-            accessible_name="Add Key",
-            tooltip="Add Key",
-        )
-        control_extent = max(
-            self.delete_key_button.sizeHint().width(),
-            self.delete_key_button.sizeHint().height(),
-            self.add_key_button.sizeHint().width(),
-            self.add_key_button.sizeHint().height(),
-        )
-        self.delete_key_button.setFixedSize(control_extent, control_extent)
-        self.add_key_button.setFixedSize(control_extent, control_extent)
-        controls.addWidget(self.delete_key_button)
-        controls.addWidget(self.add_key_button)
-        layout.addLayout(controls)
-
-        self.key_name_label = QLabel("Name")
-        self.key_name_label.setObjectName("keyNameLabel")
-        layout.addWidget(self.key_name_label)
-        self.key_name_edit = _CommitLineEdit()
-        self.key_name_edit.setObjectName("keyNameEdit")
-        self.key_name_edit.setAccessibleName("Key name")
-        layout.addWidget(self.key_name_edit)
-
-        self.key_usage_label = QLabel("Used By")
-        self.key_usage_label.setObjectName("keyUsageLabel")
-        layout.addWidget(self.key_usage_label)
-        self.key_usage_list = QListWidget()
-        self.key_usage_list.setObjectName("keyUsageList")
-        self.key_usage_list.setAccessibleName("Key usages")
-        layout.addWidget(self.key_usage_list, 1)
-        self.show_hotspot_usage_button = QPushButton("Show Hotspot")
-        self.show_hotspot_usage_button.setObjectName("showHotspotUsageButton")
-        layout.addWidget(self.show_hotspot_usage_button)
-
-        self.key_error = QLabel()
-        self.key_error.setObjectName("keyValidationError")
-        self.key_error.setWordWrap(True)
-        self.key_error.setVisible(False)
-        layout.addWidget(self.key_error)
-        self._keys_tab_index = self.inspector_tabs.addTab(page, "Keys")
+        layout.addWidget(self.hotspot_error)
+        layout.addStretch(1)
+        scroll.setWidget(page)
+        self.hotspot_scroll = scroll
+        self._hotspots_tab_index = self.inspector_tabs.addTab(scroll, "Hotspots")
 
     @property
     def hotspots_active(self) -> bool:
@@ -660,14 +684,15 @@ class Inspector(QWidget):
     def _connect_signals(self) -> None:
         self.description_edit.editing_finished.connect(self._description_editing_finished)
         self.description_edit.textChanged.connect(self._render_inputs_changed)
-        self.description_button.clicked.connect(
-            lambda: self._switch_description_mode("description")
+        self.generate_background_button.clicked.connect(self._request_generate_background)
+        self.refine_background_button.clicked.connect(self._request_refine_background)
+        self.refine_transformation_combo.currentIndexChanged.connect(
+            self._refine_similarity_changed
         )
-        self.image_prompt_button.clicked.connect(
-            lambda: self._switch_description_mode("image_prompt")
-        )
-        self.enrich_button.clicked.connect(self.prepare_image_prompt_requested)
-        self.generate_background_button.clicked.connect(self.generate_background_requested)
+        self.refine_resolution_combo.currentIndexChanged.connect(self._refine_output_changed)
+        self.edit_instruction_edit.textChanged.connect(self._edit_inputs_changed)
+        self.edit_resolution_combo.currentIndexChanged.connect(self._edit_output_changed)
+        self.edit_background_button.clicked.connect(self._request_edit_background)
         self.style_combo.currentIndexChanged.connect(self._revision_style_changed)
         self.reference_combo.currentIndexChanged.connect(
             lambda index: self._reference_changed(1, index)
@@ -675,11 +700,7 @@ class Inspector(QWidget):
         self.additional_reference_combo.currentIndexChanged.connect(
             lambda index: self._reference_changed(2, index)
         )
-        self.style_list.currentItemChanged.connect(self._style_selection_changed)
-        self.add_style_button.clicked.connect(self._add_style)
-        self.delete_style_button.clicked.connect(self._delete_style)
-        self.style_name_edit.editing_finished.connect(self._style_editing_finished)
-        self.style_prompt_edit.editing_finished.connect(self._style_editing_finished)
+        self.resolution_combo.currentIndexChanged.connect(self._revision_resolution_changed)
         self.hotspot_list.currentItemChanged.connect(self._hotspot_selection_changed)
         self.move_hotspot_up_button.clicked.connect(lambda: self._move_hotspot(-1))
         self.move_hotspot_down_button.clicked.connect(lambda: self._move_hotspot(1))
@@ -688,24 +709,44 @@ class Inspector(QWidget):
         self.add_condition_button.clicked.connect(self._add_condition)
         self.add_key_change_button.clicked.connect(self._add_key_change)
         self.hotspot_destination_combo.currentIndexChanged.connect(self._destination_changed)
-        self.key_list.currentItemChanged.connect(self._key_selection_changed)
-        self.add_key_button.clicked.connect(self._add_key)
-        self.delete_key_button.clicked.connect(self._delete_key)
-        self.key_name_edit.editing_finished.connect(
-            self._key_name_editing_finished
-        )
-        self.key_name_edit.returnPressed.connect(self._commit_key)
-        self.key_usage_list.currentItemChanged.connect(
-            lambda current, _previous: self.show_hotspot_usage_button.setEnabled(
-                current is not None
-            )
-        )
-        self.show_hotspot_usage_button.clicked.connect(self._show_hotspot_usage)
 
     def _render_inputs_changed(self) -> None:
         if not self._rendering:
-            self._update_image_prompt_freshness()
             self.render_inputs_changed.emit()
+
+    def _edit_inputs_changed(self) -> None:
+        if self._rendering:
+            return
+        self._set_error(self.edit_instruction_error, "")
+        self._set_error(self.edit_output_error, "")
+        self._render_edit_tooltip()
+        self.render_inputs_changed.emit()
+
+    def _refine_similarity_changed(self, _index: int) -> None:
+        _sync_combo_tooltip(self.refine_transformation_combo)
+        self._render_inputs_changed()
+
+    def _refine_output_changed(self, _index: int) -> None:
+        if self._rendering:
+            return
+        if self.refine_resolution_combo.currentData() is None:
+            fallback = _first_selectable_combo_index(self.refine_resolution_combo)
+            if fallback >= 0:
+                with QSignalBlocker(self.refine_resolution_combo):
+                    self.refine_resolution_combo.setCurrentIndex(fallback)
+        _sync_combo_tooltip(self.refine_resolution_combo)
+        self._render_inputs_changed()
+
+    def _edit_output_changed(self, _index: int) -> None:
+        if self._rendering:
+            return
+        if self.edit_resolution_combo.currentData() is None:
+            fallback = _first_selectable_combo_index(self.edit_resolution_combo)
+            if fallback >= 0:
+                with QSignalBlocker(self.edit_resolution_combo):
+                    self.edit_resolution_combo.setCurrentIndex(fallback)
+        _sync_combo_tooltip(self.edit_resolution_combo)
+        self._edit_inputs_changed()
 
     def _description_editing_finished(
         self,
@@ -717,20 +758,17 @@ class Inspector(QWidget):
             render_change=not mouse_focus and next_focus not in self._focus_commit_targets
         )
 
-    def render(self, document: Stack, selected_card_id: UUID | None) -> None:
+    def render(
+        self,
+        document: Stack,
+        selected_card_id: UUID | None,
+        *,
+        refine_source_size: tuple[int, int] | None = None,
+    ) -> None:
         previous_card_id = self.selected_card_id
         previous_revision_id = self._rendered_revision_id
         preserve_description = self.description_edit.hasFocus()
         description_draft = self.description_edit.toPlainText()
-        preserve_style_name = self.style_name_edit.hasFocus()
-        style_name_draft = self.style_name_edit.text()
-        preserve_style_prompt = self.style_prompt_edit.hasFocus()
-        style_prompt_draft = self.style_prompt_edit.toPlainText()
-        previous_style_id = self._rendered_style_id
-        preserve_key_name = self.key_name_edit.hasFocus()
-        key_name_draft = self.key_name_edit.text()
-        previous_key_id = self._rendered_key_id
-        previous_mode = self._description_mode
         self._rendering = True
         try:
             card = next(
@@ -743,13 +781,14 @@ class Inspector(QWidget):
                 self.pages.setCurrentIndex(0)
                 self._set_error(self.description_error, "")
                 self._set_error(self.reference_error, "")
-                self._set_error(self.style_error, "")
-                self._set_error(self.key_error, "")
+                self._set_error(self.refine_error, "")
+                self._set_error(self.edit_instruction_error, "")
+                self._set_error(self.edit_output_error, "")
+                self._set_error(self.edit_instruction_error, "")
+                self._set_error(self.edit_output_error, "")
+                self._set_error(self.style_selection_error, "")
                 self.set_hotspot_error("")
                 self.description_edit.clear()
-                self.description_toggle.hide()
-                self._image_prompt_current = None
-                self._update_enrich_button()
                 self.hotspot_list.clear()
                 self._render_hotspot_properties(document, None)
                 return
@@ -761,44 +800,33 @@ class Inspector(QWidget):
                 self._set_error(self.reference_error, "")
                 self.set_hotspot_error("")
             self._rendered_revision_id = revision.id
-            if revision.image_prompt is None or not same_revision:
-                self._description_mode = "description"
-            else:
-                self._description_mode = previous_mode
-            displayed_value = (
-                revision.image_prompt.text
-                if (self._description_mode == "image_prompt" and revision.image_prompt is not None)
+            self.description_edit.setPlainText(
+                description_draft
+                if preserve_description and same_revision
                 else revision.description
             )
-            self.description_edit.setPlainText(
-                description_draft if preserve_description and same_revision else displayed_value
-            )
             self._render_style_selector(document, revision)
-            self._render_styles(
+            self._render_reference(document, card, revision)
+            self._render_resolution(
                 document,
                 revision,
-                style_name_draft=(
-                    style_name_draft
-                    if preserve_style_name and previous_style_id == self._selected_style_id
-                    else None
-                ),
-                style_prompt_draft=(
-                    style_prompt_draft
-                    if preserve_style_prompt and previous_style_id == self._selected_style_id
-                    else None
-                ),
+                source_size=refine_source_size,
+                select_current=not same_revision,
             )
-            self._render_reference(document, card, revision)
             self._render_description_workflow(document, card, revision)
-            self._render_hotspots(document, revision)
-            self._render_keys(
+            self._render_refine(
                 document,
-                key_name_draft=(
-                    key_name_draft
-                    if preserve_key_name and previous_key_id == self._selected_key_id
-                    else None
-                ),
+                revision,
+                source_size=refine_source_size,
+                select_current=not same_revision,
             )
+            self._render_edit(
+                document,
+                revision,
+                source_size=refine_source_size,
+                select_current=not same_revision,
+            )
+            self._render_hotspots(document, revision)
         finally:
             self._rendering = False
 
@@ -809,126 +837,33 @@ class Inspector(QWidget):
         if card is None:
             return False
         value = self.description_edit.toPlainText()
-        if self._description_mode == "description":
-            if value == card.active_revision.description:
-                return True
-            return self._execute(
-                EditRevisionDescriptionCommand(
-                    card_id=card.id,
-                    revision_id=card.active_revision.id,
-                    value=value,
-                ),
-                error_label=self.description_error,
-                render_change=render_change,
-            )
-        existing = card.active_revision.image_prompt
-        if existing is None or value.strip() == existing.text:
+        if value == card.active_revision.description:
             return True
-        if not value.strip():
-            return self._execute(
-                SetRevisionImagePromptCommand(
-                    card_id=card.id,
-                    revision_id=card.active_revision.id,
-                    value=None,
-                ),
-                error_label=self.description_error,
-                undo_message="Image Prompt removed",
-                render_change=render_change,
-            )
-        changed = self._execute(
-            SetRevisionImagePromptCommand(
+        return self._execute(
+            EditRevisionDescriptionCommand(
                 card_id=card.id,
                 revision_id=card.active_revision.id,
-                value=existing.model_copy(
-                    update={
-                        "text": value.strip(),
-                        "source_description": card.active_revision.description,
-                        "references": image_prompt_reference_snapshots(
-                            self.controller.document,
-                            card,
-                        ),
-                        "model_identifier": self._image_prompt_model_identifier,
-                        "prompt_version": self._image_prompt_prompt_version,
-                    }
-                ),
+                value=value,
             ),
             error_label=self.description_error,
             render_change=render_change,
         )
-        if changed and not render_change:
-            self._update_image_prompt_freshness()
-        return changed
 
-    def commit_card_metadata(self) -> bool:
+    def commit_card_metadata(self, *, render_change: bool = True) -> bool:
         """Commit every visible authoring draft before a context change or save."""
-        if self._selected_style() is not None and not self._commit_style():
-            return False
-        if self._selected_key_id is not None and not self._commit_key():
-            return False
-        return self.commit_revision_metadata()
-
-    def has_current_image_prompt(self) -> bool:
-        card = self._selected_card()
-        if card is None:
-            return False
-        visible_value = self.description_edit.toPlainText().strip()
-        image_prompt = (
-            visible_value
-            if self._description_mode == "image_prompt"
-            else (
-                card.active_revision.image_prompt.text
-                if card.active_revision.image_prompt is not None
-                else ""
-            )
-        )
-        return (
-            bool(card.active_revision.description.strip())
-            and bool(image_prompt)
-            and self._image_prompt_current is True
-        )
+        return self.commit_revision_metadata(render_change=render_change)
 
     def has_description_input(self) -> bool:
         card = self._selected_card()
         if card is None:
             return False
-        if self._description_mode == "description":
-            return bool(self.description_edit.toPlainText().strip())
-        return bool(card.active_revision.description.strip())
+        return bool(self.description_edit.toPlainText().strip())
 
-    def show_image_prompt(
-        self,
-        card_id: UUID,
-        revision_id: UUID,
-    ) -> None:
-        """Display a newly prepared prompt when its revision is still active."""
-        card = self._selected_card()
-        if (
-            card is None
-            or card.id != card_id
-            or card.active_revision.id != revision_id
-            or card.active_revision.image_prompt is None
-        ):
-            return
-        self._description_mode = "image_prompt"
-        self.render(self.controller.document, self.selected_card_id)
-        image_prompt = card.active_revision.image_prompt
-        assert image_prompt is not None
-        with QSignalBlocker(self.description_edit):
-            self.description_edit.setPlainText(image_prompt.text)
+    def has_edit_instruction_input(self) -> bool:
+        return bool(self.edit_instruction_edit.toPlainText().strip())
 
-    def _switch_description_mode(self, mode: str) -> None:
-        if self._rendering or mode == self._description_mode:
-            return
-        card = self._selected_card()
-        if (
-            card is None
-            or (mode == "image_prompt" and card.active_revision.image_prompt is None)
-            or not self.commit_revision_metadata()
-        ):
-            self.render(self.controller.document, self.selected_card_id)
-            return
-        self._description_mode = mode
-        self.render(self.controller.document, self.selected_card_id)
+    def selected_edit_output_size(self) -> EditOutputSize | None:
+        return self._selected_edit_output_size()
 
     def _render_description_workflow(
         self,
@@ -945,21 +880,24 @@ class Inspector(QWidget):
             else ""
         )
         style_suffix = " + Style" if revision.style_id is not None else ""
-        self._enrich_using_text = f"Using: Description{reference_suffix}"
-        image_prompt = revision.image_prompt
-        self._image_prompt_current = self._current_image_prompt_state(
-            document,
-            card,
+        selected_output_size = self.resolution_combo.currentData()
+        if not isinstance(
+            selected_output_size,
+            (PresetOutputSize, ExactOutputSize),
+        ):
+            selected_output_size = revision.generate_output_size
+        width, height = selected_output_dimensions(
+            selected_output_size,
+            document.aspect_ratio,
         )
-        self.description_toggle.setVisible(image_prompt is not None)
-        self.description_button.setChecked(self._description_mode == "description")
-        self.image_prompt_button.setChecked(self._description_mode == "image_prompt")
-        label = "Image Prompt" if self._description_mode == "image_prompt" else "Description"
-        self.description_label.setText(label)
-        self.description_edit.setAccessibleName(label)
-        self.description_edit.setPlaceholderText(label)
-        self._generate_using_text = f"Using: Image Prompt{style_suffix}{reference_suffix}"
-        self._update_enrich_button()
+        if isinstance(selected_output_size, PresetOutputSize):
+            output_label = selected_output_size.tier.label
+        else:
+            output_label = "Exact"
+        self._generate_using_text = (
+            f"Using: Description{style_suffix}{reference_suffix}\n"
+            f"Resolution: {output_label} ({width} × {height})"
+        )
         self._refresh_generation_tooltips()
 
     def set_background_capabilities(
@@ -980,109 +918,60 @@ class Inspector(QWidget):
         )
         self._refresh_generation_tooltips()
 
-    def set_image_prompt_capabilities(
+    def set_refine_capabilities(
         self,
         *,
-        can_enrich: bool,
-        reason: str,
+        can_refine: bool,
+        refine_reason: str,
         busy: bool,
-        model_identifier: str | None = None,
-        prompt_version: str | None = None,
+        refining: bool,
     ) -> None:
-        self._enrich_reason = reason
-        self._can_enrich = can_enrich
-        self._image_prompt_busy = busy
-        self._image_prompt_model_identifier = model_identifier
-        self._image_prompt_prompt_version = prompt_version
-        self._update_image_prompt_freshness()
-
-    def _update_image_prompt_freshness(self) -> None:
-        card = self._selected_card()
-        self._image_prompt_current = (
-            None
-            if card is None
-            else self._current_image_prompt_state(
-                self.controller.document,
-                card,
-            )
-        )
-        self._update_enrich_button()
+        self._refine_reason = "" if can_refine and not busy else refine_reason
+        self.refine_background_button.setEnabled(can_refine and not busy)
+        self.refine_background_button.setText("Reinterpreting…" if refining else "Reinterpret")
         self._refresh_generation_tooltips()
 
-    def _current_image_prompt_state(
+    def set_edit_capabilities(
         self,
-        document: Stack,
-        card: Card,
-    ) -> bool | None:
-        image_prompt = card.active_revision.image_prompt
-        if image_prompt is None:
-            return None
-        source_description = (
-            self.description_edit.toPlainText()
-            if self._description_mode == "description"
-            else card.active_revision.description
-        )
-        reference_snapshots = image_prompt_reference_snapshots(document, card)
-        reference_is_usable = (
-            len(reference_snapshots) == len(card.active_revision.references)
-        )
-        visible_prompt = self.description_edit.toPlainText().strip()
-        has_manual_update = (
-            self._description_mode == "image_prompt"
-            and bool(visible_prompt)
-            and visible_prompt != image_prompt.text
-        )
-        return reference_is_usable and (
-            has_manual_update
-            or image_prompt.is_current(
-                source_description=source_description,
-                references=reference_snapshots,
-                model_identifier=self._image_prompt_model_identifier,
-                prompt_version=self._image_prompt_prompt_version,
-            )
-        )
+        *,
+        can_edit: bool,
+        edit_reason: str,
+        busy: bool,
+        editing: bool,
+    ) -> None:
+        self._edit_reason = "" if can_edit and not busy else edit_reason
+        self.edit_background_button.setEnabled(can_edit and not busy)
+        self.edit_background_button.setText("Editing…" if editing else "Edit")
+        self._refresh_generation_tooltips()
 
-    def _update_enrich_button(self) -> None:
-        card = self._selected_card()
-        has_image_prompt = card is not None and card.active_revision.image_prompt is not None
-        if self._image_prompt_busy:
-            text = "Preparing Image Prompt…"
-            enabled = False
-        elif self._image_prompt_current is True:
-            text = "Image Prompt Current"
-            enabled = False
-        else:
-            text = "Update Image Prompt" if has_image_prompt else "Prepare Image Prompt"
-            enabled = self._can_enrich
-        self.enrich_button.setText(text)
-        self.enrich_button.setEnabled(enabled)
-        self.enrich_button.setAccessibleDescription(self._enrich_state_reason())
+    def set_edit_error(self, message: str) -> None:
+        self._set_error(self.edit_instruction_error, message)
+
+    def clear_edit_instruction(self) -> None:
+        with QSignalBlocker(self.edit_instruction_edit):
+            self.edit_instruction_edit.clear()
+        self._set_error(self.edit_instruction_error, "")
+        self._render_edit_tooltip()
 
     def _refresh_generation_tooltips(self) -> None:
-        self.enrich_button.setToolTip(
-            self._tooltip_with_using(
-                self._enrich_state_reason(),
-                self._enrich_using_text,
-            )
-        )
         self.generate_background_button.setToolTip(
             self._tooltip_with_using(
                 self._generate_reason,
                 self._generate_using_text,
             )
         )
-
-    def _enrich_state_reason(self) -> str:
-        if self._image_prompt_busy:
-            return "Image Prompt preparation is running"
-        if self._image_prompt_current is True:
-            return "Current"
-        if self._image_prompt_current is False:
-            return self._tooltip_with_using(
-                "Out of date",
-                self._enrich_reason,
+        self.refine_background_button.setToolTip(
+            self._tooltip_with_using(
+                self._refine_reason,
+                self._refine_using_text,
             )
-        return self._enrich_reason
+        )
+        self.edit_background_button.setToolTip(
+            self._tooltip_with_using(
+                self._edit_reason,
+                self._edit_using_text,
+            )
+        )
 
     @staticmethod
     def _tooltip_with_using(reason: str, using: str) -> str:
@@ -1117,8 +1006,8 @@ class Inspector(QWidget):
         self._rendered_revision_id = None
         self._set_error(self.description_error, "")
         self._set_error(self.reference_error, "")
-        self._set_error(self.style_error, "")
-        self._set_error(self.key_error, "")
+        self._set_error(self.refine_error, "")
+        self._set_error(self.style_selection_error, "")
         self.set_hotspot_error("")
 
     def _render_style_selector(
@@ -1149,415 +1038,16 @@ class Inspector(QWidget):
             style_id = None
         if style_id == card.active_revision.style_id:
             return
+        self._render_inputs_changed()
         self._execute(
             SetRevisionStyleCommand(
                 card_id=card.id,
                 revision_id=card.active_revision.id,
                 style_id=style_id,
             ),
-            error_label=self.style_error,
+            error_label=self.style_selection_error,
             undo_message="Style changed",
         )
-
-    @property
-    def selected_style_id(self) -> UUID | None:
-        item = self.style_list.currentItem()
-        if item is None:
-            return None
-        value = item.data(Qt.ItemDataRole.UserRole)
-        return value if isinstance(value, UUID) else None
-
-    def _render_styles(
-        self,
-        document: Stack,
-        revision: CardRevision,
-        *,
-        style_name_draft: str | None,
-        style_prompt_draft: str | None,
-    ) -> None:
-        desired_id = self._selected_style_id
-        known_ids = {style.id for style in document.styles}
-        if desired_id not in known_ids:
-            desired_id = (
-                revision.style_id
-                if revision.style_id in known_ids
-                else document.styles[0].id
-                if document.styles
-                else None
-            )
-        with QSignalBlocker(self.style_list):
-            self.style_list.clear()
-            for style in document.styles:
-                item = QListWidgetItem(style.name)
-                item.setData(Qt.ItemDataRole.UserRole, style.id)
-                self.style_list.addItem(item)
-            selected_row = next(
-                (
-                    row
-                    for row in range(self.style_list.count())
-                    if self.style_list.item(row).data(Qt.ItemDataRole.UserRole) == desired_id
-                ),
-                -1,
-            )
-            self.style_list.setCurrentRow(selected_row)
-        self._selected_style_id = desired_id
-        self._rendered_style_id = desired_id
-        self.styles_placeholder.setVisible(not document.styles)
-        style = document.style_by_id(desired_id)
-        self._render_style_properties(
-            style,
-            style_name_draft=style_name_draft,
-            style_prompt_draft=style_prompt_draft,
-        )
-
-    def _render_style_properties(
-        self,
-        style: StyleDefinition | None,
-        *,
-        style_name_draft: str | None = None,
-        style_prompt_draft: str | None = None,
-    ) -> None:
-        enabled = style is not None
-        self.delete_style_button.setEnabled(enabled)
-        self.style_name_edit.setEnabled(enabled)
-        self.style_prompt_edit.setEnabled(enabled)
-        with QSignalBlocker(self.style_name_edit):
-            self.style_name_edit.setText(
-                style_name_draft
-                if style_name_draft is not None
-                else style.name
-                if style is not None
-                else ""
-            )
-        with QSignalBlocker(self.style_prompt_edit):
-            self.style_prompt_edit.setPlainText(
-                style_prompt_draft
-                if style_prompt_draft is not None
-                else style.prompt_text
-                if style is not None
-                else ""
-            )
-
-    def _style_selection_changed(
-        self,
-        current: QListWidgetItem | None,
-        _previous: QListWidgetItem | None,
-    ) -> None:
-        if self._rendering:
-            return
-        value = current.data(Qt.ItemDataRole.UserRole) if current is not None else None
-        self._selected_style_id = value if isinstance(value, UUID) else None
-        self._rendered_style_id = self._selected_style_id
-        self._set_error(self.style_error, "")
-        self._render_style_properties(self._selected_style())
-
-    def _style_editing_finished(
-        self,
-        _next_focus: object,
-        reason: object,
-    ) -> None:
-        self._commit_style(
-            render_change=reason != Qt.FocusReason.MouseFocusReason
-        )
-
-    def _add_style(self) -> None:
-        document = self.controller.document
-        existing_names = {style.name.casefold() for style in document.styles}
-        number = 1
-        name = "New Style"
-        while name.casefold() in existing_names:
-            number += 1
-            name = f"New Style {number}"
-        command = AddStyleCommand(name=name)
-        self._selected_style_id = command.style_id
-        if self._execute(
-            command,
-            error_label=self.style_error,
-            undo_message="Style added",
-        ):
-            self.inspector_tabs.setCurrentIndex(self._styles_tab_index)
-            self.style_name_edit.setFocus()
-            self.style_name_edit.selectAll()
-
-    def _delete_style(self) -> None:
-        style_id = self.selected_style_id
-        if style_id is None:
-            return
-        self._selected_style_id = None
-        self._execute(
-            DeleteStyleCommand(style_id=style_id),
-            error_label=self.style_error,
-            undo_message="Style deleted",
-        )
-
-    def _commit_style(self, *, render_change: bool = True) -> bool:
-        if self._rendering:
-            return False
-        style = self._selected_style()
-        if style is None:
-            return False
-        name = self.style_name_edit.text()
-        prompt_text = self.style_prompt_edit.toPlainText()
-        if name == style.name and prompt_text.strip() == style.prompt_text:
-            return True
-        return self._execute(
-            UpdateStyleCommand(
-                style_id=style.id,
-                name=name,
-                prompt_text=prompt_text,
-            ),
-            error_label=self.style_error,
-            undo_message="Style updated",
-            render_change=render_change,
-        )
-
-    def _selected_style(self) -> StyleDefinition | None:
-        return self.controller.document.style_by_id(self._selected_style_id)
-
-    @property
-    def selected_key_id(self) -> UUID | None:
-        item = self.key_list.currentItem()
-        if item is None:
-            return None
-        value = item.data(Qt.ItemDataRole.UserRole)
-        return value if isinstance(value, UUID) else None
-
-    @staticmethod
-    def _key_usages(
-        document: Stack,
-        key_id: UUID,
-    ) -> list[tuple[Card, int, Interaction, tuple[str, ...]]]:
-        usages: list[tuple[Card, int, Interaction, tuple[str, ...]]] = []
-        for card in document.cards:
-            for revision_number, revision in enumerate(card.revisions, start=1):
-                if revision.hotspot_set is None:
-                    continue
-                for interaction in revision.hotspot_set.interactions:
-                    roles = tuple(
-                        role
-                        for role, key_ids in (
-                            ("Has", interaction.conditions.requires),
-                            ("Lacks", interaction.conditions.forbids),
-                            ("Loses", interaction.key_changes.remove),
-                            ("Gains", interaction.key_changes.grant),
-                        )
-                        if key_id in key_ids
-                    )
-                    if roles:
-                        usages.append(
-                            (card, revision_number, interaction, roles)
-                        )
-        return usages
-
-    def _render_keys(
-        self,
-        document: Stack,
-        *,
-        key_name_draft: str | None,
-    ) -> None:
-        desired_id = self._selected_key_id
-        known_ids = {key.id for key in document.keys}
-        if desired_id not in known_ids:
-            desired_id = document.keys[0].id if document.keys else None
-        with QSignalBlocker(self.key_list):
-            self.key_list.clear()
-            for key in document.keys:
-                use_count = len(self._key_usages(document, key.id))
-                suffix = (
-                    "unused"
-                    if use_count == 0
-                    else f"{use_count} use"
-                    if use_count == 1
-                    else f"{use_count} uses"
-                )
-                item = QListWidgetItem(f"{key.name} — {suffix}")
-                item.setData(Qt.ItemDataRole.UserRole, key.id)
-                item.setToolTip(key.name)
-                self.key_list.addItem(item)
-            selected_row = next(
-                (
-                    row
-                    for row in range(self.key_list.count())
-                    if self.key_list.item(row).data(Qt.ItemDataRole.UserRole)
-                    == desired_id
-                ),
-                -1,
-            )
-            self.key_list.setCurrentRow(selected_row)
-        self._selected_key_id = desired_id
-        self._rendered_key_id = desired_id
-        self.keys_placeholder.setVisible(not document.keys)
-        key = (
-            document.key_by_id(desired_id)
-            if desired_id is not None
-            else None
-        )
-        self._render_key_properties(
-            document,
-            key,
-            key_name_draft=key_name_draft,
-        )
-
-    def _render_key_properties(
-        self,
-        document: Stack,
-        key: KeyDefinition | None,
-        *,
-        key_name_draft: str | None = None,
-    ) -> None:
-        enabled = key is not None
-        usages = self._key_usages(document, key.id) if key is not None else []
-        self.key_name_edit.setEnabled(enabled)
-        self.delete_key_button.setEnabled(enabled and not usages)
-        self.delete_key_button.setToolTip(
-            "Remove hotspot references before deleting this Key"
-            if usages
-            else "Delete unused Key"
-        )
-        with QSignalBlocker(self.key_name_edit):
-            self.key_name_edit.setText(
-                key_name_draft
-                if key_name_draft is not None
-                else key.name
-                if key is not None
-                else ""
-            )
-        with QSignalBlocker(self.key_usage_list):
-            self.key_usage_list.clear()
-            for card, revision_number, interaction, _roles in usages:
-                text = self._key_usage_text(
-                    card,
-                    revision_number,
-                    interaction,
-                )
-                item = QListWidgetItem(text)
-                item.setData(
-                    Qt.ItemDataRole.UserRole,
-                    (card.id, card.revisions[revision_number - 1].id, interaction.id),
-                )
-                item.setToolTip(text)
-                self.key_usage_list.addItem(item)
-        self.show_hotspot_usage_button.setEnabled(False)
-
-    @staticmethod
-    def _key_usage_text(
-        card: Card,
-        revision_number: int,
-        interaction: Interaction,
-    ) -> str:
-        return (
-            f"{card.name} · Version {revision_number}\n"
-            f"{interaction.label}"
-        )
-
-    def _key_selection_changed(
-        self,
-        current: QListWidgetItem | None,
-        _previous: QListWidgetItem | None,
-    ) -> None:
-        if self._rendering:
-            return
-        value = current.data(Qt.ItemDataRole.UserRole) if current is not None else None
-        self._selected_key_id = value if isinstance(value, UUID) else None
-        self._rendered_key_id = self._selected_key_id
-        self._set_error(self.key_error, "")
-        key = (
-            self.controller.document.key_by_id(self._selected_key_id)
-            if self._selected_key_id is not None
-            else None
-        )
-        self._render_key_properties(self.controller.document, key)
-
-    def _add_key(self) -> None:
-        document = self.controller.document
-        existing_names = {key.name.casefold() for key in document.keys}
-        number = 1
-        name = "New Key"
-        while name.casefold() in existing_names:
-            number += 1
-            name = f"New Key {number}"
-        command = AddKeyCommand(name=name)
-        self._selected_key_id = command.key_id
-        if self._execute(
-            command,
-            error_label=self.key_error,
-            undo_message="Key added",
-        ):
-            self.inspector_tabs.setCurrentIndex(self._keys_tab_index)
-            self.key_name_edit.setFocus()
-            self.key_name_edit.selectAll()
-
-    def _delete_key(self) -> None:
-        key_id = self.selected_key_id
-        if key_id is None:
-            return
-        self._selected_key_id = None
-        self._execute(
-            DeleteKeyCommand(key_id=key_id),
-            error_label=self.key_error,
-            undo_message="Key deleted",
-        )
-
-    def _key_name_editing_finished(
-        self,
-        _next_focus: object,
-        reason: object,
-    ) -> None:
-        mouse_focus = reason == Qt.FocusReason.MouseFocusReason
-        if not self._commit_key(render_change=not mouse_focus) or not mouse_focus:
-            return
-        key_id = self._selected_key_id
-        item = self.key_list.currentItem()
-        if key_id is None or item is None:
-            return
-        document = self.controller.document
-        key = document.key_by_id(key_id)
-        usages = self._key_usages(document, key_id)
-        suffix = (
-            "unused"
-            if not usages
-            else "1 use"
-            if len(usages) == 1
-            else f"{len(usages)} uses"
-        )
-        item.setText(f"{key.name} — {suffix}")
-        item.setToolTip(key.name)
-        for row, usage in enumerate(usages):
-            usage_item = self.key_usage_list.item(row)
-            if usage_item is None:
-                continue
-            card, revision_number, interaction, _roles = usage
-            text = self._key_usage_text(
-                card,
-                revision_number,
-                interaction,
-            )
-            usage_item.setText(text)
-            usage_item.setToolTip(text)
-
-    def _commit_key(self, *, render_change: bool = True) -> bool:
-        if self._rendering or self._selected_key_id is None:
-            return False
-        key = self.controller.document.key_by_id(self._selected_key_id)
-        name = self.key_name_edit.text()
-        if name.strip() == key.name:
-            return True
-        return self._execute(
-            RenameKeyCommand(key_id=key.id, name=name),
-            error_label=self.key_error,
-            undo_message="Key renamed",
-            render_change=render_change,
-        )
-
-    def _show_hotspot_usage(self) -> None:
-        item = self.key_usage_list.currentItem()
-        value = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
-        if (
-            isinstance(value, tuple)
-            and len(value) == 3
-            and all(isinstance(identifier, UUID) for identifier in value)
-        ):
-            self.hotspot_usage_requested.emit(*value)
 
     def _render_reference(
         self,
@@ -1606,11 +1096,7 @@ class Inspector(QWidget):
         card = self._selected_card()
         if card is None:
             return
-        combo = (
-            self.reference_combo
-            if position == 1
-            else self.additional_reference_combo
-        )
+        combo = self.reference_combo if position == 1 else self.additional_reference_combo
         value = combo.itemData(index)
         if isinstance(value, UUID):
             reference = ResolvedCardReference(target_card_id=value)
@@ -1625,6 +1111,7 @@ class Inspector(QWidget):
         )
         if reference == current:
             return
+        self._render_inputs_changed()
         self._execute(
             SetRevisionReferenceCommand(
                 card_id=card.id,
@@ -1634,6 +1121,422 @@ class Inspector(QWidget):
             ),
             error_label=self.reference_error,
             undo_message="Reference changed",
+        )
+
+    def _render_resolution(
+        self,
+        document: Stack,
+        revision: CardRevision,
+        *,
+        source_size: tuple[int, int] | None,
+        select_current: bool,
+    ) -> None:
+        previous_selection = self.resolution_combo.currentData()
+        current_tier = _current_tier(source_size, document.aspect_ratio)
+        current_error = _exact_size_error(source_size, document.aspect_ratio)
+        rows: list[tuple[str, object, tuple[int, int]]] = []
+        for tier in ResolutionTier:
+            dimensions = output_dimensions(tier, document.aspect_ratio)
+            output_size: GenerateOutputSize = PresetOutputSize(tier=tier)
+            if (
+                isinstance(revision.generate_output_size, ExactOutputSize)
+                and (
+                    revision.generate_output_size.width,
+                    revision.generate_output_size.height,
+                )
+                == dimensions
+            ):
+                output_size = revision.generate_output_size
+            rows.append(
+                (
+                    _tier_label(tier),
+                    output_size,
+                    dimensions,
+                )
+            )
+        exact_sizes: dict[tuple[int, int], tuple[ExactOutputSize, bool]] = {}
+        if isinstance(revision.generate_output_size, ExactOutputSize):
+            exact_sizes[
+                (
+                    revision.generate_output_size.width,
+                    revision.generate_output_size.height,
+                )
+            ] = (revision.generate_output_size, False)
+        if source_size is not None and current_tier is None and current_error is None:
+            current_size = ExactOutputSize(
+                width=source_size[0],
+                height=source_size[1],
+            )
+            exact_sizes[source_size] = (current_size, True)
+        for output_size, current in exact_sizes.values():
+            dimensions = (output_size.width, output_size.height)
+            if any(existing[2] == dimensions for existing in rows):
+                continue
+            label = "Current" if current else "Exact"
+            rows.append(
+                (
+                    label,
+                    output_size,
+                    dimensions,
+                )
+            )
+        if source_size is not None and current_tier is None and current_error is not None:
+            rows.append(
+                (
+                    "Current",
+                    None,
+                    source_size,
+                )
+            )
+        sorted_rows = _sort_size_rows(rows)
+        with QSignalBlocker(self.resolution_combo):
+            self.resolution_combo.clear()
+            for label, output_size, dimensions in sorted_rows:
+                _add_resolution_item(
+                    self.resolution_combo,
+                    label=label,
+                    value=output_size,
+                    dimensions=dimensions,
+                    unavailable_reason=(
+                        f"{current_error}. Choose a named tier."
+                        if output_size is None and current_error is not None
+                        else None
+                    ),
+                )
+            if select_current and source_size is not None and current_error is None:
+                selected_index = next(
+                    (
+                        index
+                        for index, (_label, output_size, dimensions) in enumerate(sorted_rows)
+                        if output_size is not None and dimensions == source_size
+                    ),
+                    -1,
+                )
+            elif (
+                source_size is not None
+                and isinstance(previous_selection, (PresetOutputSize, ExactOutputSize))
+                and selected_output_dimensions(
+                    previous_selection,
+                    document.aspect_ratio,
+                )
+                == source_size
+            ):
+                selected_index = self._combo_index_for_data(
+                    self.resolution_combo,
+                    previous_selection,
+                )
+            else:
+                selected_index = self._combo_index_for_data(
+                    self.resolution_combo,
+                    revision.generate_output_size,
+                )
+            self.resolution_combo.setCurrentIndex(
+                selected_index
+                if selected_index >= 0
+                else _first_selectable_combo_index(self.resolution_combo)
+            )
+        _sync_combo_tooltip(self.resolution_combo)
+
+    def _revision_resolution_changed(self, index: int) -> None:
+        if self._rendering or index < 0:
+            return
+        card = self._selected_card()
+        if card is None:
+            return
+        output_size = self.resolution_combo.itemData(index)
+        if not isinstance(output_size, (PresetOutputSize, ExactOutputSize)):
+            self.render(self.controller.document, self.selected_card_id)
+            return
+        _sync_combo_tooltip(self.resolution_combo)
+        if output_size == card.active_revision.generate_output_size:
+            return
+        self._render_inputs_changed()
+        self._execute(
+            SetRevisionGenerateOutputSizeCommand(
+                card_id=card.id,
+                revision_id=card.active_revision.id,
+                output_size=output_size,
+            )
+        )
+
+    def _request_generate_background(self) -> None:
+        card = self._selected_card()
+        output_size = self.resolution_combo.currentData()
+        if card is None or not isinstance(
+            output_size,
+            (PresetOutputSize, ExactOutputSize),
+        ):
+            return
+        if output_size != card.active_revision.generate_output_size and not self._execute(
+            SetRevisionGenerateOutputSizeCommand(
+                card_id=card.id,
+                revision_id=card.active_revision.id,
+                output_size=output_size,
+            )
+        ):
+            return
+        self.generate_background_requested.emit()
+
+    def _render_refine(
+        self,
+        document: Stack,
+        revision: CardRevision,
+        *,
+        source_size: tuple[int, int] | None,
+        select_current: bool,
+    ) -> None:
+        previous_selection = self.refine_resolution_combo.currentData()
+        self._refine_source_size = source_size
+        error = ""
+        current_error = _exact_size_error(source_size, document.aspect_ratio)
+        if revision.background is None:
+            error = "Generate an image before reinterpreting."
+        elif source_size is None:
+            error = "The current image is unavailable or unreadable."
+        with QSignalBlocker(self.refine_resolution_combo):
+            self.refine_resolution_combo.clear()
+            current_output_size = None
+            current_tier = _current_tier(source_size, document.aspect_ratio)
+            if source_size is not None:
+                if current_error is None:
+                    current_output_size = CurrentSourceSize(
+                        width=source_size[0],
+                        height=source_size[1],
+                    )
+                rows: list[tuple[str, object, tuple[int, int]]] = []
+                if current_output_size is not None:
+                    rows.append(
+                        (
+                            _tier_label(current_tier) if current_tier is not None else "Current",
+                            current_output_size,
+                            source_size,
+                        )
+                    )
+                elif current_tier is None:
+                    rows.append(
+                        (
+                            "Current",
+                            None,
+                            source_size,
+                        )
+                    )
+                rows.extend(
+                    (
+                        _tier_label(tier),
+                        PresetOutputSize(tier=tier),
+                        output_dimensions(tier, document.aspect_ratio),
+                    )
+                    for tier in higher_output_tiers(
+                        source_size[0],
+                        source_size[1],
+                        document.aspect_ratio,
+                    )
+                )
+                for label, data, dimensions in _sort_size_rows(rows):
+                    _add_resolution_item(
+                        self.refine_resolution_combo,
+                        label=label,
+                        value=data,
+                        dimensions=dimensions,
+                        unavailable_reason=(
+                            f"{current_error}. Choose a higher named tier."
+                            if data is None and current_error is not None
+                            else None
+                        ),
+                    )
+            use_current = current_output_size is not None and (
+                select_current
+                or not isinstance(
+                    previous_selection,
+                    (PresetOutputSize, CurrentSourceSize),
+                )
+                or isinstance(previous_selection, CurrentSourceSize)
+            )
+            selection = (
+                current_output_size
+                if use_current
+                else (
+                    previous_selection if isinstance(previous_selection, PresetOutputSize) else None
+                )
+            )
+            selected_index = (
+                self._combo_index_for_data(
+                    self.refine_resolution_combo,
+                    selection,
+                )
+                if selection is not None
+                else -1
+            )
+            self.refine_resolution_combo.setCurrentIndex(
+                selected_index
+                if selected_index >= 0
+                else _first_selectable_combo_index(self.refine_resolution_combo)
+            )
+        self.refine_resolution_combo.setEnabled(
+            _first_selectable_combo_index(self.refine_resolution_combo) >= 0
+        )
+        _sync_combo_tooltip(self.refine_resolution_combo)
+        self._set_error(self.refine_error, error)
+        style_suffix = ", and Style" if revision.style_id is not None else ""
+        self._refine_using_text = (
+            f"Create a new version using the current image, Description{style_suffix}."
+        )
+        self._refresh_generation_tooltips()
+
+    def _request_refine_background(self) -> None:
+        try:
+            transformation = RefineTransformation(self.refine_transformation_combo.currentData())
+        except (TypeError, ValueError):
+            transformation = None
+        output_size = self.refine_resolution_combo.currentData()
+        if not isinstance(transformation, RefineTransformation):
+            self._set_error(
+                self.refine_error,
+                "Select a supported Source Similarity.",
+            )
+            return
+        if not isinstance(output_size, (PresetOutputSize, CurrentSourceSize)):
+            if not self.refine_error.text():
+                self._set_error(
+                    self.refine_error,
+                    "Select a Reinterpret resolution.",
+                )
+            return
+        self.refine_background_requested.emit(transformation, output_size)
+
+    def _render_edit(
+        self,
+        document: Stack,
+        revision: CardRevision,
+        *,
+        source_size: tuple[int, int] | None,
+        select_current: bool,
+    ) -> None:
+        previous_selection = self.edit_resolution_combo.currentData()
+        self._edit_source_size = source_size
+        error = ""
+        current_error = _exact_size_error(source_size, document.aspect_ratio)
+        if revision.background is None:
+            error = "Generate an image before editing."
+        elif source_size is None:
+            error = "The current image is unavailable or unreadable."
+        with QSignalBlocker(self.edit_resolution_combo):
+            self.edit_resolution_combo.clear()
+            if source_size is not None:
+                current_output_size = (
+                    CurrentSourceSize(
+                        width=source_size[0],
+                        height=source_size[1],
+                    )
+                    if current_error is None
+                    else None
+                )
+                current_tier = _current_tier(
+                    source_size,
+                    document.aspect_ratio,
+                )
+                if current_tier is None:
+                    _add_resolution_item(
+                        self.edit_resolution_combo,
+                        label="Current",
+                        value=current_output_size,
+                        dimensions=source_size,
+                        unavailable_reason=(
+                            f"{current_error}. Choose a higher named tier."
+                            if current_output_size is None and current_error is not None
+                            else None
+                        ),
+                    )
+                else:
+                    _add_resolution_item(
+                        self.edit_resolution_combo,
+                        label=_tier_label(current_tier),
+                        value=current_output_size,
+                        dimensions=source_size,
+                    )
+                for tier in higher_output_tiers(
+                    source_size[0],
+                    source_size[1],
+                    document.aspect_ratio,
+                ):
+                    _add_resolution_item(
+                        self.edit_resolution_combo,
+                        label=_tier_label(tier),
+                        value=PresetOutputSize(tier=tier),
+                        dimensions=output_dimensions(tier, document.aspect_ratio),
+                    )
+                use_current = current_output_size is not None and (
+                    select_current
+                    or not isinstance(
+                        previous_selection,
+                        (PresetOutputSize, CurrentSourceSize),
+                    )
+                    or isinstance(previous_selection, CurrentSourceSize)
+                )
+                selection = (
+                    current_output_size
+                    if use_current
+                    else (
+                        previous_selection
+                        if isinstance(previous_selection, PresetOutputSize)
+                        else None
+                    )
+                )
+                selected_index = (
+                    self._combo_index_for_data(
+                        self.edit_resolution_combo,
+                        selection,
+                    )
+                    if selection is not None
+                    else -1
+                )
+                fallback_index = _first_selectable_combo_index(self.edit_resolution_combo)
+                self.edit_resolution_combo.setCurrentIndex(
+                    selected_index
+                    if selected_index >= 0
+                    else (
+                        fallback_index
+                        if fallback_index >= 0
+                        else (0 if self.edit_resolution_combo.count() else -1)
+                    )
+                )
+        self.edit_resolution_combo.setEnabled(
+            _first_selectable_combo_index(self.edit_resolution_combo) >= 0
+        )
+        _sync_combo_tooltip(self.edit_resolution_combo)
+        self._set_error(self.edit_output_error, error)
+        self._render_edit_tooltip()
+
+    def _selected_edit_output_size(self) -> EditOutputSize | None:
+        selection = self.edit_resolution_combo.currentData()
+        if isinstance(selection, (CurrentSourceSize, PresetOutputSize)):
+            return selection
+        return None
+
+    def _render_edit_tooltip(self) -> None:
+        self._edit_using_text = "Create a new version with only the requested change."
+        self._refresh_generation_tooltips()
+
+    def _request_edit_background(self) -> None:
+        instruction = self.edit_instruction_edit.toPlainText().strip()
+        if not instruction:
+            self._set_error(
+                self.edit_instruction_error,
+                "Enter an Edit Instruction.",
+            )
+            return
+        output_size = self._selected_edit_output_size()
+        if output_size is None:
+            self._set_error(
+                self.edit_output_error,
+                "Select the current size or a higher Edit output tier.",
+            )
+            return
+        self._set_error(self.edit_instruction_error, "")
+        self._set_error(self.edit_output_error, "")
+        self.edit_background_requested.emit(
+            instruction,
+            output_size,
         )
 
     def _render_hotspots(
@@ -1694,7 +1597,6 @@ class Inspector(QWidget):
         self.hotspot_when_panel.setVisible(has_interaction)
         self.hotspot_then_label.setVisible(has_interaction)
         self.hotspot_then_panel.setVisible(has_interaction)
-        self.hotspot_summary.setVisible(has_interaction)
         self.condition_table.setEnabled(has_interaction)
         self.add_condition_button.setEnabled(has_interaction)
         self.key_change_table.setEnabled(has_interaction)
@@ -1730,9 +1632,8 @@ class Inspector(QWidget):
             self.hotspot_destination_combo.addItem("Create New Card...", "create")
             if interaction is None:
                 self.hotspot_destination_combo.setCurrentIndex(-1)
-            elif (
-                interaction.action is not None
-                and isinstance(interaction.action.target, ResolvedCardReference)
+            elif interaction.action is not None and isinstance(
+                interaction.action.target, ResolvedCardReference
             ):
                 self.hotspot_destination_combo.setCurrentIndex(
                     self._combo_index_for_data(
@@ -1740,9 +1641,8 @@ class Inspector(QWidget):
                         interaction.action.target.target_card_id,
                     )
                 )
-            elif (
-                interaction.action is not None
-                and isinstance(interaction.action.target, UnresolvedCardReference)
+            elif interaction.action is not None and isinstance(
+                interaction.action.target, UnresolvedCardReference
             ):
                 self.hotspot_destination_combo.setCurrentIndex(
                     self._combo_index_for_data(
@@ -1752,9 +1652,6 @@ class Inspector(QWidget):
                 )
             else:
                 self.hotspot_destination_combo.setCurrentIndex(0)
-        self.hotspot_summary.setText(
-            self._hotspot_summary_text(document, interaction)
-        )
 
     def _render_condition_rows(
         self,
@@ -1949,56 +1846,6 @@ class Inspector(QWidget):
         combo.setCurrentIndex(Inspector._combo_index_for_data(combo, selected_key_id))
         return combo
 
-    @staticmethod
-    def _hotspot_summary_text(
-        document: Stack,
-        interaction: Interaction | None,
-    ) -> str:
-        if interaction is None:
-            return ""
-        condition_parts = [
-            *(
-                f"has {document.key_by_id(key_id).name}"
-                for key_id in interaction.conditions.requires
-            ),
-            *(
-                f"lacks {document.key_by_id(key_id).name}"
-                for key_id in interaction.conditions.forbids
-            ),
-        ]
-        action_parts: list[str] = []
-        action_parts.extend(
-            f"lose {document.key_by_id(key_id).name}"
-            for key_id in interaction.key_changes.remove
-        )
-        action_parts.extend(
-            f"gain {document.key_by_id(key_id).name}"
-            for key_id in interaction.key_changes.grant
-        )
-        if interaction.action is not None:
-            target = interaction.action.target
-            destination = (
-                next(
-                    card.name
-                    for card in document.cards
-                    if isinstance(target, ResolvedCardReference)
-                    and card.id == target.target_card_id
-                )
-                if isinstance(target, ResolvedCardReference)
-                else target.target_name or "an unresolved destination"
-            )
-            action_parts.append(f"go to {destination}")
-        condition_text = (
-            f"When the runner {' and '.join(condition_parts)}"
-            if condition_parts
-            else "Always"
-        )
-        return (
-            f"{condition_text}, {', then '.join(action_parts)}."
-            if action_parts
-            else f"{condition_text}; no actions."
-        )
-
     def _hotspot_selection_changed(
         self,
         current: QListWidgetItem | None,
@@ -2032,9 +1879,7 @@ class Inspector(QWidget):
         interaction = self._selected_interaction()
         if interaction is None:
             return
-        used = set(interaction.conditions.requires) | set(
-            interaction.conditions.forbids
-        )
+        used = set(interaction.conditions.requires) | set(interaction.conditions.forbids)
         self._choose_key_reference(
             title="Add Condition",
             role="requires",
@@ -2045,9 +1890,7 @@ class Inspector(QWidget):
         interaction = self._selected_interaction()
         if interaction is None:
             return
-        used = set(interaction.key_changes.remove) | set(
-            interaction.key_changes.grant
-        )
+        used = set(interaction.key_changes.remove) | set(interaction.key_changes.grant)
         self._choose_key_reference(
             title="Add Key Change",
             role="grant",
@@ -2061,14 +1904,10 @@ class Inspector(QWidget):
         role: Literal["requires", "forbids", "remove", "grant"],
         excluded: set[UUID],
     ) -> None:
-        available = [
-            key for key in self.controller.document.keys if key.id not in excluded
-        ]
+        available = [key for key in self.controller.document.keys if key.id not in excluded]
         create_label = "Create New Key..."
         labels = [key.name for key in available]
-        while create_label.casefold() in {
-            label.casefold() for label in labels
-        }:
+        while create_label.casefold() in {label.casefold() for label in labels}:
             create_label += "."
         selected, accepted = QInputDialog.getItem(
             self,
@@ -2123,7 +1962,6 @@ class Inspector(QWidget):
             name=name,
             role=role,
         )
-        self._selected_key_id = command.key_id
         self._execute(
             command,
             undo_message="Key and hotspot behavior added",
@@ -2140,9 +1978,7 @@ class Inspector(QWidget):
                 card_id=card.id,
                 revision_id=card.active_revision.id,
                 interaction_id=interaction.id,
-                conditions=interaction.conditions.model_copy(
-                    update={role: (*values, key_id)}
-                ),
+                conditions=interaction.conditions.model_copy(update={role: (*values, key_id)}),
             ),
             undo_message="Hotspot condition added",
         )
@@ -2201,18 +2037,14 @@ class Inspector(QWidget):
         if card is None or interaction is None:
             return
         values = tuple(
-            candidate
-            for candidate in getattr(interaction.conditions, role)
-            if candidate != key_id
+            candidate for candidate in getattr(interaction.conditions, role) if candidate != key_id
         )
         self._execute(
             SetHotspotConditionsCommand(
                 card_id=card.id,
                 revision_id=card.active_revision.id,
                 interaction_id=interaction.id,
-                conditions=interaction.conditions.model_copy(
-                    update={role: values}
-                ),
+                conditions=interaction.conditions.model_copy(update={role: values}),
             ),
             undo_message="Hotspot condition removed",
         )
@@ -2228,9 +2060,7 @@ class Inspector(QWidget):
                 card_id=card.id,
                 revision_id=card.active_revision.id,
                 interaction_id=interaction.id,
-                key_changes=interaction.key_changes.model_copy(
-                    update={role: (*values, key_id)}
-                ),
+                key_changes=interaction.key_changes.model_copy(update={role: (*values, key_id)}),
             ),
             undo_message="Hotspot key change added",
         )
@@ -2289,18 +2119,14 @@ class Inspector(QWidget):
         if card is None or interaction is None:
             return
         values = tuple(
-            candidate
-            for candidate in getattr(interaction.key_changes, role)
-            if candidate != key_id
+            candidate for candidate in getattr(interaction.key_changes, role) if candidate != key_id
         )
         self._execute(
             SetHotspotKeyChangesCommand(
                 card_id=card.id,
                 revision_id=card.active_revision.id,
                 interaction_id=interaction.id,
-                key_changes=interaction.key_changes.model_copy(
-                    update={role: values}
-                ),
+                key_changes=interaction.key_changes.model_copy(update={role: values}),
             ),
             undo_message="Hotspot key change removed",
         )
@@ -2405,7 +2231,7 @@ class Inspector(QWidget):
         previous_token = self.controller.current_undo_token
         try:
             changed = self.controller.execute(command)
-        except (CommandError, ValidationError) as error:
+        except (CommandError, DocumentMutationBlockedError, ValidationError) as error:
             self._set_error(target_error, str(error))
             if render_change:
                 self.render(self.controller.document, self.selected_card_id)

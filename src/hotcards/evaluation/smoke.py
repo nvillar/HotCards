@@ -8,7 +8,17 @@ from pathlib import Path
 
 from pydantic import PositiveInt
 
-from hotcards.domain.models import DomainModel, ImageGenerationInputs, NonEmptyString
+from hotcards.domain.image_dimensions import (
+    AspectRatio,
+    ResolutionTier,
+    output_dimensions,
+)
+from hotcards.domain.models import (
+    DomainModel,
+    GenerateInputs,
+    NonEmptyString,
+    PresetOutputSize,
+)
 from hotcards.evaluation.manifest import (
     EnvironmentProvider,
     RunLifecycle,
@@ -23,9 +33,12 @@ from hotcards.evaluation.reports import (
     render_reports_checked,
 )
 from hotcards.generation.errors import GenerationError
-from hotcards.generation.image_prompts import IMAGE_PROMPT_VERSION, compose_image_prompt
+from hotcards.generation.image_generation import (
+    DIRECT_GENERATION_PROMPT_VERSION,
+    compose_generation_prompt,
+)
 from hotcards.generation.mflux_generator import (
-    MfluxGenerationRequest,
+    MfluxGenerateRequest,
     MfluxGenerator,
 )
 
@@ -45,8 +58,8 @@ class SmokeSettings(DomainModel):
     output_dir: Path
     mflux_model: NonEmptyString = "flux2-klein-4b"
     seed: int = 42
-    width: PositiveInt = 1024
-    height: PositiveInt = 768
+    tier: ResolutionTier = ResolutionTier.FULL
+    aspect_ratio: AspectRatio = AspectRatio.LANDSCAPE
     step_count: PositiveInt = 4
     quantization: int | None = None
 
@@ -76,11 +89,11 @@ def run_smoke(
         settings=settings.model_dump(mode="json"),
         models={"mflux": settings.mflux_model},
         contracts={
-            "image_prompt": {
-                "version": IMAGE_PROMPT_VERSION,
+            "generation_prompt": {
+                "version": DIRECT_GENERATION_PROMPT_VERSION,
                 "sha256": contract_digest(
-                    IMAGE_PROMPT_VERSION,
-                    inspect.getsource(compose_image_prompt),
+                    DIRECT_GENERATION_PROMPT_VERSION,
+                    inspect.getsource(compose_generation_prompt),
                 ),
             },
         },
@@ -105,24 +118,29 @@ def run_smoke(
             "Restrained storybook ink and watercolor illustration with "
             "cool twilight shadows and warm lantern light."
         )
-        inputs = ImageGenerationInputs(
+        inputs = GenerateInputs(
             description=prompt,
-            image_prompt=prompt,
+            output_size=PresetOutputSize(tier=settings.tier),
         )
-        render_prompt = compose_image_prompt(inputs)
+        render_prompt = compose_generation_prompt(inputs)
         result["render_prompt"] = render_prompt
+        width, height = output_dimensions(
+            settings.tier,
+            settings.aspect_ratio,
+        )
         for phase in ("cold", "warm"):
             stage = f"image_generation_{phase}"
             lifecycle.set_stage(stage)
             generated = mflux.generate(
-                MfluxGenerationRequest(
+                MfluxGenerateRequest(
                     inputs=inputs,
                     render_prompt=render_prompt,
                     output_path=settings.output_dir / f"generated-{phase}.png",
                     model_identifier=settings.mflux_model,
                     seed=settings.seed,
-                    width=settings.width,
-                    height=settings.height,
+                    aspect_ratio=settings.aspect_ratio,
+                    width=width,
+                    height=height,
                     step_count=settings.step_count,
                     quantization=settings.quantization,
                 )

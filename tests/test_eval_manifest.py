@@ -20,7 +20,7 @@ def test_manifest_is_immediate_deterministic_and_finalizes_artifacts(tmp_path: P
         run_dir=run_dir,
         suite="fake",
         settings={"seed": 42},
-        models={"ollama": "fake", "mflux": "fake"},
+        models={"mflux": "fake"},
         contracts={"prompt": {"version": "v1", "sha256": "abc"}},
         clock=lambda: now,
         monotonic_clock=lambda: next(times),

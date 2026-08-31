@@ -19,7 +19,6 @@ from PySide6.QtGui import (
     QPen,
     QPixmap,
     QResizeEvent,
-    QWheelEvent,
 )
 from PySide6.QtWidgets import (
     QGraphicsEllipseItem,
@@ -65,12 +64,11 @@ class CardCanvas(QGraphicsView):
         self.viewport().setMouseTracking(True)
         self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         self.setDragMode(QGraphicsView.DragMode.NoDrag)
-        self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
         self.setBackgroundBrush(QColor("#34373b"))
         self._canvas_size = CanvasSize()
-        self._fit_mode = True
         self._image_item: QGraphicsPixmapItem | None = None
+        self._image_scene_rect: QRectF | None = None
         self._border_item: QGraphicsRectItem | None = None
         self._message_item: QGraphicsTextItem | None = None
         self._current_image: Path | None = None
@@ -92,8 +90,6 @@ class CardCanvas(QGraphicsView):
         self._drag_origin: QPointF | None = None
         self._drag_original: tuple[Point, ...] | None = None
         self._preview_polygon: tuple[Point, ...] | None = None
-        self._panning = False
-        self._pan_origin: QPoint | None = None
         self.set_canvas_size(self._canvas_size)
         self.show_message("Select a card")
 
@@ -106,7 +102,7 @@ class CardCanvas(QGraphicsView):
         self.scene().setSceneRect(QRectF(0, 0, size.width, size.height))
 
     def show_image(self, path: Path) -> None:
-        """Render one decoded image across the logical canvas."""
+        """Fit one complete decoded image inside the logical canvas."""
         image_key = path.resolve()
         if image_key == self._current_image and self._image_item is not None:
             return
@@ -118,10 +114,19 @@ class CardCanvas(QGraphicsView):
         scaled = pixmap.scaled(
             self._canvas_size.width,
             self._canvas_size.height,
-            Qt.AspectRatioMode.IgnoreAspectRatio,
+            Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
+        image_x = (self._canvas_size.width - scaled.width()) / 2
+        image_y = (self._canvas_size.height - scaled.height()) / 2
+        self._image_scene_rect = QRectF(
+            image_x,
+            image_y,
+            scaled.width(),
+            scaled.height(),
+        )
         self._image_item = self.scene().addPixmap(scaled)
+        self._image_item.setPos(image_x, image_y)
         self._image_item.setZValue(0)
         self._current_image = image_key
         self._current_message = None
@@ -132,7 +137,7 @@ class CardCanvas(QGraphicsView):
         self.scene().addItem(border)
         border.setZValue(1)
         self._border_item = border
-        self.fit_to_window()
+        self._fit_to_window()
 
     def set_hotspots(
         self,
@@ -145,19 +150,13 @@ class CardCanvas(QGraphicsView):
         """Render applied hotspots and enable author gestures when appropriate."""
         context_changed = context_id != self._hotspot_context_id
         interaction_ids = (
-            {
-                interaction.id
-                for interaction in hotspot_set.interactions
-            }
+            {interaction.id for interaction in hotspot_set.interactions}
             if hotspot_set is not None
             else set()
         )
-        drawing_target_changed = (
-            self._draft_points is not None
-            and (
-                self._drawing_interaction_id not in interaction_ids
-                or selected_interaction_id != self._drawing_interaction_id
-            )
+        drawing_target_changed = self._draft_points is not None and (
+            self._drawing_interaction_id not in interaction_ids
+            or selected_interaction_id != self._drawing_interaction_id
         )
         preserve_geometry_selection = (
             context_id is not None
@@ -168,21 +167,13 @@ class CardCanvas(QGraphicsView):
             self._drawing_interaction_id = None
             self._draft_points = None
         selected_polygon_index = (
-            self._selected_polygon_index
-            if preserve_geometry_selection
-            else None
+            self._selected_polygon_index if preserve_geometry_selection else None
         )
-        selected_vertex_index = (
-            self._selected_vertex_index
-            if preserve_geometry_selection
-            else None
-        )
+        selected_vertex_index = self._selected_vertex_index if preserve_geometry_selection else None
         self._hotspot_set = hotspot_set
         self._hotspot_context_id = context_id
         self._selected_interaction_id = (
-            selected_interaction_id
-            if selected_interaction_id in interaction_ids
-            else None
+            selected_interaction_id if selected_interaction_id in interaction_ids else None
         )
         selected_interaction = self._interaction(self._selected_interaction_id)
         if (
@@ -234,13 +225,10 @@ class CardCanvas(QGraphicsView):
         self._preview_polygon = None
         self.cancel_drawing()
         self.viewport().unsetCursor()
-        self.fit_to_window()
+        self._fit_to_window()
 
     def select_interaction(self, interaction_id: UUID | None) -> None:
-        if (
-            self._draft_points is not None
-            and interaction_id != self._drawing_interaction_id
-        ):
+        if self._draft_points is not None and interaction_id != self._drawing_interaction_id:
             self.cancel_drawing()
         if interaction_id == self._selected_interaction_id:
             return
@@ -281,9 +269,7 @@ class CardCanvas(QGraphicsView):
             return
         self._drawing_interaction_id = interaction_id
         self._draft_points = (
-            [QPointF(initial_point.x, initial_point.y)]
-            if initial_point is not None
-            else []
+            [QPointF(initial_point.x, initial_point.y)] if initial_point is not None else []
         )
         self._selected_polygon_index = None
         self._selected_vertex_index = None
@@ -318,58 +304,60 @@ class CardCanvas(QGraphicsView):
             (self._canvas_size.width - bounds.width()) / 2,
             (self._canvas_size.height - bounds.height()) / 2,
         )
-        self.fit_to_window()
+        self._fit_to_window()
 
-    def fit_to_window(self) -> None:
-        self._fit_mode = True
+    def _fit_to_window(self) -> None:
         self.fitInView(
             self.scene().sceneRect(),
             Qt.AspectRatioMode.KeepAspectRatio,
         )
         self._render_hotspots()
 
-    def document_point_at(self, viewport_point: QPoint) -> QPointF:
-        """Map a viewport point into normalized document coordinates."""
+    def document_point_at(self, viewport_point: QPoint) -> QPointF | None:
+        """Map an image pixel in the viewport into normalized coordinates."""
+        image_rect = self._image_scene_rect
+        if image_rect is None:
+            return None
         scene_point = self.mapToScene(viewport_point)
+        scene_tolerance = 0.51 / max(abs(self.transform().m11()), 0.01)
+        if not image_rect.adjusted(
+            -scene_tolerance,
+            -scene_tolerance,
+            scene_tolerance,
+            scene_tolerance,
+        ).contains(scene_point):
+            return None
         return QPointF(
-            scene_point.x() / self._canvas_size.width,
-            scene_point.y() / self._canvas_size.height,
+            min(
+                max(
+                    (scene_point.x() - image_rect.left()) / image_rect.width(),
+                    0.0,
+                ),
+                1.0,
+            ),
+            min(
+                max(
+                    (scene_point.y() - image_rect.top()) / image_rect.height(),
+                    0.0,
+                ),
+                1.0,
+            ),
         )
 
     def viewport_point_for(self, document_point: QPointF) -> QPoint:
         """Map a normalized document point into viewport coordinates."""
+        image_rect = self._image_scene_rect or self.scene().sceneRect()
         return self.mapFromScene(
             QPointF(
-                document_point.x() * self._canvas_size.width,
-                document_point.y() * self._canvas_size.height,
+                image_rect.left() + document_point.x() * image_rect.width(),
+                image_rect.top() + document_point.y() * image_rect.height(),
             )
         )
 
-    def wheelEvent(self, event: QWheelEvent) -> None:
-        vertical_delta = event.angleDelta().y()
-        if vertical_delta == 0:
-            super().wheelEvent(event)
-            return
-        factor = 1.2 if vertical_delta > 0 else 1 / 1.2
-        current_scale = self.transform().m11()
-        next_scale = current_scale * factor
-        if 0.05 <= next_scale <= 20:
-            self._fit_mode = False
-            self.scale(factor, factor)
-            self._render_hotspots()
-        event.accept()
-
     def mousePressEvent(self, event: QMouseEvent) -> None:
-        if event.button() == Qt.MouseButton.MiddleButton:
-            self._panning = True
-            self._pan_origin = event.position().toPoint()
-            self.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
-            event.accept()
-            return
         if event.button() == Qt.MouseButton.LeftButton and self._run_mode:
-            interaction = self._run_interaction_at(
-                self.document_point_at(event.position().toPoint())
-            )
+            point = self.document_point_at(event.position().toPoint())
+            interaction = self._run_interaction_at(point)
             if interaction is not None:
                 self.interaction_activated.emit(interaction.id)
             event.accept()
@@ -378,28 +366,26 @@ class CardCanvas(QGraphicsView):
             super().mousePressEvent(event)
             return
         self.setFocus(Qt.FocusReason.MouseFocusReason)
+        normalized = self.document_point_at(event.position().toPoint())
+        if normalized is None:
+            event.accept()
+            return
         if self._draft_points is not None:
             self._append_draft_point(event.position().toPoint())
             event.accept()
             return
         if self._hovered_edge_insertion is not None:
-            interaction_id, polygon_index, hovered_edge_index, _point = (
-                self._hovered_edge_insertion
-            )
+            interaction_id, polygon_index, hovered_edge_index, _point = self._hovered_edge_insertion
             interaction = self._interaction(interaction_id)
             insertion = (
                 self._nearest_edge_insertion(
                     interaction.polygons[polygon_index],
                     event.position().toPoint(),
                 )
-                if interaction is not None
-                and 0 <= polygon_index < len(interaction.polygons)
+                if interaction is not None and 0 <= polygon_index < len(interaction.polygons)
                 else None
             )
-            if (
-                insertion is not None
-                and insertion[0] == hovered_edge_index
-            ):
+            if insertion is not None and insertion[0] == hovered_edge_index:
                 edge_index, point = insertion
                 self._select_geometry(interaction_id, polygon_index)
                 self._insert_vertex(
@@ -411,7 +397,6 @@ class CardCanvas(QGraphicsView):
                 event.accept()
                 return
             self._set_hovered_edge_insertion(None)
-        normalized = self._clamped_document_point(event.position().toPoint())
         vertex = self._vertex_at(event.position().toPoint())
         if vertex is not None:
             interaction_id, polygon_index, vertex_index = vertex
@@ -452,25 +437,10 @@ class CardCanvas(QGraphicsView):
         event.accept()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
-        if self._panning and self._pan_origin is not None:
-            current = event.position().toPoint()
-            delta = current - self._pan_origin
-            self._pan_origin = current
-            self.horizontalScrollBar().setValue(
-                self.horizontalScrollBar().value() - delta.x()
-            )
-            self.verticalScrollBar().setValue(
-                self.verticalScrollBar().value() - delta.y()
-            )
-            event.accept()
-            return
         if self._run_mode:
-            interaction = self._run_interaction_at(
-                self.document_point_at(event.position().toPoint())
-            )
-            hovered_interaction_id = (
-                interaction.id if interaction is not None else None
-            )
+            point = self.document_point_at(event.position().toPoint())
+            interaction = self._run_interaction_at(point)
+            hovered_interaction_id = interaction.id if interaction is not None else None
             self.viewport().setCursor(
                 Qt.CursorShape.PointingHandCursor
                 if hovered_interaction_id is not None
@@ -481,18 +451,17 @@ class CardCanvas(QGraphicsView):
                 self._render_hotspots()
             event.accept()
             return
-        if (
-            self._drag_kind is None
-            or self._drag_origin is None
-            or self._drag_original is None
-        ):
+        if self._drag_kind is None or self._drag_origin is None or self._drag_original is None:
             if self._editable:
                 self._update_authoring_hover(event.position().toPoint())
                 event.accept()
             else:
                 super().mouseMoveEvent(event)
             return
-        current = self._clamped_document_point(event.position().toPoint())
+        current = self.document_point_at(event.position().toPoint())
+        if current is None:
+            event.accept()
+            return
         if self._drag_kind == "vertex" and self._selected_vertex_index is not None:
             points = list(self._drag_original)
             points[self._selected_vertex_index] = Point(
@@ -510,28 +479,16 @@ class CardCanvas(QGraphicsView):
             dx = min(max(dx, -minimum_x), 1 - maximum_x)
             dy = min(max(dy, -minimum_y), 1 - maximum_y)
             self._preview_polygon = tuple(
-                Point(x=point.x + dx, y=point.y + dy)
-                for point in self._drag_original
+                Point(x=point.x + dx, y=point.y + dy) for point in self._drag_original
             )
         self._render_hotspots()
         event.accept()
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
-        if event.button() == Qt.MouseButton.MiddleButton and self._panning:
-            self._panning = False
-            self._pan_origin = None
-            if self._draft_points is not None:
-                self.viewport().setCursor(Qt.CursorShape.CrossCursor)
-            else:
-                self.viewport().unsetCursor()
-            event.accept()
-            return
-        if (
-            event.button() == Qt.MouseButton.LeftButton
-            and self._drag_kind is not None
-        ):
+        if event.button() == Qt.MouseButton.LeftButton and self._drag_kind is not None:
             if (
-                self._preview_polygon is not None
+                self.document_point_at(event.position().toPoint()) is not None
+                and self._preview_polygon is not None
                 and self._selected_interaction_id is not None
                 and self._selected_polygon_index is not None
             ):
@@ -559,12 +516,17 @@ class CardCanvas(QGraphicsView):
         if event.button() != Qt.MouseButton.LeftButton or not self._editable:
             super().mouseDoubleClickEvent(event)
             return
+        viewport_point = event.position().toPoint()
+        if self.document_point_at(viewport_point) is None:
+            event.accept()
+            return
         if self._draft_points is not None:
-            viewport_point = event.position().toPoint()
             if self._draft_vertex_at(viewport_point) is None:
-                self._draft_points.append(
-                    self._clamped_document_point(viewport_point)
-                )
+                point = self.document_point_at(viewport_point)
+                if point is None:
+                    event.accept()
+                    return
+                self._draft_points.append(point)
             self._finish_drawing()
             event.accept()
             return
@@ -574,10 +536,7 @@ class CardCanvas(QGraphicsView):
             self._render_hotspots()
             event.accept()
             return
-        if (
-            self._selected_interaction_id is not None
-            and self._selected_polygon_index is not None
-        ):
+        if self._selected_interaction_id is not None and self._selected_polygon_index is not None:
             interaction = self._interaction(self._selected_interaction_id)
             if interaction is not None:
                 polygon = interaction.polygons[self._selected_polygon_index]
@@ -638,13 +597,12 @@ class CardCanvas(QGraphicsView):
             return
         self.setFocus(Qt.FocusReason.MouseFocusReason)
         viewport_point = event.pos()
+        normalized = self.document_point_at(viewport_point)
+        if normalized is None:
+            event.accept()
+            return
         vertex = self._vertex_at(viewport_point)
-        normalized = self._clamped_document_point(viewport_point)
-        hit = (
-            (vertex[0], vertex[1])
-            if vertex is not None
-            else self._polygon_at(normalized)
-        )
+        hit = (vertex[0], vertex[1]) if vertex is not None else self._polygon_at(normalized)
         if vertex is not None:
             self._select_geometry(*vertex)
         elif hit is not None:
@@ -672,9 +630,7 @@ class CardCanvas(QGraphicsView):
                     maximum_distance=None,
                 )
                 if insertion is not None:
-                    add_vertex_action = menu.addAction(
-                        "Add Vertex on Nearest Edge"
-                    )
+                    add_vertex_action = menu.addAction("Add Vertex on Nearest Edge")
                 delete_area_action = menu.addAction("Delete Area")
         else:
             interaction = self._interaction(self._selected_interaction_id)
@@ -687,11 +643,7 @@ class CardCanvas(QGraphicsView):
             return
         if selected_action == delete_vertex_action:
             self._delete_selected_geometry()
-        elif (
-            selected_action == add_vertex_action
-            and hit is not None
-            and insertion is not None
-        ):
+        elif selected_action == add_vertex_action and hit is not None and insertion is not None:
             self._insert_vertex(hit[0], hit[1], *insertion)
         elif selected_action == delete_area_action:
             self._selected_vertex_index = None
@@ -706,8 +658,7 @@ class CardCanvas(QGraphicsView):
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
-        if self._fit_mode:
-            self.fit_to_window()
+        self._fit_to_window()
 
     def leaveEvent(self, event: QEvent) -> None:
         if self._run_mode and self._hovered_interaction_id is not None:
@@ -725,6 +676,7 @@ class CardCanvas(QGraphicsView):
         self.scene().clear()
         self._overlay_items.clear()
         self._image_item = None
+        self._image_scene_rect = None
         self._border_item = None
         self._message_item = None
         self._hotspot_set = None
@@ -745,9 +697,7 @@ class CardCanvas(QGraphicsView):
         if not self._run_mode and not self._editable:
             return
         if self._hotspot_set is not None:
-            for interaction_index, interaction in enumerate(
-                self._hotspot_set.interactions
-            ):
+            for interaction_index, interaction in enumerate(self._hotspot_set.interactions):
                 if self._run_mode and (
                     self._overlay_mode is RunOverlayMode.HIDDEN
                     or (
@@ -756,18 +706,14 @@ class CardCanvas(QGraphicsView):
                     )
                 ):
                     continue
-                hotspot_selected = (
-                    interaction.id == self._selected_interaction_id
-                )
+                hotspot_selected = interaction.id == self._selected_interaction_id
                 for polygon_index, polygon in enumerate(interaction.polygons):
                     area_selected = (
-                        hotspot_selected
-                        and polygon_index == self._selected_polygon_index
+                        hotspot_selected and polygon_index == self._selected_polygon_index
                     )
                     points = (
                         self._preview_polygon
-                        if area_selected
-                        and self._preview_polygon is not None
+                        if area_selected and self._preview_polygon is not None
                         else polygon.points
                     )
                     path = self._polygon_path(points)
@@ -781,8 +727,7 @@ class CardCanvas(QGraphicsView):
                     fill = QColor(color)
                     fill.setAlpha(
                         78
-                        if self._run_mode
-                        and interaction.id == self._hovered_interaction_id
+                        if self._run_mode and interaction.id == self._hovered_interaction_id
                         else 55
                         if self._run_mode
                         else 92
@@ -797,10 +742,7 @@ class CardCanvas(QGraphicsView):
                         if area_selected
                         else 3
                         if hotspot_selected
-                        or (
-                            self._run_mode
-                            and interaction.id == self._hovered_interaction_id
-                        )
+                        or (self._run_mode and interaction.id == self._hovered_interaction_id)
                         else 2,
                     )
                     pen.setCosmetic(True)
@@ -844,9 +786,7 @@ class CardCanvas(QGraphicsView):
                 handle_radius * 2,
             )
             handle.setPen(QPen(QColor("#202225"), 1))
-            handle.setBrush(
-                QBrush(QColor("#ffb347") if selected else QColor("#fff3d6"))
-            )
+            handle.setBrush(QBrush(QColor("#ffb347") if selected else QColor("#fff3d6")))
             handle.setZValue(100)
             handle.setData(0, interaction_id)
             handle.setData(1, polygon_index)
@@ -917,23 +857,31 @@ class CardCanvas(QGraphicsView):
 
     def _append_draft_point(self, viewport_point: QPoint) -> None:
         assert self._draft_points is not None
+        if self.document_point_at(viewport_point) is None:
+            return
         vertex_index = self._draft_vertex_at(viewport_point)
         if vertex_index == 0 and len(self._draft_points) >= 3:
             self._finish_drawing()
             return
         if vertex_index is not None:
             return
-        self._draft_points.append(self._clamped_document_point(viewport_point))
+        point = self.document_point_at(viewport_point)
+        if point is None:
+            return
+        self._draft_points.append(point)
         self._render_hotspots()
 
     def _draft_vertex_at(self, viewport_point: QPoint) -> int | None:
         assert self._draft_points is not None
         for vertex_index, point in enumerate(self._draft_points):
             candidate = self.viewport_point_for(point)
-            if hypot(
-                candidate.x() - viewport_point.x(),
-                candidate.y() - viewport_point.y(),
-            ) <= 9:
+            if (
+                hypot(
+                    candidate.x() - viewport_point.x(),
+                    candidate.y() - viewport_point.y(),
+                )
+                <= 9
+            ):
                 return vertex_index
         return None
 
@@ -944,10 +892,7 @@ class CardCanvas(QGraphicsView):
             return
         try:
             polygon = Polygon(
-                points=tuple(
-                    Point(x=point.x(), y=point.y())
-                    for point in self._draft_points
-                )
+                points=tuple(Point(x=point.x(), y=point.y()) for point in self._draft_points)
             )
         except ValidationError as error:
             self.editing_error.emit(self._geometry_error(error))
@@ -1027,6 +972,12 @@ class CardCanvas(QGraphicsView):
         self.polygon_deletion_requested.emit(interaction_id, polygon_index)
 
     def _update_authoring_hover(self, viewport_point: QPoint) -> None:
+        normalized = self.document_point_at(viewport_point)
+        if normalized is None:
+            self._set_hovered_edge_insertion(None)
+            self.viewport().setCursor(Qt.CursorShape.ArrowCursor)
+            self.setToolTip("")
+            return
         if self._draft_points is not None:
             self._set_hovered_edge_insertion(None)
             self.viewport().setCursor(Qt.CursorShape.CrossCursor)
@@ -1045,9 +996,7 @@ class CardCanvas(QGraphicsView):
         if (
             interaction is not None
             and self._selected_polygon_index is not None
-            and 0
-            <= self._selected_polygon_index
-            < len(interaction.polygons)
+            and 0 <= self._selected_polygon_index < len(interaction.polygons)
         ):
             insertion = self._nearest_edge_insertion(
                 interaction.polygons[self._selected_polygon_index],
@@ -1064,17 +1013,14 @@ class CardCanvas(QGraphicsView):
                     )
                 )
                 self.viewport().setCursor(Qt.CursorShape.PointingHandCursor)
-                self.setToolTip(
-                    "Click the + or double-click the edge to add a vertex."
-                )
+                self.setToolTip("Click the + or double-click the edge to add a vertex.")
                 return
         self._set_hovered_edge_insertion(None)
-        hit = self._polygon_at(self._clamped_document_point(viewport_point))
+        hit = self._polygon_at(normalized)
         if hit is not None:
             self.viewport().setCursor(Qt.CursorShape.OpenHandCursor)
             self.setToolTip(
-                "Click to select this area, or drag to move it. "
-                "Delete removes the selected area."
+                "Click to select this area, or drag to move it. Delete removes the selected area."
             )
             return
         self.viewport().setCursor(Qt.CursorShape.CrossCursor)
@@ -1106,31 +1052,33 @@ class CardCanvas(QGraphicsView):
         polygon = interaction.polygons[polygon_index]
         for vertex_index, point in enumerate(polygon.points):
             candidate = self.viewport_point_for(QPointF(point.x, point.y))
-            if hypot(
-                candidate.x() - viewport_point.x(),
-                candidate.y() - viewport_point.y(),
-            ) <= 9:
+            if (
+                hypot(
+                    candidate.x() - viewport_point.x(),
+                    candidate.y() - viewport_point.y(),
+                )
+                <= 9
+            ):
                 return interaction.id, polygon_index, vertex_index
         return None
 
     def _polygon_at(self, point: QPointF) -> tuple[UUID, int] | None:
         if self._hotspot_set is None:
             return None
-        scene_point = QPointF(
-            point.x() * self._canvas_size.width,
-            point.y() * self._canvas_size.height,
-        )
+        scene_point = self._scene_point(point)
         for interaction in reversed(self._hotspot_set.interactions):
             for polygon_index in reversed(range(len(interaction.polygons))):
-                if self._polygon_path(
-                    interaction.polygons[polygon_index].points
-                ).contains(scene_point):
+                if self._polygon_path(interaction.polygons[polygon_index].points).contains(
+                    scene_point
+                ):
                     return interaction.id, polygon_index
         return None
 
-    def _run_interaction_at(self, point: QPointF) -> Interaction | None:
-        if self._hotspot_set is None or not (
-            0.0 <= point.x() <= 1.0 and 0.0 <= point.y() <= 1.0
+    def _run_interaction_at(self, point: QPointF | None) -> Interaction | None:
+        if (
+            self._hotspot_set is None
+            or point is None
+            or not (0.0 <= point.x() <= 1.0 and 0.0 <= point.y() <= 1.0)
         ):
             return None
         return hit_test_interactions(
@@ -1146,14 +1094,9 @@ class CardCanvas(QGraphicsView):
         maximum_distance: float | None = 9,
     ) -> tuple[int, Point] | None:
         best: tuple[float, int, QPointF] | None = None
-        points = [
-            self.viewport_point_for(QPointF(point.x, point.y))
-            for point in polygon.points
-        ]
+        points = [self.viewport_point_for(QPointF(point.x, point.y)) for point in polygon.points]
         target = QPointF(viewport_point)
-        for index, (start, end) in enumerate(
-            zip(points, points[1:] + points[:1], strict=True)
-        ):
+        for index, (start, end) in enumerate(zip(points, points[1:] + points[:1], strict=True)):
             start_f = QPointF(start)
             end_f = QPointF(end)
             edge = end_f - start_f
@@ -1163,8 +1106,7 @@ class CardCanvas(QGraphicsView):
             offset = target - start_f
             fraction = min(
                 max(
-                    (offset.x() * edge.x() + offset.y() * edge.y())
-                    / length_squared,
+                    (offset.x() * edge.x() + offset.y() * edge.y()) / length_squared,
                     0.0,
                 ),
                 1.0,
@@ -1173,11 +1115,11 @@ class CardCanvas(QGraphicsView):
             distance = self._point_distance(target, projection)
             if best is None or distance < best[0]:
                 best = (distance, index, projection)
-        if best is None or (
-            maximum_distance is not None and best[0] > maximum_distance
-        ):
+        if best is None or (maximum_distance is not None and best[0] > maximum_distance):
             return None
-        normalized = self._clamped_document_point(best[2].toPoint())
+        normalized = self.document_point_at(best[2].toPoint())
+        if normalized is None:
+            return None
         return best[1], Point(x=normalized.x(), y=normalized.y())
 
     def _interaction(self, interaction_id: UUID | None) -> Interaction | None:
@@ -1192,21 +1134,21 @@ class CardCanvas(QGraphicsView):
             None,
         )
 
-    def _clamped_document_point(self, viewport_point: QPoint) -> QPointF:
-        point = self.document_point_at(viewport_point)
-        return QPointF(
-            min(max(point.x(), 0.0), 1.0),
-            min(max(point.y(), 0.0), 1.0),
-        )
-
     def _scene_point(self, point: Point | QPointF) -> QPointF:
+        image_rect = self._image_scene_rect or self.scene().sceneRect()
         return QPointF(
-            point.x * self._canvas_size.width
-            if isinstance(point, Point)
-            else point.x() * self._canvas_size.width,
-            point.y * self._canvas_size.height
-            if isinstance(point, Point)
-            else point.y() * self._canvas_size.height,
+            image_rect.left()
+            + (
+                point.x * image_rect.width()
+                if isinstance(point, Point)
+                else point.x() * image_rect.width()
+            ),
+            image_rect.top()
+            + (
+                point.y * image_rect.height()
+                if isinstance(point, Point)
+                else point.y() * image_rect.height()
+            ),
         )
 
     def _polygon_path(self, points: tuple[Point, ...]) -> QPainterPath:

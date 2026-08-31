@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QSizePolicy,
     QSplitter,
     QStackedWidget,
     QStyle,
@@ -36,6 +37,10 @@ from hotcards.application.background_workflow import (
     BackgroundWorkflow,
     BackgroundWorkflowError,
 )
+from hotcards.application.card_duplication import (
+    CardDuplicationError,
+    CardDuplicationWorkflow,
+)
 from hotcards.application.commands import (
     AddInteractionCommand,
     AddPolygonCommand,
@@ -48,21 +53,18 @@ from hotcards.application.commands import (
     ReplacePolygonCommand,
     SetRunOverlayModeCommand,
 )
-from hotcards.application.document_controller import DocumentController, UndoToken
+from hotcards.application.document_controller import (
+    PENDING_DURABILITY_MESSAGE,
+    DocumentController,
+    DocumentMutationBlockedError,
+    UndoToken,
+)
 from hotcards.application.document_session import (
     DocumentSession,
     DocumentSessionError,
     DocumentSessionState,
 )
 from hotcards.application.generated_revision_change import GeneratedRevisionChange
-from hotcards.application.image_prompt_workflow import (
-    IMAGE_PROMPT_PREPARATION_VERSION as IMAGE_PROMPT_PREPARATION_VERSION,
-)
-from hotcards.application.image_prompt_workflow import (
-    ImagePromptWorkflow,
-    ImagePromptWorkflowError,
-    image_prompt_preparation_version,
-)
 from hotcards.application.run_session import RunSession, RunSessionState
 from hotcards.application.workers import (
     AdapterKind,
@@ -73,14 +75,16 @@ from hotcards.application.workers import (
 )
 from hotcards.domain.models import (
     Card,
+    CurrentSourceSize,
     HotspotSet,
     Interaction,
     Polygon,
+    PresetOutputSize,
+    RefineTransformation,
     ResolvedCardReference,
     RunOverlayMode,
     Stack,
 )
-from hotcards.generation.ollama_client import OllamaSettings
 from hotcards.storage.stack_store import StackStoreError
 from hotcards.ui.card_canvas import CardCanvas
 from hotcards.ui.card_sidebar import CardSidebar
@@ -96,11 +100,11 @@ from hotcards.ui.project_paths import bundle_path, default_project_directory
 from hotcards.ui.settings_dialog import (
     MFLUX_MODEL_KEY,
     MFLUX_MODEL_OPTIONS,
-    OLLAMA_MODEL_KEY,
     SettingsDialog,
     SettingsStore,
     load_machine_settings,
 )
+from hotcards.ui.utility_windows import KeyManagerWindow, StyleManagerWindow
 
 AvailabilityChecks = Mapping[AdapterKind, Callable[[], Any]]
 AvailabilityChecksFactory = Callable[[], AvailabilityChecks]
@@ -109,6 +113,9 @@ SettingsDialogFactory = Callable[[SettingsStore, QWidget], QDialog]
 
 class MainWindow(QMainWindow):
     """Application shell whose panes render one DocumentController."""
+
+    _STYLE_MANAGER_GEOMETRY_KEY = "windows/style_manager_geometry"
+    _KEY_MANAGER_GEOMETRY_KEY = "windows/key_manager_geometry"
 
     def __init__(
         self,
@@ -121,7 +128,7 @@ class MainWindow(QMainWindow):
         settings_dialog_factory: SettingsDialogFactory = SettingsDialog,
         document_session: DocumentSession | None = None,
         background_workflow: BackgroundWorkflow | None = None,
-        image_prompt_workflow: ImagePromptWorkflow | None = None,
+        card_duplication_workflow: CardDuplicationWorkflow | None = None,
         project_directory: Path | None = None,
         start_diagnostics: bool = True,
         owns_workers: bool = False,
@@ -132,7 +139,7 @@ class MainWindow(QMainWindow):
         self.settings = settings if settings is not None else QSettings()
         self.document_session = document_session
         self.background_workflow = background_workflow
-        self.image_prompt_workflow = image_prompt_workflow
+        self.card_duplication_workflow = card_duplication_workflow
         self.project_directory = project_directory or default_project_directory()
         self._availability_checks = dict(availability_checks or {})
         self._availability_checks_factory = availability_checks_factory
@@ -143,7 +150,6 @@ class MainWindow(QMainWindow):
         )
         self._rendered_card_id: UUID | None = None
         self._availability: dict[AdapterKind, bool | None] = {
-            AdapterKind.OLLAMA: None,
             AdapterKind.MFLUX: None,
         }
         self._diagnostic_messages: dict[AdapterKind, str] = {}
@@ -152,13 +158,19 @@ class MainWindow(QMainWindow):
         self._service_notification_dismissed = False
         self._undo_notification_token: UndoToken | None = None
         self._generated_revision_change: GeneratedRevisionChange | None = None
+        self._card_selection_history: dict[
+            UndoToken,
+            tuple[UUID | None, UUID | None],
+        ] = {}
         self._card_name_commit_failed = False
         self._rendering = False
         self._is_running = False
         self._background_step_progress: tuple[int, int] | None = None
-        self._image_prompt_progress_message = ""
         self._background_progress_message = ""
+        self._last_session_mutation_blocked = False
         self._run_session = RunSession()
+        self.style_manager_window: StyleManagerWindow | None = None
+        self.key_manager_window: KeyManagerWindow | None = None
         if self.background_workflow is None and self.document_session is not None:
             self.background_workflow = BackgroundWorkflow(
                 controller,
@@ -167,13 +179,10 @@ class MainWindow(QMainWindow):
                 self._background_generation_settings,
                 parent=self,
             )
-        if self.image_prompt_workflow is None:
-            self.image_prompt_workflow = ImagePromptWorkflow(
+        if self.card_duplication_workflow is None and self.document_session is not None:
+            self.card_duplication_workflow = CardDuplicationWorkflow(
                 controller,
-                workers,
-                self._ollama_settings,
-                reference_image_resolver=self._reference_image_path,
-                parent=self,
+                self.document_session,
             )
         self.setWindowTitle(f"HotCards — {controller.document.name}")
         self.setObjectName("mainWindow")
@@ -261,6 +270,137 @@ class MainWindow(QMainWindow):
         self.overlay_label_action.setVisible(False)
         self.overlay_selector_action.setVisible(False)
 
+        self.author_action_spacer = QWidget()
+        self.author_action_spacer.setObjectName("authorActionSpacer")
+        self.author_action_spacer.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Preferred,
+        )
+        self.author_action_spacer_action = toolbar.addWidget(self.author_action_spacer)
+        self.styles_button = QPushButton("Styles")
+        self.styles_button.setObjectName("stylesManagerButton")
+        self.styles_button.setAccessibleName("Open Styles manager")
+        self.styles_button.setToolTip("Open the stack Styles manager")
+        self.styles_button.clicked.connect(self._show_style_manager)
+        self.styles_button_action = toolbar.addWidget(self.styles_button)
+        self.keys_button = QPushButton("Keys")
+        self.keys_button.setObjectName("keysManagerButton")
+        self.keys_button.setAccessibleName("Open Keys manager")
+        self.keys_button.setToolTip("Open the stack Keys manager")
+        self.keys_button.clicked.connect(self._show_key_manager)
+        self.keys_button_action = toolbar.addWidget(self.keys_button)
+        self.toolbar_trailing_spacer = QWidget()
+        self.toolbar_trailing_spacer.setFixedWidth(self.toolbar_leading_spacer.width())
+        self.toolbar_trailing_spacer_action = toolbar.addWidget(self.toolbar_trailing_spacer)
+
+    def _show_style_manager(self) -> None:
+        if self._is_running:
+            return
+        window = self.style_manager_window
+        if window is None:
+            window = StyleManagerWindow(self.controller, self)
+            self.style_manager_window = window
+            self._attach_utility_actions(window)
+            window.document_changed.connect(
+                lambda document, source=window: self.render_document(
+                    document,
+                    utility_source=source,
+                )
+            )
+            window.change_applied.connect(self._show_undo_notification)
+            window.inputs_changed.connect(self._authoring_inputs_changed)
+            window.closing.connect(
+                lambda geometry: self.settings.setValue(
+                    self._STYLE_MANAGER_GEOMETRY_KEY,
+                    geometry,
+                )
+            )
+            window.destroyed.connect(
+                lambda _object=None, source=window: self._utility_destroyed(source)
+            )
+            geometry = self.settings.value(self._STYLE_MANAGER_GEOMETRY_KEY)
+            if geometry is not None:
+                window.restoreGeometry(geometry)
+        window.set_mutation_allowed(not self.controller.mutation_blocked)
+        window.render(self.controller.document)
+        window.show()
+        window.raise_()
+        window.activateWindow()
+
+    def _show_key_manager(self) -> None:
+        if self._is_running:
+            return
+        window = self.key_manager_window
+        if window is None:
+            window = KeyManagerWindow(self.controller, self)
+            self.key_manager_window = window
+            self._attach_utility_actions(window)
+            window.document_changed.connect(
+                lambda document, source=window: self.render_document(
+                    document,
+                    utility_source=source,
+                )
+            )
+            window.change_applied.connect(self._show_undo_notification)
+            window.hotspot_usage_requested.connect(self._show_hotspot_usage)
+            window.closing.connect(
+                lambda geometry: self.settings.setValue(
+                    self._KEY_MANAGER_GEOMETRY_KEY,
+                    geometry,
+                )
+            )
+            window.destroyed.connect(
+                lambda _object=None, source=window: self._utility_destroyed(source)
+            )
+            geometry = self.settings.value(self._KEY_MANAGER_GEOMETRY_KEY)
+            if geometry is not None:
+                window.restoreGeometry(geometry)
+        window.set_mutation_allowed(not self.controller.mutation_blocked)
+        window.render(self.controller.document)
+        window.show()
+        window.raise_()
+        window.activateWindow()
+
+    def _utility_destroyed(self, window: QWidget) -> None:
+        if self.style_manager_window is window:
+            self.style_manager_window = None
+        if self.key_manager_window is window:
+            self.key_manager_window = None
+
+    def _attach_utility_actions(self, window: QWidget) -> None:
+        window.addActions(
+            [
+                self.new_stack_action,
+                self.open_stack_action,
+                self.save_action,
+                self.save_as_action,
+                self.undo_action,
+                self.redo_action,
+                self.duplicate_card_action,
+            ]
+        )
+
+    def _render_utility_windows(
+        self,
+        *,
+        skip: QWidget | None = None,
+    ) -> None:
+        for window in (
+            self.style_manager_window,
+            self.key_manager_window,
+        ):
+            if window is not None and window is not skip:
+                window.render(self.controller.document)
+
+    def _close_utility_windows(self, *, commit_pending: bool = True) -> None:
+        for attribute in ("style_manager_window", "key_manager_window"):
+            window = getattr(self, attribute)
+            if window is None:
+                continue
+            closed = window.close() if commit_pending else window.close_without_committing()
+            if closed:
+                setattr(self, attribute, None)
+
     def _build_panes(self) -> None:
         self.card_sidebar = CardSidebar(
             self.controller,
@@ -268,6 +408,7 @@ class MainWindow(QMainWindow):
         )
         self.card_sidebar.card_selected.connect(self.select_card)
         self.card_sidebar.document_changed.connect(self.render_document)
+        self.card_sidebar.duplicate_requested.connect(self._duplicate_card)
         self.card_sidebar.delete_requested.connect(self._delete_card)
 
         self.canvas_pages = QStackedWidget()
@@ -341,40 +482,7 @@ class MainWindow(QMainWindow):
         canvas_layout.addWidget(self.canvas_card_name_error)
         self.card_canvas = CardCanvas()
         canvas_layout.addWidget(self.card_canvas, 1)
-        self.canvas_fit_controls = QHBoxLayout()
-        self.canvas_fit_controls.addStretch(1)
-        self.fit_canvas_button = QToolButton()
-        self.fit_canvas_button.setObjectName("fitCanvasButton")
-        self.fit_canvas_button.setText("⛶")
-        self.fit_canvas_button.setAccessibleName("Fit image to window")
-        self.fit_canvas_button.setToolTip("Fit image to window")
-        self.canvas_fit_controls.addWidget(self.fit_canvas_button)
-        self.clear_background_button = QToolButton()
-        self.clear_background_button.setObjectName("clearBackgroundButton")
-        self.clear_background_button.setIcon(
-            self.style().standardIcon(QStyle.StandardPixmap.SP_TrashIcon)
-        )
-        self.clear_background_button.setAccessibleName("Clear image")
-        self.clear_background_button.setToolTip("This revision has no image")
-        self.canvas_fit_controls.addWidget(self.clear_background_button)
-        canvas_action_extent = max(
-            self.fit_canvas_button.sizeHint().width(),
-            self.fit_canvas_button.sizeHint().height(),
-            self.clear_background_button.sizeHint().width(),
-            self.clear_background_button.sizeHint().height(),
-        )
-        self.fit_canvas_button.setFixedSize(
-            canvas_action_extent,
-            canvas_action_extent,
-        )
-        self.clear_background_button.setFixedSize(
-            canvas_action_extent,
-            canvas_action_extent,
-        )
-        canvas_layout.addLayout(self.canvas_fit_controls)
         self.canvas_pages.addWidget(card_canvas)
-        self.fit_canvas_button.clicked.connect(self.card_canvas.fit_to_window)
-        self.clear_background_button.clicked.connect(self._clear_background)
         self.canvas_card_name.editingFinished.connect(self._commit_canvas_card_name)
         self.canvas_card_name.textEdited.connect(self._card_name_edited)
         self.revision_combo.currentIndexChanged.connect(self._revision_selection_changed)
@@ -384,16 +492,12 @@ class MainWindow(QMainWindow):
         self.inspector = Inspector(self.controller)
         self.inspector.document_changed.connect(self.render_document)
         self.inspector.render_inputs_changed.connect(self._authoring_inputs_changed)
-        self.inspector.inspector_tabs.currentChanged.connect(
-            self._inspector_tab_changed
-        )
-        self.inspector.prepare_image_prompt_requested.connect(
-            self._prepare_image_prompt
-        )
+        self.inspector.inspector_tabs.currentChanged.connect(self._inspector_tab_changed)
         self.inspector.generate_background_requested.connect(self._generate_background)
+        self.inspector.refine_background_requested.connect(self._refine_background)
+        self.inspector.edit_background_requested.connect(self._edit_background)
         self.inspector.change_applied.connect(self._show_undo_notification)
         self.inspector.hotspot_selected.connect(self.card_canvas.select_interaction)
-        self.inspector.hotspot_usage_requested.connect(self._show_hotspot_usage)
         self.card_canvas.interaction_selected.connect(self.inspector.select_interaction)
         self.card_canvas.empty_area_requested.connect(self._begin_implicit_hotspot_area)
         self.card_canvas.polygon_created.connect(self._create_hotspot_polygon)
@@ -403,9 +507,14 @@ class MainWindow(QMainWindow):
         self.card_canvas.editing_error.connect(self.inspector.set_hotspot_error)
         self.card_canvas.interaction_activated.connect(self._run_interaction_activated)
         if self.background_workflow is not None:
-            self.background_workflow.busy_changed.connect(
-                lambda _busy: self._update_generation_actions()
+            self.background_workflow.busy_changed.connect(self._background_activity_changed)
+            invocation_active_changed = getattr(
+                self.background_workflow,
+                "invocation_active_changed",
+                None,
             )
+            if invocation_active_changed is not None:
+                invocation_active_changed.connect(self._background_activity_changed)
             self.background_workflow.progress_changed.connect(self._background_progress_changed)
             self.background_workflow.generation_progress_changed.connect(
                 self._background_generation_progress_changed
@@ -416,18 +525,13 @@ class MainWindow(QMainWindow):
             self.background_workflow.generation_applied.connect(
                 self._show_generated_revision_notification
             )
-        self.image_prompt_workflow.busy_changed.connect(
-            lambda _busy: self._update_generation_actions()
-        )
-        self.image_prompt_workflow.progress_changed.connect(
-            self._image_prompt_progress_changed
-        )
-        self.image_prompt_workflow.failed.connect(self._image_prompt_failed)
-        self.image_prompt_workflow.document_changed.connect(self.render_document)
-        self.image_prompt_workflow.change_applied.connect(self._show_undo_notification)
-        self.image_prompt_workflow.generation_applied.connect(
-            self._image_prompt_applied
-        )
+            edit_instruction_clear_requested = getattr(
+                self.background_workflow,
+                "edit_instruction_clear_requested",
+                None,
+            )
+            if edit_instruction_clear_requested is not None:
+                edit_instruction_clear_requested.connect(self.inspector.clear_edit_instruction)
         self.pane_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.pane_splitter.setObjectName("threePaneSplitter")
         self.pane_splitter.addWidget(self.card_sidebar)
@@ -436,7 +540,7 @@ class MainWindow(QMainWindow):
         self.pane_splitter.setStretchFactor(0, 0)
         self.pane_splitter.setStretchFactor(1, 1)
         self.pane_splitter.setStretchFactor(2, 0)
-        self.pane_splitter.setSizes([220, 700, 280])
+        self.pane_splitter.setSizes([240, 680, 280])
 
         self.notification_bar = NotificationBar()
         self.notification_bar.action_requested.connect(self._notification_action_requested)
@@ -450,11 +554,6 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central_widget)
 
         values = load_machine_settings(self.settings)
-        self.llm_model_label = QLabel("LLM")
-        self.llm_model_combo = QComboBox()
-        self.llm_model_combo.setObjectName("llmModelCombo")
-        self.llm_model_combo.setAccessibleName("LLM model")
-        self.llm_model_combo.addItem(values.ollama_model, values.ollama_model)
         self.image_model_label = QLabel("Image")
         self.image_model_combo = QComboBox()
         self.image_model_combo.setObjectName("imageModelCombo")
@@ -470,21 +569,13 @@ class MainWindow(QMainWindow):
         self.generation_progress_bar.setRange(0, 0)
         self.generation_progress_bar.setTextVisible(False)
         self.generation_progress_container = QWidget()
-        self.generation_progress_container.setObjectName(
-            "generationProgressContainer"
-        )
-        self.generation_progress_layout = QHBoxLayout(
-            self.generation_progress_container
-        )
+        self.generation_progress_container.setObjectName("generationProgressContainer")
+        self.generation_progress_layout = QHBoxLayout(self.generation_progress_container)
         self.generation_progress_layout.setContentsMargins(8, 0, 8, 0)
         self.generation_step_label = QLabel()
         self.generation_step_label.setObjectName("generationStepLabel")
-        self.generation_step_label.setAccessibleName(
-            "Current generation step"
-        )
-        self.generation_progress_layout.addWidget(
-            self.generation_step_label
-        )
+        self.generation_step_label.setAccessibleName("Current generation step")
+        self.generation_progress_layout.addWidget(self.generation_step_label)
         self.generation_progress_layout.addSpacing(8)
         self.generation_progress_layout.addWidget(
             self.generation_progress_bar,
@@ -494,28 +585,15 @@ class MainWindow(QMainWindow):
         self.cancel_generation_button = QPushButton("Cancel")
         self.cancel_generation_button.setObjectName("cancelGenerationButton")
         self.cancel_generation_button.setAccessibleName("Cancel generation")
-        self.cancel_generation_button.setToolTip(
-            "Cancel Image Prompt preparation or image generation"
-        )
-        self.cancel_generation_button.clicked.connect(
-            self._cancel_generation_activity
-        )
-        self.generation_progress_layout.addWidget(
-            self.cancel_generation_button
-        )
+        self.cancel_generation_button.setToolTip("Cancel image generation")
+        self.cancel_generation_button.clicked.connect(self._cancel_generation_activity)
+        self.generation_progress_layout.addWidget(self.cancel_generation_button)
         self.generation_progress_container.hide()
         self.statusBar().addWidget(self.generation_progress_container, 1)
-        self.statusBar().addPermanentWidget(self.llm_model_label)
-        self.statusBar().addPermanentWidget(self.llm_model_combo)
         self.statusBar().addPermanentWidget(self.image_model_label)
         self.statusBar().addPermanentWidget(self.image_model_combo)
-        self.llm_model_combo.currentIndexChanged.connect(
-            self._llm_model_changed
-        )
-        self.image_model_combo.currentIndexChanged.connect(
-            self._image_model_changed
-        )
-        self._service_status_detail = "Local AI availability checks pending"
+        self.image_model_combo.currentIndexChanged.connect(self._image_model_changed)
+        self._service_status_detail = "MFLUX availability check pending"
         self.create_first_card_button.clicked.connect(self._primary_empty_action)
 
     def _build_menu(self) -> None:
@@ -553,6 +631,12 @@ class MainWindow(QMainWindow):
         self.redo_action.setShortcut(QKeySequence.StandardKey.Redo)
         self.redo_action.triggered.connect(self.redo)
         edit_menu.addAction(self.redo_action)
+        edit_menu.addSeparator()
+        self.duplicate_card_action = QAction("Duplicate Card", self)
+        self.duplicate_card_action.setObjectName("duplicateCardAction")
+        self.duplicate_card_action.setShortcut(QKeySequence("Ctrl+D"))
+        self.duplicate_card_action.triggered.connect(self._duplicate_card)
+        edit_menu.addAction(self.duplicate_card_action)
 
         self.advanced_settings_action = QAction("Advanced Settings…", self)
         self.advanced_settings_action.setObjectName("advancedSettingsAction")
@@ -564,6 +648,7 @@ class MainWindow(QMainWindow):
         _document: Stack | None = None,
         *,
         render_sidebar: bool = True,
+        utility_source: QWidget | None = None,
     ) -> None:
         """Refresh all panes from the controller's authoritative snapshot."""
         snapshot = self.controller.document
@@ -580,6 +665,10 @@ class MainWindow(QMainWindow):
             self._selected_card_id = self._run_session.state.current_card_id
         elif self._selected_card_id not in card_ids:
             self._selected_card_id = snapshot.cards[0].id if snapshot.cards else None
+        selected_card = next(
+            (card for card in snapshot.cards if card.id == self._selected_card_id),
+            None,
+        )
         self._rendering = True
         try:
             if render_sidebar:
@@ -588,10 +677,10 @@ class MainWindow(QMainWindow):
                     self._selected_card_id,
                     draft_card_ids=(),
                 )
-            self.inspector.render(snapshot, self._selected_card_id)
-            selected_card = next(
-                (card for card in snapshot.cards if card.id == self._selected_card_id),
-                None,
+            self.inspector.render(
+                snapshot,
+                self._selected_card_id,
+                refine_source_size=self._refine_source_size(selected_card),
             )
             if selected_card is None:
                 self._rendered_card_id = None
@@ -640,13 +729,18 @@ class MainWindow(QMainWindow):
         self._update_window_title()
         self._update_generation_actions()
         self._update_run_actions()
+        self._render_utility_windows(skip=utility_source)
 
     def select_card(self, card_id: object) -> None:
         if self._is_running:
             return
         selected_card_id = card_id if isinstance(card_id, UUID) else None
-        if selected_card_id != self._selected_card_id:
-            self.image_prompt_workflow.cancel()
+        if (
+            selected_card_id != self._selected_card_id
+            and self.background_workflow is not None
+            and self.background_workflow.busy
+        ):
+            self._cancel_background_generation()
         self._selected_card_id = selected_card_id
         if self.card_sidebar.selected_card_id != self._selected_card_id:
             self.card_sidebar.select_card(self._selected_card_id)
@@ -669,11 +763,7 @@ class MainWindow(QMainWindow):
             return
         self.select_card(card_id)
         card = next(
-            (
-                candidate
-                for candidate in self.controller.document.cards
-                if candidate.id == card_id
-            ),
+            (candidate for candidate in self.controller.document.cards if candidate.id == card_id),
             None,
         )
         if card is None:
@@ -693,8 +783,10 @@ class MainWindow(QMainWindow):
         self.inspector.show_interaction(interaction_id)
         self.card_canvas.select_interaction(interaction_id)
 
-    def _commit_canvas_card_name(self) -> bool:
+    def _commit_canvas_card_name(self, *, render_change: bool = True) -> bool:
         if self._rendering or self._selected_card_id is None or self._is_running:
+            return True
+        if self.controller.mutation_blocked:
             return True
         if self._card_name_commit_failed:
             self._card_name_commit_failed = False
@@ -714,14 +806,15 @@ class MainWindow(QMainWindow):
             return True
         try:
             changed = self.controller.execute(RenameCardCommand(card_id=card.id, name=name))
-        except (CommandError, ValidationError) as error:
+        except (CommandError, DocumentMutationBlockedError, ValidationError) as error:
             self._card_name_commit_failed = True
             self._set_canvas_card_name_error(str(error))
             self.canvas_card_name.setText(card.name)
             return False
         self._card_name_commit_failed = False
         self._set_canvas_card_name_error("")
-        self.render_document(changed)
+        if render_change:
+            self.render_document(changed)
         return True
 
     def _card_name_edited(self) -> None:
@@ -733,11 +826,49 @@ class MainWindow(QMainWindow):
         self.canvas_card_name_error.setVisible(bool(message))
 
     def _commit_authoring_metadata(self) -> bool:
+        if self.controller.mutation_blocked:
+            self._show_pending_durability_error(PENDING_DURABILITY_MESSAGE)
+            return False
+        for window in (
+            self.style_manager_window,
+            self.key_manager_window,
+        ):
+            if window is not None and not window.commit_pending_edits(render_change=False):
+                window.show()
+                window.raise_()
+                window.activateWindow()
+                return False
         if self._selected_card_id is None:
             return True
-        if not self._commit_canvas_card_name():
+        if not self.inspector.commit_card_metadata(render_change=False):
             return False
-        return self.inspector.commit_card_metadata()
+        return self._commit_canvas_card_name(render_change=False)
+
+    def _flush_document(self, *, title: str) -> bool:
+        if self.document_session is None:
+            return True
+        if self.document_session.flush():
+            return True
+        self._show_document_error(
+            title,
+            self.document_session.state.error or "The document could not be saved.",
+        )
+        return False
+
+    def _prepare_authoring_lifecycle(
+        self,
+        *,
+        save_error_title: str,
+        flush_after_commit: bool = False,
+    ) -> bool:
+        durability_was_pending = self.controller.mutation_blocked
+        if durability_was_pending and not self._flush_document(title=save_error_title):
+            return False
+        if not self._commit_authoring_metadata():
+            return False
+        if durability_was_pending or flush_after_commit:
+            return self._flush_document(title=save_error_title)
+        return True
 
     def _revision_selection_changed(self, index: int) -> None:
         if self._rendering or self._selected_card_id is None or index < 0:
@@ -760,8 +891,9 @@ class MainWindow(QMainWindow):
             or not self._commit_authoring_metadata()
         ):
             return
+        if workflow.busy:
+            self._cancel_background_generation()
         self.notification_bar.clear_notification("background-error")
-        self.image_prompt_workflow.cancel()
         try:
             workflow.duplicate_revision(card_id, revision_id)
         except (BackgroundWorkflowError, CommandError, ValidationError) as error:
@@ -811,33 +943,22 @@ class MainWindow(QMainWindow):
             ),
         )
 
-    def _image_prompt_applied(self, change: object) -> None:
-        if self._is_running:
-            return
-        if isinstance(change, GeneratedRevisionChange):
-            self.inspector.show_image_prompt(
-                change.card_id,
-                change.revision_id,
-            )
-        self._show_generated_revision_notification(change)
-
     def _undo_notification(self) -> None:
         if self._is_running:
             return
-        self.image_prompt_workflow.cancel()
         token = self._undo_notification_token
         self._clear_undo_notification()
+        if self.background_workflow is not None and self.background_workflow.busy:
+            self._cancel_background_generation()
         if token is not None and self.controller.undo_if_current(token):
+            self._restore_card_selection(token, undoing=True)
             self.render_document()
 
     def _create_generated_revision(self) -> None:
         if self._is_running:
             return
         change = self._generated_revision_change
-        if (
-            change is None
-            or self.controller.current_undo_token != change.token
-        ):
+        if change is None or self.controller.current_undo_token != change.token:
             self._clear_undo_notification()
             return
         card = next(
@@ -850,11 +971,7 @@ class MainWindow(QMainWindow):
         )
         revision = (
             next(
-                (
-                    candidate
-                    for candidate in card.revisions
-                    if candidate.id == change.revision_id
-                ),
+                (candidate for candidate in card.revisions if candidate.id == change.revision_id),
                 None,
             )
             if card is not None
@@ -863,7 +980,8 @@ class MainWindow(QMainWindow):
         if revision is None:
             self._clear_undo_notification()
             return
-        self.image_prompt_workflow.cancel()
+        if self.background_workflow is not None and self.background_workflow.busy:
+            self._cancel_background_generation()
         self._clear_undo_notification()
         command = CreateGeneratedRevisionCommand(
             card_id=change.card_id,
@@ -872,7 +990,7 @@ class MainWindow(QMainWindow):
         )
         try:
             changed = self.controller.execute(command)
-        except (CommandError, ValidationError) as error:
+        except (CommandError, DocumentMutationBlockedError, ValidationError) as error:
             self._show_error(
                 "revision-error",
                 "Could not create a new version",
@@ -923,6 +1041,13 @@ class MainWindow(QMainWindow):
             ),
         )
 
+    def _show_pending_durability_error(self, detail: str) -> None:
+        self._show_error(
+            "document-error",
+            "Save required before editing",
+            detail=detail,
+        )
+
     def _show_warning(
         self,
         key: str,
@@ -953,7 +1078,7 @@ class MainWindow(QMainWindow):
         """Create and bind a new stack before exposing its initial card."""
         if self.document_session is None:
             return
-        if not self._commit_authoring_metadata():
+        if not self._prepare_authoring_lifecycle(save_error_title="Could Not Save Current Stack"):
             return
         dialog = NewStackDialog(self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
@@ -977,7 +1102,7 @@ class MainWindow(QMainWindow):
         """Open a validated bundle without replacing the current session on failure."""
         if self.document_session is None:
             return
-        if not self._commit_authoring_metadata():
+        if not self._prepare_authoring_lifecycle(save_error_title="Could Not Save Current Stack"):
             return
         selected_path = QFileDialog.getExistingDirectory(
             self,
@@ -995,21 +1120,16 @@ class MainWindow(QMainWindow):
         """Flush accepted mutations and keep a failed save visible."""
         if self.document_session is None:
             return True
-        if not self._commit_authoring_metadata():
-            return False
-        saved = self.document_session.flush()
-        if not saved:
-            self._show_document_error(
-                "Could Not Save Stack",
-                self.document_session.state.error or "The document could not be saved.",
-            )
-        return saved
+        return self._prepare_authoring_lifecycle(
+            save_error_title="Could Not Save Stack",
+            flush_after_commit=True,
+        )
 
     def save_as(self) -> None:
         """Clone the current bound bundle and rebind future autosaves."""
         if self.document_session is None or self.document_session.store is None:
             return
-        if not self._commit_authoring_metadata():
+        if not self._prepare_authoring_lifecycle(save_error_title="Could Not Save Current Stack"):
             return
         selected_path, _filter = QFileDialog.getSaveFileName(
             self,
@@ -1025,24 +1145,51 @@ class MainWindow(QMainWindow):
             self._show_document_error("Could Not Save Stack As", str(error))
             return
         self._cancel_background_generation()
-        self.image_prompt_workflow.cancel()
         self._clear_undo_notification()
         self._update_document_actions()
 
     def undo(self) -> None:
-        self.image_prompt_workflow.cancel()
         self._clear_undo_notification()
-        if self.controller.undo():
+        if self.background_workflow is not None and self.background_workflow.busy:
+            self._cancel_background_generation()
+        token = self.controller.current_undo_token
+        try:
+            changed = self.controller.undo()
+        except DocumentMutationBlockedError as error:
+            self._show_pending_durability_error(str(error))
+            return
+        if changed:
+            self._restore_card_selection(token, undoing=True)
             self.render_document()
 
     def redo(self) -> None:
-        self.image_prompt_workflow.cancel()
         self._clear_undo_notification()
-        if self.controller.redo():
+        if self.background_workflow is not None and self.background_workflow.busy:
+            self._cancel_background_generation()
+        token = self.controller.current_redo_token
+        try:
+            changed = self.controller.redo()
+        except DocumentMutationBlockedError as error:
+            self._show_pending_durability_error(str(error))
+            return
+        if changed:
+            self._restore_card_selection(token, undoing=False)
             self.render_document()
 
+    def _restore_card_selection(
+        self,
+        token: UndoToken | None,
+        *,
+        undoing: bool,
+    ) -> None:
+        if token is None or token not in self._card_selection_history:
+            return
+        before, after = self._card_selection_history[token]
+        self._selected_card_id = before if undoing else after
+
     def _authoring_inputs_changed(self) -> None:
-        self.image_prompt_workflow.cancel()
+        if self.background_workflow is not None and self.background_workflow.busy:
+            self._cancel_background_generation()
         self._update_generation_actions()
 
     def _primary_empty_action(self) -> None:
@@ -1052,6 +1199,41 @@ class MainWindow(QMainWindow):
             self.new_stack()
         else:
             self.card_sidebar.add_card()
+
+    def _duplicate_card(self, requested_card_id: object = None) -> None:
+        if self._is_running or self.card_duplication_workflow is None:
+            return
+        card_id = (
+            requested_card_id if isinstance(requested_card_id, UUID) else self._selected_card_id
+        )
+        if card_id is None or card_id != self._selected_card_id:
+            return
+        if not self._commit_authoring_metadata():
+            return
+        if self.background_workflow is not None and self.background_workflow.busy:
+            self._cancel_background_generation()
+        self.notification_bar.clear_notification("card-error")
+        previous_selection = self._selected_card_id
+        try:
+            change = self.card_duplication_workflow.duplicate(card_id)
+        except CardDuplicationError as error:
+            self.render_document()
+            if self.controller.mutation_blocked:
+                self._show_pending_durability_error(f"{PENDING_DURABILITY_MESSAGE}\n\n{error}")
+            else:
+                self._show_error(
+                    "card-error",
+                    "Could not duplicate card",
+                    detail=str(error),
+                )
+            return
+        self._selected_card_id = change.duplicate_card_id
+        self._card_selection_history[change.token] = (
+            previous_selection,
+            change.duplicate_card_id,
+        )
+        self.render_document(change.document)
+        self._show_undo_notification("Card duplicated", change.token)
 
     def _delete_card(self, card_id: object) -> None:
         if not isinstance(card_id, UUID):
@@ -1074,13 +1256,23 @@ class MainWindow(QMainWindow):
             and isinstance(interaction.action.target, ResolvedCardReference)
             and interaction.action.target.target_card_id == card.id
         )
-        if self.background_workflow is not None and self.background_workflow.is_generating_for(
-            card.id
-        ):
-            self._cancel_background_generation()
+        was_generating = (
+            self.background_workflow is not None
+            and self.background_workflow.is_generating_for(card.id)
+        )
         previous_token = self.controller.current_undo_token
-        self.image_prompt_workflow.cancel()
-        self.card_sidebar.delete_card(card.id)
+        try:
+            self.card_sidebar.delete_card(card.id)
+        except (CommandError, DocumentMutationBlockedError) as error:
+            self._show_error(
+                "card-error",
+                "Could not delete card",
+                detail=str(error),
+            )
+            return
+        if was_generating:
+            self._cancel_background_generation()
+        self.notification_bar.clear_notification("card-error")
         consequences: list[str] = []
         if inbound_link_count:
             noun = "link is" if inbound_link_count == 1 else "links are"
@@ -1095,29 +1287,18 @@ class MainWindow(QMainWindow):
             self._show_undo_notification(message, token)
 
     def _cancel_background_generation(self) -> None:
-        if self.background_workflow is not None and self.background_workflow.busy:
+        if self.background_workflow is not None:
             self.background_workflow.cancel()
 
     def _cancel_generation_activity(self) -> None:
-        background_busy = (
-            self.background_workflow.busy
-            if self.background_workflow is not None
-            else False
-        )
-        image_prompt_busy = self.image_prompt_workflow.busy
-        if background_busy:
+        if self.background_workflow is not None and self.background_workflow.busy:
             self._cancel_background_generation()
-        if image_prompt_busy:
-            self.image_prompt_workflow.cancel()
-            self._show_info(
-                "image-prompt-cancelled",
-                "Image Prompt preparation cancelled",
-            )
 
     def _document_replaced(self, _document: object) -> None:
         self._cancel_background_generation()
-        self.image_prompt_workflow.cancel()
+        self._close_utility_windows(commit_pending=False)
         self._clear_undo_notification()
+        self._card_selection_history.clear()
         self._rendered_card_id = None
         self._card_name_commit_failed = False
         self._set_canvas_card_name_error("")
@@ -1133,12 +1314,33 @@ class MainWindow(QMainWindow):
     def _session_state_changed(self, state: object) -> None:
         if not isinstance(state, DocumentSessionState):
             return
+        durability_resolved = self._last_session_mutation_blocked and not state.mutation_blocked
+        self._last_session_mutation_blocked = state.mutation_blocked
+        if (
+            state.mutation_blocked
+            and self.background_workflow is not None
+            and self.background_workflow.busy
+        ):
+            self._cancel_background_generation()
         if state.error is None:
             self.notification_bar.clear_notification("document-error")
         bound = state.bundle_path is not None
-        self.card_sidebar.set_document_editable(self.document_session is None or bound)
+        mutation_allowed = (self.document_session is None or bound) and not state.mutation_blocked
+        for window in (
+            self.style_manager_window,
+            self.key_manager_window,
+        ):
+            if window is not None:
+                window.set_mutation_allowed(mutation_allowed)
+        self.card_sidebar.set_document_editable(self.document_session is None or mutation_allowed)
         if self.document_session is not None and not bound:
             self.create_first_card_button.setText("Create New Stack")
+        elif state.mutation_blocked:
+            self.create_first_card_button.setText("Create Your First Card")
+            detail = PENDING_DURABILITY_MESSAGE
+            if state.error is not None:
+                detail = f"{detail}\n\n{state.error}"
+            self._show_pending_durability_error(detail)
         elif state.error is not None:
             self.create_first_card_button.setText("Create Your First Card")
             self._show_error(
@@ -1149,11 +1351,38 @@ class MainWindow(QMainWindow):
         else:
             self.create_first_card_button.setText("Create Your First Card")
         self._update_document_actions()
+        self.styles_button.setEnabled(mutation_allowed and not self._is_running)
+        self.keys_button.setEnabled(mutation_allowed and not self._is_running)
         self._update_window_title()
         self._update_generation_actions()
+        if durability_resolved:
+            self.render_document()
+
+    def _background_activity_changed(self, _active: bool) -> None:
+        if self._image_operation_active() and self.card_canvas.drawing:
+            self.card_canvas.cancel_drawing()
+            self._show_info(
+                "hotspot-draft-cancelled",
+                "Unfinished hotspot area cancelled before image processing",
+            )
+        card = next(
+            (card for card in self.controller.document.cards if card.id == self._selected_card_id),
+            None,
+        )
+        if card is not None and not self._is_running:
+            self._render_card_canvas(card)
+        self._update_generation_actions()
+
+    def _image_operation_active(self) -> bool:
+        workflow = self.background_workflow
+        return bool(
+            workflow is not None
+            and (workflow.busy or bool(getattr(workflow, "invocation_active", False)))
+        )
 
     def _update_document_actions(self) -> None:
         bound = self.document_session is None or self.document_session.store is not None
+        mutation_allowed = bound and not self.controller.mutation_blocked
         self.save_action.setEnabled(
             self.document_session is not None and self.document_session.store is not None
         )
@@ -1167,12 +1396,39 @@ class MainWindow(QMainWindow):
             and self.document_session is not None
             and self.document_session.store is not None
         )
-        self.undo_action.setEnabled(bound and not self._is_running and self.controller.can_undo)
-        self.redo_action.setEnabled(bound and not self._is_running and self.controller.can_redo)
+        self.undo_action.setEnabled(
+            mutation_allowed and not self._is_running and self.controller.can_undo
+        )
+        self.redo_action.setEnabled(
+            mutation_allowed and not self._is_running and self.controller.can_redo
+        )
+        self.duplicate_card_action.setEnabled(
+            mutation_allowed
+            and not self._is_running
+            and self._selected_card_id is not None
+            and self.card_duplication_workflow is not None
+        )
         self.advanced_settings_action.setEnabled(not self._is_running)
         self.mode_button.setEnabled(bound)
-        self.overlay_selector.setEnabled(bound and self._is_running)
-        self.card_sidebar.set_document_editable(bound and not self._is_running)
+        self.overlay_selector.setEnabled(mutation_allowed and self._is_running)
+        self.card_sidebar.set_document_editable(mutation_allowed and not self._is_running)
+        authoring_enabled = mutation_allowed and not self._is_running
+        self.styles_button.setEnabled(authoring_enabled)
+        self.keys_button.setEnabled(authoring_enabled)
+        self.inspector.setEnabled(authoring_enabled)
+        self.canvas_card_name.setReadOnly(not authoring_enabled)
+        self.revision_combo.setEnabled(authoring_enabled)
+        self.add_revision_button.setEnabled(
+            authoring_enabled and self._selected_card_id is not None
+        )
+        selected_card = next(
+            (card for card in self.controller.document.cards if card.id == self._selected_card_id),
+            None,
+        )
+        self.delete_revision_button.setEnabled(
+            authoring_enabled and selected_card is not None and len(selected_card.revisions) > 1
+        )
+        self.create_first_card_button.setEnabled(mutation_allowed)
 
     def _update_window_title(self) -> None:
         dirty = self.document_session is not None and self.document_session.state.dirty
@@ -1202,10 +1458,9 @@ class MainWindow(QMainWindow):
         for adapter, check in checks.items():
             self._availability[adapter] = None
             self._diagnostic_messages.pop(adapter, None)
-            operation = (
-                self.workers.check_ollama(check, emit_diagnostic=False)
-                if adapter is AdapterKind.OLLAMA
-                else self.workers.check_mflux(check, emit_diagnostic=False)
+            operation = self.workers.check_mflux(
+                check,
+                emit_diagnostic=False,
             )
             self._diagnostic_operations.append(operation)
             operation.succeeded.connect(
@@ -1223,7 +1478,6 @@ class MainWindow(QMainWindow):
         self.notification_bar.clear_notification("background-error")
         self.notification_bar.clear_notification("background-warning")
         self.notification_bar.clear_notification("background-cancelled")
-        self.notification_bar.clear_notification("image-prompt-cancelled")
         if not self._commit_authoring_metadata():
             return
         try:
@@ -1237,57 +1491,77 @@ class MainWindow(QMainWindow):
         self.render_document()
         self._update_generation_actions()
 
-    def _prepare_image_prompt(self) -> None:
+    def _refine_background(
+        self,
+        transformation: object,
+        output_size: object,
+    ) -> None:
+        workflow = self.background_workflow
         card_id = self._selected_card_id
-        if card_id is None or not self._commit_authoring_metadata():
+        if (
+            workflow is None
+            or card_id is None
+            or not isinstance(transformation, RefineTransformation)
+            or not isinstance(output_size, (CurrentSourceSize, PresetOutputSize))
+        ):
             return
-        self.notification_bar.clear_notification("image-prompt-error")
-        self.notification_bar.clear_notification("image-prompt-cancelled")
+        self.notification_bar.clear_notification("background-error")
+        self.notification_bar.clear_notification("background-warning")
+        self.notification_bar.clear_notification("background-cancelled")
+        if not self._commit_authoring_metadata():
+            return
         try:
-            self.image_prompt_workflow.start(card_id)
-        except ImagePromptWorkflowError as error:
+            workflow.refine(
+                card_id,
+                transformation=transformation,
+                output_size=output_size,
+            )
+        except BackgroundWorkflowError as error:
             self._show_error(
-                "image-prompt-error",
-                "Could not prepare Image Prompt",
+                "background-error",
+                "Could not reinterpret image",
                 detail=str(error),
             )
         self.render_document()
         self._update_generation_actions()
 
-    def _image_prompt_progress_changed(self, message: str) -> None:
-        self.notification_bar.clear_notification("image-prompt-error")
-        self._image_prompt_progress_message = message
-        self._update_generation_progress()
-        self._update_generation_actions()
-
-    def _image_prompt_failed(self, failure: object) -> None:
-        detail = failure.message if isinstance(failure, WorkerFailure) else str(failure)
-        self._show_error(
-            "image-prompt-error",
-            "Image Prompt preparation failed",
-            detail=detail,
-        )
-        self._update_generation_actions()
-
-    def _clear_background(self) -> None:
+    def _edit_background(
+        self,
+        instruction: object,
+        output_size: object,
+    ) -> None:
         workflow = self.background_workflow
         card_id = self._selected_card_id
-        if workflow is None or card_id is None:
+        if (
+            workflow is None
+            or card_id is None
+            or not isinstance(instruction, str)
+            or not isinstance(
+                output_size,
+                (CurrentSourceSize, PresetOutputSize),
+            )
+        ):
             return
         self.notification_bar.clear_notification("background-error")
-        self.image_prompt_workflow.cancel()
+        self.notification_bar.clear_notification("background-warning")
+        self.notification_bar.clear_notification("background-cancelled")
+        if not self._commit_authoring_metadata():
+            return
         try:
-            workflow.clear_background(card_id)
-        except (
-            BackgroundWorkflowError,
-            CommandError,
-            ValidationError,
-        ) as error:
+            workflow.edit(
+                card_id,
+                instruction=instruction,
+                output_size=output_size,
+            )
+        except (BackgroundWorkflowError, ValidationError) as error:
+            self.inspector.set_edit_error(str(error))
             self._show_error(
                 "background-error",
-                "Could not clear image",
+                "Could not edit image",
                 detail=str(error),
             )
+        self.render_document()
+        self._update_generation_actions()
 
     def _activate_revision(self, revision_id: object) -> None:
         if (
@@ -1296,8 +1570,17 @@ class MainWindow(QMainWindow):
             or not isinstance(revision_id, UUID)
         ):
             return
+        selected_card = next(
+            (card for card in self.controller.document.cards if card.id == self._selected_card_id),
+            None,
+        )
+        if (
+            selected_card is not None
+            and revision_id != selected_card.active_revision_id
+            and self.background_workflow.busy
+        ):
+            self._cancel_background_generation()
         self.notification_bar.clear_notification("background-error")
-        self.image_prompt_workflow.cancel()
         try:
             self.background_workflow.activate_revision(
                 self._selected_card_id,
@@ -1319,7 +1602,6 @@ class MainWindow(QMainWindow):
             return
         was_generating = self.background_workflow.is_generating_for(self._selected_card_id)
         self.notification_bar.clear_notification("background-error")
-        self.image_prompt_workflow.cancel()
         try:
             self.background_workflow.delete_revision(
                 self._selected_card_id,
@@ -1338,7 +1620,11 @@ class MainWindow(QMainWindow):
     def _background_progress_changed(self, message: str) -> None:
         self.notification_bar.clear_notification("background-error")
         self.notification_bar.clear_notification("background-warning")
-        if message == "Generation cancelled":
+        if message in {
+            "Generation cancelled",
+            "Reinterpret cancelled",
+            "Edit cancelled",
+        }:
             self._show_info("background-cancelled", message)
         else:
             self.notification_bar.clear_notification("background-cancelled")
@@ -1363,24 +1649,14 @@ class MainWindow(QMainWindow):
 
     def _update_generation_progress(self) -> None:
         background_busy = (
-            self.background_workflow.busy
-            if self.background_workflow is not None
-            else False
+            self.background_workflow.busy if self.background_workflow is not None else False
         )
-        if not (background_busy or self.image_prompt_workflow.busy):
+        if not background_busy:
             self.generation_progress_container.hide()
             self.generation_step_label.clear()
             return
         self.generation_step_label.setText(
-            (
-                self._background_progress_message
-                or "Generating image..."
-            )
-            if background_busy
-            else (
-                self._image_prompt_progress_message
-                or "Preparing Image Prompt..."
-            )
+            self._background_progress_message or "Generating image..."
         )
         if background_busy and self._background_step_progress is not None:
             completed_steps, total_steps = self._background_step_progress
@@ -1391,17 +1667,27 @@ class MainWindow(QMainWindow):
         self.generation_progress_container.show()
 
     def _background_failed(self, failure: object) -> None:
+        if self._background_progress_message == "Image reinterpretation failed":
+            title = "Image reinterpretation failed"
+        elif self._background_progress_message == "Image editing failed":
+            title = "Image editing failed"
+        else:
+            title = "Image generation failed"
+        detail = failure.message if isinstance(failure, WorkerFailure) else str(failure)
+        if title == "Image editing failed":
+            self.inspector.set_edit_error(detail)
+        message = f"{title}: {detail}" if detail else title
         if isinstance(failure, WorkerFailure):
             self._show_error(
                 "background-error",
-                "Image generation failed",
-                detail=failure.message,
+                message,
+                detail=detail,
             )
         else:
             self._show_error(
                 "background-error",
-                "Image generation failed",
-                detail=str(failure),
+                message,
+                detail=detail,
             )
         self._update_generation_actions()
 
@@ -1413,23 +1699,6 @@ class MainWindow(QMainWindow):
     ) -> None:
         if generation != self._diagnostic_generation:
             return
-        if adapter is AdapterKind.OLLAMA and isinstance(result, (list, tuple)):
-            models = tuple(
-                model for model in result if isinstance(model, str) and model
-            )
-            self._set_installed_ollama_models(models)
-            if not models:
-                self.apply_availability_diagnostic(
-                    AvailabilityDiagnostic(
-                        adapter=adapter,
-                        available=False,
-                        message=(
-                            "No installed Ollama model advertises vision support. "
-                            "Install a vision-capable model, then check services again."
-                        ),
-                    )
-                )
-                return
         self.apply_availability_diagnostic(
             AvailabilityDiagnostic(
                 adapter=adapter,
@@ -1475,103 +1744,138 @@ class MainWindow(QMainWindow):
 
     def _update_generation_actions(self) -> None:
         bound = self.document_session is None or self.document_session.store is not None
+        mutation_allowed = bound and not self.controller.mutation_blocked
         workflow_available = self.background_workflow is not None
         has_card = (
             workflow_available
-            and bound
+            and mutation_allowed
             and self._selected_card_id is not None
             and not self._is_running
         )
         mflux_available = self._availability[AdapterKind.MFLUX] is True
-        ollama_available = self._availability[AdapterKind.OLLAMA] is True
-        image_prompt_busy = self.image_prompt_workflow.busy
         has_description_input = self.inspector.has_description_input()
-        can_enrich = (
-            has_card
-            and has_description_input
-            and ollama_available
-            and not image_prompt_busy
-        )
-        enrich_reason = "Ready to prepare Image Prompt"
-        if not has_card:
-            enrich_reason = "Select a card in a saved stack"
-        elif not has_description_input:
-            enrich_reason = "Enter a Description before preparing an Image Prompt"
-        elif image_prompt_busy:
-            enrich_reason = "Image Prompt preparation is running"
-        elif not ollama_available:
-            enrich_reason = self._action_diagnostic(AdapterKind.OLLAMA)
         selected_card = next(
-            (
-                card
-                for card in self.controller.document.cards
-                if card.id == self._selected_card_id
-            ),
+            (card for card in self.controller.document.cards if card.id == self._selected_card_id),
             None,
         )
-        reference_count = (
-            len(selected_card.active_revision.references)
-            if selected_card is not None
-            else 0
-        )
-        self.inspector.set_image_prompt_capabilities(
-            can_enrich=can_enrich,
-            reason=enrich_reason,
-            busy=image_prompt_busy,
-            model_identifier=load_machine_settings(self.settings).ollama_model,
-            prompt_version=image_prompt_preparation_version(reference_count),
-        )
-        has_render_prompt = self.inspector.has_current_image_prompt()
-        workflow_busy = (
-            self.background_workflow.busy if self.background_workflow is not None else False
+        workflow_busy = self._image_operation_active()
+        active_operation = (
+            getattr(self.background_workflow, "active_operation", None)
+            if self.background_workflow is not None
+            else None
         )
         active_revision = selected_card.active_revision if selected_card is not None else None
         has_image = active_revision is not None and active_revision.background is not None
         generate_reason = "Ready to generate"
-        if not has_card:
+        if self.controller.mutation_blocked:
+            generate_reason = PENDING_DURABILITY_MESSAGE
+        elif not has_card:
             generate_reason = "Select a card in a saved stack"
         elif workflow_busy:
             generate_reason = (
                 "Background generation is running for this card"
-                if self.background_workflow is not None
+                if active_operation == "generate"
+                and self.background_workflow is not None
                 and self._selected_card_id is not None
                 and self.background_workflow.is_generating_for(self._selected_card_id)
-                else (
-                    "Background generation is running for another card; "
-                    "MFLUX runs one job at a time"
-                )
+                else ("An image operation is running; MFLUX runs one job at a time")
             )
-        elif not has_render_prompt:
-            generate_reason = "Prepare a current Image Prompt before generating"
+        elif not has_description_input:
+            generate_reason = "Enter a Description before generating"
         elif not mflux_available:
             generate_reason = self._action_diagnostic(AdapterKind.MFLUX)
         self.inspector.set_background_capabilities(
-            can_generate=(has_card and has_render_prompt and mflux_available),
+            can_generate=(has_card and has_description_input and mflux_available),
             generate_reason=generate_reason,
             has_image=has_image,
             busy=workflow_busy,
-            generating=workflow_busy,
+            generating=workflow_busy and active_operation == "generate",
         )
-        self.clear_background_button.setEnabled(
-            has_card and has_image and not workflow_busy
+        refine_output_size = self.inspector.refine_resolution_combo.currentData()
+        has_refine_output_size = isinstance(
+            refine_output_size,
+            (CurrentSourceSize, PresetOutputSize),
         )
-        self.clear_background_button.setToolTip(
-            "Clear the current image"
-            if has_image
-            else "This revision has no image"
+        refine_reason = "Ready to reinterpret"
+        if self.controller.mutation_blocked:
+            refine_reason = PENDING_DURABILITY_MESSAGE
+        elif not has_card:
+            refine_reason = "Select a card in a saved stack"
+        elif workflow_busy:
+            refine_reason = (
+                "Reinterpret is running for this card"
+                if self.background_workflow is not None
+                and self._selected_card_id is not None
+                and getattr(
+                    self.background_workflow,
+                    "is_refining_for",
+                    lambda _card_id: False,
+                )(self._selected_card_id)
+                else ("An image operation is running; MFLUX runs one job at a time")
+            )
+        elif not has_description_input:
+            refine_reason = "Enter a Description before reinterpreting"
+        elif not has_image:
+            refine_reason = "Generate an image before reinterpreting"
+        elif not has_refine_output_size:
+            refine_reason = self.inspector.refine_error.text() or "Select a Reinterpret resolution"
+        elif not mflux_available:
+            refine_reason = self._action_diagnostic(AdapterKind.MFLUX)
+        self.inspector.set_refine_capabilities(
+            can_refine=(
+                has_card
+                and has_description_input
+                and has_image
+                and has_refine_output_size
+                and mflux_available
+            ),
+            refine_reason=refine_reason,
+            busy=workflow_busy,
+            refining=workflow_busy and active_operation == "refine",
+        )
+        has_edit_instruction = self.inspector.has_edit_instruction_input()
+        has_edit_output_size = self.inspector.selected_edit_output_size() is not None
+        edit_reason = "Ready to edit"
+        if self.controller.mutation_blocked:
+            edit_reason = PENDING_DURABILITY_MESSAGE
+        elif not has_card:
+            edit_reason = "Select a card in a saved stack"
+        elif workflow_busy:
+            edit_reason = (
+                "Edit is running for this card"
+                if self.background_workflow is not None
+                and self._selected_card_id is not None
+                and getattr(
+                    self.background_workflow,
+                    "is_editing_for",
+                    lambda _card_id: False,
+                )(self._selected_card_id)
+                else "An image operation is running; MFLUX runs one job at a time"
+            )
+        elif not has_image:
+            edit_reason = "Generate an image before editing"
+        elif not has_edit_instruction:
+            edit_reason = "Enter an Edit Instruction"
+        elif not has_edit_output_size:
+            edit_reason = (
+                self.inspector.edit_output_error.text()
+                or "Select the current size or a higher Edit output tier"
+            )
+        elif not mflux_available:
+            edit_reason = self._action_diagnostic(AdapterKind.MFLUX)
+        self.inspector.set_edit_capabilities(
+            can_edit=(
+                has_card
+                and has_image
+                and has_edit_instruction
+                and has_edit_output_size
+                and mflux_available
+            ),
+            edit_reason=edit_reason,
+            busy=workflow_busy,
+            editing=workflow_busy and active_operation == "edit",
         )
         authoring = not self._is_running
-        has_ollama_model = any(
-            isinstance(self.llm_model_combo.itemData(index), str)
-            and bool(self.llm_model_combo.itemData(index))
-            for index in range(self.llm_model_combo.count())
-        )
-        self.llm_model_combo.setEnabled(
-            authoring
-            and not image_prompt_busy
-            and not workflow_busy
-            and has_ollama_model
-        )
         self.image_model_combo.setEnabled(authoring and not workflow_busy)
         pending = [
             adapter for adapter, available in self._availability.items() if available is None
@@ -1585,12 +1889,7 @@ class MainWindow(QMainWindow):
         elif pending:
             summary = "AI services not checked"
         elif unavailable:
-            labels = {
-                AdapterKind.OLLAMA: "Ollama",
-                AdapterKind.MFLUX: "MFLUX",
-            }
-            names = " and ".join(labels[adapter] for adapter in unavailable)
-            summary = f"{names} unavailable"
+            summary = "MFLUX unavailable"
         else:
             summary = "Local AI services ready"
         self._service_status_detail = "\n".join(
@@ -1600,7 +1899,6 @@ class MainWindow(QMainWindow):
             )
             for adapter in AdapterKind
         )
-        self.llm_model_combo.setToolTip(self._service_status_detail)
         self.image_model_combo.setToolTip(self._service_status_detail)
         if (
             unavailable
@@ -1630,38 +1928,6 @@ class MainWindow(QMainWindow):
         elif self._is_running:
             self.notification_bar.clear_notification("ai-services")
 
-    def _set_installed_ollama_models(self, models: tuple[str, ...]) -> None:
-        selected = load_machine_settings(self.settings).ollama_model
-        with QSignalBlocker(self.llm_model_combo):
-            self.llm_model_combo.clear()
-            for model in models:
-                self.llm_model_combo.addItem(model, model)
-            if not models:
-                self.llm_model_combo.addItem(
-                    "No vision-capable models installed",
-                    None,
-                )
-                return
-            if selected not in models:
-                selected = models[0]
-                self._cancel_background_generation()
-                self.image_prompt_workflow.cancel()
-                self.settings.setValue(OLLAMA_MODEL_KEY, selected)
-                self.settings.sync()
-            self.llm_model_combo.setCurrentIndex(self.llm_model_combo.findData(selected))
-
-    def _llm_model_changed(self, index: int) -> None:
-        model = self.llm_model_combo.itemData(index)
-        if not isinstance(model, str) or not model:
-            return
-        if model == load_machine_settings(self.settings).ollama_model:
-            return
-        self._cancel_background_generation()
-        self.image_prompt_workflow.cancel()
-        self.settings.setValue(OLLAMA_MODEL_KEY, model)
-        self.settings.sync()
-        self._restart_availability_checks()
-
     def _image_model_changed(self, index: int) -> None:
         model = self.image_model_combo.itemData(index)
         if not isinstance(model, str) or not model:
@@ -1672,6 +1938,27 @@ class MainWindow(QMainWindow):
         self.settings.setValue(MFLUX_MODEL_KEY, model)
         self.settings.sync()
         self._restart_availability_checks()
+
+    def _refine_source_size(
+        self,
+        card: Card | None,
+    ) -> tuple[int, int] | None:
+        if (
+            card is None
+            or card.active_revision.background is None
+            or self.document_session is None
+            or self.document_session.store is None
+        ):
+            return None
+        try:
+            background = card.active_revision.background
+            return self.document_session.store.image_asset_dimensions(
+                background.image_path,
+                card_id=card.id,
+                asset_id=background.id,
+            )
+        except StackStoreError:
+            return None
 
     def _render_card_canvas(self, card: object) -> None:
         if not isinstance(card, Card):
@@ -1705,7 +1992,11 @@ class MainWindow(QMainWindow):
         self.card_canvas.set_hotspots(
             revision.hotspot_set,
             self.inspector.selected_interaction_id,
-            editable=self.inspector.hotspots_active,
+            editable=(
+                self.inspector.hotspots_active
+                and not self.controller.mutation_blocked
+                and not self._image_operation_active()
+            ),
             context_id=revision.id,
         )
 
@@ -1723,9 +2014,7 @@ class MainWindow(QMainWindow):
 
     def _reference_image_path(self, image_path: str) -> Path:
         if self.document_session is None or self.document_session.store is None:
-            raise ImagePromptWorkflowError(
-                "save the stack before using a Reference image"
-            )
+            raise BackgroundWorkflowError("save the stack before generating with a Reference image")
         return self.document_session.store.asset_path(image_path)
 
     def _create_hotspot_polygon(
@@ -1872,7 +2161,7 @@ class MainWindow(QMainWindow):
         previous_undo_token = self.controller.current_undo_token
         try:
             changed = self.controller.execute(command)
-        except (CommandError, ValidationError) as error:
+        except (CommandError, DocumentMutationBlockedError, ValidationError) as error:
             self.inspector.set_hotspot_error(str(error))
             self.render_document()
             return
@@ -1918,14 +2207,6 @@ class MainWindow(QMainWindow):
             quantization=values.quantization,
             random_seed=values.random_seed,
             fixed_seed=values.fixed_seed,
-            ollama_model=values.ollama_model,
-        )
-
-    def _ollama_settings(self) -> OllamaSettings:
-        values = load_machine_settings(self.settings)
-        return OllamaSettings(
-            endpoint=values.ollama_endpoint,
-            model=values.ollama_model,
         )
 
     def _action_diagnostic(self, adapter: AdapterKind) -> str:
@@ -1944,7 +2225,11 @@ class MainWindow(QMainWindow):
             overlay_mode = RunOverlayMode(mode)
         except (TypeError, ValueError):
             return
-        changed = self.controller.execute(SetRunOverlayModeCommand(mode=overlay_mode))
+        try:
+            changed = self.controller.execute(SetRunOverlayModeCommand(mode=overlay_mode))
+        except DocumentMutationBlockedError as error:
+            self._show_pending_durability_error(str(error))
+            return
         self.render_document(changed)
 
     def _toggle_mode(self) -> None:
@@ -2009,27 +2294,22 @@ class MainWindow(QMainWindow):
 
     def _apply_mode_chrome(self) -> None:
         authoring = not self._is_running
+        authoring_enabled = authoring and not self.controller.mutation_blocked
         self.mode_button.setText("Run" if authoring else "Author")
-        self.mode_button.setToolTip(
-            "Switch to Run mode" if authoring else "Switch to Author mode"
-        )
-        self.canvas_card_name.setReadOnly(not authoring)
+        self.mode_button.setToolTip("Switch to Run mode" if authoring else "Switch to Author mode")
+        self.canvas_card_name.setReadOnly(not authoring_enabled)
         self.canvas_card_name.setVisible(authoring)
         self.canvas_card_name_error.setVisible(
             authoring and bool(self.canvas_card_name_error.text())
         )
         self.revision_label.setVisible(authoring)
         self.revision_combo.setVisible(authoring)
-        self.revision_combo.setEnabled(authoring)
+        self.revision_combo.setEnabled(authoring_enabled)
         self.add_revision_button.setVisible(authoring)
         self.delete_revision_button.setVisible(authoring)
         self.card_sidebar.setVisible(authoring)
         self.inspector.setVisible(authoring)
-        self.fit_canvas_button.setVisible(authoring)
-        self.clear_background_button.setVisible(authoring)
         self.create_first_card_button.setVisible(authoring)
-        self.llm_model_label.setVisible(authoring)
-        self.llm_model_combo.setVisible(authoring)
         self.image_model_label.setVisible(authoring)
         self.image_model_combo.setVisible(authoring)
         self.empty_canvas_title.setText(
@@ -2050,6 +2330,17 @@ class MainWindow(QMainWindow):
             action.setVisible(self._is_running)
         self.back_button_action.setVisible(self._is_running)
         self.restart_button_action.setVisible(self._is_running)
+        self.styles_button_action.setVisible(authoring)
+        self.keys_button_action.setVisible(authoring)
+        self.styles_button.setVisible(authoring)
+        self.keys_button.setVisible(authoring)
+        self.styles_button.setEnabled(authoring_enabled)
+        self.keys_button.setEnabled(authoring_enabled)
+        if self._is_running:
+            if self.style_manager_window is not None:
+                self.style_manager_window.hide()
+            if self.key_manager_window is not None:
+                self.key_manager_window.hide()
 
     def _update_run_actions(self) -> None:
         state = self._run_session.state
@@ -2074,8 +2365,7 @@ class MainWindow(QMainWindow):
 
     def _cancel_ai_activity_for_run(self) -> None:
         self._cancel_diagnostics()
-        self.image_prompt_workflow.cancel()
-        if self.background_workflow is not None and self.background_workflow.busy:
+        if self.background_workflow is not None:
             self.background_workflow.cancel()
 
     def _cancel_diagnostics(self) -> None:
@@ -2113,27 +2403,41 @@ class MainWindow(QMainWindow):
         return dialog.clickedButton() is retry_button
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        if (
+            self.document_session is not None
+            and self.controller.mutation_blocked
+            and not self._flush_for_close()
+        ):
+            event.ignore()
+            return
         if not self._commit_authoring_metadata():
             event.ignore()
             return
-        if self.document_session is not None and not self.document_session.flush():
-            if self._ask_retry_failed_close_save(
-                (self.document_session.state.error or "The stack could not be saved.")
-                + "\n\nRetry saving before closing?",
-            ):
-                if not self.document_session.flush():
-                    event.ignore()
-                    return
-            else:
-                event.ignore()
-                return
-        self._cancel_background_generation()
+        if self.document_session is not None and not self._flush_for_close():
+            event.ignore()
+            return
+        if self.document_session is not None and not self.document_session.close_history():
+            self._show_document_error(
+                "Could Not Clean Up Stack",
+                self.document_session.state.error
+                or "Duplicate-owned assets could not be cleaned up.",
+            )
         if self.background_workflow is not None:
             self.background_workflow.close()
-        self.image_prompt_workflow.close()
+        self._close_utility_windows()
         if self._owns_workers:
             self.workers.shutdown(wait_milliseconds=100)
         super().closeEvent(event)
+
+    def _flush_for_close(self) -> bool:
+        if self.document_session is None or self.document_session.flush():
+            return True
+        if not self._ask_retry_failed_close_save(
+            (self.document_session.state.error or "The stack could not be saved.")
+            + "\n\nRetry saving before closing?",
+        ):
+            return False
+        return self.document_session.flush()
 
 
 __all__ = [

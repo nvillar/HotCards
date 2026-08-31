@@ -13,11 +13,17 @@ from uuid import NAMESPACE_URL, uuid5
 
 from pydantic import Field, model_validator
 
+from hotcards.domain.image_dimensions import (
+    AspectRatio,
+    ResolutionTier,
+    output_dimensions,
+)
 from hotcards.domain.models import (
     DomainModel,
-    ImageGenerationInputs,
+    GenerateInputs,
     NonEmptyString,
     PositiveInt,
+    PresetOutputSize,
     StyleSnapshot,
 )
 from hotcards.evaluation.contracts import SafeCaseId
@@ -31,10 +37,10 @@ from hotcards.evaluation.manifest import (
 )
 from hotcards.evaluation.reports import create_contact_sheet
 from hotcards.generation.errors import ImageGenerationError, ModelLoadError
-from hotcards.generation.image_prompts import compose_image_prompt
+from hotcards.generation.image_generation import compose_generation_prompt
 from hotcards.generation.mflux_generator import (
-    MfluxGenerationRequest,
-    MfluxGenerationResult,
+    MfluxGenerateRequest,
+    MfluxGenerateResult,
     MfluxGenerator,
 )
 
@@ -108,8 +114,8 @@ class StylePresetSettings(DomainModel):
     experiment_path: Path = DEFAULT_STYLE_PRESET_EXPERIMENT
     model_identifier: NonEmptyString = "flux2-klein-9b"
     seeds: tuple[int, ...] = Field(default=DEFAULT_STYLE_PRESET_SEEDS, min_length=1)
-    width: PositiveInt = 1024
-    height: PositiveInt = 768
+    tier: ResolutionTier = ResolutionTier.FULL
+    aspect_ratio: AspectRatio = AspectRatio.LANDSCAPE
     step_count: PositiveInt = 4
     quantization: int | None = None
 
@@ -123,7 +129,7 @@ class StylePresetSettings(DomainModel):
 class ImageGeneratorProtocol(Protocol):
     """Production MFLUX surface consumed by the Style runner."""
 
-    def generate(self, request: MfluxGenerationRequest) -> MfluxGenerationResult: ...
+    def generate(self, request: MfluxGenerateRequest) -> MfluxGenerateResult: ...
 
 
 ImageGeneratorFactory = Callable[[], ImageGeneratorProtocol]
@@ -143,11 +149,10 @@ def load_style_preset_experiment(
 
 
 def compose_style_preset_prompt(description: str, prompt_text: str | None) -> str:
-    """Append one Style treatment without changing the accepted Image Prompt."""
-    return compose_image_prompt(
-        ImageGenerationInputs(
+    """Append one Style treatment without changing the authored Description."""
+    return compose_generation_prompt(
+        GenerateInputs(
             description=description,
-            image_prompt=description,
             style=(
                 StyleSnapshot(
                     style_id=uuid5(
@@ -165,7 +170,7 @@ def compose_style_preset_prompt(description: str, prompt_text: str | None) -> st
 
 
 def _generation_record(
-    generated: MfluxGenerationResult,
+    generated: MfluxGenerateResult,
     *,
     output_dir: Path,
 ) -> dict[str, object]:
@@ -175,8 +180,8 @@ def _generation_record(
         "load_duration_seconds": generated.load_duration_seconds,
         "inference_duration_seconds": generated.generation_duration_seconds,
         "serialization_duration_seconds": generated.serialization_duration_seconds,
-        "total_duration_seconds": generated.metadata.duration_seconds,
-        "metadata": generated.metadata.model_dump(mode="json"),
+        "total_duration_seconds": generated.provenance.settings.duration_seconds,
+        "metadata": generated.provenance.model_dump(mode="json"),
     }
 
 
@@ -336,6 +341,10 @@ def _execute_style_preset_evaluation(
         "warnings": [],
     }
     _write_result(settings.output_dir, result)
+    width, height = output_dimensions(
+        settings.tier,
+        settings.aspect_ratio,
+    )
 
     for scene in experiment.scenes:
         for seed in settings.seeds:
@@ -359,18 +368,19 @@ def _execute_style_preset_evaluation(
                 stage = f"render:{scene.case_id}:seed-{seed}:{style.style_id}"
                 lifecycle.set_stage(stage)
                 output_path = outputs_dir / scene.case_id / f"seed-{seed}" / f"{style.style_id}.png"
-                request = MfluxGenerationRequest(
-                    inputs=ImageGenerationInputs(
+                request = MfluxGenerateRequest(
+                    inputs=GenerateInputs(
                         description=scene.description,
-                        image_prompt=scene.description,
                         style=style_snapshot,
+                        output_size=PresetOutputSize(tier=settings.tier),
                     ),
                     render_prompt=render_prompt,
                     output_path=output_path,
                     model_identifier=settings.model_identifier,
                     seed=seed,
-                    width=settings.width,
-                    height=settings.height,
+                    aspect_ratio=settings.aspect_ratio,
+                    width=width,
+                    height=height,
                     step_count=settings.step_count,
                     quantization=settings.quantization,
                 )

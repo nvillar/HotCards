@@ -79,7 +79,7 @@ def test_explicit_priority_keeps_time_sensitive_action_visible(
     bar.show_notification(
         "service",
         Notification(
-            "Ollama unavailable",
+            "MFLUX unavailable",
             kind=NotificationKind.WARNING,
         ),
     )

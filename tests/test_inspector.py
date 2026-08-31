@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+from datetime import UTC, datetime
+from uuid import uuid4
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -12,34 +14,49 @@ from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
     QFrame,
+    QGroupBox,
     QInputDialog,
     QLabel,
-    QRadioButton,
     QStyle,
     QToolButton,
 )
 
-from hotcards.application.commands import DeleteCardCommand, RenameCardCommand
+from hotcards.application.commands import (
+    DeleteCardCommand,
+    RenameCardCommand,
+    UpdateStyleCommand,
+)
 from hotcards.application.document_controller import DocumentController
+from hotcards.domain.image_dimensions import (
+    AspectRatio,
+    ResolutionTier,
+    higher_output_tiers,
+    output_dimensions,
+)
 from hotcards.domain.models import (
     Card,
     CardRevision,
+    CurrentSourceSize,
+    DirectGenerateProvenance,
+    ExactOutputSize,
+    GeneratedBackground,
+    GenerateInputs,
     HotspotConditions,
     HotspotKeyChanges,
     HotspotSet,
-    ImagePrompt,
+    ImageOperationSettings,
     Interaction,
     KeyDefinition,
     NavigateAction,
+    PresetOutputSize,
+    RefineTransformation,
     ResolvedCardReference,
     Stack,
     StyleDefinition,
     UnresolvedCardReference,
 )
-from hotcards.generation.image_prompt_preparation import (
-    IMAGE_PROMPT_PREPARATION_VERSION,
-)
 from hotcards.ui.inspector import Inspector
+from hotcards.ui.utility_windows import KeyManagerWindow, StyleManagerWindow
 
 
 @pytest.fixture(scope="module")
@@ -51,6 +68,30 @@ def _interaction(label: str = "Door") -> Interaction:
     return Interaction(
         label=label,
         action=NavigateAction(target=UnresolvedCardReference()),
+    )
+
+
+def _background() -> GeneratedBackground:
+    asset_id = uuid4()
+    generated_at = datetime.now(UTC)
+    return GeneratedBackground(
+        id=asset_id,
+        image_path=f"assets/cards/card/image-{asset_id}.png",
+        provenance=DirectGenerateProvenance(
+            inputs=GenerateInputs(description="A courtyard"),
+            render_prompt="A courtyard",
+            settings=ImageOperationSettings(
+                model_identifier="test",
+                mflux_version="test",
+                seed=7,
+                width=512,
+                height=384,
+                step_count=4,
+                generated_at=generated_at,
+                duration_seconds=1,
+            ),
+        ),
+        created_at=generated_at,
     )
 
 
@@ -70,14 +111,15 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     inspector = Inspector(controller)
     inspector.render(controller.document, card.id)
 
-    assert inspector.inspector_tabs.count() == 4
-    assert inspector.inspector_tabs.tabText(0) == "Image"
-    assert inspector.inspector_tabs.tabText(1) == "Styles"
+    assert inspector.inspector_tabs.count() == 3
+    assert inspector.inspector_tabs.tabText(0) == "Generate"
+    assert inspector.inspector_tabs.tabText(1) == "Transform"
     assert inspector.inspector_tabs.tabText(2) == "Hotspots"
-    assert inspector.inspector_tabs.tabText(3) == "Keys"
+    assert not hasattr(inspector, "style_list")
+    assert not hasattr(inspector, "key_list")
+    assert not hasattr(inspector, "edit_preserve_checkboxes")
     assert all(
-        label.text() != "Keys are global to this stack."
-        for label in inspector.findChildren(QLabel)
+        label.text() != "Keys are global to this stack." for label in inspector.findChildren(QLabel)
     )
     root_layout = inspector.layout()
     assert root_layout is not None
@@ -86,25 +128,21 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     assert root_layout.contentsMargins().left() == inspector.style().pixelMetric(
         QStyle.PixelMetric.PM_LayoutLeftMargin
     )
-    assert inspector.description_edit.placeholderText() == "Description"
+    assert "image 1 and image 2" in inspector.description_edit.placeholderText()
     assert inspector.description_edit.minimumHeight() == round(
         (inspector.description_edit.fontMetrics().lineSpacing() * 10 + 20) * 1.25
     )
     assert inspector.description_edit.maximumHeight() > (inspector.description_edit.minimumHeight())
-    assert inspector.enrich_button.text() == "Prepare Image Prompt"
     assert inspector.generate_background_button.text() == "Generate Image"
-    assert inspector.description_toggle.isHidden()
-    assert isinstance(inspector.description_button, QRadioButton)
-    assert isinstance(inspector.image_prompt_button, QRadioButton)
+    assert not hasattr(inspector, "enrich_button")
+    assert not hasattr(inspector, "description_toggle")
+    assert not hasattr(inspector, "image_prompt_button")
     assert not isinstance(inspector.reference_panel, QFrame)
     assert inspector.reference_panel.layout().contentsMargins().isNull()
     content_layout = inspector.reference_panel.parentWidget().layout()
     assert content_layout is not None
     assert content_layout.stretch(content_layout.indexOf(inspector.description_edit)) == 1
     assert content_layout.indexOf(inspector.description_edit) < (
-        content_layout.indexOf(inspector.description_toggle)
-    )
-    assert content_layout.indexOf(inspector.description_toggle) < (
         content_layout.indexOf(inspector.style_label)
     )
     assert content_layout.indexOf(inspector.style_label) < (
@@ -117,43 +155,47 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
         content_layout.indexOf(inspector.reference_panel)
     )
     assert content_layout.indexOf(inspector.reference_panel) < (
-        content_layout.indexOf(inspector.enrich_button)
+        content_layout.indexOf(inspector.resolution_label)
     )
-    assert content_layout.indexOf(inspector.enrich_button) < (
+    assert content_layout.indexOf(inspector.resolution_label) < (
+        content_layout.indexOf(inspector.resolution_combo)
+    )
+
+    assert content_layout.indexOf(inspector.resolution_combo) < (
         content_layout.indexOf(inspector.generate_background_button)
     )
     assert inspector.style_combo.currentText() == "No Style"
     assert not hasattr(inspector, "clear_background_button")
-    styles_layout = inspector.style_list.parentWidget().layout()
-    assert styles_layout is not None
-    assert styles_layout.stretch(styles_layout.indexOf(inspector.style_list)) == 1
-    style_controls = styles_layout.itemAt(styles_layout.indexOf(inspector.style_list) + 1).layout()
-    assert style_controls is not None
-    assert style_controls.indexOf(inspector.delete_style_button) < style_controls.indexOf(
-        inspector.add_style_button
-    )
-    assert styles_layout.indexOf(inspector.style_name_label) < (
-        styles_layout.indexOf(inspector.style_name_edit)
-    )
-    assert styles_layout.indexOf(inspector.style_name_edit) < (
-        styles_layout.indexOf(inspector.style_prompt_label)
-    )
-    assert styles_layout.indexOf(inspector.style_prompt_label) < (
-        styles_layout.indexOf(inspector.style_prompt_edit)
-    )
     assert inspector.hotspot_target_label.text() == "Go to"
     assert inspector.hotspot_target_label.font().pointSizeF() == (
         inspector.description_label.font().pointSizeF()
     )
     assert inspector.hotspot_when_label.text() == "When"
     assert inspector.hotspot_then_label.text() == "Then"
+    assert isinstance(inspector.hotspot_when_panel, QGroupBox)
+    assert isinstance(inspector.hotspot_then_panel, QGroupBox)
+    assert not inspector.hotspot_when_panel.title()
+    assert not inspector.hotspot_then_panel.title()
+    assert not inspector.hotspot_when_panel.styleSheet()
+    assert not inspector.hotspot_then_panel.styleSheet()
+    assert inspector.hotspot_when_label.font().pointSizeF() == (
+        inspector.reinterpret_section_label.font().pointSizeF()
+    )
+    assert inspector.hotspot_then_label.font().pointSizeF() == (
+        inspector.edit_section_label.font().pointSizeF()
+    )
     assert inspector.add_condition_button.text() == "+ Add condition"
     assert inspector.add_condition_button.isFlat()
     assert inspector.add_key_change_button.text() == "+ Add key change"
     assert inspector.add_key_change_button.isFlat()
     assert not hasattr(inspector, "clear_all_keys_checkbox")
+    assert not hasattr(inspector, "hotspot_summary")
     hotspot_layout = inspector.hotspot_list.parentWidget().layout()
     assert hotspot_layout is not None
+    assert inspector.hotspot_list.parentWidget().objectName() == "hotspotsInspectorContent"
+    assert hotspot_layout.contentsMargins() == (
+        inspector.refine_background_button.parentWidget().parentWidget().layout().contentsMargins()
+    )
     then_layout = inspector.hotspot_then_panel.layout()
     assert then_layout is not None
     assert then_layout.indexOf(inspector.key_change_table) < (
@@ -165,7 +207,9 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     assert then_layout.indexOf(inspector.hotspot_target_label) < (
         then_layout.indexOf(inspector.hotspot_destination_combo)
     )
-    assert hotspot_layout.stretch(hotspot_layout.indexOf(inspector.hotspot_list)) == 1
+    assert inspector.hotspot_list.minimumHeight() == 120
+    assert inspector.hotspot_list.maximumHeight() == 120
+    assert hotspot_layout.stretch(hotspot_layout.indexOf(inspector.hotspot_list)) == 0
     hotspot_control_sizes = {
         button.size()
         for button in (
@@ -186,16 +230,6 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     assert hotspot_controls.indexOf(inspector.delete_hotspot_button) < hotspot_controls.indexOf(
         inspector.add_hotspot_button
     )
-    keys_layout = inspector.key_list.parentWidget().layout()
-    assert keys_layout is not None
-    key_controls = keys_layout.itemAt(
-        keys_layout.indexOf(inspector.key_list) + 1
-    ).layout()
-    assert key_controls is not None
-    assert key_controls.indexOf(inspector.delete_key_button) < (
-        key_controls.indexOf(inspector.add_key_button)
-    )
-
     visible_copy = " ".join(label.text() for label in inspector.findChildren(QLabel))
     for obsolete in (
         "Inspector",
@@ -209,7 +243,217 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
         assert obsolete not in visible_copy
 
 
-def test_keys_tab_manages_global_names_and_lists_hotspot_usages(
+def test_transform_edit_uses_current_or_higher_size_and_emits_exact_inputs(
+    application: QApplication,
+) -> None:
+    revision = CardRevision(
+        description="A legacy courtyard",
+        background=_background(),
+    )
+    card = Card(name="Courtyard", revisions=(revision,))
+    controller = DocumentController(Stack(name="Demo", cards=(card,)))
+    inspector = Inspector(controller)
+    requests: list[tuple[object, object]] = []
+    inspector.edit_background_requested.connect(
+        lambda instruction, output: requests.append((instruction, output))
+    )
+
+    inspector.render(
+        controller.document,
+        card.id,
+        refine_source_size=(768, 576),
+    )
+
+    assert inspector.edit_resolution_combo.count() == 2
+    assert inspector.edit_resolution_combo.itemText(0) == "Large"
+    assert inspector.edit_resolution_combo.itemData(0) == CurrentSourceSize(
+        width=768,
+        height=576,
+    )
+    assert inspector.edit_resolution_combo.itemData(0, Qt.ItemDataRole.ToolTipRole) == "768 × 576"
+    assert inspector.edit_resolution_combo.itemText(1) == "Full"
+    inspector.edit_instruction_edit.setPlainText("  Open the gate.  ")
+    inspector.edit_background_button.click()
+
+    assert len(requests) == 1
+    instruction, output = requests[0]
+    assert instruction == "Open the gate."
+    assert output.mode == "current"
+    assert (output.width, output.height) == (768, 576)
+    assert inspector.edit_background_button.toolTip() == (
+        "Create a new version with only the requested change."
+    )
+
+
+def test_transform_reinterpret_has_source_similarity_resolution_and_action(
+    application: QApplication,
+) -> None:
+    revision = CardRevision(
+        description="A moonlit courtyard",
+        background=_background(),
+    )
+    card = Card(name="Courtyard", revisions=(revision,))
+    controller = DocumentController(Stack(name="Demo", cards=(card,)))
+    inspector = Inspector(controller)
+    inspector.render(
+        controller.document,
+        card.id,
+        refine_source_size=(512, 384),
+    )
+
+    assert inspector.inspector_tabs.tabText(inspector._transform_tab_index) == "Transform"
+    reinterpret_group = inspector.refine_background_button.parentWidget()
+    edit_group = inspector.edit_background_button.parentWidget()
+    assert isinstance(reinterpret_group, QGroupBox)
+    assert isinstance(edit_group, QGroupBox)
+    assert not reinterpret_group.title()
+    assert not edit_group.title()
+    assert inspector.reinterpret_section_label.text() == "Reinterpret"
+    assert inspector.edit_section_label.text() == "Edit"
+    assert inspector.reinterpret_section_label.font().pointSizeF() == (
+        inspector.refine_transformation_label.font().pointSizeF()
+    )
+    assert inspector.edit_section_label.font().pointSizeF() == (
+        inspector.edit_instruction_label.font().pointSizeF()
+    )
+    assert not hasattr(inspector, "refine_description_label")
+    assert not hasattr(inspector, "edit_description_label")
+    assert (
+        RefineTransformation(inspector.refine_transformation_combo.currentData())
+        is RefineTransformation.BALANCED
+    )
+    assert [
+        inspector.refine_transformation_combo.itemText(index)
+        for index in range(inspector.refine_transformation_combo.count())
+    ] == [
+        "Reimagine",
+        "Balanced",
+        "Preserve",
+    ]
+    assert inspector.refine_transformation_label.text() == "Source Similarity"
+    assert "Balance the Description" in inspector.refine_transformation_combo.toolTip()
+    assert [
+        inspector.refine_resolution_combo.itemText(index)
+        for index in range(inspector.refine_resolution_combo.count())
+    ] == [
+        "Medium",
+        "Large",
+        "Full",
+    ]
+    assert inspector.refine_resolution_label.text() == "Resolution"
+    assert inspector.edit_resolution_label.text() == "Resolution"
+    assert inspector.refine_resolution_combo.currentData() == CurrentSourceSize(
+        width=512,
+        height=384,
+    )
+    refine_layout = inspector.refine_background_button.parentWidget().layout()
+    assert refine_layout is not None
+    assert refine_layout.indexOf(inspector.refine_transformation_label) < refine_layout.indexOf(
+        inspector.refine_transformation_combo
+    )
+    assert refine_layout.indexOf(inspector.refine_transformation_combo) < refine_layout.indexOf(
+        inspector.refine_resolution_label
+    )
+    assert refine_layout.indexOf(inspector.refine_resolution_label) < refine_layout.indexOf(
+        inspector.refine_resolution_combo
+    )
+    assert refine_layout.indexOf(inspector.refine_resolution_combo) < refine_layout.indexOf(
+        inspector.refine_background_button
+    )
+    assert not hasattr(inspector, "refine_source_card_combo")
+    assert not hasattr(inspector, "refine_source_revision_combo")
+
+    requested: list[tuple[object, object]] = []
+    inspector.refine_background_requested.connect(
+        lambda transformation, output_size: requested.append((transformation, output_size))
+    )
+    inspector.set_refine_capabilities(
+        can_refine=True,
+        refine_reason="Ready to reinterpret",
+        busy=False,
+        refining=False,
+    )
+    inspector.refine_background_button.click()
+
+    assert requested == [
+        (
+            RefineTransformation.BALANCED,
+            CurrentSourceSize(width=512, height=384),
+        )
+    ]
+    assert inspector.refine_background_button.text() == "Reinterpret"
+    assert inspector.refine_background_button.toolTip() == (
+        "Create a new version using the current image, Description."
+    )
+
+
+def test_refine_resolution_inserts_nonstandard_current_size_by_area(
+    application: QApplication,
+) -> None:
+    revision = CardRevision(
+        description="A moonlit courtyard",
+        background=_background(),
+    )
+    card = Card(name="Courtyard", revisions=(revision,))
+    controller = DocumentController(Stack(name="Demo", cards=(card,)))
+    inspector = Inspector(controller)
+
+    inspector.render(
+        controller.document,
+        card.id,
+        refine_source_size=(640, 480),
+    )
+    assert [
+        inspector.refine_resolution_combo.itemText(index)
+        for index in range(inspector.refine_resolution_combo.count())
+    ] == [
+        "Current",
+        "Large",
+        "Full",
+    ]
+    assert inspector.refine_resolution_combo.currentData() == CurrentSourceSize(
+        width=640,
+        height=480,
+    )
+    assert not inspector.refine_error.isVisible()
+
+
+def test_refine_selection_becomes_current_when_new_image_matches_preset(
+    application: QApplication,
+) -> None:
+    revision = CardRevision(
+        description="A moonlit courtyard",
+        background=_background(),
+    )
+    card = Card(name="Courtyard", revisions=(revision,))
+    controller = DocumentController(Stack(name="Demo", cards=(card,)))
+    inspector = Inspector(controller)
+    inspector.render(
+        controller.document,
+        card.id,
+        refine_source_size=(640, 480),
+    )
+    inspector.refine_resolution_combo.setCurrentIndex(
+        inspector._combo_index_for_data(
+            inspector.refine_resolution_combo,
+            PresetOutputSize(tier=ResolutionTier.MEDIUM),
+        )
+    )
+
+    inspector.render(
+        controller.document,
+        card.id,
+        refine_source_size=(512, 384),
+    )
+
+    assert inspector.refine_resolution_combo.currentData() == CurrentSourceSize(
+        width=512,
+        height=384,
+    )
+    assert inspector.refine_resolution_combo.currentIndex() == 0
+
+
+def test_key_manager_manages_global_names_and_lists_hotspot_usages(
     application: QApplication,
 ) -> None:
     red_key = KeyDefinition(name="Red key")
@@ -219,60 +463,54 @@ def test_keys_tab_manages_global_names_and_lists_hotspot_usages(
     )
     card = Card(
         name="Castle",
-        revisions=(
-            CardRevision(hotspot_set=HotspotSet(interactions=(interaction,))),
-        ),
+        revisions=(CardRevision(hotspot_set=HotspotSet(interactions=(interaction,))),),
     )
-    controller = DocumentController(
-        Stack(name="Demo", keys=(red_key,), cards=(card,))
-    )
-    inspector = Inspector(controller)
-    inspector.render(controller.document, card.id)
+    controller = DocumentController(Stack(name="Demo", keys=(red_key,), cards=(card,)))
+    parent = Inspector(controller)
+    manager = KeyManagerWindow(controller, parent)
 
-    assert inspector.key_list.currentItem().text() == "Red key — 1 use"
-    assert inspector.key_name_edit.text() == "Red key"
-    assert not inspector.delete_key_button.isEnabled()
-    assert inspector.key_usage_list.count() == 1
-    assert inspector.key_usage_list.item(0).text() == (
-        "Castle · Version 1\n"
-        "Lose Red key"
+    assert manager.key_list.currentItem().text() == "Red key — 1 use"
+    assert manager.name_edit.text() == "Red key"
+    assert not manager.delete_button.isEnabled()
+    assert manager.usage_list.count() == 1
+    assert manager.usage_list.item(0).text() == (
+        "Castle · Version 1\nLose Red key · Requires, Removes"
     )
 
-    inspector.key_name_edit.setText("Ruby key")
-    usage_item = inspector.key_usage_list.item(0)
-    inspector._key_name_editing_finished(
-        inspector.show_hotspot_usage_button,
+    manager.name_edit.setText("Ruby key")
+    usage_item = manager.usage_list.item(0)
+    manager._editing_finished(
+        manager.show_usage_button,
         Qt.FocusReason.MouseFocusReason,
     )
     assert controller.document.keys[0].name == "Ruby key"
-    assert inspector.key_usage_list.item(0) is usage_item
-    assert inspector.key_usage_list.item(0).text().splitlines()[1] == (
-        "Lose Ruby key"
+    assert manager.usage_list.item(0) is usage_item
+    assert manager.usage_list.item(0).text().splitlines()[1] == (
+        "Lose Ruby key · Requires, Removes"
     )
     hotspot_set = controller.document.cards[0].active_revision.hotspot_set
     assert hotspot_set is not None
     assert hotspot_set.interactions[0].label == "Lose Ruby key"
 
     requested: list[tuple[object, object, object]] = []
-    inspector.hotspot_usage_requested.connect(
+    manager.hotspot_usage_requested.connect(
         lambda card_id, revision_id, interaction_id: requested.append(
             (card_id, revision_id, interaction_id)
         )
     )
-    inspector.key_usage_list.setCurrentRow(0)
-    inspector.show_hotspot_usage_button.click()
-    assert requested == [
-        (card.id, card.active_revision.id, interaction.id)
-    ]
+    manager.usage_list.setCurrentRow(0)
+    manager.show_usage_button.click()
+    assert requested == [(card.id, card.active_revision.id, interaction.id)]
 
-    inspector.add_key_button.click()
+    manager.add_button.click()
     assert [key.name for key in controller.document.keys] == [
         "Ruby key",
         "New Key",
     ]
-    assert inspector.delete_key_button.isEnabled()
-    inspector.delete_key_button.click()
+    assert manager.delete_button.isEnabled()
+    manager.delete_button.click()
     assert [key.name for key in controller.document.keys] == ["Ruby key"]
+    manager.close()
 
 
 def test_hotspot_pipeline_edits_conditions_changes_and_navigation(
@@ -287,15 +525,11 @@ def test_hotspot_pipeline_edits_conditions_changes_and_navigation(
             remove=(red_key.id,),
             grant=(door_open.id,),
         ),
-        action=NavigateAction(
-            target=ResolvedCardReference(target_card_id=destination.id)
-        ),
+        action=NavigateAction(target=ResolvedCardReference(target_card_id=destination.id)),
     )
     source = Card(
         name="Source",
-        revisions=(
-            CardRevision(hotspot_set=HotspotSet(interactions=(interaction,))),
-        ),
+        revisions=(CardRevision(hotspot_set=HotspotSet(interactions=(interaction,))),),
     )
     controller = DocumentController(
         Stack(
@@ -323,9 +557,7 @@ def test_hotspot_pipeline_edits_conditions_changes_and_navigation(
     condition_remove_cell = inspector.condition_table.cellWidget(0, 2)
     condition_remove = condition_remove_cell.findChild(QToolButton)
     assert condition_remove is not None
-    assert condition_remove_cell.layout().itemAt(0).alignment() == (
-        Qt.AlignmentFlag.AlignCenter
-    )
+    assert condition_remove_cell.layout().itemAt(0).alignment() == (Qt.AlignmentFlag.AlignCenter)
     assert condition_remove.width() == condition_remove.height()
     assert condition_remove.size() == QSize(20, 20)
     assert inspector.condition_table.height() == (
@@ -347,26 +579,15 @@ def test_hotspot_pipeline_edits_conditions_changes_and_navigation(
     key_change_remove_cell = inspector.key_change_table.cellWidget(0, 2)
     key_change_remove = key_change_remove_cell.findChild(QToolButton)
     assert key_change_remove is not None
-    assert key_change_remove_cell.layout().itemAt(0).alignment() == (
-        Qt.AlignmentFlag.AlignCenter
-    )
+    assert key_change_remove_cell.layout().itemAt(0).alignment() == (Qt.AlignmentFlag.AlignCenter)
     assert key_change_remove.width() == key_change_remove.height()
     assert key_change_remove.size() == QSize(20, 20)
     assert inspector.no_key_changes_label.isHidden()
     assert inspector.hotspot_target_label.text() == "Go to"
-    assert inspector.hotspot_summary.text() == (
-        "When the runner has Red key, lose Red key, then gain Door open, "
-        "then go to Castle."
-    )
-
     grant_key = inspector.key_change_table.cellWidget(1, 1)
     assert isinstance(grant_key, QComboBox)
     grant_key.setCurrentIndex(
-        next(
-            index
-            for index in range(grant_key.count())
-            if grant_key.itemData(index) == red_key.id
-        )
+        next(index for index in range(grant_key.count()) if grant_key.itemData(index) == red_key.id)
     )
     assert "both gained and lost" in inspector.hotspot_error.text()
     assert not inspector.hotspot_error.isHidden()
@@ -392,9 +613,7 @@ def test_empty_hotspot_rule_sections_use_plain_language_placeholders(
     interaction = Interaction()
     card = Card(
         name="Card",
-        revisions=(
-            CardRevision(hotspot_set=HotspotSet(interactions=(interaction,))),
-        ),
+        revisions=(CardRevision(hotspot_set=HotspotSet(interactions=(interaction,))),),
     )
     inspector = Inspector(DocumentController(Stack(name="Demo", cards=(card,))))
 
@@ -417,13 +636,9 @@ def test_contextual_key_creation_label_does_not_reserve_free_form_name(
     interaction = Interaction()
     card = Card(
         name="Card",
-        revisions=(
-            CardRevision(hotspot_set=HotspotSet(interactions=(interaction,))),
-        ),
+        revisions=(CardRevision(hotspot_set=HotspotSet(interactions=(interaction,))),),
     )
-    controller = DocumentController(
-        Stack(name="Demo", keys=(key,), cards=(card,))
-    )
+    controller = DocumentController(Stack(name="Demo", keys=(key,), cards=(card,)))
     inspector = Inspector(controller)
     inspector.render(controller.document, card.id)
     monkeypatch.setattr(
@@ -457,6 +672,316 @@ def test_description_edits_target_active_revision(
     assert revision.description == "New description"
     assert controller.undo()
     assert controller.document.cards[0].active_revision.description == "Old"
+
+
+@pytest.mark.parametrize("aspect_ratio", tuple(AspectRatio))
+def test_resolution_selector_uses_tier_names_and_dimension_tooltips(
+    application: QApplication,
+    aspect_ratio: AspectRatio,
+) -> None:
+    card = Card(name="Card")
+    controller = DocumentController(Stack(name="Demo", aspect_ratio=aspect_ratio, cards=(card,)))
+    inspector = Inspector(controller)
+    inspector.render(controller.document, card.id)
+
+    assert [
+        inspector.resolution_combo.itemText(index)
+        for index in range(inspector.resolution_combo.count())
+    ] == [tier.label for tier in ResolutionTier]
+    assert [
+        inspector.resolution_combo.itemData(index, Qt.ItemDataRole.ToolTipRole)
+        for index in range(inspector.resolution_combo.count())
+    ] == [
+        f"{output_dimensions(tier, aspect_ratio)[0]} × {output_dimensions(tier, aspect_ratio)[1]}"
+        for tier in ResolutionTier
+    ]
+    assert inspector.resolution_combo.currentData() == PresetOutputSize(tier=ResolutionTier.MEDIUM)
+    width, height = output_dimensions(
+        ResolutionTier.MEDIUM,
+        aspect_ratio,
+    )
+    assert (
+        f"Resolution: Medium ({width} × {height})" in inspector.generate_background_button.toolTip()
+    )
+
+
+def test_resolution_selector_is_revision_local_and_undoable(
+    application: QApplication,
+) -> None:
+    first = CardRevision()
+    second = CardRevision(generate_output_size=PresetOutputSize(tier=ResolutionTier.SMALL))
+    card = Card(
+        name="Card",
+        revisions=(first, second),
+        active_revision_id=first.id,
+    )
+    autosaves: list[Stack] = []
+    controller = DocumentController(
+        Stack(name="Demo", cards=(card,)),
+        autosave_hook=autosaves.append,
+    )
+    inspector = Inspector(controller)
+    inspector.render(controller.document, card.id)
+    applied: list[tuple[str, object]] = []
+    inspector.change_applied.connect(lambda message, token: applied.append((message, token)))
+
+    inspector.resolution_combo.setCurrentIndex(
+        inspector._combo_index_for_data(
+            inspector.resolution_combo,
+            PresetOutputSize(tier=ResolutionTier.FULL),
+        )
+    )
+
+    revisions = controller.document.cards[0].revisions
+    assert revisions[0].generate_output_size == PresetOutputSize(tier=ResolutionTier.FULL)
+    assert revisions[1].generate_output_size == PresetOutputSize(tier=ResolutionTier.SMALL)
+    assert autosaves[-1].cards[0].active_revision.generate_output_size == PresetOutputSize(
+        tier=ResolutionTier.FULL
+    )
+    assert not applied
+    undo_token = controller.current_undo_token
+    assert undo_token is not None
+    assert controller.undo_if_current(undo_token)
+    inspector.render(controller.document, card.id)
+    assert inspector.resolution_combo.currentData() == PresetOutputSize(tier=ResolutionTier.MEDIUM)
+    assert controller.redo()
+    inspector.render(controller.document, card.id)
+    assert inspector.resolution_combo.currentData() == PresetOutputSize(tier=ResolutionTier.FULL)
+
+
+def test_generate_selects_current_size_on_navigation_and_syncs_it_on_request(
+    application: QApplication,
+) -> None:
+    revision = CardRevision(
+        generate_output_size=PresetOutputSize(tier=ResolutionTier.MEDIUM),
+        background=_background(),
+    )
+    card = Card(name="Card", revisions=(revision,))
+    controller = DocumentController(Stack(name="Demo", cards=(card,)))
+    inspector = Inspector(controller)
+
+    inspector.render(
+        controller.document,
+        card.id,
+        refine_source_size=(1024, 768),
+    )
+
+    assert inspector.resolution_combo.itemText(3) == "Full"
+    assert inspector.resolution_combo.currentData() == PresetOutputSize(tier=ResolutionTier.FULL)
+    assert "Resolution: Full (1024 × 768)" in (inspector.generate_background_button.toolTip())
+    assert controller.document.cards[0].active_revision.generate_output_size == PresetOutputSize(
+        tier=ResolutionTier.MEDIUM
+    )
+
+    inspector.render(
+        controller.document,
+        card.id,
+        refine_source_size=(1024, 768),
+    )
+    assert inspector.resolution_combo.currentData() == PresetOutputSize(tier=ResolutionTier.FULL)
+
+    requested: list[None] = []
+    inspector.generate_background_requested.connect(lambda: requested.append(None))
+    inspector.generate_background_button.click()
+
+    assert requested == [None]
+    assert controller.document.cards[0].active_revision.generate_output_size == PresetOutputSize(
+        tier=ResolutionTier.FULL
+    )
+
+
+def test_generate_output_size_inserts_selectable_exact_current_size(
+    application: QApplication,
+) -> None:
+    revision = CardRevision(background=_background())
+    card = Card(name="Card", revisions=(revision,))
+    controller = DocumentController(Stack(name="Demo", cards=(card,)))
+    inspector = Inspector(controller)
+    inspector.render(
+        controller.document,
+        card.id,
+        refine_source_size=(592, 448),
+    )
+
+    labels = [
+        inspector.resolution_combo.itemText(index)
+        for index in range(inspector.resolution_combo.count())
+    ]
+    assert labels == [
+        "Small",
+        "Medium",
+        "Current",
+        "Large",
+        "Full",
+    ]
+    assert inspector.resolution_combo.currentText() == "Current"
+    assert inspector.resolution_combo.toolTip() == "592 × 448"
+    inspector.generate_background_button.click()
+    assert controller.document.cards[0].active_revision.generate_output_size == (
+        ExactOutputSize(width=592, height=448)
+    )
+
+
+def test_card_navigation_selects_each_current_resolution(
+    application: QApplication,
+) -> None:
+    first = Card(name="First", revisions=(CardRevision(background=_background()),))
+    second = Card(name="Second", revisions=(CardRevision(background=_background()),))
+    controller = DocumentController(Stack(name="Demo", cards=(first, second)))
+    inspector = Inspector(controller)
+
+    inspector.render(
+        controller.document,
+        first.id,
+        refine_source_size=(512, 384),
+    )
+    inspector.resolution_combo.setCurrentIndex(
+        inspector._combo_index_for_data(
+            inspector.resolution_combo,
+            PresetOutputSize(tier=ResolutionTier.FULL),
+        )
+    )
+    inspector.refine_resolution_combo.setCurrentIndex(
+        inspector._combo_index_for_data(
+            inspector.refine_resolution_combo,
+            PresetOutputSize(tier=ResolutionTier.LARGE),
+        )
+    )
+
+    inspector.render(
+        controller.document,
+        second.id,
+        refine_source_size=(768, 576),
+    )
+
+    current = CurrentSourceSize(width=768, height=576)
+    assert inspector.resolution_combo.currentData() == PresetOutputSize(tier=ResolutionTier.LARGE)
+    assert inspector.refine_resolution_combo.currentData() == current
+    assert inspector.edit_resolution_combo.currentData() == current
+
+
+@pytest.mark.parametrize("source_size", ((641, 480), (1008, 784)))
+def test_generate_shows_invalid_current_size_without_selecting_or_persisting_it(
+    application: QApplication,
+    source_size: tuple[int, int],
+) -> None:
+    revision = CardRevision(background=_background())
+    card = Card(name="Card", revisions=(revision,))
+    controller = DocumentController(Stack(name="Demo", cards=(card,)))
+    inspector = Inspector(controller)
+    inspector.render(
+        controller.document,
+        card.id,
+        refine_source_size=source_size,
+    )
+
+    labels = [
+        inspector.resolution_combo.itemText(index)
+        for index in range(inspector.resolution_combo.count())
+    ]
+    unavailable_index = labels.index("Current")
+    item = inspector.resolution_combo.model().item(unavailable_index)
+    assert item is not None
+    assert not item.isEnabled()
+    assert inspector.resolution_combo.currentData() == PresetOutputSize(tier=ResolutionTier.MEDIUM)
+    assert "Unavailable" in item.toolTip()
+    assert f"{source_size[0]} × {source_size[1]}" in item.toolTip()
+
+    inspector.resolution_combo.setCurrentIndex(unavailable_index)
+
+    assert inspector.resolution_combo.currentData() == PresetOutputSize(tier=ResolutionTier.MEDIUM)
+    assert controller.document.cards[0].active_revision.generate_output_size == (
+        PresetOutputSize(tier=ResolutionTier.MEDIUM)
+    )
+
+
+def test_edit_resolution_inserts_nonstandard_current_and_only_higher_tiers(
+    application: QApplication,
+) -> None:
+    revision = CardRevision(background=_background())
+    card = Card(name="Card", revisions=(revision,))
+    controller = DocumentController(Stack(name="Demo", cards=(card,)))
+    inspector = Inspector(controller)
+
+    inspector.render(
+        controller.document,
+        card.id,
+        refine_source_size=(640, 480),
+    )
+
+    assert [
+        inspector.edit_resolution_combo.itemText(index)
+        for index in range(inspector.edit_resolution_combo.count())
+    ] == [
+        "Current",
+        "Large",
+        "Full",
+    ]
+
+
+@pytest.mark.parametrize("source_size", ((641, 480), (1008, 784)))
+def test_refine_and_edit_show_invalid_current_size_as_unavailable(
+    application: QApplication,
+    source_size: tuple[int, int],
+) -> None:
+    revision = CardRevision(
+        description="A courtyard",
+        background=_background(),
+    )
+    card = Card(name="Card", revisions=(revision,))
+    controller = DocumentController(Stack(name="Demo", cards=(card,)))
+    inspector = Inspector(controller)
+    inspector.render(
+        controller.document,
+        card.id,
+        refine_source_size=source_size,
+    )
+    refine_labels = [
+        inspector.refine_resolution_combo.itemText(index)
+        for index in range(inspector.refine_resolution_combo.count())
+    ]
+    refine_unavailable = refine_labels.index("Current")
+    refine_item = inspector.refine_resolution_combo.model().item(refine_unavailable)
+    assert refine_item is not None
+    assert not refine_item.isEnabled()
+    higher_tiers = higher_output_tiers(
+        source_size[0],
+        source_size[1],
+        AspectRatio.LANDSCAPE,
+    )
+    if higher_tiers:
+        assert inspector.refine_resolution_combo.currentData() == PresetOutputSize(
+            tier=higher_tiers[0]
+        )
+        inspector.refine_resolution_combo.setCurrentIndex(refine_unavailable)
+        assert inspector.refine_resolution_combo.currentData() == PresetOutputSize(
+            tier=higher_tiers[0]
+        )
+        assert inspector.refine_resolution_combo.isEnabled()
+    else:
+        assert inspector.refine_resolution_combo.currentData() is None
+        assert not inspector.refine_resolution_combo.isEnabled()
+
+    edit_labels = [
+        inspector.edit_resolution_combo.itemText(index)
+        for index in range(inspector.edit_resolution_combo.count())
+    ]
+    edit_unavailable = edit_labels.index("Current")
+    edit_item = inspector.edit_resolution_combo.model().item(edit_unavailable)
+    assert edit_item is not None
+    assert not edit_item.isEnabled()
+    if higher_tiers:
+        assert inspector.edit_resolution_combo.currentData() == (
+            PresetOutputSize(tier=higher_tiers[0])
+        )
+        inspector.edit_resolution_combo.setCurrentIndex(edit_unavailable)
+        assert inspector.edit_resolution_combo.currentData() == (
+            PresetOutputSize(tier=higher_tiers[0])
+        )
+        assert inspector.edit_resolution_combo.isEnabled()
+    else:
+        assert inspector.edit_resolution_combo.currentData() is None
+        assert not inspector.edit_resolution_combo.isEnabled()
 
 
 def test_reference_selector_assigns_one_card_with_undo(
@@ -498,9 +1023,7 @@ def test_second_reference_is_ordered_unique_and_promoted_when_first_clears(
     source = Card(name="Source")
     portrait = Card(name="Portrait")
     room = Card(name="Room")
-    controller = DocumentController(
-        Stack(name="Demo", cards=(source, portrait, room))
-    )
+    controller = DocumentController(Stack(name="Demo", cards=(source, portrait, room)))
     inspector = Inspector(controller)
     inspector.render(controller.document, source.id)
 
@@ -567,7 +1090,7 @@ def test_style_selector_updates_revision_and_new_card_default_with_undo(
     assert controller.document.new_card_style_id is None
 
 
-def test_styles_tab_edits_global_definition_and_deletes_with_undo(
+def test_style_manager_edits_global_definition_and_deletes_with_undo(
     application: QApplication,
 ) -> None:
     ink = StyleDefinition(name="Ink", prompt_text="Rendered in ink.")
@@ -585,17 +1108,23 @@ def test_styles_tab_edits_global_definition_and_deletes_with_undo(
             cards=(source, other),
         )
     )
-    inspector = Inspector(controller)
-    inspector.render(controller.document, source.id)
+    parent = Inspector(controller)
+    manager = StyleManagerWindow(controller, parent)
     applied: list[tuple[str, object]] = []
-    inspector.change_applied.connect(lambda message, token: applied.append((message, token)))
+    manager.change_applied.connect(lambda message, token: applied.append((message, token)))
 
-    assert inspector.style_list.currentItem().text() == "Ink"
-    assert inspector.style_name_edit.text() == "Ink"
-    assert inspector.style_prompt_edit.toPlainText() == "Rendered in ink."
-    inspector.style_name_edit.setText("Etching")
-    inspector.style_prompt_edit.setPlainText("Fine etched linework.")
-    assert inspector._commit_style()
+    assert manager.style_list.currentItem().text() == "Ink"
+    assert manager.name_edit.text() == "Ink"
+    assert manager.prompt_edit.toPlainText() == "Rendered in ink."
+    style_layout = manager.layout()
+    assert style_layout is not None
+    assert style_layout.indexOf(manager.name_edit) < style_layout.indexOf(manager.prompt_edit)
+    assert manager.name_edit.sizePolicy().horizontalPolicy() == (
+        manager.prompt_edit.sizePolicy().horizontalPolicy()
+    )
+    manager.name_edit.setText("Etching")
+    manager.prompt_edit.setPlainText("Fine etched linework.")
+    assert manager.commit_pending_edits(render_change=True)
 
     changed_style = controller.document.styles[0]
     assert changed_style.id == ink.id
@@ -603,33 +1132,104 @@ def test_styles_tab_edits_global_definition_and_deletes_with_undo(
     assert changed_style.prompt_text == "Fine etched linework."
     assert all(card.active_revision.style_id == ink.id for card in controller.document.cards)
 
-    inspector.add_style_button.click()
+    manager.add_button.click()
     assert len(controller.document.styles) == 2
-    assert inspector.style_name_edit.text() == "New Style"
-    assert inspector.style_name_edit.selectedText() == "New Style"
+    assert manager.name_edit.text() == "New Style"
+    assert manager.name_edit.selectedText() == "New Style"
 
-    inspector.delete_style_button.click()
+    manager.delete_button.click()
     assert len(controller.document.styles) == 1
     assert controller.document.styles[0].id == ink.id
     assert applied[-1][0] == "Style deleted"
     assert controller.undo_if_current(applied[-1][1])  # type: ignore[arg-type]
     assert len(controller.document.styles) == 2
 
-    inspector.render(controller.document, source.id)
-    inspector.style_list.setCurrentRow(0)
-    inspector.delete_style_button.click()
+    manager.render(controller.document)
+    manager.style_list.setCurrentRow(0)
+    manager.delete_button.click()
     assert controller.document.styles[0].name == "New Style"
     assert controller.document.new_card_style_id is None
     assert all(card.active_revision.style_id is None for card in controller.document.cards)
+    manager.close()
+
+
+@pytest.mark.parametrize("field", ("name", "prompt"))
+def test_live_style_drafts_signal_without_programmatic_render_noise(
+    application: QApplication,
+    field: str,
+) -> None:
+    style = StyleDefinition(name="Ink", prompt_text="Rendered in ink.")
+    revision = CardRevision(style_id=style.id)
+    card = Card(name="Card", revisions=(revision,))
+    controller = DocumentController(
+        Stack(
+            name="Demo",
+            styles=(style,),
+            new_card_style_id=style.id,
+            cards=(card,),
+        )
+    )
+    parent = Inspector(controller)
+    manager = StyleManagerWindow(controller, parent)
+    changes: list[None] = []
+    manager.inputs_changed.connect(lambda: changes.append(None))
+    manager.show()
+    editor = manager.name_edit if field == "name" else manager.prompt_edit
+    editor.setFocus()
+    application.processEvents()
+
+    manager.render(controller.document)
+    assert changes == []
+
+    if field == "name":
+        manager.name_edit.setText("Etching")
+    else:
+        manager.prompt_edit.setPlainText("Fine etched linework.")
+
+    assert changes == [None]
+    assert controller.document.style_by_id(style.id) == style
+    manager.close()
+
+
+def test_style_name_draft_does_not_overwrite_authoritative_prompt_change(
+    application: QApplication,
+) -> None:
+    style = StyleDefinition(name="Ink", prompt_text="Original prompt.")
+    controller = DocumentController(
+        Stack(
+            name="Demo",
+            styles=(style,),
+            new_card_style_id=style.id,
+        )
+    )
+    parent = Inspector(controller)
+    manager = StyleManagerWindow(controller, parent)
+
+    manager.name_edit.setText("Etching")
+    changed = controller.execute(
+        UpdateStyleCommand(
+            style_id=style.id,
+            name=style.name,
+            prompt_text="Changed elsewhere.",
+        )
+    )
+    manager.render(changed)
+
+    assert manager.name_edit.text() == "Etching"
+    assert manager.prompt_edit.toPlainText() == "Changed elsewhere."
+    assert manager.commit_pending_edits(render_change=True)
+    committed = controller.document.style_by_id(style.id)
+    assert committed is not None
+    assert committed.name == "Etching"
+    assert committed.prompt_text == "Changed elsewhere."
+    manager.close()
 
 
 def test_deleted_reference_is_shown_as_unresolved(
     application: QApplication,
 ) -> None:
     destination = Card(name="Former portrait")
-    revision = CardRevision(
-        references=(ResolvedCardReference(target_card_id=destination.id),)
-    )
+    revision = CardRevision(references=(ResolvedCardReference(target_card_id=destination.id),))
     source = Card(name="Source", revisions=(revision,))
     controller = DocumentController(Stack(name="Demo", cards=(source, destination)))
     inspector = Inspector(controller)
@@ -669,196 +1269,23 @@ def test_render_preserves_focused_description_draft(
     inspector.close()
 
 
-def test_image_prompt_status_and_generation_source(
-    application: QApplication,
-) -> None:
-    revision = CardRevision(
-        description="A courtyard",
-        image_prompt=ImagePrompt(
-            text="A richly detailed courtyard",
-            source_description="A courtyard",
-        ),
-    )
-    card = Card(name="Card", revisions=(revision,))
-    controller = DocumentController(Stack(name="Demo", cards=(card,)))
-    inspector = Inspector(controller)
-    inspector.render(controller.document, card.id)
-
-    assert not inspector.description_toggle.isHidden()
-    assert inspector.description_button.isChecked()
-    assert inspector.description_edit.toPlainText() == ("A courtyard")
-    assert "Using: Description" in inspector.enrich_button.toolTip()
-    assert "Using: Image Prompt" in inspector.generate_background_button.toolTip()
-    assert inspector.enrich_button.text() == "Image Prompt Current"
-    assert not inspector.enrich_button.isEnabled()
-    assert "Current" in inspector.enrich_button.toolTip()
-    inspector.set_image_prompt_capabilities(
-        can_enrich=True,
-        reason="Ready to prepare Image Prompt",
-        busy=False,
-    )
-
-    inspector.description_edit.setPlainText("A changed courtyard")
-    assert inspector.enrich_button.text() == "Update Image Prompt"
-    assert inspector.enrich_button.isEnabled()
-    assert "Out of date" in inspector.enrich_button.toolTip()
-    assert inspector.commit_revision_metadata()
-
-    current = controller.document.cards[0].active_revision
-    assert current.image_prompt is not None
-    assert current.image_prompt.text == "A richly detailed courtyard"
-
-    inspector.image_prompt_button.click()
-    inspector.description_edit.setPlainText("A manually revised courtyard")
-    assert inspector.commit_revision_metadata()
-
-    inspector.description_edit.clear()
-    assert inspector.commit_revision_metadata()
-    assert controller.document.cards[0].active_revision.image_prompt is None
-    assert inspector.description_toggle.isHidden()
-    assert inspector.description_edit.toPlainText() == "A changed courtyard"
-    assert "Using: Image Prompt" in inspector.generate_background_button.toolTip()
-    assert controller.undo()
-    assert controller.document.cards[0].active_revision.image_prompt is not None
-
-
-def test_manual_image_prompt_edit_refreshes_changed_description(
-    application: QApplication,
-) -> None:
-    revision = CardRevision(
-        description="A courtyard",
-        image_prompt=ImagePrompt(
-            text="A richly detailed courtyard",
-            source_description="A courtyard",
-            model_identifier="qwen3.5:9b-mlx",
-            prompt_version=IMAGE_PROMPT_PREPARATION_VERSION,
-        ),
-    )
-    card = Card(name="Card", revisions=(revision,))
-    controller = DocumentController(Stack(name="Demo", cards=(card,)))
-    inspector = Inspector(controller)
-    inspector.render(controller.document, card.id)
-    inspector.set_image_prompt_capabilities(
-        can_enrich=True,
-        reason="Ready to prepare Image Prompt",
-        busy=False,
-        model_identifier="qwen3.5:9b-mlx",
-        prompt_version=IMAGE_PROMPT_PREPARATION_VERSION,
-    )
-
-    inspector.description_edit.setPlainText("A moonlit courtyard")
-    assert inspector.commit_revision_metadata()
-    assert not inspector.has_current_image_prompt()
-
-    inspector.image_prompt_button.click()
-    inspector.description_edit.setPlainText("A manually revised moonlit courtyard")
-
-    assert inspector.has_current_image_prompt()
-    assert inspector.enrich_button.text() == "Image Prompt Current"
-    inspector.show()
-    inspector.description_edit.setFocus()
-    application.processEvents()
-    assert inspector.description_edit.hasFocus()
-    inspector.render(controller.document, card.id)
-    assert (
-        inspector.description_edit.toPlainText()
-        == "A manually revised moonlit courtyard"
-    )
-    assert inspector.has_current_image_prompt()
-    assert inspector.commit_revision_metadata(render_change=False)
-
-    image_prompt = controller.document.cards[0].active_revision.image_prompt
-    assert image_prompt is not None
-    assert image_prompt.text == "A manually revised moonlit courtyard"
-    assert image_prompt.source_description == "A moonlit courtyard"
-    assert image_prompt.model_identifier == "qwen3.5:9b-mlx"
-    assert image_prompt.prompt_version == IMAGE_PROMPT_PREPARATION_VERSION
-    assert inspector.has_current_image_prompt()
-
-
-def test_switching_cards_defaults_to_description(
+def test_switching_cards_shows_each_description(
     application: QApplication,
 ) -> None:
     first = Card(
         name="First",
-        revisions=(
-            CardRevision(
-                description="First description",
-                image_prompt=ImagePrompt(
-                    text="First prompt",
-                    source_description="First description",
-                ),
-            ),
-        ),
+        revisions=(CardRevision(description="First description"),),
     )
     second = Card(
         name="Second",
-        revisions=(
-            CardRevision(
-                description="Second description",
-                image_prompt=ImagePrompt(
-                    text="Second prompt",
-                    source_description="Second description",
-                ),
-            ),
-        ),
+        revisions=(CardRevision(description="Second description"),),
     )
     controller = DocumentController(Stack(name="Demo", cards=(first, second)))
     inspector = Inspector(controller)
     inspector.render(controller.document, first.id)
-    inspector.image_prompt_button.click()
-    assert inspector.image_prompt_button.isChecked()
-
     inspector.render(controller.document, second.id)
 
-    assert inspector.description_button.isChecked()
     assert inspector.description_edit.toPlainText() == "Second description"
-
-
-def test_changing_model_marks_image_prompt_out_of_date(
-    application: QApplication,
-) -> None:
-    revision = CardRevision(
-        description="A courtyard",
-        image_prompt=ImagePrompt(
-            text="A richly detailed courtyard",
-            source_description="A courtyard",
-            model_identifier="qwen3.5:9b-mlx",
-        ),
-    )
-    card = Card(name="Card", revisions=(revision,))
-    controller = DocumentController(Stack(name="Demo", cards=(card,)))
-    inspector = Inspector(controller)
-    inspector.render(controller.document, card.id)
-
-    inspector.set_image_prompt_capabilities(
-        can_enrich=True,
-        reason="Ready to prepare Image Prompt",
-        busy=False,
-        model_identifier="qwen3.5:9b-mlx",
-    )
-    assert inspector.enrich_button.text() == "Image Prompt Current"
-    assert not inspector.enrich_button.isEnabled()
-
-    inspector.set_image_prompt_capabilities(
-        can_enrich=True,
-        reason="Ready to prepare Image Prompt",
-        busy=False,
-        model_identifier="llama3.2:latest",
-    )
-
-    assert inspector.enrich_button.text() == "Update Image Prompt"
-    assert inspector.enrich_button.isEnabled()
-    assert "Out of date" in inspector.enrich_button.toolTip()
-
-    inspector.set_image_prompt_capabilities(
-        can_enrich=True,
-        reason="Ready to prepare Image Prompt",
-        busy=False,
-        model_identifier="qwen3.5:9b-mlx",
-    )
-    assert inspector.enrich_button.text() == "Image Prompt Current"
-    assert not inspector.enrich_button.isEnabled()
 
 
 def test_using_labels_name_single_reference(
@@ -879,33 +1306,8 @@ def test_using_labels_name_single_reference(
     inspector.render(controller.document, source.id)
 
     assert inspector.reference_label.text() == "References"
-    assert "Using: Description + Reference" in inspector.enrich_button.toolTip()
-    assert "Using: Image Prompt + Reference" in inspector.generate_background_button.toolTip()
-
-
-def test_generate_requires_a_current_non_empty_image_prompt(
-    application: QApplication,
-) -> None:
-    revision = CardRevision(
-        description="A courtyard",
-        image_prompt=ImagePrompt(
-            text="A richly detailed courtyard",
-            source_description="A courtyard",
-        ),
-    )
-    card = Card(name="Card", revisions=(revision,))
-    controller = DocumentController(Stack(name="Demo", cards=(card,)))
-    inspector = Inspector(controller)
-    inspector.render(controller.document, card.id)
-
-    assert inspector.has_current_image_prompt()
-    assert inspector.has_description_input()
-
-    inspector.image_prompt_button.click()
-    inspector.description_edit.clear()
-    assert not inspector.has_current_image_prompt()
-    assert inspector.commit_revision_metadata()
-    assert controller.document.cards[0].active_revision.image_prompt is None
+    assert "Using: Description + Reference" in inspector.generate_background_button.toolTip()
+    assert "image 1" in inspector.reference_combo.toolTip()
 
 
 def test_add_hotspot_persists_and_selects_area_less_entry(
@@ -976,7 +1378,7 @@ def test_hotspot_properties_reorder_and_delete_use_commands(
     assert controller.undo_if_current(applied[0][1])  # type: ignore[arg-type]
 
 
-def test_ai_activity_is_reflected_on_the_initiating_buttons(
+def test_generation_activity_is_reflected_on_the_initiating_button(
     application: QApplication,
 ) -> None:
     inspector = Inspector(DocumentController(Stack(name="Demo")))
@@ -987,21 +1389,15 @@ def test_ai_activity_is_reflected_on_the_initiating_buttons(
         busy=True,
         generating=True,
     )
-    inspector.set_image_prompt_capabilities(
-        can_enrich=False,
-        reason="Preparing Image Prompt",
-        busy=True,
-    )
 
     assert inspector.generate_background_button.text() == "Generating…"
-    assert inspector.enrich_button.text() == "Preparing Image Prompt…"
 
 
-def test_image_prompt_has_no_separate_proposal_editor(
+def test_image_prompt_controls_are_absent(
     application: QApplication,
 ) -> None:
     inspector = Inspector(DocumentController(Stack(name="Demo")))
 
-    assert not hasattr(inspector, "image_prompt_review")
-    assert not hasattr(inspector, "apply_image_prompt_button")
-    assert not hasattr(inspector, "discard_image_prompt_button")
+    assert not hasattr(inspector, "image_prompt_button")
+    assert not hasattr(inspector, "enrich_button")
+    assert not hasattr(inspector, "prepare_image_prompt_requested")

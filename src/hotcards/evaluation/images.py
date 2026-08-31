@@ -12,11 +12,17 @@ from typing import Literal
 
 from pydantic import Field
 
+from hotcards.domain.image_dimensions import (
+    AspectRatio,
+    ResolutionTier,
+    output_dimensions,
+)
 from hotcards.domain.models import (
     DomainModel,
-    ImageGenerationInputs,
+    GenerateInputs,
     NonEmptyString,
     PositiveInt,
+    PresetOutputSize,
 )
 from hotcards.evaluation.contracts import SafeCaseId
 from hotcards.evaluation.manifest import (
@@ -28,10 +34,13 @@ from hotcards.evaluation.manifest import (
     default_environment,
 )
 from hotcards.evaluation.reports import render_reports, render_reports_checked
-from hotcards.generation.image_prompts import IMAGE_PROMPT_VERSION, compose_image_prompt
+from hotcards.generation.image_generation import (
+    DIRECT_GENERATION_PROMPT_VERSION,
+    compose_generation_prompt,
+)
 from hotcards.generation.mflux_generator import (
-    MfluxGenerationRequest,
-    MfluxGenerationResult,
+    MfluxGenerateRequest,
+    MfluxGenerateResult,
     MfluxGenerator,
 )
 
@@ -53,7 +62,7 @@ class ImageEvaluationCase(DomainModel):
 
     case_version: Literal["image-case-v3"] = IMAGE_CASE_VERSION
     case_id: SafeCaseId
-    inputs: ImageGenerationInputs
+    inputs: GenerateInputs
     required_visual_elements: tuple[NonEmptyString, ...] = Field(min_length=1)
     unwanted_artifacts: tuple[NonEmptyString, ...] = Field(default_factory=tuple)
 
@@ -65,10 +74,11 @@ class ImageEvaluationSettings(DomainModel):
     case_dir: Path = Path("evals/cases/images")
     mflux_models: tuple[NonEmptyString, ...] = DEFAULT_MFLUX_MODELS
     seed: int = 42
-    width: PositiveInt = 1024
-    height: PositiveInt = 768
+    tier: ResolutionTier = ResolutionTier.FULL
+    aspect_ratio: AspectRatio = AspectRatio.LANDSCAPE
     step_count: PositiveInt = 4
     quantization: int | None = None
+
 
 MfluxGeneratorFactory = Callable[[], MfluxGenerator]
 
@@ -98,7 +108,7 @@ def load_image_cases(case_dir: Path) -> tuple[ImageEvaluationCase, ...]:
 
 
 def _generation_record(
-    result: MfluxGenerationResult,
+    result: MfluxGenerateResult,
     output_dir: Path,
 ) -> dict[str, object]:
     return {
@@ -107,8 +117,8 @@ def _generation_record(
         "load_duration_seconds": result.load_duration_seconds,
         "inference_duration_seconds": result.generation_duration_seconds,
         "serialization_duration_seconds": result.serialization_duration_seconds,
-        "total_duration_seconds": result.metadata.duration_seconds,
-        "metadata": result.metadata.model_dump(mode="json"),
+        "total_duration_seconds": result.provenance.settings.duration_seconds,
+        "metadata": result.provenance.model_dump(mode="json"),
     }
 
 
@@ -119,15 +129,23 @@ def _request(
     output_path: Path,
     model: str,
     settings: ImageEvaluationSettings,
-) -> MfluxGenerationRequest:
-    return MfluxGenerationRequest(
-        inputs=case.inputs,
+) -> MfluxGenerateRequest:
+    inputs = case.inputs.model_copy(
+        update={"output_size": PresetOutputSize(tier=settings.tier)},
+    )
+    width, height = output_dimensions(
+        settings.tier,
+        settings.aspect_ratio,
+    )
+    return MfluxGenerateRequest(
+        inputs=inputs,
         render_prompt=render_prompt,
         output_path=output_path,
         model_identifier=model,
         seed=settings.seed,
-        width=settings.width,
-        height=settings.height,
+        aspect_ratio=settings.aspect_ratio,
+        width=width,
+        height=height,
         step_count=settings.step_count,
         quantization=settings.quantization,
     )
@@ -182,7 +200,7 @@ def _execute_image_evaluation(
     _write_result(settings.output_dir, result)
 
     for case in cases:
-        render_prompt = compose_image_prompt(case.inputs)
+        render_prompt = compose_generation_prompt(case.inputs)
         for model in settings.mflux_models:
             stage = f"mflux_axis:{case.case_id}:{model}"
             lifecycle.set_stage(stage)
@@ -214,7 +232,7 @@ def _execute_image_evaluation(
                 {
                     "case_id": case.case_id,
                     "model": model,
-                    "prompt_version": IMAGE_PROMPT_VERSION,
+                    "prompt_version": DIRECT_GENERATION_PROMPT_VERSION,
                     "render_prompt": render_prompt,
                     "required_visual_elements": case.required_visual_elements,
                     "unwanted_artifacts": case.unwanted_artifacts,
@@ -254,11 +272,11 @@ def run_image_evaluation(
         settings=settings.model_dump(mode="json"),
         models={"mflux_candidates": list(settings.mflux_models)},
         contracts={
-            "image_prompt": {
-                "version": IMAGE_PROMPT_VERSION,
+            "generation_prompt": {
+                "version": DIRECT_GENERATION_PROMPT_VERSION,
                 "sha256": contract_digest(
-                    IMAGE_PROMPT_VERSION,
-                    inspect.getsource(compose_image_prompt),
+                    DIRECT_GENERATION_PROMPT_VERSION,
+                    inspect.getsource(compose_generation_prompt),
                 ),
             },
             "image_case": {"version": IMAGE_CASE_VERSION},
