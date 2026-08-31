@@ -13,7 +13,10 @@ import tempfile
 from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import dataclass
+from functools import wraps
 from pathlib import Path, PurePosixPath
+from threading import Lock, RLock
+from typing import Concatenate
 from uuid import UUID, uuid4
 
 from PIL import Image, UnidentifiedImageError
@@ -24,6 +27,8 @@ from hotcards.domain.models import CURRENT_SCHEMA_VERSION, Stack
 STACK_FILENAME = "stack.json"
 ASSET_ROOT = PurePosixPath("assets/cards")
 logger = logging.getLogger(__name__)
+_BUNDLE_LOCKS_GUARD = Lock()
+_BUNDLE_LOCKS: dict[str, RLock] = {}
 
 
 class StackStoreError(ValueError):
@@ -39,16 +44,22 @@ class StackStoreTransactionError(StackStoreError):
         rollback_errors: tuple[Exception, ...] = (),
         *,
         persisted_stack: Stack | None = None,
+        observed_stack: Stack | None = None,
+        durability_indeterminate: bool = False,
         owned_asset: StoredImageAsset | None = None,
     ) -> None:
         message = f"could not commit duplicate asset and stack document: {operation_error}"
         if rollback_errors:
             details = "; ".join(str(error) for error in rollback_errors)
             message += f"; rollback also failed: {details}"
+        if durability_indeterminate:
+            message += "; manifest durability remains indeterminate"
         super().__init__(message)
         self.operation_error = operation_error
         self.rollback_errors = rollback_errors
         self.persisted_stack = persisted_stack
+        self.observed_stack = observed_stack
+        self.durability_indeterminate = durability_indeterminate
         self.owned_asset = owned_asset
 
 
@@ -59,10 +70,33 @@ class StoredImageAsset:
     relative_path: str
     device: int
     inode: int
+    directory_device: int
+    directory_inode: int
 
 
 def _io_checkpoint(_name: str) -> None:
     """Fault-injection seam around durable transaction boundaries."""
+
+
+def _bundle_mutation_lock(bundle_path: Path) -> RLock:
+    key = os.path.abspath(os.fspath(bundle_path))
+    with _BUNDLE_LOCKS_GUARD:
+        return _BUNDLE_LOCKS.setdefault(key, RLock())
+
+
+def _serialized_bundle_mutation[**P, R](
+    operation: Callable[Concatenate[StackStore, P], R],
+) -> Callable[Concatenate[StackStore, P], R]:
+    @wraps(operation)
+    def serialized(
+        store: StackStore,
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> R:
+        with _bundle_mutation_lock(store.bundle_path):
+            return operation(store, *args, **kwargs)
+
+    return serialized
 
 
 def _secure_open_flags(*, directory: bool = False) -> int:
@@ -203,6 +237,168 @@ def _open_matching_directory_at(
     return candidate_fd
 
 
+def _quarantine_name(name: str, kind: str) -> str:
+    return f".{name}.{kind}-{uuid4().hex}.tmp"
+
+
+def _quarantine_owned_file_at(
+    parent_fd: int,
+    name: str,
+    *,
+    device: int,
+    inode: int,
+) -> bool:
+    try:
+        candidate_fd = os.open(
+            name,
+            _secure_open_flags(),
+            dir_fd=parent_fd,
+        )
+    except FileNotFoundError:
+        return False
+    except OSError as error:
+        raise StackStoreError(
+            f"could not securely open owned image {name!r}: {error}"
+        ) from error
+    try:
+        candidate_stat = os.fstat(candidate_fd)
+        if (
+            not stat.S_ISREG(candidate_stat.st_mode)
+            or candidate_stat.st_dev != device
+            or candidate_stat.st_ino != inode
+        ):
+            raise StackStoreError(
+                f"refusing to remove image asset whose identity changed: {name}"
+            )
+        _io_checkpoint("owned-file-cleanup-prechecked")
+        quarantine_name = _quarantine_name(name, "owned-file")
+        try:
+            os.rename(
+                name,
+                quarantine_name,
+                src_dir_fd=parent_fd,
+                dst_dir_fd=parent_fd,
+            )
+        except OSError as error:
+            raise StackStoreError(
+                f"could not quarantine owned image {name!r}: {error}"
+            ) from error
+        try:
+            quarantine_fd = os.open(
+                quarantine_name,
+                _secure_open_flags(),
+                dir_fd=parent_fd,
+            )
+        except OSError as error:
+            raise StackStoreError(
+                f"owned image quarantine {quarantine_name!r} could not be "
+                f"verified and was preserved: {error}"
+            ) from error
+        try:
+            quarantine_stat = os.fstat(quarantine_fd)
+            if (
+                not stat.S_ISREG(quarantine_stat.st_mode)
+                or quarantine_stat.st_dev != device
+                or quarantine_stat.st_ino != inode
+            ):
+                raise StackStoreError(
+                    f"owned image quarantine {quarantine_name!r} has a foreign "
+                    "identity and was preserved"
+                )
+        finally:
+            os.close(quarantine_fd)
+        try:
+            os.unlink(quarantine_name, dir_fd=parent_fd)
+            os.fsync(parent_fd)
+        except OSError as error:
+            raise StackStoreError(
+                f"could not remove owned image quarantine {quarantine_name!r}: "
+                f"{error}"
+            ) from error
+        return True
+    finally:
+        os.close(candidate_fd)
+
+
+def _quarantine_owned_directory_if_empty(
+    parent_fd: int,
+    name: str,
+    *,
+    device: int,
+    inode: int,
+) -> bool:
+    candidate_fd = _open_matching_directory_at(
+        parent_fd,
+        name,
+        device=device,
+        inode=inode,
+    )
+    if candidate_fd is None:
+        try:
+            os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return False
+        except OSError as error:
+            raise StackStoreError(
+                f"could not inspect owned asset directory {name!r}: {error}"
+            ) from error
+        raise StackStoreError(
+            f"refusing to remove asset directory whose identity changed: {name}"
+        )
+    try:
+        if os.listdir(candidate_fd):
+            return False
+        _io_checkpoint("owned-directory-cleanup-prechecked")
+        quarantine_name = _quarantine_name(name, "owned-directory")
+        try:
+            os.rename(
+                name,
+                quarantine_name,
+                src_dir_fd=parent_fd,
+                dst_dir_fd=parent_fd,
+            )
+        except OSError as error:
+            raise StackStoreError(
+                f"could not quarantine owned asset directory {name!r}: {error}"
+            ) from error
+        try:
+            quarantine_fd = os.open(
+                quarantine_name,
+                _secure_open_flags(directory=True),
+                dir_fd=parent_fd,
+            )
+        except OSError as error:
+            raise StackStoreError(
+                f"owned directory quarantine {quarantine_name!r} could not be "
+                f"verified and was preserved: {error}"
+            ) from error
+        try:
+            quarantine_stat = os.fstat(quarantine_fd)
+            if (
+                not stat.S_ISDIR(quarantine_stat.st_mode)
+                or quarantine_stat.st_dev != device
+                or quarantine_stat.st_ino != inode
+                or os.listdir(quarantine_fd)
+            ):
+                raise StackStoreError(
+                    f"owned directory quarantine {quarantine_name!r} changed "
+                    "identity or contents and was preserved"
+                )
+        finally:
+            os.close(quarantine_fd)
+        try:
+            os.rmdir(quarantine_name, dir_fd=parent_fd)
+            os.fsync(parent_fd)
+        except OSError as error:
+            raise StackStoreError(
+                f"could not remove owned directory quarantine "
+                f"{quarantine_name!r}: {error}"
+            ) from error
+        return True
+    finally:
+        os.close(candidate_fd)
+
+
 def _asset_path_matches(
     bundle_fd: int,
     *,
@@ -263,6 +459,8 @@ def _replace_manifest_at(
     temporary_name: str,
     *,
     checkpoints: bool,
+    on_replaced: Callable[[], None] | None = None,
+    on_directory_fsynced: Callable[[], None] | None = None,
 ) -> None:
     os.replace(
         temporary_name,
@@ -270,11 +468,90 @@ def _replace_manifest_at(
         src_dir_fd=bundle_fd,
         dst_dir_fd=bundle_fd,
     )
+    if on_replaced is not None:
+        on_replaced()
     if checkpoints:
         _io_checkpoint("manifest-replaced")
     os.fsync(bundle_fd)
+    if on_directory_fsynced is not None:
+        on_directory_fsynced()
     if checkpoints:
         _io_checkpoint("manifest-directory-fsynced")
+
+
+def _recover_previous_manifest(
+    bundle_fd: int,
+    *,
+    previous_payload: bytes,
+    previous_stack: Stack,
+    changed_stack: Stack,
+    rollback_errors: list[Exception],
+) -> tuple[bool, Stack | None]:
+    previous_manifest_durable = False
+
+    def attempt(prefix: str) -> bool:
+        temporary_name: str | None = None
+        directory_fsynced = False
+
+        def mark_directory_fsynced() -> None:
+            nonlocal directory_fsynced
+            directory_fsynced = True
+
+        try:
+            temporary_name = _write_manifest_at(
+                bundle_fd,
+                previous_payload,
+                prefix=prefix,
+                checkpoints=False,
+            )
+            _replace_manifest_at(
+                bundle_fd,
+                temporary_name,
+                checkpoints=False,
+                on_directory_fsynced=mark_directory_fsynced,
+            )
+            temporary_name = None
+        except Exception as error:
+            rollback_errors.append(error)
+            if temporary_name is not None:
+                try:
+                    os.unlink(temporary_name, dir_fd=bundle_fd)
+                except FileNotFoundError:
+                    pass
+                except OSError as cleanup_error:
+                    rollback_errors.append(cleanup_error)
+        return directory_fsynced
+
+    previous_manifest_durable = attempt(".stack-rollback-")
+    if not previous_manifest_durable:
+        previous_manifest_durable = attempt(".stack-stabilize-")
+
+    observed_stack: Stack | None = None
+    try:
+        current_stack_fd = os.open(
+            STACK_FILENAME,
+            _secure_open_flags(),
+            dir_fd=bundle_fd,
+        )
+        try:
+            current_payload = _read_all(current_stack_fd)
+        finally:
+            os.close(current_stack_fd)
+        current_stack = Stack.model_validate_json(current_payload)
+        if current_stack == previous_stack:
+            observed_stack = previous_stack
+        elif current_stack == changed_stack:
+            observed_stack = changed_stack
+        else:
+            rollback_errors.append(
+                StackStoreError(
+                    "observed stack document matches neither the previous nor "
+                    "duplicate state"
+                )
+            )
+    except (OSError, ValidationError) as error:
+        rollback_errors.append(error)
+    return previous_manifest_durable, observed_stack
 
 
 def _relative_asset_path(value: str) -> PurePosixPath:
@@ -408,6 +685,7 @@ class StackStore:
         """Atomically create `stack.json` without replacing an existing document."""
         self._write_stack(stack, replace=False)
 
+    @_serialized_bundle_mutation
     def _write_stack(self, stack: Stack, *, replace: bool) -> None:
         try:
             validated = Stack.model_validate(stack.model_dump(mode="python", round_trip=True))
@@ -447,6 +725,7 @@ class StackStore:
             if temporary_path is not None:
                 temporary_path.unlink(missing_ok=True)
 
+    @_serialized_bundle_mutation
     def store_image_asset(
         self,
         source_path: Path,
@@ -510,6 +789,7 @@ class StackStore:
                 temporary_path.unlink(missing_ok=True)
         return relative_path.as_posix()
 
+    @_serialized_bundle_mutation
     def copy_image_asset_and_save(
         self,
         source_relative_path: str,
@@ -659,7 +939,20 @@ class StackStore:
                 relative_path=destination_path.as_posix(),
                 device=destination_stat.st_dev,
                 inode=destination_stat.st_ino,
+                directory_device=destination_directory_stat.st_dev,
+                directory_inode=destination_directory_stat.st_ino,
             )
+
+            changed_manifest_replaced = False
+            changed_manifest_durable = False
+
+            def mark_changed_manifest_replaced() -> None:
+                nonlocal changed_manifest_replaced
+                changed_manifest_replaced = True
+
+            def mark_changed_manifest_durable() -> None:
+                nonlocal changed_manifest_durable
+                changed_manifest_durable = True
 
             try:
                 _io_checkpoint("destination-created")
@@ -732,6 +1025,8 @@ class StackStore:
                     bundle_fd,
                     manifest_temporary_name,
                     checkpoints=True,
+                    on_replaced=mark_changed_manifest_replaced,
+                    on_directory_fsynced=mark_changed_manifest_durable,
                 )
                 manifest_temporary_name = None
                 if not _asset_path_matches(
@@ -750,6 +1045,10 @@ class StackStore:
                     raise StackStoreError(
                         "image namespace changed before transaction completion"
                     )
+                if not changed_manifest_durable:
+                    raise StackStoreError(
+                        "duplicate manifest durability was not established"
+                    )
             except Exception as operation_error:
                 if manifest_temporary_name is not None:
                     try:
@@ -758,115 +1057,63 @@ class StackStore:
                         pass
                     except OSError as error:
                         rollback_errors.append(error)
-                rollback_name: str | None = None
-                try:
-                    rollback_name = _write_manifest_at(
-                        bundle_fd,
-                        previous_payload,
-                        prefix=".stack-rollback-",
-                        checkpoints=False,
-                    )
-                    _replace_manifest_at(
-                        bundle_fd,
-                        rollback_name,
-                        checkpoints=False,
-                    )
-                    rollback_name = None
-                except Exception as error:
-                    rollback_errors.append(error)
-                    if rollback_name is not None:
-                        try:
-                            os.unlink(rollback_name, dir_fd=bundle_fd)
-                        except FileNotFoundError:
-                            pass
-                        except OSError as cleanup_error:
-                            rollback_errors.append(cleanup_error)
-                persisted_after_failure: Stack | None = None
-                try:
-                    current_stack_fd = os.open(
-                        STACK_FILENAME,
-                        _secure_open_flags(),
-                        dir_fd=bundle_fd,
-                    )
-                    try:
-                        current_payload = _read_all(current_stack_fd)
-                    finally:
-                        os.close(current_stack_fd)
-                    current_stack = Stack.model_validate_json(current_payload)
-                    if current_stack == previous_stack:
-                        persisted_after_failure = previous_stack
-                    elif current_stack == changed_stack:
-                        persisted_after_failure = changed_stack
-                    else:
-                        rollback_errors.append(
-                            StackStoreError(
-                                "persisted stack document matches neither the "
-                                "previous nor duplicate state"
-                            )
+                if changed_manifest_replaced:
+                    previous_manifest_durable, observed_stack = (
+                        _recover_previous_manifest(
+                            bundle_fd,
+                            previous_payload=previous_payload,
+                            previous_stack=previous_stack,
+                            changed_stack=changed_stack,
+                            rollback_errors=rollback_errors,
                         )
-                except (OSError, ValidationError) as error:
-                    rollback_errors.append(error)
+                    )
+                else:
+                    previous_manifest_durable = True
+                    observed_stack = previous_stack
                 retained_asset = stored_asset if destination_owned else None
-                if persisted_after_failure == previous_stack:
-                    retained_asset = None
-                    if (
-                        destination_owned
-                        and stored_asset is not None
-                        and _file_at_matches(
-                            destination_card_fd,
-                            destination_name,
-                            device=stored_asset.device,
-                            inode=stored_asset.inode,
-                        )
-                    ):
+                if previous_manifest_durable:
+                    if destination_owned and stored_asset is not None:
                         try:
-                            os.unlink(destination_name, dir_fd=destination_card_fd)
-                            os.fsync(destination_card_fd)
-                        except FileNotFoundError:
-                            pass
-                        except OSError as error:
+                            _quarantine_owned_file_at(
+                                destination_card_fd,
+                                destination_name,
+                                device=stored_asset.device,
+                                inode=stored_asset.inode,
+                            )
+                            retained_asset = None
+                        except StackStoreError as error:
                             rollback_errors.append(error)
-                            retained_asset = stored_asset
                     if (
-                        destination_directory_created
+                        retained_asset is None
+                        and destination_directory_created
                         and destination_directory_device is not None
                         and destination_directory_inode is not None
                     ):
                         try:
                             _io_checkpoint("destination-directory-cleanup")
-                            matching_directory_fd = _open_matching_directory_at(
+                            _quarantine_owned_directory_if_empty(
                                 cards_fd,
                                 str(destination_card_id),
                                 device=destination_directory_device,
                                 inode=destination_directory_inode,
                             )
-                            if matching_directory_fd is not None:
-                                try:
-                                    if not os.listdir(matching_directory_fd):
-                                        os.rmdir(
-                                            str(destination_card_id),
-                                            dir_fd=cards_fd,
-                                        )
-                                        os.fsync(cards_fd)
-                                finally:
-                                    os.close(matching_directory_fd)
-                        except FileNotFoundError:
-                            pass
-                        except OSError as error:
-                            if error.errno not in {errno.ENOTEMPTY, errno.EEXIST}:
-                                rollback_errors.append(error)
                         except StackStoreError as error:
                             rollback_errors.append(error)
                 raise StackStoreTransactionError(
                     operation_error,
                     tuple(rollback_errors),
-                    persisted_stack=persisted_after_failure,
+                    persisted_stack=(
+                        previous_stack if previous_manifest_durable else None
+                    ),
+                    observed_stack=observed_stack,
+                    durability_indeterminate=not previous_manifest_durable,
                     owned_asset=retained_asset,
                 ) from operation_error
 
         assert stored_asset is not None
         return stored_asset
 
+    @_serialized_bundle_mutation
     def save_stack_transaction(
         self,
         previous_stack: Stack,
@@ -912,6 +1159,17 @@ class StackStore:
                 raise StackStoreError(
                     "current stack document changed before duplication"
                 )
+            changed_manifest_replaced = False
+            changed_manifest_durable = False
+
+            def mark_changed_manifest_replaced() -> None:
+                nonlocal changed_manifest_replaced
+                changed_manifest_replaced = True
+
+            def mark_changed_manifest_durable() -> None:
+                nonlocal changed_manifest_durable
+                changed_manifest_durable = True
+
             try:
                 manifest_temporary_name = _write_manifest_at(
                     bundle_fd,
@@ -923,8 +1181,14 @@ class StackStore:
                     bundle_fd,
                     manifest_temporary_name,
                     checkpoints=True,
+                    on_replaced=mark_changed_manifest_replaced,
+                    on_directory_fsynced=mark_changed_manifest_durable,
                 )
                 manifest_temporary_name = None
+                if not changed_manifest_durable:
+                    raise StackStoreError(
+                        "duplicate manifest durability was not established"
+                    )
             except Exception as operation_error:
                 if manifest_temporary_name is not None:
                     try:
@@ -933,51 +1197,32 @@ class StackStore:
                         pass
                     except OSError as error:
                         rollback_errors.append(error)
-                rollback_name: str | None = None
-                try:
-                    rollback_name = _write_manifest_at(
-                        bundle_fd,
-                        previous_payload,
-                        prefix=".stack-rollback-",
-                        checkpoints=False,
+                if changed_manifest_replaced:
+                    previous_manifest_durable, observed_stack = (
+                        _recover_previous_manifest(
+                            bundle_fd,
+                            previous_payload=previous_payload,
+                            previous_stack=previous_stack,
+                            changed_stack=changed_stack,
+                            rollback_errors=rollback_errors,
+                        )
                     )
-                    _replace_manifest_at(
-                        bundle_fd,
-                        rollback_name,
-                        checkpoints=False,
-                    )
-                    rollback_name = None
-                except Exception as error:
-                    rollback_errors.append(error)
-                    if rollback_name is not None:
-                        try:
-                            os.unlink(rollback_name, dir_fd=bundle_fd)
-                        except OSError as cleanup_error:
-                            rollback_errors.append(cleanup_error)
-                persisted_after_failure: Stack | None = None
-                try:
-                    current_stack_fd = os.open(
-                        STACK_FILENAME,
-                        _secure_open_flags(),
-                        dir_fd=bundle_fd,
-                    )
-                    try:
-                        current_payload = _read_all(current_stack_fd)
-                    finally:
-                        os.close(current_stack_fd)
-                    current_stack = Stack.model_validate_json(current_payload)
-                    if current_stack == previous_stack or current_stack == changed_stack:
-                        persisted_after_failure = current_stack
-                except (OSError, ValidationError) as error:
-                    rollback_errors.append(error)
+                else:
+                    previous_manifest_durable = True
+                    observed_stack = previous_stack
                 raise StackStoreTransactionError(
                     operation_error,
                     tuple(rollback_errors),
-                    persisted_stack=persisted_after_failure,
+                    persisted_stack=(
+                        previous_stack if previous_manifest_durable else None
+                    ),
+                    observed_stack=observed_stack,
+                    durability_indeterminate=not previous_manifest_durable,
                 ) from operation_error
         finally:
             os.close(bundle_fd)
 
+    @_serialized_bundle_mutation
     def remove_image_asset_if_unreferenced(
         self,
         relative_path: str,
@@ -1065,12 +1310,16 @@ class StackStore:
                 raise StackStoreError(
                     f"owned image is not a regular file: {parsed_path}"
                 )
+            card_stat = os.fstat(card_fd)
             return StoredImageAsset(
                 relative_path=relative_path,
                 device=image_stat.st_dev,
                 inode=image_stat.st_ino,
+                directory_device=card_stat.st_dev,
+                directory_inode=card_stat.st_ino,
             )
 
+    @_serialized_bundle_mutation
     def remove_owned_image_asset_if_unreferenced(
         self,
         asset: StoredImageAsset,
@@ -1116,35 +1365,19 @@ class StackStore:
             descriptors.callback(os.close, cards_fd)
             card_fd = _open_directory_at(cards_fd, str(card_id))
             descriptors.callback(os.close, card_fd)
-            if not _file_at_matches(
+            removed = _quarantine_owned_file_at(
                 card_fd,
                 parsed_path.name,
                 device=asset.device,
                 inode=asset.inode,
-            ):
-                try:
-                    os.stat(
-                        parsed_path.name,
-                        dir_fd=card_fd,
-                        follow_symlinks=False,
-                    )
-                except FileNotFoundError:
-                    return False
-                except OSError as error:
-                    raise StackStoreError(
-                        f"could not inspect owned image {parsed_path}: {error}"
-                    ) from error
-                raise StackStoreError(
-                    f"refusing to remove image asset whose identity changed: {parsed_path}"
-                )
-            try:
-                os.unlink(parsed_path.name, dir_fd=card_fd)
-                os.fsync(card_fd)
-            except OSError as error:
-                raise StackStoreError(
-                    f"could not remove image asset {parsed_path}: {error}"
-                ) from error
-        return True
+            )
+            directory_removed = _quarantine_owned_directory_if_empty(
+                cards_fd,
+                str(card_id),
+                device=asset.directory_device,
+                inode=asset.directory_inode,
+            )
+        return removed or directory_removed
 
     def autosave_hook(self) -> Callable[[Stack], None]:
         """Return the synchronous save boundary for a later debouncer/controller."""

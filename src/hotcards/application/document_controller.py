@@ -31,6 +31,8 @@ class OwnedImageAsset:
     asset_id: UUID
     device: int
     inode: int
+    directory_device: int
+    directory_inode: int
 
 
 OwnedAssetReleaseHook = Callable[[tuple[OwnedImageAsset, ...]], None]
@@ -41,6 +43,12 @@ class _HistoryEntry:
     before: Stack
     after: Stack
     token: UndoToken
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingPersistedChange:
+    before: Stack
+    after: Stack
 
 
 class DocumentController:
@@ -58,6 +66,8 @@ class DocumentController:
         self._undo_stack: list[_HistoryEntry] = []
         self._redo_stack: list[_HistoryEntry] = []
         self._owned_assets: dict[tuple[Path, str], OwnedImageAsset] = {}
+        self._durability_pending_assets: set[tuple[Path, str]] = set()
+        self._pending_persisted_change: _PendingPersistedChange | None = None
         self._next_undo_sequence = 1
 
     @property
@@ -102,10 +112,12 @@ class DocumentController:
         self._document = validated_copy(document)
         self._undo_stack.clear()
         self._redo_stack.clear()
+        self._pending_persisted_change = None
         return self.document
 
     def execute(self, command: DocumentCommand) -> Stack:
         """Apply one command and record one session undo boundary."""
+        self._pending_persisted_change = None
         before = self._document
         after = validated_copy(command.apply(validated_copy(before)))
         self._record_change(before, after)
@@ -130,19 +142,60 @@ class DocumentController:
             persist(validated_copy(after))
         except Exception as error:
             persisted_after = getattr(error, "persisted_stack", None) == after
+            durability_indeterminate = bool(
+                getattr(error, "durability_indeterminate", False)
+            )
+            observed_stack = getattr(error, "observed_stack", None)
             retained_owned_asset = getattr(error, "owned_asset", None) is not None
             if persisted_after:
                 self._record_change(before, after)
-            if persisted_after or retained_owned_asset:
+            elif durability_indeterminate:
+                if isinstance(observed_stack, Stack):
+                    self._document = validated_copy(observed_stack)
+                self._pending_persisted_change = (
+                    _PendingPersistedChange(before=before, after=after)
+                    if observed_stack == after
+                    else None
+                )
+            if persisted_after or retained_owned_asset or durability_indeterminate:
                 for asset in tuple(owned_assets):
-                    self._owned_assets[(asset.bundle_path, asset.relative_path)] = asset
-                self._release_unreachable_owned_assets()
+                    key = (asset.bundle_path, asset.relative_path)
+                    self._owned_assets[key] = asset
+                    if durability_indeterminate:
+                        self._durability_pending_assets.add(key)
+                if not durability_indeterminate:
+                    self._release_unreachable_owned_assets()
             raise
+        self._pending_persisted_change = None
         self._record_change(before, after)
         for asset in tuple(owned_assets):
             self._owned_assets[(asset.bundle_path, asset.relative_path)] = asset
+        self._durability_pending_assets.clear()
         self._release_unreachable_owned_assets()
         return self.document
+
+    def confirm_persisted_document(self, document: Stack) -> None:
+        """Finalize history and asset cleanup after one durable retry save."""
+        persisted = validated_copy(document)
+        pending = self._pending_persisted_change
+        if (
+            pending is not None
+            and persisted == pending.after
+            and self._document == pending.after
+        ):
+            token = UndoToken(self._next_undo_sequence)
+            self._next_undo_sequence += 1
+            self._undo_stack.append(
+                _HistoryEntry(
+                    before=pending.before,
+                    after=pending.after,
+                    token=token,
+                )
+            )
+            self._redo_stack.clear()
+        self._pending_persisted_change = None
+        self._durability_pending_assets.clear()
+        self._release_unreachable_owned_assets()
 
     def _record_change(self, before: Stack, after: Stack) -> None:
         if after != before:
@@ -156,6 +209,7 @@ class DocumentController:
 
     def undo(self) -> bool:
         """Undo the latest command in this session."""
+        self._pending_persisted_change = None
         if not self._undo_stack:
             return False
         entry = self._undo_stack.pop()
@@ -173,6 +227,7 @@ class DocumentController:
 
     def redo(self) -> bool:
         """Redo the latest command undone in this session."""
+        self._pending_persisted_change = None
         if not self._redo_stack:
             return False
         entry = self._redo_stack.pop()
@@ -186,6 +241,7 @@ class DocumentController:
         """Discard undo and redo state without changing the document."""
         self._undo_stack.clear()
         self._redo_stack.clear()
+        self._pending_persisted_change = None
         self._release_unreachable_owned_assets()
 
     def register_owned_assets(
@@ -201,13 +257,19 @@ class DocumentController:
         """Release unreachable assets and forget those retained by this document."""
         self._undo_stack.clear()
         self._redo_stack.clear()
+        self._pending_persisted_change = None
         current_paths = self._background_paths(self._document)
         released = tuple(
             asset
-            for asset in self._owned_assets.values()
-            if asset.relative_path not in current_paths
+            for key, asset in self._owned_assets.items()
+            if key not in self._durability_pending_assets
+            and asset.relative_path not in current_paths
         )
-        self._owned_assets.clear()
+        self._owned_assets = {
+            key: asset
+            for key, asset in self._owned_assets.items()
+            if key in self._durability_pending_assets
+        }
         self._signal_owned_asset_release(released)
 
     def _signal_autosave(self) -> None:
@@ -221,8 +283,9 @@ class DocumentController:
             reachable_paths.update(self._background_paths(entry.after))
         released = tuple(
             asset
-            for asset in self._owned_assets.values()
-            if asset.relative_path not in reachable_paths
+            for key, asset in self._owned_assets.items()
+            if key not in self._durability_pending_assets
+            and asset.relative_path not in reachable_paths
         )
         for asset in released:
             self._owned_assets.pop((asset.bundle_path, asset.relative_path), None)

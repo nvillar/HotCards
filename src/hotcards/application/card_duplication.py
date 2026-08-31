@@ -129,6 +129,10 @@ class CardDuplicationWorkflow:
                                     asset_id=duplicate_background_id,
                                     device=error.owned_asset.device,
                                     inode=error.owned_asset.inode,
+                                    directory_device=(
+                                        error.owned_asset.directory_device
+                                    ),
+                                    directory_inode=error.owned_asset.directory_inode,
                                 )
                             )
                         raise
@@ -140,6 +144,8 @@ class CardDuplicationWorkflow:
                             asset_id=duplicate_background_id,
                             device=stored_asset.device,
                             inode=stored_asset.inode,
+                            directory_device=stored_asset.directory_device,
+                            directory_inode=stored_asset.directory_inode,
                         )
                     )
 

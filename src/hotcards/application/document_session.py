@@ -156,14 +156,21 @@ class DocumentSession(QObject):
             )
         except StackStoreError as error:
             persisted_stack = getattr(error, "persisted_stack", None)
+            durability_indeterminate = bool(
+                getattr(error, "durability_indeterminate", False)
+            )
             committed = (
                 self.controller.document != before
                 and persisted_stack == self.controller.document
             )
             if committed:
                 self._pending_snapshot = None
+            elif durability_indeterminate:
+                self._pending_snapshot = self.controller.document
             self._error = str(error)
-            self._dirty = not committed and self._pending_snapshot is not None
+            self._dirty = durability_indeterminate or (
+                not committed and self._pending_snapshot is not None
+            )
             self._emit_state()
             raise DocumentSessionError(str(error), committed=committed) from error
         self._pending_snapshot = None
@@ -200,12 +207,14 @@ class DocumentSession(QObject):
             self._emit_state()
             return False
         try:
-            self._store.save(self._pending_snapshot)
+            persisted_snapshot = self._pending_snapshot
+            self._store.save(persisted_snapshot)
         except StackStoreError as error:
             self._error = str(error)
             self._dirty = True
             self._emit_state()
             return False
+        self.controller.confirm_persisted_document(persisted_snapshot)
         self._pending_snapshot = None
         self._dirty = False
         self._error = None
@@ -279,6 +288,8 @@ class DocumentSession(QObject):
                         relative_path=asset.relative_path,
                         device=asset.device,
                         inode=asset.inode,
+                        directory_device=asset.directory_device,
+                        directory_inode=asset.directory_inode,
                     ),
                     card_id=asset.card_id,
                     asset_id=asset.asset_id,
@@ -320,6 +331,8 @@ class DocumentSession(QObject):
                         asset_id=background.id,
                         device=stored.device,
                         inode=stored.inode,
+                        directory_device=stored.directory_device,
+                        directory_inode=stored.directory_inode,
                     )
                 )
         return tuple(assets)
