@@ -164,9 +164,13 @@ class _Success:
         with self._lock:
             if self._disposed:
                 return
+            try:
+                if self._disposer is not None:
+                    self._disposer(self.value)
+            except Exception:
+                logger.exception("Could not dispose a discarded adapter result")
+                return
             self._disposed = True
-        if self._disposer is not None:
-            self._disposer(self.value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -235,6 +239,7 @@ class _InvocationThread:
 
 
 _PROCESS_MFLUX_INVOCATIONS = _InvocationThread()
+_PROCESS_MFLUX_INVOCATION_SLOT = BoundedSemaphore(1)
 
 
 class _CancellationControl:
@@ -376,9 +381,13 @@ class _BoundedRunnable(QRunnable):
                     )
                 )
             except Exception as error:
-                if self._invocation_finished is not None:
-                    self._invocation_finished()
-                self._invocation_slots.release()
+                try:
+                    if self._invocation_finished is not None:
+                        self._invocation_finished()
+                except Exception:
+                    logger.exception("MFLUX invocation startup cleanup failed")
+                finally:
+                    self._invocation_slots.release()
                 self._dispatcher.completed.emit(self._operation_id, _Error(error))
                 return
         while True:
@@ -415,7 +424,7 @@ class AdapterWorkers(QObject):
         self._mflux_pool = QThreadPool(self)
         self._mflux_pool.setMaxThreadCount(1)
         self._invocation_slots = {
-            AdapterKind.MFLUX: BoundedSemaphore(1),
+            AdapterKind.MFLUX: _PROCESS_MFLUX_INVOCATION_SLOT,
         }
         self._invocation_thread = _PROCESS_MFLUX_INVOCATIONS
         self._dispatcher = _CompletionDispatcher(self)

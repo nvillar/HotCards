@@ -178,6 +178,73 @@ def test_invocation_callback_failure_does_not_break_later_work(
     workers.shutdown(wait_milliseconds=500)
 
 
+def test_startup_cleanup_failure_releases_slot_and_reports_original_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    workers = AdapterWorkers(mflux_timeout_seconds=0.5)
+
+    def fail_start() -> None:
+        raise ValueError("injected startup failure")
+
+    def fail_completion() -> None:
+        raise RuntimeError("injected completion failure")
+
+    failed = workers.run_mflux(
+        lambda: "unreachable",
+        stage="starting first image",
+        invocation_started=fail_start,
+        invocation_finished=fail_completion,
+    )
+    wait_for(failed)
+    follow_up = workers.run_mflux(
+        lambda: "second",
+        stage="generating second image",
+    )
+    wait_for(follow_up)
+
+    assert failed.status is OperationStatus.FAILED
+    assert failed.failure is not None
+    assert failed.failure.exception_type == "ValueError"
+    assert "injected startup failure" in failed.failure.message
+    assert follow_up.result == "second"
+    assert "MFLUX invocation startup cleanup failed" in caplog.text
+    workers.shutdown(wait_milliseconds=500)
+
+
+def test_disposer_failure_does_not_abort_cancellation_or_shutdown(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    workers = AdapterWorkers(mflux_timeout_seconds=0.5)
+    returned = Event()
+    release_delivery = Event()
+
+    def return_then_pause() -> object:
+        returned.set()
+        release_delivery.wait()
+        return object()
+
+    disposal_attempts: list[None] = []
+
+    def fail_disposal(_result: object) -> None:
+        disposal_attempts.append(None)
+        raise OSError("injected disposal failure")
+
+    operation = workers.run_mflux(
+        return_then_pause,
+        stage="generating disposable image",
+        dispose_result=fail_disposal,
+    )
+    assert returned.wait(0.5)
+    operation.cancel()
+    release_delivery.set()
+    spin_event_loop(50)
+    workers.shutdown(wait_milliseconds=500)
+
+    assert operation.status is OperationStatus.CANCELLED
+    assert disposal_attempts
+    assert "Could not dispose a discarded adapter result" in caplog.text
+
+
 def test_cancellation_discards_a_late_success() -> None:
     workers = AdapterWorkers(mflux_timeout_seconds=0.5)
     entered = Event()
@@ -342,6 +409,48 @@ def test_mflux_stays_serialized_after_ui_timeout() -> None:
     wait_for(second)
     assert second.result == "second"
     workers.shutdown(wait_milliseconds=500)
+
+
+def test_cross_worker_timeouts_do_not_queue_abandoned_invocations() -> None:
+    first_workers = AdapterWorkers(mflux_timeout_seconds=0.05)
+    second_workers = AdapterWorkers(mflux_timeout_seconds=0.05)
+    first_entered = Event()
+    release_first = Event()
+    first_finished = Event()
+    second_called = Event()
+
+    def stalled_first() -> None:
+        first_entered.set()
+        release_first.wait()
+        first_finished.set()
+
+    first = first_workers.run_mflux(
+        stalled_first,
+        stage="stalled first image",
+    )
+    assert first_entered.wait(0.5)
+    wait_for(first)
+    second = second_workers.run_mflux(
+        second_called.set,
+        stage="queued second image",
+    )
+    wait_for(second)
+
+    release_first.set()
+    assert first_finished.wait(0.5)
+    follow_up = second_workers.run_mflux(
+        lambda: "follow-up",
+        stage="generating follow-up image",
+        timeout_seconds=0.5,
+    )
+    wait_for(follow_up)
+
+    assert first.status is OperationStatus.FAILED
+    assert second.status is OperationStatus.FAILED
+    assert not second_called.is_set()
+    assert follow_up.result == "follow-up"
+    first_workers.shutdown(wait_milliseconds=500)
+    second_workers.shutdown(wait_milliseconds=500)
 
 
 def test_timeout_requests_cancel_and_disposes_late_success_once() -> None:
