@@ -7,6 +7,7 @@ from pathlib import Path
 from threading import Event, Thread
 from types import SimpleNamespace
 from uuid import uuid4
+from weakref import finalize, ref
 
 import pytest
 from PIL import Image
@@ -72,6 +73,32 @@ class FakeGeneratedImage:
         )
 
 
+class SuffixingGeneratedImage(FakeGeneratedImage):
+    def save(self, path: Path, *, overwrite: bool) -> None:
+        assert not overwrite
+        suffixed = path.with_name(f"{path.stem}_1{path.suffix}")
+        Image.new("RGB", (self.width, self.height), "navy").save(
+            suffixed,
+            format="PNG",
+        )
+
+
+class CancellingGeneratedImage(FakeGeneratedImage):
+    def __init__(
+        self,
+        width: int,
+        height: int,
+        *,
+        cancellation: MfluxCancellationToken,
+    ) -> None:
+        super().__init__(width, height)
+        self.cancellation = cancellation
+
+    def save(self, path: Path, *, overwrite: bool) -> None:
+        super().save(path, overwrite=overwrite)
+        self.cancellation.cancel()
+
+
 class FakeCallbackRegistry:
     def __init__(self) -> None:
         self.registered: list[object] = []
@@ -113,6 +140,36 @@ class FakeMfluxModel:
         )
 
 
+class GeneratedImageModel(FakeMfluxModel):
+    def __init__(self, generated_image: FakeGeneratedImage) -> None:
+        super().__init__()
+        self.generated_image = generated_image
+
+    def generate_image(self, **kwargs: object) -> FakeGeneratedImage:
+        self.calls.append(kwargs)
+        return self.generated_image
+
+
+class RacingMfluxModel(FakeMfluxModel):
+    def __init__(
+        self,
+        *,
+        target: Path,
+        foreign_bytes: bytes,
+    ) -> None:
+        super().__init__()
+        self.target = target
+        self.foreign_bytes = foreign_bytes
+
+    def generate_image(self, **kwargs: object) -> FakeGeneratedImage:
+        self.calls.append(kwargs)
+        self.target.write_bytes(self.foreign_bytes)
+        return FakeGeneratedImage(
+            width=kwargs["width"],  # type: ignore[arg-type]
+            height=kwargs["height"],  # type: ignore[arg-type]
+        )
+
+
 class BlockingMfluxModel(FakeMfluxModel):
     def __init__(
         self,
@@ -145,6 +202,10 @@ class BlockingMfluxModel(FakeMfluxModel):
 def write_source(path: Path) -> Path:
     Image.new("RGB", (32, 32), "green").save(path, format="PNG")
     return path
+
+
+def owned_output_scopes(directory: Path) -> list[Path]:
+    return list(directory.glob(".hotcards-mflux-*"))
 
 
 def generate_request(
@@ -593,6 +654,126 @@ def test_incompatible_family_model_or_quantization_evicts_cached_model(
     assert len(releases) == 2
 
 
+def test_family_switches_destroy_old_model_before_cache_clear_and_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_path = write_source(tmp_path / "source.png")
+    snapshot = ImageReferenceSnapshot(
+        card_id=uuid4(),
+        revision_id=uuid4(),
+        background_id=uuid4(),
+    )
+    events: list[str] = []
+    current_ref: ref[FakeMfluxModel] | None = None
+    current_label = ""
+
+    def make_model(label: str) -> FakeMfluxModel:
+        nonlocal current_ref, current_label
+        model = FakeMfluxModel()
+        current_ref = ref(model)
+        current_label = label
+        finalize(model, events.append, f"destroy:{label}")
+        return model
+
+    def clear_cache() -> None:
+        assert current_ref is not None
+        assert current_ref() is None
+        events.append(f"clear:{current_label}")
+
+    def regular_factory(
+        _model_identifier: str,
+        _quantization: int | None,
+    ) -> FakeMfluxModel:
+        if current_ref is not None:
+            assert current_ref() is None
+            assert events[-1] == f"clear:{current_label}"
+        events.append("factory:regular")
+        return make_model("regular")
+
+    def edit_factory(
+        _model_identifier: str,
+        _quantization: int | None,
+    ) -> FakeMfluxModel:
+        assert current_ref is not None
+        assert current_ref() is None
+        assert events[-1] == "clear:regular"
+        events.append("factory:edit")
+        return make_model("edit")
+
+    monkeypatch.setattr(mflux_module, "_release_model_cache", clear_cache)
+    generator = MfluxGenerator(
+        model_factory=regular_factory,
+        edit_model_factory=edit_factory,
+    )
+
+    generator.generate(
+        generate_request(tmp_path / "regular.png"),
+        progress=lambda *_: None,
+    )
+    generator.generate(
+        generate_request(
+            tmp_path / "edit.png",
+            references=(snapshot,),
+            reference_paths=(source_path,),
+        )
+    )
+    generator.generate(generate_request(tmp_path / "regular-again.png"))
+
+    assert events[:7] == [
+        "factory:regular",
+        "destroy:regular",
+        "clear:regular",
+        "factory:edit",
+        "destroy:edit",
+        "clear:edit",
+        "factory:regular",
+    ]
+
+
+def test_config_switch_destroys_old_model_before_cache_clear_and_factory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    old_ref: ref[FakeMfluxModel] | None = None
+
+    def factory(
+        model_identifier: str,
+        _quantization: int | None,
+    ) -> FakeMfluxModel:
+        nonlocal old_ref
+        if model_identifier == "flux2-klein-9b":
+            assert old_ref is not None
+            assert old_ref() is None
+            assert events == ["destroy", "clear"]
+            events.append("replacement")
+            return FakeMfluxModel()
+        model = FakeMfluxModel()
+        old_ref = ref(model)
+        finalize(model, events.append, "destroy")
+        return model
+
+    def clear_cache() -> None:
+        assert old_ref is not None
+        assert old_ref() is None
+        events.append("clear")
+
+    monkeypatch.setattr(mflux_module, "_release_model_cache", clear_cache)
+    generator = MfluxGenerator(model_factory=factory)
+    generator.generate(generate_request(tmp_path / "first.png"))
+
+    generator.generate(
+        generate_request(
+            tmp_path / "second.png",
+            model_identifier="flux2-klein-9b",
+            quantization=8,
+        )
+    )
+
+    assert events == ["destroy", "clear", "replacement"]
+
+
 def test_release_discards_this_adapters_cached_configuration(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -610,6 +791,37 @@ def test_release_discards_this_adapters_cached_configuration(
 
     assert releases == [None]
     assert mflux_module._CACHED_MODEL is None
+
+
+def test_release_destroys_model_before_clearing_mlx_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    model_ref: ref[FakeMfluxModel] | None = None
+
+    def factory(*_args: object) -> FakeMfluxModel:
+        nonlocal model_ref
+        model = FakeMfluxModel()
+        model_ref = ref(model)
+        finalize(model, events.append, "destroy")
+        return model
+
+    def clear_cache() -> None:
+        assert model_ref is not None
+        assert model_ref() is None
+        events.append("clear")
+
+    monkeypatch.setattr(mflux_module, "_release_model_cache", clear_cache)
+    generator = MfluxGenerator(model_factory=factory)
+    generator.generate(
+        generate_request(tmp_path / "generated.png"),
+        progress=lambda *_: None,
+    )
+
+    generator.release()
+
+    assert events == ["destroy", "clear"]
 
 
 def test_separate_adapter_instances_share_one_process_execution_boundary(
@@ -718,6 +930,121 @@ def test_cancellation_during_generation_publishes_no_output_or_source_cleanup(
     assert mflux_module._CACHED_MODEL is None
 
 
+def test_cancellation_destroys_active_model_before_clearing_mlx_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entered = Event()
+    release = Event()
+    cancellation = MfluxCancellationToken()
+    events: list[str] = []
+    model_ref: ref[FakeMfluxModel] | None = None
+
+    def factory(*_args: object) -> FakeMfluxModel:
+        nonlocal model_ref
+        model = BlockingMfluxModel(entered=entered, release=release)
+        model_ref = ref(model)
+        finalize(model, events.append, "destroy")
+        return model
+
+    def clear_cache() -> None:
+        assert model_ref is not None
+        assert model_ref() is None
+        events.append("clear")
+
+    monkeypatch.setattr(mflux_module, "_release_model_cache", clear_cache)
+    generator = MfluxGenerator(model_factory=factory)
+    thread, outcomes = run_in_thread(
+        lambda: generator.generate(
+            generate_request(tmp_path / "cancelled.png"),
+            cancellation=cancellation,
+        )
+    )
+    assert entered.wait(1)
+
+    cancellation.cancel()
+    release.set()
+    thread.join(2)
+
+    assert isinstance(outcomes[0], ImageGenerationCancelled)
+    assert events == ["destroy", "clear"]
+
+
+def test_success_atomically_publishes_exact_target_and_cleans_owned_scope(
+    tmp_path: Path,
+) -> None:
+    output_path = tmp_path / "published.png"
+    generator = MfluxGenerator(model_factory=lambda *_: FakeMfluxModel())
+
+    result = generator.generate(generate_request(output_path))
+
+    assert result.output_path == output_path
+    assert output_path.is_file()
+    with Image.open(output_path) as generated:
+        assert generated.size == (592, 448)
+    assert owned_output_scopes(tmp_path) == []
+
+
+def test_target_created_during_inference_survives_failed_publication(
+    tmp_path: Path,
+) -> None:
+    output_path = tmp_path / "raced.png"
+    foreign_bytes = b"foreign-writer"
+    model = RacingMfluxModel(
+        target=output_path,
+        foreign_bytes=foreign_bytes,
+    )
+    generator = MfluxGenerator(model_factory=lambda *_: model)
+
+    with pytest.raises(ImageGenerationError, match="appeared before publication"):
+        generator.generate(generate_request(output_path))
+
+    assert output_path.read_bytes() == foreign_bytes
+    assert owned_output_scopes(tmp_path) == []
+
+
+def test_mflux_suffix_output_is_rejected_and_owned_scope_is_cleaned(
+    tmp_path: Path,
+) -> None:
+    output_path = tmp_path / "requested.png"
+    generator = MfluxGenerator(
+        model_factory=lambda *_: GeneratedImageModel(
+            SuffixingGeneratedImage(592, 448)
+        )
+    )
+
+    with pytest.raises(ImageGenerationError, match="reserved candidate"):
+        generator.generate(generate_request(output_path))
+
+    assert not output_path.exists()
+    assert owned_output_scopes(tmp_path) == []
+
+
+def test_cancellation_after_temp_save_publishes_nothing_and_cleans_scope(
+    tmp_path: Path,
+) -> None:
+    output_path = tmp_path / "cancelled-after-save.png"
+    cancellation = MfluxCancellationToken()
+    generator = MfluxGenerator(
+        model_factory=lambda *_: GeneratedImageModel(
+            CancellingGeneratedImage(
+                592,
+                448,
+                cancellation=cancellation,
+            )
+        )
+    )
+
+    with pytest.raises(ImageGenerationCancelled, match="cancelled"):
+        generator.generate(
+            generate_request(output_path),
+            cancellation=cancellation,
+        )
+
+    assert not output_path.exists()
+    assert owned_output_scopes(tmp_path) == []
+
+
 def test_operation_errors_are_actionable_and_leave_no_output(
     tmp_path: Path,
 ) -> None:
@@ -726,6 +1053,8 @@ def test_operation_errors_are_actionable_and_leave_no_output(
     generator = MfluxGenerator(model_factory=lambda *_: FakeMfluxModel())
     with pytest.raises(ImageGenerationError, match="overwrite.*generate"):
         generator.generate(generate_request(output_path))
+    assert output_path.read_bytes() == b"existing"
+    assert owned_output_scopes(tmp_path) == []
 
     failing = MfluxGenerator(
         model_factory=lambda *_: FakeMfluxModel(
@@ -739,6 +1068,7 @@ def test_operation_errors_are_actionable_and_leave_no_output(
     ):
         failing.generate(generate_request(failed_path))
     assert not failed_path.exists()
+    assert owned_output_scopes(tmp_path) == []
 
     blocked_parent = tmp_path / "not-a-directory"
     blocked_parent.write_text("file")
@@ -766,3 +1096,4 @@ def test_model_load_and_output_validation_errors_are_typed(
     with pytest.raises(ImageGenerationError, match="unreadable image"):
         corrupt.generate(generate_request(output_path))
     assert not output_path.exists()
+    assert owned_output_scopes(tmp_path) == []

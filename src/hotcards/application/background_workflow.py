@@ -135,7 +135,6 @@ class BackgroundWorkflow(QObject):
         self._request_id: UUID | None = None
         self._request_target: _GenerationTarget | None = None
         self._pending_image_path: Path | None = None
-        self._active_output_path: Path | None = None
         self._cancellation: MfluxCancellationToken | None = None
         self._busy = False
 
@@ -209,7 +208,6 @@ class BackgroundWorkflow(QObject):
         )
         cancellation = MfluxCancellationToken()
         self._cancellation = cancellation
-        self._active_output_path = output_path
         self._set_busy(True, "Generating image...")
         operation = self.workers.run_mflux(
             lambda: self._mflux_generator.generate(
@@ -294,7 +292,6 @@ class BackgroundWorkflow(QObject):
         self._request_target = None
         self._operation = None
         self._discard_pending_image()
-        self._discard_active_output()
         if self._busy:
             self._set_busy(False, "Generation cancelled")
 
@@ -376,7 +373,6 @@ class BackgroundWorkflow(QObject):
             self._finish_with_error(error)
             return
         self._pending_image_path = None
-        self._active_output_path = None
         self._cancellation = None
         result.output_path.unlink(missing_ok=True)
         self._operation = None
@@ -451,7 +447,6 @@ class BackgroundWorkflow(QObject):
         self._request_target = None
         self._cancellation = None
         self._discard_pending_image()
-        self._discard_active_output()
         self._set_busy(False, "Image generation failed")
         self.failed.emit(failure)
 
@@ -459,11 +454,6 @@ class BackgroundWorkflow(QObject):
         if self._pending_image_path is not None:
             self._pending_image_path.unlink(missing_ok=True)
             self._pending_image_path = None
-
-    def _discard_active_output(self) -> None:
-        if self._active_output_path is not None:
-            self._active_output_path.unlink(missing_ok=True)
-            self._active_output_path = None
 
     def _set_busy(self, busy: bool, progress: str) -> None:
         self._busy = busy

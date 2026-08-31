@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import gc
+import os
+import shutil
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -112,17 +115,29 @@ class MfluxCancellationToken:
 
     def __init__(self) -> None:
         self._event = Event()
+        self._publication_lock = Lock()
 
     @property
     def is_cancelled(self) -> bool:
         return self._event.is_set()
 
     def cancel(self) -> None:
-        self._event.set()
+        with self._publication_lock:
+            self._event.set()
 
     def raise_if_cancelled(self, operation: str) -> None:
         if self.is_cancelled:
             raise ImageGenerationCancelled(f"MFLUX {operation} was cancelled")
+
+    def publish_if_active(
+        self,
+        operation: str,
+        publish: Callable[[], None],
+    ) -> None:
+        """Linearize cancellation against final output publication."""
+        with self._publication_lock:
+            self.raise_if_cancelled(operation)
+            publish()
 
 
 class _MfluxStepProgress:
@@ -426,12 +441,103 @@ _PROCESS_EXECUTION_LOCK = Lock()
 _CACHED_MODEL: _CachedModel | None = None
 
 
+def _cached_model_is_compatible(
+    *,
+    family: _ModelFamily,
+    model_identifier: str,
+    quantization: int | None,
+    factory: object,
+) -> bool:
+    cached = _CACHED_MODEL
+    return cached is not None and cached.is_compatible(
+        family=family,
+        model_identifier=model_identifier,
+        quantization=quantization,
+        factory=factory,
+    )
+
+
+def _cached_model_uses_factory(
+    regular_factory: object,
+    edit_factory: object,
+) -> bool:
+    cached = _CACHED_MODEL
+    return cached is not None and (
+        cached.factory is regular_factory or cached.factory is edit_factory
+    )
+
+
 def _release_cached_model_locked() -> None:
+    """Detach every cache-owned model reference before clearing MLX memory."""
     global _CACHED_MODEL
     if _CACHED_MODEL is None:
         return
+    if _CACHED_MODEL.progress is not None:
+        _CACHED_MODEL.progress.clear_context()
     _CACHED_MODEL = None
     _release_model_cache()
+
+
+@dataclass(frozen=True, slots=True)
+class _OwnedOutput:
+    scope: Path
+    candidate: Path
+
+    @classmethod
+    def create(cls, target: Path, operation: str) -> _OwnedOutput:
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            raise ImageGenerationError(
+                f"MFLUX {operation} could not prepare output directory "
+                f"{target.parent}: {error}"
+            ) from error
+        if os.path.lexists(target):
+            raise ImageGenerationError(
+                f"Refusing to overwrite existing MFLUX {operation} output: {target}"
+            )
+        try:
+            scope = Path(
+                tempfile.mkdtemp(
+                    prefix=".hotcards-mflux-",
+                    dir=target.parent,
+                )
+            )
+        except OSError as error:
+            raise ImageGenerationError(
+                f"MFLUX {operation} could not reserve a private output scope in "
+                f"{target.parent}: {error}"
+            ) from error
+        return cls(scope=scope, candidate=scope / "candidate.png")
+
+    def publish(self, target: Path, operation: str) -> None:
+        try:
+            os.link(self.candidate, target)
+        except FileExistsError as error:
+            raise ImageGenerationError(
+                f"MFLUX {operation} output appeared before publication; "
+                f"refusing to overwrite {target}"
+            ) from error
+        except OSError as error:
+            if os.path.lexists(target):
+                raise ImageGenerationError(
+                    f"MFLUX {operation} output appeared before publication; "
+                    f"refusing to overwrite {target}"
+                ) from error
+            raise ImageGenerationError(
+                f"MFLUX {operation} could not atomically publish {target}: {error}"
+            ) from error
+
+    def cleanup(self, operation: str) -> None:
+        if not self.scope.exists():
+            return
+        try:
+            shutil.rmtree(self.scope)
+        except OSError as error:
+            raise ImageGenerationError(
+                f"MFLUX {operation} could not clean private output scope "
+                f"{self.scope}: {error}"
+            ) from error
 
 
 class MfluxGenerator:
@@ -497,10 +603,9 @@ class MfluxGenerator:
     def release(self) -> None:
         """Release this adapter's compatible process-local cached model."""
         with _PROCESS_EXECUTION_LOCK:
-            cached = _CACHED_MODEL
-            if cached is not None and (
-                cached.factory is self._model_factory
-                or cached.factory is self._edit_model_factory
+            if _cached_model_uses_factory(
+                self._model_factory,
+                self._edit_model_factory,
             ):
                 _release_cached_model_locked()
 
@@ -520,20 +625,12 @@ class MfluxGenerator:
             token.raise_if_cancelled(operation)
         queue_duration_seconds = perf_counter() - request_started
         progress_callback: _MfluxStepProgress | None = None
+        model: MfluxRegularModelProtocol | MfluxEditModelProtocol | None = None
+        image: GeneratedImageProtocol | None = None
+        owned_output: _OwnedOutput | None = None
         try:
             token.raise_if_cancelled(operation)
-            if request.output_path.exists():
-                raise ImageGenerationError(
-                    f"Refusing to overwrite existing MFLUX {operation} output: "
-                    f"{request.output_path}"
-                )
-            try:
-                request.output_path.parent.mkdir(parents=True, exist_ok=True)
-            except OSError as error:
-                raise ImageGenerationError(
-                    f"MFLUX {operation} could not prepare output directory "
-                    f"{request.output_path.parent}: {error}"
-                ) from error
+            owned_output = _OwnedOutput.create(request.output_path, operation)
             load_started = perf_counter()
             model, family = self._model_for(request)
             load_duration_seconds = perf_counter() - load_started
@@ -557,13 +654,13 @@ class MfluxGenerator:
             generated_at = datetime.now(UTC)
             generation_started = perf_counter()
             try:
-                image = model.generate_image(  # type: ignore[union-attr]
+                image = model.generate_image(
                     **self._generation_arguments(request),
                 )
                 token.raise_if_cancelled(operation)
                 generation_duration_seconds = perf_counter() - generation_started
                 serialization_started = perf_counter()
-                image.save(request.output_path, overwrite=False)
+                image.save(owned_output.candidate, overwrite=False)
                 token.raise_if_cancelled(operation)
                 serialization_duration_seconds = (
                     perf_counter() - serialization_started
@@ -578,13 +675,19 @@ class MfluxGenerator:
                 TypeError,
                 ValueError,
             ) as error:
-                request.output_path.unlink(missing_ok=True)
                 raise ImageGenerationError(
                     f"MFLUX {operation} failed for "
                     f"{request.model_identifier!r}: {error}"
                 ) from error
-            self._validate_output(request)
+            self._validate_output(
+                owned_output.candidate,
+                request=request,
+            )
             token.raise_if_cancelled(operation)
+            token.publish_if_active(
+                operation,
+                lambda: owned_output.publish(request.output_path, operation),
+            )
             duration_seconds = perf_counter() - request_started
             settings = ImageOperationSettings(
                 model_identifier=request.model_identifier,
@@ -612,14 +715,25 @@ class MfluxGenerator:
                 generation_duration_seconds=generation_duration_seconds,
                 serialization_duration_seconds=serialization_duration_seconds,
             )
-        except ImageGenerationCancelled:
-            request.output_path.unlink(missing_ok=True)
+        except ImageGenerationCancelled as error:
+            error.__traceback__ = None
+            image = None
+            model = None
+            if progress_callback is not None:
+                progress_callback.clear_context()
+                progress_callback = None
             _release_cached_model_locked()
-            raise
+            raise error from None
         finally:
             if progress_callback is not None:
                 progress_callback.clear_context()
-            _PROCESS_EXECUTION_LOCK.release()
+            image = None
+            model = None
+            try:
+                if owned_output is not None:
+                    owned_output.cleanup(operation)
+            finally:
+                _PROCESS_EXECUTION_LOCK.release()
 
     def _model_for(
         self,
@@ -635,8 +749,7 @@ class MfluxGenerator:
             if family is _ModelFamily.REGULAR
             else self._edit_model_factory
         )
-        cached = _CACHED_MODEL
-        if cached is None or not cached.is_compatible(
+        if not _cached_model_is_compatible(
             family=family,
             model_identifier=request.model_identifier,
             quantization=request.quantization,
@@ -667,8 +780,9 @@ class MfluxGenerator:
                 factory=factory,
                 model=model,
             )
-            cached = _CACHED_MODEL
-        return cached.model, family
+            return model, family
+        assert _CACHED_MODEL is not None
+        return _CACHED_MODEL.model, family
 
     @staticmethod
     def _progress_callback_for(
@@ -769,30 +883,32 @@ class MfluxGenerator:
                 )
 
     @staticmethod
-    def _validate_output(request: MfluxOperationRequest) -> None:
-        if not request.output_path.is_file():
+    def _validate_output(
+        output_path: Path,
+        *,
+        request: MfluxOperationRequest,
+    ) -> None:
+        if not output_path.is_file():
             raise ImageGenerationError(
                 f"MFLUX {request.operation} reported success but did not create "
-                f"{request.output_path}"
+                f"the reserved candidate {output_path}"
             )
         try:
-            with Image.open(request.output_path) as saved_image:
+            with Image.open(output_path) as saved_image:
                 image_format = saved_image.format
                 image_size = saved_image.size
                 saved_image.verify()
-            with Image.open(request.output_path) as decoded_image:
+            with Image.open(output_path) as decoded_image:
                 decoded_image.load()
         except (OSError, UnidentifiedImageError) as error:
-            request.output_path.unlink(missing_ok=True)
             raise ImageGenerationError(
                 f"MFLUX {request.operation} produced an unreadable image at "
-                f"{request.output_path}: {error}"
+                f"{output_path}: {error}"
             ) from error
         if image_format != "PNG" or image_size != (
             request.width,
             request.height,
         ):
-            request.output_path.unlink(missing_ok=True)
             raise ImageGenerationError(
                 f"MFLUX {request.operation} output did not match the requested "
                 f"PNG contract: format={image_format!r}, size={image_size!r}, "
