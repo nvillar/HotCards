@@ -80,12 +80,12 @@ class WorkerOperation(QObject):
     def __init__(
         self,
         operation_id: UUID,
-        cancel_event: Event,
+        cancellation: _CancellationControl,
         start_lock: Lock,
     ) -> None:
         super().__init__()
         self._operation_id = operation_id
-        self._cancel_event = cancel_event
+        self._cancellation = cancellation
         self._start_lock = start_lock
         self._lock = Lock()
         self._status = OperationStatus.PENDING
@@ -123,7 +123,7 @@ class WorkerOperation(QObject):
                 if self._status is not OperationStatus.PENDING:
                     return
                 self._status = OperationStatus.CANCELLED
-                self._cancel_event.set()
+                self._cancellation.request()
         self.cancelled.emit()
         self.finished.emit()
 
@@ -146,9 +146,24 @@ class WorkerOperation(QObject):
         self.finished.emit()
 
 
-@dataclass(frozen=True, slots=True)
 class _Success:
-    value: Any
+    def __init__(
+        self,
+        value: Any,
+        disposer: Callable[[Any], None] | None,
+    ) -> None:
+        self.value = value
+        self._disposer = disposer
+        self._lock = Lock()
+        self._disposed = False
+
+    def dispose(self) -> None:
+        with self._lock:
+            if self._disposed:
+                return
+            self._disposed = True
+        if self._disposer is not None:
+            self._disposer(self.value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,6 +176,54 @@ class _Timeout:
     pass
 
 
+class _CancellationControl:
+    def __init__(
+        self,
+        request_adapter_cancel: Callable[[], None] | None,
+    ) -> None:
+        self.event = Event()
+        self._request_adapter_cancel = request_adapter_cancel
+        self._lock = Lock()
+        self._requested = False
+        self._pending_success: _Success | None = None
+
+    def request(self) -> None:
+        pending: _Success | None
+        request_adapter_cancel: Callable[[], None] | None
+        with self._lock:
+            if self._requested:
+                return
+            self._requested = True
+            self.event.set()
+            pending = self._pending_success
+            self._pending_success = None
+            request_adapter_cancel = self._request_adapter_cancel
+        try:
+            if request_adapter_cancel is not None:
+                request_adapter_cancel()
+        finally:
+            if pending is not None:
+                pending.dispose()
+
+    def offer_success(self, success: _Success) -> bool:
+        with self._lock:
+            if self._requested:
+                accepted = False
+            else:
+                self._pending_success = success
+                accepted = True
+        if not accepted:
+            success.dispose()
+        return accepted
+
+    def claim_success(self, success: _Success) -> bool:
+        with self._lock:
+            if self._requested or self._pending_success is not success:
+                return False
+            self._pending_success = None
+            return True
+
+
 @dataclass(slots=True)
 class _OperationRecord:
     handle: WorkerOperation
@@ -169,7 +232,7 @@ class _OperationRecord:
     timeout_seconds: float
     availability_check: bool
     emit_availability: bool
-    cancel_event: Event
+    cancellation: _CancellationControl
     start_lock: Lock
     deadline: float
 
@@ -184,8 +247,9 @@ class _BoundedRunnable(QRunnable):
         *,
         operation_id: UUID,
         operation: Callable[[], Any],
+        dispose_result: Callable[[Any], None] | None,
         deadline: float,
-        cancel_event: Event,
+        cancellation: _CancellationControl,
         start_lock: Lock,
         invocation_slots: BoundedSemaphore,
         dispatcher: _CompletionDispatcher,
@@ -193,24 +257,28 @@ class _BoundedRunnable(QRunnable):
         super().__init__()
         self._operation_id = operation_id
         self._operation = operation
+        self._dispose_result = dispose_result
         self._deadline = deadline
-        self._cancel_event = cancel_event
+        self._cancellation = cancellation
         self._start_lock = start_lock
         self._invocation_slots = invocation_slots
         self._dispatcher = dispatcher
 
     def run(self) -> None:
-        if self._cancel_event.is_set():
+        if self._cancellation.event.is_set():
+            self._cancellation.request()
             self._dispatcher.completed.emit(self._operation_id, _Timeout())
             return
         remaining = self._deadline - monotonic()
         if remaining <= 0:
+            self._cancellation.request()
             self._dispatcher.completed.emit(self._operation_id, _Timeout())
             return
 
-        while not self._cancel_event.is_set():
+        while not self._cancellation.event.is_set():
             remaining = self._deadline - monotonic()
             if remaining <= 0:
+                self._cancellation.request()
                 self._dispatcher.completed.emit(self._operation_id, _Timeout())
                 return
             if self._invocation_slots.acquire(timeout=min(remaining, 0.05)):
@@ -224,15 +292,22 @@ class _BoundedRunnable(QRunnable):
         def invoke() -> None:
             try:
                 try:
-                    outcome: _Success | _Error = _Success(self._operation())
+                    outcome: _Success | _Error = _Success(
+                        self._operation(),
+                        self._dispose_result,
+                    )
                 except Exception as error:
                     outcome = _Error(error)
-                outcomes.put(outcome)
+                if not isinstance(outcome, _Success) or self._cancellation.offer_success(
+                    outcome
+                ):
+                    outcomes.put(outcome)
             finally:
                 self._invocation_slots.release()
 
         with self._start_lock:
-            if self._cancel_event.is_set() or self._deadline <= monotonic():
+            if self._cancellation.event.is_set() or self._deadline <= monotonic():
+                self._cancellation.request()
                 self._invocation_slots.release()
                 self._dispatcher.completed.emit(self._operation_id, _Timeout())
                 return
@@ -248,11 +323,17 @@ class _BoundedRunnable(QRunnable):
                 return
         while True:
             remaining = self._deadline - monotonic()
-            if remaining <= 0 or self._cancel_event.is_set():
+            if remaining <= 0 or self._cancellation.event.is_set():
+                self._cancellation.request()
                 outcome: _Success | _Error | _Timeout = _Timeout()
                 break
             try:
                 outcome = outcomes.get(timeout=min(remaining, 0.05))
+                if isinstance(outcome, _Success) and not self._cancellation.claim_success(
+                    outcome
+                ):
+                    outcome.dispose()
+                    outcome = _Timeout()
                 break
             except Empty:
                 continue
@@ -296,6 +377,8 @@ class AdapterWorkers(QObject):
         *,
         stage: str,
         timeout_seconds: float | None = None,
+        request_cancel: Callable[[], None] | None = None,
+        dispose_result: Callable[[Any], None] | None = None,
     ) -> WorkerOperation:
         """Submit a synchronous MFLUX operation to the serialized queue."""
         return self._submit(
@@ -305,6 +388,8 @@ class AdapterWorkers(QObject):
             timeout_seconds=timeout_seconds,
             availability_check=False,
             emit_availability=True,
+            request_cancel=request_cancel,
+            dispose_result=dispose_result,
         )
 
     def check_mflux(
@@ -323,6 +408,8 @@ class AdapterWorkers(QObject):
             timeout_seconds=timeout_seconds,
             availability_check=True,
             emit_availability=emit_diagnostic,
+            request_cancel=None,
+            dispose_result=None,
         )
 
     def shutdown(self, *, wait_milliseconds: int = 0) -> None:
@@ -347,6 +434,8 @@ class AdapterWorkers(QObject):
         timeout_seconds: float | None,
         availability_check: bool,
         emit_availability: bool,
+        request_cancel: Callable[[], None] | None,
+        dispose_result: Callable[[Any], None] | None,
     ) -> WorkerOperation:
         if not callable(operation):
             raise TypeError("worker operation must be callable")
@@ -359,9 +448,9 @@ class AdapterWorkers(QObject):
             else _validate_timeout(timeout_seconds)
         )
         operation_id = uuid4()
-        cancel_event = Event()
+        cancellation = _CancellationControl(request_cancel)
         start_lock = Lock()
-        handle = WorkerOperation(operation_id, cancel_event, start_lock)
+        handle = WorkerOperation(operation_id, cancellation, start_lock)
         deadline = monotonic() + timeout
         with self._state_lock:
             if self._closed:
@@ -373,7 +462,7 @@ class AdapterWorkers(QObject):
                 timeout_seconds=timeout,
                 availability_check=availability_check,
                 emit_availability=emit_availability,
-                cancel_event=cancel_event,
+                cancellation=cancellation,
                 start_lock=start_lock,
                 deadline=deadline,
             )
@@ -381,8 +470,9 @@ class AdapterWorkers(QObject):
             runnable = _BoundedRunnable(
                 operation_id=operation_id,
                 operation=operation,
+                dispose_result=dispose_result,
                 deadline=deadline,
-                cancel_event=cancel_event,
+                cancellation=cancellation,
                 start_lock=start_lock,
                 invocation_slots=self._invocation_slots[adapter],
                 dispatcher=self._dispatcher,
@@ -395,15 +485,21 @@ class AdapterWorkers(QObject):
     def _complete(self, operation_id: UUID, outcome: object) -> None:
         record = self._records.pop(operation_id, None)
         if record is None:
+            if isinstance(outcome, _Success):
+                outcome.dispose()
             return
         self._schedule_deadline()
         if record.handle.status is OperationStatus.CANCELLED:
+            if isinstance(outcome, _Success):
+                outcome.dispose()
             return
         if isinstance(outcome, _Success):
             record.handle._succeed(outcome.value)
             if record.emit_availability:
                 self._mark_available(record)
             return
+        if isinstance(outcome, _Timeout):
+            record.cancellation.request()
         failure = _failure_for(record, outcome)
         record.handle._fail(failure)
         if record.emit_availability and (
@@ -430,7 +526,7 @@ class AdapterWorkers(QObject):
             if record is None:
                 continue
             with record.start_lock:
-                record.cancel_event.set()
+                record.cancellation.request()
             if record.handle.status is OperationStatus.CANCELLED:
                 continue
             failure = _failure_for(record, _Timeout())

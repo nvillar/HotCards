@@ -8,6 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
+from threading import Event
 from uuid import UUID, uuid4
 
 from pydantic import ValidationError
@@ -47,6 +48,7 @@ from hotcards.generation.mflux_generator import (
     MfluxGenerateRequest,
     MfluxGenerateResult,
     MfluxGenerator,
+    dispose_mflux_result,
 )
 from hotcards.storage.stack_store import StackStore, StackStoreError
 
@@ -134,8 +136,8 @@ class BackgroundWorkflow(QObject):
         self._operation: WorkerOperation | None = None
         self._request_id: UUID | None = None
         self._request_target: _GenerationTarget | None = None
-        self._pending_image_path: Path | None = None
-        self._cancellation: MfluxCancellationToken | None = None
+        self._pending_result: MfluxGenerateResult | None = None
+        self._close_requested = Event()
         self._busy = False
 
     @property
@@ -207,21 +209,31 @@ class BackgroundWorkflow(QObject):
             reference_image_paths=reference_image_paths,
         )
         cancellation = MfluxCancellationToken()
-        self._cancellation = cancellation
         self._set_busy(True, "Generating image...")
+
+        def execute_generation() -> MfluxGenerateResult:
+            try:
+                return self._mflux_generator.generate(
+                    request,
+                    progress=partial(
+                        self._generation_progress,
+                        request_id,
+                    ),
+                    cancellation=cancellation,
+                )
+            finally:
+                if self._close_requested.is_set():
+                    self._mflux_generator.release()
+                    if self._owned_temporary_directory is not None:
+                        self._owned_temporary_directory.cleanup()
+
         operation = self.workers.run_mflux(
-            lambda: self._mflux_generator.generate(
-                request,
-                progress=partial(
-                    self._generation_progress,
-                    request_id,
-                ),
-                cancellation=cancellation,
-            ),
+            execute_generation,
             stage="generating background image",
+            request_cancel=cancellation.cancel,
+            dispose_result=dispose_mflux_result,
         )
         self._operation = operation
-        operation.cancelled.connect(cancellation.cancel)
         operation.succeeded.connect(
             partial(self._generation_succeeded, request_id, target, asset_id)
         )
@@ -284,8 +296,6 @@ class BackgroundWorkflow(QObject):
         return changed
 
     def cancel(self) -> None:
-        if self._cancellation is not None:
-            self._cancellation.cancel()
         if self._operation is not None and not self._operation.is_finished:
             self._operation.cancel()
         self._request_id = None
@@ -296,9 +306,12 @@ class BackgroundWorkflow(QObject):
             self._set_busy(False, "Generation cancelled")
 
     def close(self) -> None:
+        was_busy = self._busy
+        self._close_requested.set()
         self.cancel()
-        self._mflux_generator.release()
-        if self._owned_temporary_directory is not None:
+        if not was_busy:
+            self._mflux_generator.release()
+        if self._owned_temporary_directory is not None and not was_busy:
             self._owned_temporary_directory.cleanup()
 
     def release_model(self) -> None:
@@ -321,14 +334,14 @@ class BackgroundWorkflow(QObject):
     ) -> None:
         if request_id != self._request_id:
             if isinstance(result, MfluxGenerateResult):
-                result.output_path.unlink(missing_ok=True)
+                result.dispose_output()
             return
         if not isinstance(result, MfluxGenerateResult):
             self._finish_with_error(
                 BackgroundWorkflowError("image generation returned an unexpected result")
             )
             return
-        self._pending_image_path = result.output_path
+        self._pending_result = result
         if not self._target_is_current(target):
             self._finish_with_error(
                 BackgroundWorkflowError(
@@ -372,9 +385,8 @@ class BackgroundWorkflow(QObject):
                     )
             self._finish_with_error(error)
             return
-        self._pending_image_path = None
-        self._cancellation = None
-        result.output_path.unlink(missing_ok=True)
+        self._pending_result = None
+        result.dispose_output()
         self._operation = None
         self._request_id = None
         self._request_target = None
@@ -445,15 +457,14 @@ class BackgroundWorkflow(QObject):
         self._operation = None
         self._request_id = None
         self._request_target = None
-        self._cancellation = None
         self._discard_pending_image()
         self._set_busy(False, "Image generation failed")
         self.failed.emit(failure)
 
     def _discard_pending_image(self) -> None:
-        if self._pending_image_path is not None:
-            self._pending_image_path.unlink(missing_ok=True)
-            self._pending_image_path = None
+        if self._pending_result is not None:
+            self._pending_result.dispose_output()
+            self._pending_result = None
 
     def _set_busy(self, busy: bool, progress: str) -> None:
         self._busy = busy

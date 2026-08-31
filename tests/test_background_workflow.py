@@ -58,10 +58,11 @@ class FakeOperation(QObject):
     failed = Signal(object)
     cancelled = Signal()
 
-    def __init__(self) -> None:
+    def __init__(self, request_cancel: object = None) -> None:
         super().__init__()
         self.was_cancelled = False
         self.finished_state = False
+        self.request_cancel = request_cancel
 
     @property
     def is_finished(self) -> bool:
@@ -70,6 +71,8 @@ class FakeOperation(QObject):
     def cancel(self) -> None:
         self.was_cancelled = True
         self.finished_state = True
+        if callable(self.request_cancel):
+            self.request_cancel()
         self.cancelled.emit()
 
 
@@ -77,11 +80,20 @@ class FakeWorkers:
     def __init__(self) -> None:
         self.calls: list[object] = []
         self.operations: list[FakeOperation] = []
+        self.disposers: list[object] = []
 
-    def run_mflux(self, operation: object, *, stage: str) -> FakeOperation:
+    def run_mflux(
+        self,
+        operation: object,
+        *,
+        stage: str,
+        request_cancel: object = None,
+        dispose_result: object = None,
+    ) -> FakeOperation:
         assert stage == "generating background image"
         self.calls.append(operation)
-        handle = FakeOperation()
+        self.disposers.append(dispose_result)
+        handle = FakeOperation(request_cancel)
         self.operations.append(handle)
         return handle
 
@@ -179,6 +191,7 @@ def _complete_generation(workers: FakeWorkers) -> None:
     operation = workers.operations[-1]
     work = workers.calls[-1]
     assert callable(work)
+    assert callable(workers.disposers[-1])
     operation.succeeded.emit(work())
 
 

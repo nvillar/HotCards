@@ -1459,8 +1459,12 @@ class MainWindow(QMainWindow):
             return
         if model == load_machine_settings(self.settings).mflux_model:
             return
+        was_generating = (
+            self.background_workflow is not None
+            and self.background_workflow.busy
+        )
         self._cancel_background_generation()
-        if self.background_workflow is not None:
+        if self.background_workflow is not None and not was_generating:
             self.background_workflow.release_model()
         self.settings.setValue(MFLUX_MODEL_KEY, model)
         self.settings.sync()

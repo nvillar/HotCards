@@ -985,6 +985,26 @@ def test_success_atomically_publishes_exact_target_and_cleans_owned_scope(
     assert owned_output_scopes(tmp_path) == []
 
 
+def test_result_disposal_is_idempotent_and_identity_checked(tmp_path: Path) -> None:
+    owned_path = tmp_path / "owned.png"
+    generator = MfluxGenerator(model_factory=lambda *_: FakeMfluxModel())
+    owned_result = generator.generate(generate_request(owned_path))
+
+    owned_result.dispose_output()
+    owned_result.dispose_output()
+
+    assert not owned_path.exists()
+
+    replaced_path = tmp_path / "replaced.png"
+    replaced_result = generator.generate(generate_request(replaced_path))
+    replaced_path.unlink()
+    replaced_path.write_bytes(b"foreign replacement")
+
+    replaced_result.dispose_output()
+
+    assert replaced_path.read_bytes() == b"foreign replacement"
+
+
 def test_target_created_during_inference_survives_failed_publication(
     tmp_path: Path,
 ) -> None:

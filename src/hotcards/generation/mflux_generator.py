@@ -132,12 +132,12 @@ class MfluxCancellationToken:
     def publish_if_active(
         self,
         operation: str,
-        publish: Callable[[], None],
-    ) -> None:
+        publish: Callable[[], MfluxOutputOwnership],
+    ) -> MfluxOutputOwnership:
         """Linearize cancellation against final output publication."""
         with self._publication_lock:
             self.raise_if_cancelled(operation)
-            publish()
+            return publish()
 
 
 class _MfluxStepProgress:
@@ -324,14 +324,45 @@ type MfluxOperationRequest = (
 )
 
 
+class MfluxOutputOwnership(DomainModel):
+    """Filesystem identity proving ownership of one atomically published output."""
+
+    output_path: Path
+    device: int = Field(ge=0)
+    inode: int = Field(ge=0)
+
+    def dispose(self) -> None:
+        try:
+            current = self.output_path.stat(follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        if (current.st_dev, current.st_ino) != (self.device, self.inode):
+            return
+        try:
+            self.output_path.unlink()
+        except FileNotFoundError:
+            return
+
+
 class _MfluxResult(DomainModel):
     """Shared timing and output facts for one completed MFLUX operation."""
 
     output_path: Path
+    output_ownership: MfluxOutputOwnership
     queue_duration_seconds: float = Field(ge=0.0)
     load_duration_seconds: float = Field(ge=0.0)
     generation_duration_seconds: float = Field(ge=0.0)
     serialization_duration_seconds: float = Field(ge=0.0)
+
+    @model_validator(mode="after")
+    def require_matching_output_ownership(self) -> _MfluxResult:
+        if self.output_ownership.output_path != self.output_path:
+            raise ValueError("MFLUX result ownership must match its output path")
+        return self
+
+    def dispose_output(self) -> None:
+        """Remove this result only while its exact published inode is still present."""
+        self.output_ownership.dispose()
 
 
 class MfluxGenerateResult(_MfluxResult):
@@ -510,7 +541,18 @@ class _OwnedOutput:
             ) from error
         return cls(scope=scope, candidate=scope / "candidate.png")
 
-    def publish(self, target: Path, operation: str) -> None:
+    def publish(
+        self,
+        target: Path,
+        operation: str,
+    ) -> MfluxOutputOwnership:
+        try:
+            candidate_identity = self.candidate.stat(follow_symlinks=False)
+        except OSError as error:
+            raise ImageGenerationError(
+                f"MFLUX {operation} could not inspect reserved candidate "
+                f"{self.candidate}: {error}"
+            ) from error
         try:
             os.link(self.candidate, target)
         except FileExistsError as error:
@@ -527,6 +569,11 @@ class _OwnedOutput:
             raise ImageGenerationError(
                 f"MFLUX {operation} could not atomically publish {target}: {error}"
             ) from error
+        return MfluxOutputOwnership(
+            output_path=target,
+            device=candidate_identity.st_dev,
+            inode=candidate_identity.st_ino,
+        )
 
     def cleanup(self, operation: str) -> None:
         if not self.scope.exists():
@@ -628,6 +675,7 @@ class MfluxGenerator:
         model: MfluxRegularModelProtocol | MfluxEditModelProtocol | None = None
         image: GeneratedImageProtocol | None = None
         owned_output: _OwnedOutput | None = None
+        output_ownership: MfluxOutputOwnership | None = None
         try:
             token.raise_if_cancelled(operation)
             owned_output = _OwnedOutput.create(request.output_path, operation)
@@ -684,7 +732,7 @@ class MfluxGenerator:
                 request=request,
             )
             token.raise_if_cancelled(operation)
-            token.publish_if_active(
+            output_ownership = token.publish_if_active(
                 operation,
                 lambda: owned_output.publish(request.output_path, operation),
             )
@@ -709,6 +757,7 @@ class MfluxGenerator:
             )
             return self._result(
                 request,
+                output_ownership=output_ownership,
                 settings=settings,
                 queue_duration_seconds=queue_duration_seconds,
                 load_duration_seconds=load_duration_seconds,
@@ -919,6 +968,7 @@ class MfluxGenerator:
     def _result(
         request: MfluxOperationRequest,
         *,
+        output_ownership: MfluxOutputOwnership,
         settings: ImageOperationSettings,
         queue_duration_seconds: float,
         load_duration_seconds: float,
@@ -927,6 +977,7 @@ class MfluxGenerator:
     ) -> MfluxOperationResult:
         timing = {
             "output_path": request.output_path,
+            "output_ownership": output_ownership,
             "queue_duration_seconds": queue_duration_seconds,
             "load_duration_seconds": load_duration_seconds,
             "generation_duration_seconds": generation_duration_seconds,
@@ -970,7 +1021,18 @@ class MfluxGenerator:
         )
 
 
+def dispose_mflux_result(result: object) -> None:
+    """Dispose only a typed MFLUX result's identity-verified output."""
+    if not isinstance(
+        result,
+        (MfluxGenerateResult, MfluxRefineResult, MfluxEditResult),
+    ):
+        raise TypeError("MFLUX result disposer requires a typed MFLUX result")
+    result.dispose_output()
+
+
 __all__ = [
+    "dispose_mflux_result",
     "MfluxCancellationToken",
     "MfluxEditRequest",
     "MfluxEditResult",
@@ -979,6 +1041,7 @@ __all__ = [
     "MfluxGenerator",
     "MfluxOperationRequest",
     "MfluxOperationResult",
+    "MfluxOutputOwnership",
     "MfluxRefineRequest",
     "MfluxRefineResult",
 ]
