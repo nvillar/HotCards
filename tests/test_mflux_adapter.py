@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from pathlib import Path
 from threading import Event, Thread
+from time import monotonic
 from types import SimpleNamespace
 from uuid import uuid4
 from weakref import finalize, ref
@@ -46,8 +47,10 @@ from hotcards.generation.mflux_generator import (
 @pytest.fixture(autouse=True)
 def reset_process_model_cache() -> Iterator[None]:
     mflux_module._CACHED_MODEL = None
+    mflux_module._DEFERRED_RELEASES.clear()
     yield
     mflux_module._CACHED_MODEL = None
+    mflux_module._DEFERRED_RELEASES.clear()
 
 
 class FakeGeneratedImage:
@@ -822,6 +825,45 @@ def test_release_destroys_model_before_clearing_mlx_cache(
     generator.release()
 
     assert events == ["destroy", "clear"]
+
+
+def test_release_defers_without_blocking_until_active_invocation_unwinds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entered = Event()
+    allow_finish = Event()
+    releases: list[None] = []
+    monkeypatch.setattr(
+        mflux_module,
+        "_release_model_cache",
+        lambda: releases.append(None),
+    )
+    generator = MfluxGenerator(
+        model_factory=lambda *_: BlockingMfluxModel(
+            entered=entered,
+            release=allow_finish,
+        )
+    )
+    thread, outcomes = run_in_thread(
+        lambda: generator.generate(
+            generate_request(tmp_path / "generated.png")
+        )
+    )
+    assert entered.wait(0.5)
+
+    release_started = monotonic()
+    generator.release()
+
+    assert monotonic() - release_started < 0.25
+    assert len(mflux_module._DEFERRED_RELEASES) == 1
+    allow_finish.set()
+    thread.join(2)
+
+    assert isinstance(outcomes[0], MfluxGenerateResult)
+    assert releases == [None]
+    assert mflux_module._CACHED_MODEL is None
+    assert mflux_module._DEFERRED_RELEASES == []
 
 
 def test_separate_adapter_instances_share_one_process_execution_boundary(

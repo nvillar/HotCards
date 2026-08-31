@@ -6,7 +6,7 @@ import os
 from collections.abc import Iterator
 from pathlib import Path
 from threading import Event, Lock, get_ident
-from time import sleep
+from time import monotonic, sleep
 from types import SimpleNamespace
 from weakref import ref
 
@@ -331,6 +331,7 @@ def test_mflux_deadline_cancels_adapter_before_single_failure_delivery(
         cache_released.set()
 
     monkeypatch.setattr(mflux_module, "_CACHED_MODEL", None)
+    mflux_module._DEFERRED_RELEASES.clear()
     monkeypatch.setattr(mflux_module, "_release_model_cache", release_cache)
     token = MfluxCancellationToken()
     generator = MfluxGenerator(model_factory=model_factory)  # type: ignore[arg-type]
@@ -358,6 +359,9 @@ def test_mflux_deadline_cancels_adapter_before_single_failure_delivery(
     assert operation.failure is not None
     assert operation.failure.kind is WorkerFailureKind.TIMEOUT
     assert failures == [operation.failure]
+    release_started = monotonic()
+    generator.release()
+    assert monotonic() - release_started < 0.25
     release.set()
     assert cancellation_seen.wait(0.5)
     assert cache_released.wait(0.5)
@@ -367,6 +371,7 @@ def test_mflux_deadline_cancels_adapter_before_single_failure_delivery(
     assert not output_path.exists()
     assert list(tmp_path.glob(".hotcards-mflux-*")) == []
     assert mflux_module._CACHED_MODEL is None
+    assert mflux_module._DEFERRED_RELEASES == []
     workers.shutdown(wait_milliseconds=500)
 
 

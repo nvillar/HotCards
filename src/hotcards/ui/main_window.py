@@ -1039,7 +1039,7 @@ class MainWindow(QMainWindow):
             self._show_undo_notification(message, token)
 
     def _cancel_background_generation(self) -> None:
-        if self.background_workflow is not None and self.background_workflow.busy:
+        if self.background_workflow is not None:
             self.background_workflow.cancel()
 
     def _cancel_generation_activity(self) -> None:
@@ -1459,13 +1459,7 @@ class MainWindow(QMainWindow):
             return
         if model == load_machine_settings(self.settings).mflux_model:
             return
-        was_generating = (
-            self.background_workflow is not None
-            and self.background_workflow.busy
-        )
         self._cancel_background_generation()
-        if self.background_workflow is not None and not was_generating:
-            self.background_workflow.release_model()
         self.settings.setValue(MFLUX_MODEL_KEY, model)
         self.settings.sync()
         self._restart_availability_checks()
@@ -1861,7 +1855,7 @@ class MainWindow(QMainWindow):
 
     def _cancel_ai_activity_for_run(self) -> None:
         self._cancel_diagnostics()
-        if self.background_workflow is not None and self.background_workflow.busy:
+        if self.background_workflow is not None:
             self.background_workflow.cancel()
 
     def _cancel_diagnostics(self) -> None:
@@ -1913,7 +1907,6 @@ class MainWindow(QMainWindow):
             else:
                 event.ignore()
                 return
-        self._cancel_background_generation()
         if self.background_workflow is not None:
             self.background_workflow.close()
         if self._owns_workers:

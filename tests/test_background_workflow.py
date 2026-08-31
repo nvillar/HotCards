@@ -89,9 +89,22 @@ class FakeWorkers:
         stage: str,
         request_cancel: object = None,
         dispose_result: object = None,
+        invocation_started: object = None,
+        invocation_finished: object = None,
     ) -> FakeOperation:
         assert stage == "generating background image"
-        self.calls.append(operation)
+
+        def wrapped_operation() -> object:
+            if callable(invocation_started):
+                invocation_started()
+            try:
+                assert callable(operation)
+                return operation()
+            finally:
+                if callable(invocation_finished):
+                    invocation_finished()
+
+        self.calls.append(wrapped_operation)
         self.disposers.append(dispose_result)
         handle = FakeOperation(request_cancel)
         self.operations.append(handle)

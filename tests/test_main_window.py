@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 from datetime import UTC, datetime
 from pathlib import Path
+from threading import Event
+from time import monotonic
 from types import SimpleNamespace
 from typing import Any
 from uuid import UUID, uuid4
@@ -17,7 +19,12 @@ from PySide6.QtGui import QCloseEvent, QColor, QPixmap
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel
 
+import hotcards.generation.mflux_generator as mflux_module
 import hotcards.ui.main_window as main_window_module
+from hotcards.application.background_workflow import (
+    BackgroundGenerationSettings,
+    BackgroundWorkflow,
+)
 from hotcards.application.commands import (
     ActivateRevisionCommand,
     DeleteRevisionCommand,
@@ -28,7 +35,11 @@ from hotcards.application.commands import (
 from hotcards.application.document_controller import DocumentController
 from hotcards.application.document_session import DocumentSession, DocumentSessionState
 from hotcards.application.generated_revision_change import GeneratedRevisionChange
-from hotcards.application.workers import AdapterKind, AvailabilityDiagnostic
+from hotcards.application.workers import (
+    AdapterKind,
+    AdapterWorkers,
+    AvailabilityDiagnostic,
+)
 from hotcards.domain.image_dimensions import AspectRatio, GenerateResolution
 from hotcards.domain.models import (
     HYPERCARD_STYLE_ID,
@@ -52,6 +63,8 @@ from hotcards.domain.models import (
     Stack,
     UnresolvedCardReference,
 )
+from hotcards.generation.errors import ImageGenerationCancelled
+from hotcards.generation.mflux_generator import MfluxGenerator
 from hotcards.ui.card_sidebar import CardSidebar
 from hotcards.ui.main_window import MainWindow
 from hotcards.ui.new_stack_dialog import NewStackDialog
@@ -128,7 +141,6 @@ class FakeBackgroundWorkflow(QObject):
         self.generate_calls: list[object] = []
         self.clear_calls: list[object] = []
         self.cancel_calls = 0
-        self.release_model_calls = 0
         self.closed = False
 
     def generate(self, card_id: object) -> None:
@@ -178,10 +190,6 @@ class FakeBackgroundWorkflow(QObject):
 
     def close(self) -> None:
         self.closed = True
-
-    def release_model(self) -> None:
-        self.release_model_calls += 1
-
 
 @pytest.fixture(scope="module")
 def application() -> QApplication:
@@ -897,7 +905,7 @@ def test_bottom_model_selectors_persist_and_follow_operation_state(
     )
     assert settings.values["generation/mflux_model"] == "flux2-klein-9b-kv"
     assert window.image_model_combo.currentText() == "FLUX.2 Klein 9B KV"
-    assert background.release_model_calls == 1
+    assert background.cancel_calls == 1
 
     background.busy = True
     window._update_generation_actions()
@@ -906,6 +914,161 @@ def test_bottom_model_selectors_persist_and_follow_operation_state(
     background.busy = False
     window.mode_button.click()
     assert not window.image_model_combo.isEnabled()
+
+
+def test_timed_out_mflux_model_change_and_window_close_never_block_qt_thread(
+    application: QApplication,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entered = Event()
+    release = Event()
+    unwound = Event()
+    cache_released = Event()
+
+    class CallbackRegistry:
+        def __init__(self) -> None:
+            self.registered: list[object] = []
+
+        def register(self, callback: object) -> None:
+            self.registered.append(callback)
+
+    class BlockingModel:
+        def __init__(self) -> None:
+            self.callbacks = CallbackRegistry()
+
+        def generate_image(self, **kwargs: object) -> object:
+            config = SimpleNamespace(
+                num_inference_steps=kwargs["num_inference_steps"]
+            )
+            for callback in self.callbacks.registered:
+                callback.call_before_loop(config=config)
+            entered.set()
+            try:
+                assert release.wait(2)
+                for callback in self.callbacks.registered:
+                    callback.call_in_loop()
+            except ImageGenerationCancelled:
+                raise
+            finally:
+                unwound.set()
+            raise AssertionError("cancelled MFLUX inference returned")
+
+    def release_cache() -> None:
+        assert unwound.is_set()
+        cache_released.set()
+
+    monkeypatch.setattr(mflux_module, "_CACHED_MODEL", None)
+    mflux_module._DEFERRED_RELEASES.clear()
+    monkeypatch.setattr(mflux_module, "_release_model_cache", release_cache)
+    revision = CardRevision(description="A blocked image")
+    card = Card(name="Blocked", revisions=(revision,))
+    controller = DocumentController(Stack(name="Blocked", cards=(card,)))
+    session = DocumentSession(controller)
+    session.create(controller.document, tmp_path / "Blocked.hotcards")
+    workers = AdapterWorkers(mflux_timeout_seconds=0.05)
+    workflow = BackgroundWorkflow(
+        controller,
+        session,
+        workers,
+        lambda: BackgroundGenerationSettings(
+            mflux_model="flux2-klein-4b",
+            step_count=4,
+            quantization=None,
+            random_seed=False,
+            fixed_seed=42,
+        ),
+        mflux_generator=MfluxGenerator(
+            model_factory=lambda *_: BlockingModel()
+        ),
+    )
+    temporary_directory = workflow._temporary_directory
+    window = MainWindow(
+        controller,
+        workers,
+        FakeSettings(),
+        document_session=session,
+        background_workflow=workflow,
+        start_diagnostics=False,
+        owns_workers=True,
+    )
+    failures: list[object] = []
+    workflow.failed.connect(failures.append)
+    workflow.generate(card.id)
+    assert entered.wait(0.5)
+    deadline = monotonic() + 1
+    while workflow.busy and monotonic() < deadline:
+        application.processEvents()
+        QTest.qWait(10)
+    assert not workflow.busy
+    assert len(failures) == 1
+
+    changed_started = monotonic()
+    window.image_model_combo.setCurrentIndex(
+        window.image_model_combo.findData("flux2-klein-9b-kv")
+    )
+    assert monotonic() - changed_started < 0.25
+
+    close_event = QCloseEvent()
+    close_started = monotonic()
+    window.closeEvent(close_event)
+    assert monotonic() - close_started < 0.5
+    assert close_event.isAccepted()
+    assert temporary_directory.is_dir()
+    assert not list(temporary_directory.glob("generated-*.png"))
+
+    release.set()
+    assert cache_released.wait(0.5)
+    deadline = monotonic() + 1
+    while temporary_directory.exists() and monotonic() < deadline:
+        QTest.qWait(10)
+
+    assert not temporary_directory.exists()
+    assert mflux_module._CACHED_MODEL is None
+    assert mflux_module._DEFERRED_RELEASES == []
+
+
+def test_normal_window_close_releases_idle_mflux_and_temporary_directory(
+    application: QApplication,
+    tmp_path: Path,
+) -> None:
+    assert application is not None
+    revision = CardRevision(description="An idle image")
+    card = Card(name="Idle", revisions=(revision,))
+    controller = DocumentController(Stack(name="Idle", cards=(card,)))
+    session = DocumentSession(controller)
+    session.create(controller.document, tmp_path / "Idle.hotcards")
+    workers = AdapterWorkers(mflux_timeout_seconds=0.5)
+    workflow = BackgroundWorkflow(
+        controller,
+        session,
+        workers,
+        lambda: BackgroundGenerationSettings(
+            mflux_model="flux2-klein-4b",
+            step_count=4,
+            quantization=None,
+            random_seed=False,
+            fixed_seed=42,
+        ),
+    )
+    temporary_directory = workflow._temporary_directory
+    window = MainWindow(
+        controller,
+        workers,
+        FakeSettings(),
+        document_session=session,
+        background_workflow=workflow,
+        start_diagnostics=False,
+        owns_workers=True,
+    )
+
+    close_event = QCloseEvent()
+    close_started = monotonic()
+    window.closeEvent(close_event)
+
+    assert monotonic() - close_started < 0.5
+    assert close_event.isAccepted()
+    assert not temporary_directory.exists()
 
 
 def test_generation_failure_keeps_description_reusable(

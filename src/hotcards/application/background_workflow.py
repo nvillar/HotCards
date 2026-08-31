@@ -138,6 +138,7 @@ class BackgroundWorkflow(QObject):
         self._request_target: _GenerationTarget | None = None
         self._pending_result: MfluxGenerateResult | None = None
         self._close_requested = Event()
+        self._invocation_active = Event()
         self._busy = False
 
     @property
@@ -210,28 +211,20 @@ class BackgroundWorkflow(QObject):
         )
         cancellation = MfluxCancellationToken()
         self._set_busy(True, "Generating image...")
-
-        def execute_generation() -> MfluxGenerateResult:
-            try:
-                return self._mflux_generator.generate(
-                    request,
-                    progress=partial(
-                        self._generation_progress,
-                        request_id,
-                    ),
-                    cancellation=cancellation,
-                )
-            finally:
-                if self._close_requested.is_set():
-                    self._mflux_generator.release()
-                    if self._owned_temporary_directory is not None:
-                        self._owned_temporary_directory.cleanup()
-
         operation = self.workers.run_mflux(
-            execute_generation,
+            lambda: self._mflux_generator.generate(
+                request,
+                progress=partial(
+                    self._generation_progress,
+                    request_id,
+                ),
+                cancellation=cancellation,
+            ),
             stage="generating background image",
             request_cancel=cancellation.cancel,
             dispose_result=dispose_mflux_result,
+            invocation_started=self._invocation_active.set,
+            invocation_finished=self._invocation_finished,
         )
         self._operation = operation
         operation.succeeded.connect(
@@ -298,6 +291,7 @@ class BackgroundWorkflow(QObject):
     def cancel(self) -> None:
         if self._operation is not None and not self._operation.is_finished:
             self._operation.cancel()
+        self._mflux_generator.release()
         self._request_id = None
         self._request_target = None
         self._operation = None
@@ -306,17 +300,21 @@ class BackgroundWorkflow(QObject):
             self._set_busy(False, "Generation cancelled")
 
     def close(self) -> None:
-        was_busy = self._busy
         self._close_requested.set()
         self.cancel()
-        if not was_busy:
-            self._mflux_generator.release()
-        if self._owned_temporary_directory is not None and not was_busy:
+        if (
+            self._owned_temporary_directory is not None
+            and not self._invocation_active.is_set()
+        ):
             self._owned_temporary_directory.cleanup()
 
-    def release_model(self) -> None:
-        """Release the process-local model cached for this workflow."""
+    def _invocation_finished(self) -> None:
+        self._invocation_active.clear()
+        if not self._close_requested.is_set():
+            return
         self._mflux_generator.release()
+        if self._owned_temporary_directory is not None:
+            self._owned_temporary_directory.cleanup()
 
     def is_generating_for(self, card_id: UUID) -> bool:
         return (
@@ -451,6 +449,7 @@ class BackgroundWorkflow(QObject):
 
     def _operation_failed(self, request_id: UUID, failure: object) -> None:
         if request_id == self._request_id:
+            self._mflux_generator.release()
             self._finish_with_error(failure)
 
     def _finish_with_error(self, failure: object) -> None:

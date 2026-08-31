@@ -248,6 +248,8 @@ class _BoundedRunnable(QRunnable):
         operation_id: UUID,
         operation: Callable[[], Any],
         dispose_result: Callable[[Any], None] | None,
+        invocation_started: Callable[[], None] | None,
+        invocation_finished: Callable[[], None] | None,
         deadline: float,
         cancellation: _CancellationControl,
         start_lock: Lock,
@@ -258,6 +260,8 @@ class _BoundedRunnable(QRunnable):
         self._operation_id = operation_id
         self._operation = operation
         self._dispose_result = dispose_result
+        self._invocation_started = invocation_started
+        self._invocation_finished = invocation_finished
         self._deadline = deadline
         self._cancellation = cancellation
         self._start_lock = start_lock
@@ -303,7 +307,11 @@ class _BoundedRunnable(QRunnable):
                 ):
                     outcomes.put(outcome)
             finally:
-                self._invocation_slots.release()
+                try:
+                    if self._invocation_finished is not None:
+                        self._invocation_finished()
+                finally:
+                    self._invocation_slots.release()
 
         with self._start_lock:
             if self._cancellation.event.is_set() or self._deadline <= monotonic():
@@ -312,12 +320,16 @@ class _BoundedRunnable(QRunnable):
                 self._dispatcher.completed.emit(self._operation_id, _Timeout())
                 return
             try:
+                if self._invocation_started is not None:
+                    self._invocation_started()
                 Thread(
                     target=invoke,
                     name=f"hotcards-adapter-{self._operation_id}",
                     daemon=True,
                 ).start()
             except Exception as error:
+                if self._invocation_finished is not None:
+                    self._invocation_finished()
                 self._invocation_slots.release()
                 self._dispatcher.completed.emit(self._operation_id, _Error(error))
                 return
@@ -379,6 +391,8 @@ class AdapterWorkers(QObject):
         timeout_seconds: float | None = None,
         request_cancel: Callable[[], None] | None = None,
         dispose_result: Callable[[Any], None] | None = None,
+        invocation_started: Callable[[], None] | None = None,
+        invocation_finished: Callable[[], None] | None = None,
     ) -> WorkerOperation:
         """Submit a synchronous MFLUX operation to the serialized queue."""
         return self._submit(
@@ -390,6 +404,8 @@ class AdapterWorkers(QObject):
             emit_availability=True,
             request_cancel=request_cancel,
             dispose_result=dispose_result,
+            invocation_started=invocation_started,
+            invocation_finished=invocation_finished,
         )
 
     def check_mflux(
@@ -410,6 +426,8 @@ class AdapterWorkers(QObject):
             emit_availability=emit_diagnostic,
             request_cancel=None,
             dispose_result=None,
+            invocation_started=None,
+            invocation_finished=None,
         )
 
     def shutdown(self, *, wait_milliseconds: int = 0) -> None:
@@ -436,6 +454,8 @@ class AdapterWorkers(QObject):
         emit_availability: bool,
         request_cancel: Callable[[], None] | None,
         dispose_result: Callable[[Any], None] | None,
+        invocation_started: Callable[[], None] | None,
+        invocation_finished: Callable[[], None] | None,
     ) -> WorkerOperation:
         if not callable(operation):
             raise TypeError("worker operation must be callable")
@@ -471,6 +491,8 @@ class AdapterWorkers(QObject):
                 operation_id=operation_id,
                 operation=operation,
                 dispose_result=dispose_result,
+                invocation_started=invocation_started,
+                invocation_finished=invocation_finished,
                 deadline=deadline,
                 cancellation=cancellation,
                 start_lock=start_lock,

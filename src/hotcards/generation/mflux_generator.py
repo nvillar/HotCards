@@ -470,6 +470,8 @@ class _CachedModel:
 
 _PROCESS_EXECUTION_LOCK = Lock()
 _CACHED_MODEL: _CachedModel | None = None
+_RELEASE_REQUEST_LOCK = Lock()
+_DEFERRED_RELEASES: list[tuple[object, object]] = []
 
 
 def _cached_model_is_compatible(
@@ -507,6 +509,26 @@ def _release_cached_model_locked() -> None:
         _CACHED_MODEL.progress.clear_context()
     _CACHED_MODEL = None
     _release_model_cache()
+
+
+def _release_requested_cache_locked(
+    requests: tuple[tuple[object, object], ...],
+) -> None:
+    for regular_factory, edit_factory in requests:
+        if _cached_model_uses_factory(regular_factory, edit_factory):
+            _release_cached_model_locked()
+            return
+
+
+def _release_process_lock_after_deferred_requests() -> None:
+    while True:
+        with _RELEASE_REQUEST_LOCK:
+            if not _DEFERRED_RELEASES:
+                _PROCESS_EXECUTION_LOCK.release()
+                return
+            requests = tuple(_DEFERRED_RELEASES)
+            _DEFERRED_RELEASES.clear()
+        _release_requested_cache_locked(requests)
 
 
 @dataclass(frozen=True, slots=True)
@@ -648,13 +670,20 @@ class MfluxGenerator:
         return result
 
     def release(self) -> None:
-        """Release this adapter's compatible process-local cached model."""
-        with _PROCESS_EXECUTION_LOCK:
-            if _cached_model_uses_factory(
-                self._model_factory,
-                self._edit_model_factory,
-            ):
-                _release_cached_model_locked()
+        """Release now when idle, or defer without waiting for active MFLUX."""
+        request = (self._model_factory, self._edit_model_factory)
+        with _RELEASE_REQUEST_LOCK:
+            if not _PROCESS_EXECUTION_LOCK.acquire(blocking=False):
+                if not any(
+                    regular is request[0] and edit is request[1]
+                    for regular, edit in _DEFERRED_RELEASES
+                ):
+                    _DEFERRED_RELEASES.append(request)
+                return
+        try:
+            _release_requested_cache_locked((request,))
+        finally:
+            _release_process_lock_after_deferred_requests()
 
     def _execute(
         self,
@@ -782,7 +811,7 @@ class MfluxGenerator:
                 if owned_output is not None:
                     owned_output.cleanup(operation)
             finally:
-                _PROCESS_EXECUTION_LOCK.release()
+                _release_process_lock_after_deferred_requests()
 
     def _model_for(
         self,
