@@ -18,6 +18,7 @@ from hotcards.storage.stack_store import (
     StackStore,
     StackStoreError,
     StoredImageAsset,
+    StoredStackDocument,
 )
 
 
@@ -43,6 +44,7 @@ class DocumentSessionState:
 class _BindingCandidate:
     store: StackStore
     document: Stack
+    stored_document: StoredStackDocument
     owned_assets: tuple[OwnedImageAsset, ...]
 
 
@@ -106,10 +108,11 @@ class DocumentSession(QObject):
             store.create(stack)
         except StackStoreError as error:
             raise DocumentSessionError(str(error)) from error
-        candidate = self._confirm_binding(
-            self._preflight_binding(store, expected_document=stack)
+        return self._bind_latest(
+            store,
+            replace_document=True,
+            expected_document=stack,
         )
-        return self._bind(candidate, replace_document=True)
 
     def open(self, bundle_path: Path) -> Stack:
         """Validate a bundle, preserve the current session on failure, then bind it."""
@@ -120,32 +123,32 @@ class DocumentSession(QObject):
         )
         if reopening_active_bundle and not self.flush():
             raise DocumentSessionError(self._error or "current document could not be saved")
-        candidate = self._confirm_binding(self._preflight_binding(store))
-        if not reopening_active_bundle and not self.flush():
-            raise DocumentSessionError(self._error or "current document could not be saved")
-        return self._bind(candidate, replace_document=True)
+        if not reopening_active_bundle:
+            self._preflight_binding(store)
+            if not self.flush():
+                raise DocumentSessionError(
+                    self._error or "current document could not be saved"
+                )
+        return self._bind_latest(store, replace_document=True)
 
     def save_as(self, bundle_path: Path) -> Stack:
         """Create an independent bundle and bind subsequent autosaves to it."""
+        if not self.flush():
+            raise DocumentSessionError(self._error or "current document could not be saved")
         stack = self.controller.document
         try:
             if self._store is None:
-                if bundle_path.exists():
-                    raise StackStoreError(
-                        f"refusing to overwrite existing bundle: {bundle_path}"
-                    )
                 store = StackStore(bundle_path)
-                store.save(stack)
+                store.create(stack)
             else:
                 store = self._store.clone_to(bundle_path, stack)
         except StackStoreError as error:
             raise DocumentSessionError(str(error)) from error
-        candidate = self._confirm_binding(
-            self._preflight_binding(store, expected_document=stack)
+        return self._bind_latest(
+            store,
+            replace_document=False,
+            expected_document=stack,
         )
-        if not self.flush():
-            raise DocumentSessionError(self._error or "current document could not be saved")
-        return self._bind(candidate, replace_document=False)
 
     def execute_persisted(
         self,
@@ -279,7 +282,8 @@ class DocumentSession(QObject):
         expected_document: Stack | None = None,
     ) -> _BindingCandidate:
         try:
-            document = store.load()
+            stored_document = store.load_document()
+            document = stored_document.stack
             if expected_document is not None and document != expected_document:
                 raise StackStoreError(
                     "candidate stack document changed before binding"
@@ -290,6 +294,7 @@ class DocumentSession(QObject):
         return _BindingCandidate(
             store=store,
             document=document,
+            stored_document=stored_document,
             owned_assets=owned_assets,
         )
 
@@ -298,11 +303,42 @@ class DocumentSession(QObject):
             candidate.store,
             expected_document=candidate.document,
         )
+        if confirmed.stored_document != candidate.stored_document:
+            raise DocumentSessionError(
+                "candidate stack document identity changed before binding"
+            )
         if confirmed.owned_assets != candidate.owned_assets:
             raise DocumentSessionError(
                 "candidate duplicate-owned asset identity changed before binding"
             )
         return confirmed
+
+    def _bind_latest(
+        self,
+        store: StackStore,
+        *,
+        replace_document: bool,
+        expected_document: Stack | None = None,
+    ) -> Stack:
+        additional_paths = (
+            (self._store.bundle_path,)
+            if self._store is not None and self._store is not store
+            else ()
+        )
+
+        def bind() -> Stack:
+            candidate = self._confirm_binding(
+                self._preflight_binding(
+                    store,
+                    expected_document=expected_document,
+                )
+            )
+            return self._bind(candidate, replace_document=replace_document)
+
+        return store.run_locked(
+            bind,
+            additional_bundle_paths=additional_paths,
+        )
 
     def _emit_state(self) -> None:
         self.state_changed.emit(self.state)

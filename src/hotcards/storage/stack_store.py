@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import errno
+import hashlib
 import json
 import logging
 import os
@@ -72,6 +73,18 @@ class StoredImageAsset:
     inode: int
     directory_device: int
     directory_inode: int
+
+
+@dataclass(frozen=True, slots=True)
+class StoredStackDocument:
+    """Validated stack content and the filesystem identity it was read from."""
+
+    stack: Stack
+    device: int
+    inode: int
+    size: int
+    modified_nanoseconds: int
+    sha256: str
 
 
 def _io_checkpoint(_name: str) -> None:
@@ -651,16 +664,45 @@ class StackStore:
                         f"stack references a missing image asset: {relative_path}"
                     )
 
-    def load(self) -> Stack:
-        """Load and validate one current-schema bundle document."""
+    def load_document(self) -> StoredStackDocument:
+        """Securely load one validated stack document with its exact identity."""
+        descriptor: int | None = None
         try:
-            payload = json.loads(self.stack_path.read_text(encoding="utf-8"))
+            descriptor = os.open(self.stack_path, _secure_open_flags())
+            before = os.fstat(descriptor)
+            if not stat.S_ISREG(before.st_mode):
+                raise StackStoreError(
+                    f"stack document is not a regular file: {self.stack_path}"
+                )
+            chunks: list[bytes] = []
+            while chunk := os.read(descriptor, 1024 * 1024):
+                chunks.append(chunk)
+            after = os.fstat(descriptor)
+            if (
+                before.st_dev,
+                before.st_ino,
+                before.st_size,
+                before.st_mtime_ns,
+            ) != (
+                after.st_dev,
+                after.st_ino,
+                after.st_size,
+                after.st_mtime_ns,
+            ):
+                raise StackStoreError(
+                    f"stack document changed while being read: {self.stack_path}"
+                )
+            raw_payload = b"".join(chunks)
+            payload = json.loads(raw_payload.decode("utf-8"))
         except FileNotFoundError as error:
             raise StackStoreError(f"stack document does not exist: {self.stack_path}") from error
         except (OSError, UnicodeError, json.JSONDecodeError) as error:
             raise StackStoreError(
                 f"could not read stack document {self.stack_path}: {error}"
             ) from error
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
         if not isinstance(payload, dict):
             raise StackStoreError("stack document root must be a JSON object")
         version = payload.get("schema_version")
@@ -675,7 +717,34 @@ class StackStore:
         except ValidationError as error:
             raise StackStoreError(f"invalid stack document: {error}") from error
         self._validate_assets(stack)
-        return stack
+        return StoredStackDocument(
+            stack=stack,
+            device=after.st_dev,
+            inode=after.st_ino,
+            size=after.st_size,
+            modified_nanoseconds=after.st_mtime_ns,
+            sha256=hashlib.sha256(raw_payload).hexdigest(),
+        )
+
+    def load(self) -> Stack:
+        """Load and validate one current-schema bundle document."""
+        return self.load_document().stack
+
+    def run_locked[R](
+        self,
+        operation: Callable[[], R],
+        *,
+        additional_bundle_paths: tuple[Path, ...] = (),
+    ) -> R:
+        """Run one operation while holding bundle mutation locks in stable order."""
+        paths = {
+            os.path.abspath(os.fspath(path))
+            for path in (self.bundle_path, *additional_bundle_paths)
+        }
+        with ExitStack() as locks:
+            for path in sorted(paths):
+                locks.enter_context(_bundle_mutation_lock(Path(path)))
+            return operation()
 
     def save(self, stack: Stack) -> None:
         """Atomically replace `stack.json` after validating all referenced assets."""
@@ -1385,38 +1454,54 @@ class StackStore:
 
     def clone_to(self, destination: Path, stack: Stack) -> StackStore:
         """Create an independent bundle containing exactly the referenced assets."""
-        if destination.exists():
-            raise StackStoreError(f"refusing to overwrite existing bundle: {destination}")
-        temporary_bundle: Path | None = None
-        try:
-            _mkdir_durable(destination.parent)
-            temporary_bundle = Path(
-                tempfile.mkdtemp(
-                    prefix=f".{destination.name}-",
-                    suffix=".tmp",
-                    dir=destination.parent,
+        destination_store = StackStore(destination)
+
+        def clone() -> StackStore:
+            if destination.exists():
+                raise StackStoreError(
+                    f"refusing to overwrite existing bundle: {destination}"
                 )
-            )
-            temporary_store = StackStore(temporary_bundle)
-            copied_paths: set[str] = set()
-            for card in stack.cards:
-                for revision in card.revisions:
-                    background = revision.background
-                    if background is None or background.image_path in copied_paths:
-                        continue
-                    temporary_store.store_image_asset(
-                        self.asset_path(background.image_path),
-                        card_id=card.id,
-                        asset_id=background.id,
+            temporary_bundle: Path | None = None
+            try:
+                _mkdir_durable(destination.parent)
+                temporary_bundle = Path(
+                    tempfile.mkdtemp(
+                        prefix=f".{destination.name}-",
+                        suffix=".tmp",
+                        dir=destination.parent,
                     )
-                    copied_paths.add(background.image_path)
-            temporary_store.save(stack)
-            os.rename(temporary_bundle, destination)
-            _fsync_directory(destination.parent)
-        except (OSError, StackStoreError) as error:
-            if temporary_bundle is not None:
-                shutil.rmtree(temporary_bundle, ignore_errors=True)
-            if isinstance(error, StackStoreError):
-                raise
-            raise StackStoreError(f"could not create bundle {destination}: {error}") from error
-        return StackStore(destination)
+                )
+                temporary_store = StackStore(temporary_bundle)
+                copied_paths: set[str] = set()
+                for card in stack.cards:
+                    for revision in card.revisions:
+                        background = revision.background
+                        if background is None or background.image_path in copied_paths:
+                            continue
+                        temporary_store.store_image_asset(
+                            self.asset_path(background.image_path),
+                            card_id=card.id,
+                            asset_id=background.id,
+                        )
+                        copied_paths.add(background.image_path)
+                temporary_store.save(stack)
+                if destination.exists():
+                    raise StackStoreError(
+                        f"refusing to overwrite existing bundle: {destination}"
+                    )
+                os.rename(temporary_bundle, destination)
+                _fsync_directory(destination.parent)
+            except (OSError, StackStoreError) as error:
+                if temporary_bundle is not None:
+                    shutil.rmtree(temporary_bundle, ignore_errors=True)
+                if isinstance(error, StackStoreError):
+                    raise
+                raise StackStoreError(
+                    f"could not create bundle {destination}: {error}"
+                ) from error
+            return destination_store
+
+        return destination_store.run_locked(
+            clone,
+            additional_bundle_paths=(self.bundle_path,),
+        )

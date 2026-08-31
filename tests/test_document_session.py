@@ -234,7 +234,7 @@ def test_secure_duplicate_asset_preflight_preserves_active_session(
     assert candidate_store.load() == candidate_stack
 
 
-def test_candidate_owned_asset_is_revalidated_before_active_flush(
+def test_candidate_owned_asset_changed_after_early_preflight_is_rejected(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -247,9 +247,7 @@ def test_candidate_owned_asset_is_revalidated_before_active_flush(
     before_store = session.store
     controller.execute(RenameCardCommand(card_id=card.id, name="Pending edit"))
     before_document = controller.document
-    before_state = session.state
     before_token = controller.current_undo_token
-    before_pending = session._pending_snapshot
     candidate_store, _candidate_stack = _duplicate_bundle(
         tmp_path,
         symlink_owned_image=False,
@@ -289,10 +287,136 @@ def test_candidate_owned_asset_is_revalidated_before_active_flush(
 
     assert candidate_classifications == 1
     assert session.store is before_store
-    assert session.state == before_state
-    assert session._pending_snapshot == before_pending
+    assert session.state.bundle_path == active_store.bundle_path
+    assert not session.state.dirty
+    assert session._pending_snapshot is None
     assert controller.document == before_document
     assert controller.current_undo_token == before_token
+
+
+def test_open_reloads_candidate_changed_during_active_flush(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    active_card = Card(name="Active card")
+    active = Stack(
+        name="Active",
+        cards=(active_card,),
+        start_card_id=active_card.id,
+    )
+    controller = DocumentController(active)
+    session = DocumentSession(controller)
+    session.create(active, tmp_path / "Active.hotcards")
+    assert session.store is not None
+    active_store = session.store
+    controller.execute(
+        RenameCardCommand(card_id=active_card.id, name="Pending active edit")
+    )
+
+    candidate_store = StackStore(tmp_path / "Candidate.hotcards")
+    candidate_card = Card(name="Candidate v1")
+    candidate_v1 = Stack(
+        name="Candidate v1",
+        cards=(candidate_card,),
+        start_card_id=candidate_card.id,
+    )
+    candidate_v2 = candidate_v1.model_copy(
+        update={
+            "name": "Candidate v2",
+            "cards": (
+                candidate_card.model_copy(update={"name": "Candidate v2 card"}),
+            ),
+        }
+    )
+    candidate_store.save(candidate_v1)
+    real_active_save = active_store.save
+
+    def save_active_then_replace_candidate(snapshot: Stack) -> None:
+        real_active_save(snapshot)
+        candidate_store.save(candidate_v2)
+
+    monkeypatch.setattr(active_store, "save", save_active_then_replace_candidate)
+    replaced: list[Stack] = []
+    session.document_replaced.connect(replaced.append)
+
+    opened = session.open(candidate_store.bundle_path)
+
+    assert opened == candidate_v2
+    assert controller.document == candidate_v2
+    assert session.store is not None
+    assert session.store.bundle_path == candidate_store.bundle_path
+    assert not session.state.dirty
+    assert replaced == [candidate_v2]
+
+    controller.execute(
+        RenameCardCommand(card_id=candidate_card.id, name="Candidate v2 edited")
+    )
+    assert session.flush()
+    persisted = candidate_store.load()
+    assert persisted.name == "Candidate v2"
+    assert persisted.cards[0].name == "Candidate v2 edited"
+
+
+def test_open_rejects_candidate_made_invalid_during_active_flush(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    active_card = Card(name="Active card")
+    active = Stack(
+        name="Active",
+        cards=(active_card,),
+        start_card_id=active_card.id,
+    )
+    controller = DocumentController(active)
+    session = DocumentSession(controller)
+    session.create(active, tmp_path / "Active.hotcards")
+    assert session.store is not None
+    active_store = session.store
+    controller.execute(
+        RenameCardCommand(card_id=active_card.id, name="Persisted active edit")
+    )
+    candidate_store, candidate_stack = _duplicate_bundle(
+        tmp_path,
+        symlink_owned_image=False,
+    )
+    background = candidate_stack.cards[0].active_revision.background
+    assert background is not None
+    owned_path = candidate_store.bundle_path.joinpath(
+        *background.image_path.split("/")
+    )
+    alternate = candidate_store.bundle_path / "assets" / "alternate.png"
+    real_active_save = active_store.save
+
+    def save_active_then_invalidate_candidate(snapshot: Stack) -> None:
+        real_active_save(snapshot)
+        alternate.write_bytes(owned_path.read_bytes())
+        owned_path.unlink()
+        owned_path.symlink_to(Path("..") / ".." / "alternate.png")
+
+    monkeypatch.setattr(active_store, "save", save_active_then_invalidate_candidate)
+    replaced: list[Stack] = []
+    session.document_replaced.connect(replaced.append)
+
+    with pytest.raises(
+        DocumentSessionError,
+        match="could not securely open owned image",
+    ):
+        session.open(candidate_store.bundle_path)
+
+    assert session.store is active_store
+    assert session.state.bundle_path == active_store.bundle_path
+    assert controller.document.cards[0].name == "Persisted active edit"
+    assert not session.state.dirty
+    assert replaced == []
+    assert candidate_store.load() == candidate_stack
+
+    monkeypatch.setattr(active_store, "save", real_active_save)
+    controller.execute(
+        RenameCardCommand(card_id=active_card.id, name="Still active after failure")
+    )
+    assert session.flush()
+    assert active_store.load().cards[0].name == "Still active after failure"
+    assert candidate_store.load() == candidate_stack
 
 
 def test_reopening_active_bundle_flushes_before_reload(tmp_path: Path) -> None:
@@ -380,6 +504,52 @@ def test_save_as_refuses_existing_destination(tmp_path: Path) -> None:
 
     with pytest.raises(DocumentSessionError, match="refusing to overwrite"):
         session.save_as(existing)
+
+
+def test_save_as_refuses_destination_created_during_active_flush(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    active_card = Card(name="Active card")
+    active = Stack(
+        name="Active",
+        cards=(active_card,),
+        start_card_id=active_card.id,
+    )
+    controller = DocumentController(active)
+    session = DocumentSession(controller)
+    session.create(active, tmp_path / "Active.hotcards")
+    assert session.store is not None
+    active_store = session.store
+    controller.execute(
+        RenameCardCommand(card_id=active_card.id, name="Pending active edit")
+    )
+    destination = tmp_path / "Copy.hotcards"
+    competing = Stack(name="External newer target")
+    real_active_save = active_store.save
+
+    def save_active_then_create_destination(snapshot: Stack) -> None:
+        real_active_save(snapshot)
+        StackStore(destination).create(competing)
+
+    monkeypatch.setattr(active_store, "save", save_active_then_create_destination)
+
+    with pytest.raises(DocumentSessionError, match="refusing to overwrite"):
+        session.save_as(destination)
+
+    assert session.store is active_store
+    assert session.state.bundle_path == active_store.bundle_path
+    assert controller.document.cards[0].name == "Pending active edit"
+    assert not session.state.dirty
+    assert StackStore(destination).load() == competing
+
+    monkeypatch.setattr(active_store, "save", real_active_save)
+    controller.execute(
+        RenameCardCommand(card_id=active_card.id, name="Still active after race")
+    )
+    assert session.flush()
+    assert active_store.load().cards[0].name == "Still active after race"
+    assert StackStore(destination).load() == competing
 
 
 def test_save_as_clears_history_that_can_reference_uncloned_assets(
