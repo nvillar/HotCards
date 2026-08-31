@@ -7,7 +7,6 @@ from typing import Literal, Protocol
 from uuid import UUID, uuid4
 
 from hotcards.domain.image_dependencies import image_source_dependencies
-from hotcards.domain.image_dimensions import GenerateResolution
 from hotcards.domain.models import (
     Background,
     Card,
@@ -15,6 +14,7 @@ from hotcards.domain.models import (
     CardRevision,
     DuplicateProvenance,
     GeneratedBackground,
+    GenerateOutputSize,
     HotspotConditions,
     HotspotKeyChanges,
     HotspotSet,
@@ -265,9 +265,7 @@ def _duplicate_interaction(
         and isinstance(action.target, ResolvedCardReference)
         and action.target.target_card_id == source_card_id
     ):
-        action = NavigateAction(
-            target=ResolvedCardReference(target_card_id=duplicate_card_id)
-        )
+        action = NavigateAction(target=ResolvedCardReference(target_card_id=duplicate_card_id))
     return interaction.model_copy(
         deep=True,
         update={"id": interaction_id, "action": action},
@@ -305,9 +303,7 @@ class DuplicateCardCommand:
             else ()
         )
         if len(self.interaction_ids) != len(source_interactions):
-            raise CommandError(
-                "duplicate interaction IDs must match the active hotspot set"
-            )
+            raise CommandError("duplicate interaction IDs must match the active hotspot set")
         if len(self.interaction_ids) != len(set(self.interaction_ids)):
             raise CommandError("duplicate interaction IDs must be unique")
         source_interaction_ids = {interaction.id for interaction in source_interactions}
@@ -356,9 +352,7 @@ class DuplicateCardCommand:
                         revision_id=source_revision.id,
                         background_id=source_background.id,
                     ),
-                    original_provenance=original_image_provenance(
-                        source_background.provenance
-                    ),
+                    original_provenance=original_image_provenance(source_background.provenance),
                 ),
                 created_at=source_background.created_at,
             )
@@ -401,8 +395,8 @@ class DeleteCardCommand:
             dependent = dependencies[0]
             raise CommandError(
                 f'cannot delete card "{deleted_card.name}" because '
-                f'{dependent.operation.title()} revision '
-                f'{dependent.dependent_revision_number} on card '
+                f"{dependent.operation.title()} revision "
+                f"{dependent.dependent_revision_number} on card "
                 f'"{dependent.dependent_card_name}" derives from it'
             )
         cards = tuple(
@@ -562,9 +556,7 @@ class CreateKeyAndAddHotspotReferenceCommand:
                 conditions=conditions,
             ).apply(changed)
         values = getattr(interaction.key_changes, self.role)
-        key_changes = interaction.key_changes.model_copy(
-            update={self.role: (*values, self.key_id)}
-        )
+        key_changes = interaction.key_changes.model_copy(update={self.role: (*values, self.key_id)})
         return SetHotspotKeyChangesCommand(
             card_id=self.card_id,
             revision_id=self.revision_id,
@@ -685,19 +677,19 @@ class SetRevisionStyleCommand:
 
 
 @dataclass(frozen=True, slots=True)
-class SetRevisionGenerateResolutionCommand:
-    """Select the square-equivalent resolution for a revision's next Generate."""
+class SetRevisionGenerateOutputSizeCommand:
+    """Select a revision's next direct Generate output size."""
 
     card_id: UUID
     revision_id: UUID
-    resolution: GenerateResolution
+    output_size: GenerateOutputSize
 
     def apply(self, document: Stack) -> Stack:
         card_index = _card_index(document, self.card_id)
         card = document.cards[card_index]
         revision_index = _revision_index(card, self.revision_id)
         revision = card.revisions[revision_index].model_copy(
-            update={"generate_resolution": self.resolution}
+            update={"generate_output_size": self.output_size}
         )
         card = _replace_revision(card, revision_index, revision)
         return validated_copy(_replace_card(document, card_index, card))
@@ -829,13 +821,9 @@ def _append_derived_revision(
     card = document.cards[card_index]
     source_index = _revision_index(card, source_revision_id)
     if card.active_revision_id != source_revision_id:
-        raise CommandError(
-            f"the {operation} source revision is no longer active"
-        )
+        raise CommandError(f"the {operation} source revision is no longer active")
     if any(revision.id == new_revision_id for revision in card.revisions):
-        raise CommandError(
-            f"revision {new_revision_id} already exists on card {card.id}"
-        )
+        raise CommandError(f"revision {new_revision_id} already exists on card {card.id}")
     source = card.revisions[source_index]
     revision = source.model_copy(
         deep=True,
@@ -872,7 +860,7 @@ class DeleteRevisionCommand:
             raise CommandError(
                 "cannot delete this source revision because "
                 f"{dependent.operation.title()} revision "
-                f'{dependent.dependent_revision_number} on card '
+                f"{dependent.dependent_revision_number} on card "
                 f'"{dependent.dependent_card_name}" derives from it'
             )
         revisions = list(card.revisions)
@@ -913,7 +901,7 @@ class ReplaceRevisionBackgroundCommand:
                 raise CommandError(
                     "cannot replace this source background because "
                     f"{dependent.operation.title()} revision "
-                    f'{dependent.dependent_revision_number} on card '
+                    f"{dependent.dependent_revision_number} on card "
                     f'"{dependent.dependent_card_name}" derives from it'
                 )
         revision = current_revision.model_copy(
@@ -1296,7 +1284,7 @@ __all__ = [
     "SetHotspotConditionsCommand",
     "SetHotspotKeyChangesCommand",
     "SetRevisionReferenceCommand",
-    "SetRevisionGenerateResolutionCommand",
+    "SetRevisionGenerateOutputSizeCommand",
     "SetStartCardCommand",
     "UpdateStyleCommand",
     "next_duplicate_card_name",

@@ -31,7 +31,7 @@ from hotcards.application.commands import (
     RenameCardCommand,
     ReplaceHotspotSetCommand,
     ReplaceRevisionBackgroundCommand,
-    SetRevisionGenerateResolutionCommand,
+    SetRevisionGenerateOutputSizeCommand,
     SetRevisionReferenceCommand,
     SetRevisionStyleCommand,
     UpdateStyleCommand,
@@ -41,17 +41,19 @@ from hotcards.application.document_session import DocumentSession
 from hotcards.application.generated_revision_change import GeneratedRevisionChange
 from hotcards.domain.image_dimensions import (
     AspectRatio,
-    GenerateResolution,
-    higher_output_resolutions,
+    ResolutionTier,
+    higher_output_tiers,
     output_dimensions,
 )
 from hotcards.domain.models import (
     Card,
     CardRevision,
     CurrentSourceSize,
+    DirectGenerateProvenance,
     DuplicateProvenance,
     EditPreserveOptions,
     EditProvenance,
+    ExactOutputSize,
     GeneratedBackground,
     HotspotSet,
     ImageReferenceSnapshot,
@@ -212,7 +214,7 @@ def _bound_workflow(
     root: Path,
     *,
     aspect_ratio: AspectRatio = AspectRatio.LANDSCAPE,
-    resolution: GenerateResolution = GenerateResolution.RESOLUTION_512,
+    resolution: ResolutionTier = ResolutionTier.MEDIUM,
 ) -> tuple[
     BackgroundWorkflow,
     DocumentController,
@@ -228,7 +230,7 @@ def _bound_workflow(
     revision = CardRevision(
         description="A garden",
         hotspot_set=HotspotSet(interactions=(hotspot,)),
-        generate_resolution=resolution,
+        generate_output_size=PresetOutputSize(tier=resolution),
     )
     card = Card(name="Garden", revisions=(revision,), active_revision_id=revision.id)
     controller = DocumentController(
@@ -311,7 +313,7 @@ def test_generate_uses_description_and_preserves_result_lifecycle(
     assert provenance.operation == "generate"
     assert provenance.inputs.description == "A garden"
     assert provenance.render_prompt == "A garden"
-    assert (provenance.settings.width, provenance.settings.height) == (592, 448)
+    assert (provenance.settings.width, provenance.settings.height) == (512, 384)
     assert model.calls[-1]["prompt"] == "A garden"
     assert session.flush()
     assert StackStore(session.state.bundle_path).load() == controller.document
@@ -373,7 +375,7 @@ def test_refine_uses_current_image_seed_and_creates_complete_version(
     workflow.refine(
         card.id,
         transformation=RefineTransformation.BALANCED,
-        resolution=GenerateResolution.RESOLUTION_768,
+        output_size=PresetOutputSize(tier=ResolutionTier.LARGE),
     )
     _complete_generation(workers)
 
@@ -386,7 +388,7 @@ def test_refine_uses_current_image_seed_and_creates_complete_version(
     assert refined.style_id == source_revision.style_id
     assert refined.references == source_revision.references
     assert refined.hotspot_set == source_revision.hotspot_set
-    assert refined.generate_resolution == source_revision.generate_resolution
+    assert refined.generate_output_size == source_revision.generate_output_size
     assert refined.background is not None
     provenance = refined.background.provenance
     assert isinstance(provenance, RefineProvenance)
@@ -409,7 +411,7 @@ def test_refine_uses_current_image_seed_and_creates_complete_version(
     assert not refine_source_path.exists()
     assert model.calls[-1]["image_strength"] == 0.50
     assert "image_paths" not in model.calls[-1]
-    assert (model.calls[-1]["width"], model.calls[-1]["height"]) == (880, 672)
+    assert (model.calls[-1]["width"], model.calls[-1]["height"]) == (768, 576)
     assert applied and applied[-1][0] == "Image refined"
     token = applied[-1][1]
     refined_path = session.store.asset_path(refined.background.image_path)
@@ -489,7 +491,7 @@ def test_edit_uses_only_secure_current_image_and_creates_complete_version(
     workflow.change_applied.connect(lambda message, token: applied.append((message, token)))
     workflow.edit_instruction_clear_requested.connect(lambda: cleared.append(None))
     options = workflow.available_edit_output_sizes(card.id)
-    assert options[0] == CurrentSourceSize(width=592, height=448)
+    assert options[0] == CurrentSourceSize(width=512, height=384)
 
     workflow.edit(
         card.id,
@@ -511,7 +513,7 @@ def test_edit_uses_only_secure_current_image_and_creates_complete_version(
     assert edited.style_id == source.style_id
     assert edited.references == source.references
     assert edited.hotspot_set == hotspot_set
-    assert edited.generate_resolution == source.generate_resolution
+    assert edited.generate_output_size == source.generate_output_size
     assert edited.background is not None
     provenance = edited.background.provenance
     assert isinstance(provenance, EditProvenance)
@@ -522,8 +524,8 @@ def test_edit_uses_only_secure_current_image_and_creates_complete_version(
     )
     assert provenance.instruction == "Open the garden gate."
     assert provenance.output_size == CurrentSourceSize(
-        width=592,
-        height=448,
+        width=512,
+        height=384,
     )
     assert provenance.settings.seed == 8675309
     assert provenance.prompt_token_count == 24
@@ -640,7 +642,7 @@ def test_edit_flattens_duplicate_and_refine_preserves_accepted_edit(
     workflow.refine(
         card.id,
         transformation=RefineTransformation.BALANCED,
-        resolution=GenerateResolution.RESOLUTION_768,
+        output_size=PresetOutputSize(tier=ResolutionTier.LARGE),
     )
     _complete_generation(workers)
     refined = controller.document.cards[0].active_revision
@@ -652,11 +654,11 @@ def test_edit_flattens_duplicate_and_refine_preserves_accepted_edit(
 
 
 @pytest.mark.parametrize("aspect_ratio", tuple(AspectRatio))
-@pytest.mark.parametrize("resolution", tuple(GenerateResolution))
+@pytest.mark.parametrize("resolution", tuple(ResolutionTier))
 def test_edit_output_sizes_include_exact_current_then_only_higher_presets(
     tmp_path: Path,
     aspect_ratio: AspectRatio,
-    resolution: GenerateResolution,
+    resolution: ResolutionTier,
 ) -> None:
     workflow, _controller, _session, workers, _model, card = _bound_workflow(
         tmp_path / aspect_ratio.name / str(resolution.value),
@@ -670,8 +672,8 @@ def test_edit_output_sizes_include_exact_current_then_only_higher_presets(
     assert workflow.available_edit_output_sizes(card.id) == (
         CurrentSourceSize(width=width, height=height),
         *(
-            PresetOutputSize(resolution=candidate)
-            for candidate in higher_output_resolutions(
+            PresetOutputSize(tier=candidate)
+            for candidate in higher_output_tiers(
                 width,
                 height,
                 aspect_ratio,
@@ -699,7 +701,7 @@ def test_edit_rejects_replaced_source_and_failed_model_without_new_version(
         output_size=workflow.available_edit_output_sizes(card.id)[0],
     )
     snapshot_path = next((tmp_path / "temporary").glob(".refine-source-*.png"))
-    Image.new("RGB", (592, 448), "gold").save(source_path, format="PNG")
+    Image.new("RGB", (512, 384), "gold").save(source_path, format="PNG")
     _complete_generation(workers)
 
     assert model.consumed_source_pixels[-1] == (0, 0, 128)
@@ -796,7 +798,7 @@ def test_refine_preserves_none_vs_empty_hotspot_set(
     workflow.refine(
         card.id,
         transformation=RefineTransformation.PRESERVE,
-        resolution=GenerateResolution.RESOLUTION_768,
+        output_size=PresetOutputSize(tier=ResolutionTier.LARGE),
     )
     _complete_generation(workers)
 
@@ -805,40 +807,60 @@ def test_refine_preserves_none_vs_empty_hotspot_set(
     assert revisions[1].hotspot_set == hotspot_set
 
 
-def test_refine_filters_legacy_pixel_size_and_disables_at_maximum(
+def test_refine_offers_current_and_every_tier_including_lower_and_same(
     tmp_path: Path,
 ) -> None:
     workflow, controller, session, workers, _model, card = _bound_workflow(
         tmp_path,
-        resolution=GenerateResolution.RESOLUTION_1024,
+        resolution=ResolutionTier.FULL,
     )
     workflow.generate(card.id)
     _complete_generation(workers)
     revision = controller.document.cards[0].active_revision
     assert revision.background is not None
 
-    assert workflow.available_refine_resolutions(card.id) == ()
-    with pytest.raises(BackgroundWorkflowError, match="maximum"):
-        workflow.refine(
-            card.id,
-            transformation=RefineTransformation.BALANCED,
-            resolution=GenerateResolution.RESOLUTION_1024,
-        )
+    assert workflow.available_refine_output_sizes(card.id) == (
+        CurrentSourceSize(width=1024, height=768),
+        *(PresetOutputSize(tier=tier) for tier in ResolutionTier),
+    )
 
     source_path = session.store.asset_path(revision.background.image_path)
     Image.new("RGB", (1024, 768), "navy").save(source_path)
-    assert workflow.available_refine_resolutions(card.id) == (GenerateResolution.RESOLUTION_1024,)
 
     workflow.refine(
         card.id,
         transformation=RefineTransformation.REIMAGINE,
-        resolution=GenerateResolution.RESOLUTION_1024,
+        output_size=PresetOutputSize(tier=ResolutionTier.SMALL),
     )
     _complete_generation(workers)
     provenance = controller.document.cards[0].active_revision.provenance
     assert isinstance(provenance, RefineProvenance)
     assert provenance.transformation is RefineTransformation.REIMAGINE
     assert provenance.strength == 0.25
+    assert provenance.output_size == PresetOutputSize(tier=ResolutionTier.SMALL)
+
+
+def test_refine_rejects_unaligned_current_size_and_releases_snapshot(
+    tmp_path: Path,
+) -> None:
+    workflow, controller, session, workers, _model, card = _bound_workflow(tmp_path)
+    workflow.generate(card.id)
+    _complete_generation(workers)
+    revision = controller.document.cards[0].active_revision
+    assert revision.background is not None
+    Image.new("RGB", (641, 480), "navy").save(
+        session.store.asset_path(revision.background.image_path)
+    )
+
+    with pytest.raises(BackgroundWorkflowError, match="aligned to 16"):
+        workflow.refine(
+            card.id,
+            transformation=RefineTransformation.BALANCED,
+            output_size=PresetOutputSize(tier=ResolutionTier.MEDIUM),
+        )
+
+    assert not workflow.busy
+    assert not list((tmp_path / "temporary").glob(".refine-source-*.png"))
 
 
 def test_refine_flattens_duplicate_source_settings(tmp_path: Path) -> None:
@@ -871,7 +893,7 @@ def test_refine_flattens_duplicate_source_settings(tmp_path: Path) -> None:
     workflow.refine(
         card.id,
         transformation=RefineTransformation.PRESERVE,
-        resolution=GenerateResolution.RESOLUTION_768,
+        output_size=PresetOutputSize(tier=ResolutionTier.LARGE),
     )
     _complete_generation(workers)
 
@@ -898,7 +920,7 @@ def test_refine_stale_revision_or_model_change_creates_no_version(
     workflow.refine(
         card.id,
         transformation=RefineTransformation.BALANCED,
-        resolution=GenerateResolution.RESOLUTION_768,
+        output_size=PresetOutputSize(tier=ResolutionTier.LARGE),
     )
     controller.execute(
         ReplaceHotspotSetCommand(
@@ -916,7 +938,7 @@ def test_refine_stale_revision_or_model_change_creates_no_version(
     workflow.refine(
         card.id,
         transformation=RefineTransformation.BALANCED,
-        resolution=GenerateResolution.RESOLUTION_768,
+        output_size=PresetOutputSize(tier=ResolutionTier.LARGE),
     )
     workflow._settings_provider = lambda: BackgroundGenerationSettings(
         mflux_model="flux2-klein-9b",
@@ -947,13 +969,13 @@ def test_refine_uses_immutable_snapshot_and_rejects_replaced_source(
     workflow.refine(
         card.id,
         transformation=RefineTransformation.BALANCED,
-        resolution=GenerateResolution.RESOLUTION_768,
+        output_size=PresetOutputSize(tier=ResolutionTier.LARGE),
     )
     snapshot_paths = list((tmp_path / "temporary").glob(".refine-source-*.png"))
     assert len(snapshot_paths) == 1
     snapshot_path = snapshot_paths[0]
     assert snapshot_path != source_path
-    Image.new("RGB", (592, 448), "gold").save(source_path, format="PNG")
+    Image.new("RGB", (512, 384), "gold").save(source_path, format="PNG")
     _complete_generation(workers)
 
     assert model.consumed_source_pixels[-1] == (0, 0, 128)
@@ -973,18 +995,18 @@ def test_refine_rejects_symlink_source_without_starting_model(
     assert revision.background is not None
     source_path = session.store.asset_path(revision.background.image_path)
     outside = tmp_path / "outside.png"
-    Image.new("RGB", (592, 448), "gold").save(outside, format="PNG")
+    Image.new("RGB", (512, 384), "gold").save(outside, format="PNG")
     source_path.unlink()
     source_path.symlink_to(outside)
     call_count = len(workers.calls)
 
     with pytest.raises(BackgroundWorkflowError, match="unavailable or unreadable"):
-        workflow.available_refine_resolutions(card.id)
+        workflow.available_refine_output_sizes(card.id)
     with pytest.raises(BackgroundWorkflowError, match="outside the stack bundle"):
         workflow.refine(
             card.id,
             transformation=RefineTransformation.BALANCED,
-            resolution=GenerateResolution.RESOLUTION_768,
+            output_size=PresetOutputSize(tier=ResolutionTier.LARGE),
         )
 
     assert len(workers.calls) == call_count
@@ -1001,7 +1023,7 @@ def test_refine_snapshot_cleanup_waits_for_native_invocation(
     workflow.refine(
         card.id,
         transformation=RefineTransformation.BALANCED,
-        resolution=GenerateResolution.RESOLUTION_768,
+        output_size=PresetOutputSize(tier=ResolutionTier.LARGE),
     )
     snapshot_path = next((tmp_path / "temporary").glob(".refine-source-*.png"))
 
@@ -1014,7 +1036,7 @@ def test_refine_snapshot_cleanup_waits_for_native_invocation(
         workflow.refine(
             card.id,
             transformation=RefineTransformation.PRESERVE,
-            resolution=GenerateResolution.RESOLUTION_768,
+            output_size=PresetOutputSize(tier=ResolutionTier.LARGE),
         )
     assert list((tmp_path / "temporary").glob(".refine-source-*.png")) == [snapshot_path]
     assert workflow._request_id is None
@@ -1033,7 +1055,7 @@ def test_refine_cleanup_never_exposes_idle_state(
     workflow.refine(
         card.id,
         transformation=RefineTransformation.BALANCED,
-        resolution=GenerateResolution.RESOLUTION_768,
+        output_size=PresetOutputSize(tier=ResolutionTier.LARGE),
     )
     snapshot = workflow._source_snapshot
     assert snapshot is not None
@@ -1058,7 +1080,7 @@ def test_refine_cleanup_never_exposes_idle_state(
         workflow.refine(
             card.id,
             transformation=RefineTransformation.PRESERVE,
-            resolution=GenerateResolution.RESOLUTION_768,
+            output_size=PresetOutputSize(tier=ResolutionTier.LARGE),
         )
 
     allow_cleanup.set()
@@ -1077,7 +1099,7 @@ def test_refine_cleanup_mismatch_preserves_foreign_entry_and_blocks_work(
     workflow.refine(
         card.id,
         transformation=RefineTransformation.BALANCED,
-        resolution=GenerateResolution.RESOLUTION_768,
+        output_size=PresetOutputSize(tier=ResolutionTier.LARGE),
     )
     snapshot = workflow._source_snapshot
     assert snapshot is not None
@@ -1152,7 +1174,7 @@ def test_refine_indeterminate_observed_after_renders_and_promotes_one_history_en
     workflow.refine(
         card.id,
         transformation=RefineTransformation.BALANCED,
-        resolution=GenerateResolution.RESOLUTION_768,
+        output_size=PresetOutputSize(tier=ResolutionTier.LARGE),
     )
     _complete_generation(workers)
 
@@ -1289,7 +1311,7 @@ def test_refine_storage_failure_creates_no_revision_or_asset(
     workflow.refine(
         card.id,
         transformation=RefineTransformation.BALANCED,
-        resolution=GenerateResolution.RESOLUTION_768,
+        output_size=PresetOutputSize(tier=ResolutionTier.LARGE),
     )
     _complete_generation(workers)
 
@@ -1312,7 +1334,7 @@ def test_refine_cancel_or_model_failure_creates_no_version(
     workflow.refine(
         card.id,
         transformation=RefineTransformation.BALANCED,
-        resolution=GenerateResolution.RESOLUTION_768,
+        output_size=PresetOutputSize(tier=ResolutionTier.LARGE),
     )
     operation = workers.operations[-1]
     work = workers.calls[-1]
@@ -1330,7 +1352,7 @@ def test_refine_cancel_or_model_failure_creates_no_version(
     workflow.refine(
         card.id,
         transformation=RefineTransformation.BALANCED,
-        resolution=GenerateResolution.RESOLUTION_768,
+        output_size=PresetOutputSize(tier=ResolutionTier.LARGE),
     )
     workers.operations[-1].failed.emit(RuntimeError("injected model failure"))
 
@@ -1356,7 +1378,7 @@ def test_refine_source_replacement_during_commit_rolls_back(
     assert source_revision.background is not None
     source_path = session.store.asset_path(source_revision.background.image_path)
     replacement = tmp_path / f"{replacement_checkpoint}.png"
-    Image.new("RGB", (592, 448), "gold").save(replacement, format="PNG")
+    Image.new("RGB", (512, 384), "gold").save(replacement, format="PNG")
     replaced = False
     failures: list[object] = []
     workflow.failed.connect(failures.append)
@@ -1376,7 +1398,7 @@ def test_refine_source_replacement_during_commit_rolls_back(
     workflow.refine(
         card.id,
         transformation=RefineTransformation.BALANCED,
-        resolution=GenerateResolution.RESOLUTION_768,
+        output_size=PresetOutputSize(tier=ResolutionTier.LARGE),
     )
     _complete_generation(workers)
 
@@ -1420,7 +1442,7 @@ def test_refine_fifo_replacement_after_manifest_fsync_rolls_back(
     workflow.refine(
         card.id,
         transformation=RefineTransformation.BALANCED,
-        resolution=GenerateResolution.RESOLUTION_768,
+        output_size=PresetOutputSize(tier=ResolutionTier.LARGE),
     )
     _complete_generation(workers)
 
@@ -1454,7 +1476,7 @@ def test_rejected_generation_apply_removes_the_new_unreachable_asset(
     dependent = next(card for card in controller.document.cards if card.id == dependent_id)
     derived_asset_id = uuid4()
     derived_source = tmp_path / "derived-source.png"
-    Image.new("RGB", (592, 448), "green").save(derived_source)
+    Image.new("RGB", (512, 384), "green").save(derived_source)
     bundle_path = session.state.bundle_path
     assert bundle_path is not None
     store = StackStore(bundle_path)
@@ -1475,7 +1497,7 @@ def test_rejected_generation_apply_removes_the_new_unreachable_asset(
             ),
             description="A refined source",
             render_prompt="A refined source",
-            resolution=GenerateResolution.RESOLUTION_512,
+            output_size=PresetOutputSize(tier=ResolutionTier.MEDIUM),
             transformation=RefineTransformation.BALANCED,
             strength=0.50,
             settings=source_background.provenance.settings,
@@ -1541,15 +1563,15 @@ def test_generate_appends_and_captures_selected_style(tmp_path: Path) -> None:
     assert model.calls[-1]["prompt"] == provenance.render_prompt
 
 
-def test_generate_uses_revision_resolution_and_stack_aspect_ratio(
+def test_generate_uses_revision_output_size_and_stack_aspect_ratio(
     tmp_path: Path,
 ) -> None:
     workflow, controller, _session, workers, model, card = _bound_workflow(tmp_path)
     controller.execute(
-        SetRevisionGenerateResolutionCommand(
+        SetRevisionGenerateOutputSizeCommand(
             card_id=card.id,
             revision_id=card.active_revision.id,
-            resolution=GenerateResolution.RESOLUTION_1024,
+            output_size=PresetOutputSize(tier=ResolutionTier.FULL),
         )
     )
 
@@ -1559,17 +1581,81 @@ def test_generate_uses_revision_resolution_and_stack_aspect_ratio(
     provenance = controller.document.cards[0].active_revision.provenance
     assert provenance is not None
     assert provenance.operation == "generate"
-    assert provenance.inputs.resolution is GenerateResolution.RESOLUTION_1024
-    assert (model.calls[-1]["width"], model.calls[-1]["height"]) == (1184, 880)
-    assert (provenance.settings.width, provenance.settings.height) == (1184, 880)
+    assert provenance.inputs.output_size == PresetOutputSize(tier=ResolutionTier.FULL)
+    assert (model.calls[-1]["width"], model.calls[-1]["height"]) == (1024, 768)
+    assert (provenance.settings.width, provenance.settings.height) == (1024, 768)
+
+
+def test_generate_can_reuse_an_exact_nonstandard_current_image_size(
+    tmp_path: Path,
+) -> None:
+    workflow, controller, session, workers, model, card = _bound_workflow(tmp_path)
+    workflow.generate(card.id)
+    _complete_generation(workers)
+    revision = controller.document.cards[0].active_revision
+    assert revision.background is not None
+    Image.new("RGB", (640, 480), "navy").save(
+        session.store.asset_path(revision.background.image_path)
+    )
+    controller.execute(
+        SetRevisionGenerateOutputSizeCommand(
+            card_id=card.id,
+            revision_id=revision.id,
+            output_size=ExactOutputSize(width=640, height=480),
+        )
+    )
+
+    workflow.generate(card.id)
+    _complete_generation(workers)
+
+    generated = controller.document.cards[0].active_revision
+    assert isinstance(generated.provenance, DirectGenerateProvenance)
+    assert generated.provenance.inputs.output_size == ExactOutputSize(
+        width=640,
+        height=480,
+    )
+    assert (model.calls[-1]["width"], model.calls[-1]["height"]) == (
+        640,
+        480,
+    )
+
+
+@pytest.mark.parametrize("transformation", tuple(RefineTransformation))
+def test_refine_supports_same_size_for_every_transformation(
+    tmp_path: Path,
+    transformation: RefineTransformation,
+) -> None:
+    workflow, controller, _session, workers, model, card = _bound_workflow(
+        tmp_path / transformation.value
+    )
+    workflow.generate(card.id)
+    _complete_generation(workers)
+
+    workflow.refine(
+        card.id,
+        transformation=transformation,
+        output_size=CurrentSourceSize(width=512, height=384),
+    )
+    _complete_generation(workers)
+
+    provenance = controller.document.cards[0].active_revision.provenance
+    assert isinstance(provenance, RefineProvenance)
+    assert provenance.output_size == CurrentSourceSize(
+        width=512,
+        height=384,
+    )
+    assert (model.calls[-1]["width"], model.calls[-1]["height"]) == (
+        512,
+        384,
+    )
 
 
 @pytest.mark.parametrize("aspect_ratio", tuple(AspectRatio))
-@pytest.mark.parametrize("resolution", tuple(GenerateResolution))
-def test_generate_uses_every_supported_ratio_and_resolution(
+@pytest.mark.parametrize("resolution", tuple(ResolutionTier))
+def test_generate_uses_every_supported_ratio_and_tier(
     tmp_path: Path,
     aspect_ratio: AspectRatio,
-    resolution: GenerateResolution,
+    resolution: ResolutionTier,
 ) -> None:
     root = tmp_path / aspect_ratio.name.lower() / str(resolution.value)
     workflow, controller, _session, workers, model, card = _bound_workflow(
@@ -1585,7 +1671,7 @@ def test_generate_uses_every_supported_ratio_and_resolution(
     provenance = controller.document.cards[0].active_revision.provenance
     assert provenance is not None
     assert provenance.operation == "generate"
-    assert provenance.inputs.resolution is resolution
+    assert provenance.inputs.output_size == PresetOutputSize(tier=resolution)
     assert (
         model.calls[-1]["width"],
         model.calls[-1]["height"],
@@ -1635,10 +1721,10 @@ def test_description_and_style_changes_suppress_in_flight_generation(
     assert controller.document.cards[0].active_revision.background is None
     workflow.generate(card.id)
     controller.execute(
-        SetRevisionGenerateResolutionCommand(
+        SetRevisionGenerateOutputSizeCommand(
             card_id=card.id,
             revision_id=card.active_revision.id,
-            resolution=GenerateResolution.RESOLUTION_768,
+            output_size=PresetOutputSize(tier=ResolutionTier.LARGE),
         )
     )
     _complete_generation(workers)

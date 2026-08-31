@@ -16,7 +16,7 @@ from PIL import Image
 import hotcards.generation.mflux_generator as mflux_module
 from hotcards.domain.image_dimensions import (
     AspectRatio,
-    GenerateResolution,
+    ResolutionTier,
     output_dimensions,
 )
 from hotcards.domain.models import (
@@ -113,6 +113,7 @@ class FakeCallbackRegistry:
     def register(self, callback: object) -> None:
         self.registered.append(callback)
 
+
 class FakeRawTokenizer:
     def __init__(self, token_count: int = 24) -> None:
         self.token_count = token_count
@@ -147,9 +148,7 @@ class FakeMfluxModel:
         self.calls.append(kwargs)
         if self.fail is not None:
             raise self.fail
-        config = SimpleNamespace(
-            num_inference_steps=kwargs["num_inference_steps"]
-        )
+        config = SimpleNamespace(num_inference_steps=kwargs["num_inference_steps"])
         for callback in self.callbacks.registered:
             callback.call_before_loop(config=config)
         for _step in range(kwargs["num_inference_steps"]):  # type: ignore[arg-type]
@@ -207,9 +206,7 @@ class BlockingMfluxModel(FakeMfluxModel):
 
     def generate_image(self, **kwargs: object) -> FakeGeneratedImage:
         self.calls.append(kwargs)
-        config = SimpleNamespace(
-            num_inference_steps=kwargs["num_inference_steps"]
-        )
+        config = SimpleNamespace(num_inference_steps=kwargs["num_inference_steps"])
         for callback in self.callbacks.registered:
             callback.call_before_loop(config=config)
         self.entered.set()
@@ -269,9 +266,7 @@ def accepted_edit() -> AcceptedEdit:
             subject_identity=True,
             existing_text_and_logos=True,
         ),
-        expanded_prompt=(
-            "Open the gate. Preserve subject identity and existing text and logos."
-        ),
+        expanded_prompt=("Open the gate. Preserve subject identity and existing text and logos."),
     )
 
 
@@ -291,7 +286,7 @@ def refine_request(
         source_seed=73,
         description="A refined courtyard",
         render_prompt="A refined courtyard",
-        resolution=GenerateResolution.RESOLUTION_512,
+        output_size=PresetOutputSize(tier=ResolutionTier.MEDIUM),
         transformation=RefineTransformation.BALANCED,
         image_strength=0.50,
     )
@@ -314,9 +309,7 @@ def edit_request(
         instruction=edit.instruction,
         preserve=edit.preserve,
         expanded_prompt=edit.expanded_prompt,
-        output_size=PresetOutputSize(
-            resolution=GenerateResolution.RESOLUTION_512
-        ),
+        output_size=PresetOutputSize(tier=ResolutionTier.MEDIUM),
         edit_lineage=(edit,),
         seed=991,
     )
@@ -360,8 +353,8 @@ def test_plain_generate_routes_to_regular_model_without_image_input(
         "seed": 42,
         "prompt": "A storybook watercolor courtyard",
         "num_inference_steps": 4,
-        "height": 448,
-        "width": 592,
+        "height": 384,
+        "width": 512,
         "guidance": 1.0,
         "scheduler": "flow_match_euler_discrete",
     }
@@ -485,20 +478,20 @@ def test_edit_accepts_exact_current_source_dimensions(
     source_path = write_source(tmp_path / "source.png")
     request = edit_request(tmp_path / "current.png", source_path).model_copy(
         update={
-            "output_size": CurrentSourceSize(width=1001, height=777),
-            "width": 1001,
-            "height": 777,
+            "output_size": CurrentSourceSize(width=1008, height=784),
+            "width": 1008,
+            "height": 784,
         }
     )
     model = FakeMfluxModel()
 
     result = MfluxGenerator(edit_model_factory=lambda *_: model).edit(request)
 
-    assert model.calls[0]["width"] == 1001
-    assert model.calls[0]["height"] == 777
+    assert model.calls[0]["width"] == 1008
+    assert model.calls[0]["height"] == 784
     assert result.provenance.output_size == CurrentSourceSize(
-        width=1001,
-        height=777,
+        width=1008,
+        height=784,
     )
 
 
@@ -516,9 +509,7 @@ def test_edit_enforces_exact_token_budget_before_inference(
     generator = MfluxGenerator(edit_model_factory=lambda *_: model)
 
     if succeeds:
-        result = generator.edit(
-            edit_request(tmp_path / f"edit-{token_count}.png", source_path)
-        )
+        result = generator.edit(edit_request(tmp_path / f"edit-{token_count}.png", source_path))
         assert result.provenance.prompt_token_count == token_count
         assert len(model.calls) == 1
     else:
@@ -533,18 +524,18 @@ def test_edit_enforces_exact_token_budget_before_inference(
 
 
 @pytest.mark.parametrize("aspect_ratio", tuple(AspectRatio))
-@pytest.mark.parametrize("resolution", tuple(GenerateResolution))
+@pytest.mark.parametrize("resolution", tuple(ResolutionTier))
 def test_generate_request_accepts_every_supported_dimension_combination(
     tmp_path: Path,
     aspect_ratio: AspectRatio,
-    resolution: GenerateResolution,
+    resolution: ResolutionTier,
 ) -> None:
     width, height = output_dimensions(resolution, aspect_ratio)
 
     request = MfluxGenerateRequest(
         inputs=GenerateInputs(
             description="Valid dimensions",
-            resolution=resolution,
+            output_size=PresetOutputSize(tier=resolution),
         ),
         render_prompt="Valid dimensions",
         output_path=tmp_path / "valid.png",
@@ -561,7 +552,7 @@ def test_requests_reject_mismatched_dimensions_strength_and_lineage(
     tmp_path: Path,
 ) -> None:
     source_path = write_source(tmp_path / "source.png")
-    with pytest.raises(ValueError, match="resolution and aspect ratio"):
+    with pytest.raises(ValueError, match="selected output size"):
         generate_request(tmp_path / "invalid.png").model_copy(
             update={"width": 608}
         ).__class__.model_validate(
@@ -925,9 +916,7 @@ def test_release_defers_without_blocking_until_active_invocation_unwinds(
         )
     )
     thread, outcomes = run_in_thread(
-        lambda: generator.generate(
-            generate_request(tmp_path / "generated.png")
-        )
+        lambda: generator.generate(generate_request(tmp_path / "generated.png"))
     )
     assert entered.wait(0.5)
 
@@ -968,9 +957,7 @@ def test_deferred_release_failure_unlocks_and_retries_before_later_operation(
         )
     )
     thread, outcomes = run_in_thread(
-        lambda: generator.generate(
-            generate_request(tmp_path / "first.png")
-        )
+        lambda: generator.generate(generate_request(tmp_path / "first.png"))
     )
     assert entered.wait(0.5)
 
@@ -986,9 +973,7 @@ def test_deferred_release_failure_unlocks_and_retries_before_later_operation(
     mflux_module._PROCESS_EXECUTION_LOCK.release()
 
     later_thread, later_outcomes = run_in_thread(
-        lambda: generator.generate(
-            generate_request(tmp_path / "later.png")
-        )
+        lambda: generator.generate(generate_request(tmp_path / "later.png"))
     )
     later_thread.join(2)
 
@@ -1018,15 +1003,11 @@ def test_separate_adapter_instances_share_one_process_execution_boundary(
     first_generator = MfluxGenerator(model_factory=lambda *_: first)
     second_generator = MfluxGenerator(model_factory=lambda *_: SecondModel())
     first_thread, first_outcomes = run_in_thread(
-        lambda: first_generator.generate(
-            generate_request(tmp_path / "first.png")
-        )
+        lambda: first_generator.generate(generate_request(tmp_path / "first.png"))
     )
     assert first_entered.wait(1)
     second_thread, second_outcomes = run_in_thread(
-        lambda: second_generator.generate(
-            generate_request(tmp_path / "second.png")
-        )
+        lambda: second_generator.generate(generate_request(tmp_path / "second.png"))
     )
 
     assert not second_entered.wait(0.1)
@@ -1054,9 +1035,7 @@ def test_cancellation_while_waiting_for_process_boundary_loads_no_model(
         model_factory=lambda *_: second_loads.append(None) or FakeMfluxModel()
     )
     first_thread, _first_outcomes = run_in_thread(
-        lambda: first_generator.generate(
-            generate_request(tmp_path / "first.png")
-        )
+        lambda: first_generator.generate(generate_request(tmp_path / "first.png"))
     )
     assert first_entered.wait(1)
     cancellation = MfluxCancellationToken()
@@ -1156,7 +1135,7 @@ def test_success_atomically_publishes_exact_target_and_cleans_owned_scope(
     assert result.output_path == output_path
     assert output_path.is_file()
     with Image.open(output_path) as generated:
-        assert generated.size == (592, 448)
+        assert generated.size == (512, 384)
     assert owned_output_scopes(tmp_path) == []
 
 
@@ -1203,9 +1182,7 @@ def test_mflux_suffix_output_is_rejected_and_owned_scope_is_cleaned(
 ) -> None:
     output_path = tmp_path / "requested.png"
     generator = MfluxGenerator(
-        model_factory=lambda *_: GeneratedImageModel(
-            SuffixingGeneratedImage(592, 448)
-        )
+        model_factory=lambda *_: GeneratedImageModel(SuffixingGeneratedImage(512, 384))
     )
 
     with pytest.raises(ImageGenerationError, match="reserved candidate"):
@@ -1223,8 +1200,8 @@ def test_cancellation_after_temp_save_publishes_nothing_and_cleans_scope(
     generator = MfluxGenerator(
         model_factory=lambda *_: GeneratedImageModel(
             CancellingGeneratedImage(
-                592,
-                448,
+                512,
+                384,
                 cancellation=cancellation,
             )
         )
@@ -1252,9 +1229,7 @@ def test_operation_errors_are_actionable_and_leave_no_output(
     assert owned_output_scopes(tmp_path) == []
 
     failing = MfluxGenerator(
-        model_factory=lambda *_: FakeMfluxModel(
-            fail=RuntimeError("inference exploded")
-        )
+        model_factory=lambda *_: FakeMfluxModel(fail=RuntimeError("inference exploded"))
     )
     failed_path = tmp_path / "failed.png"
     with pytest.raises(
@@ -1284,9 +1259,7 @@ def test_model_load_and_output_validation_errors_are_typed(
     with pytest.raises(ModelLoadError, match="regular model.*weights unavailable"):
         generator.generate(generate_request(tmp_path / "load-failed.png"))
 
-    corrupt = MfluxGenerator(
-        model_factory=lambda *_: FakeMfluxModel(corrupt=True)
-    )
+    corrupt = MfluxGenerator(model_factory=lambda *_: FakeMfluxModel(corrupt=True))
     output_path = tmp_path / "corrupt.png"
     with pytest.raises(ImageGenerationError, match="unreadable image"):
         corrupt.generate(generate_request(output_path))

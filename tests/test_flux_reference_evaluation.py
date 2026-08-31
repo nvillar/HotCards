@@ -8,7 +8,7 @@ from uuid import uuid4
 import pytest
 from PIL import Image
 
-from hotcards.domain.image_dimensions import AspectRatio, GenerateResolution
+from hotcards.domain.image_dimensions import AspectRatio, ResolutionTier
 from hotcards.domain.models import (
     Card,
     CardRevision,
@@ -89,8 +89,8 @@ def _card_with_image(
                     model_identifier="test",
                     mflux_version="test",
                     seed=1,
-                    width=592,
-                    height=448,
+                    width=512,
+                    height=384,
                     step_count=4,
                     generated_at=generated_at,
                     duration_seconds=1,
@@ -131,21 +131,15 @@ def _write_reference_stack(tmp_path: Path) -> Path:
 
 
 def test_reference_cli_rejects_obsolete_arbitrary_dimensions() -> None:
-    defaults = build_parser().parse_args(
-        ["flux-references", "--stack", "Stack.hotcards"]
-    )
-    assert defaults.resolution is GenerateResolution.RESOLUTION_1024
+    defaults = build_parser().parse_args(["flux-references", "--stack", "Stack.hotcards"])
+    assert defaults.tier is ResolutionTier.FULL
     assert defaults.aspect_ratio is AspectRatio.LANDSCAPE
     with pytest.raises(SystemExit) as caught:
-        build_parser().parse_args(
-            ["flux-references", "--stack", "Stack.hotcards", "--width", "48"]
-        )
+        build_parser().parse_args(["flux-references", "--stack", "Stack.hotcards", "--width", "48"])
 
     assert caught.value.code == 2
     with pytest.raises(SystemExit) as caught:
-        build_parser().parse_args(
-            ["flux-references", "--stack", "Stack.hotcards", "--kv-cache"]
-        )
+        build_parser().parse_args(["flux-references", "--stack", "Stack.hotcards", "--kv-cache"])
 
     assert caught.value.code == 2
 
@@ -160,7 +154,7 @@ def test_reference_suite_preserves_order_prompts_and_provenance(
     result_path = run_flux_reference_evaluation(
         output_dir=output_dir,
         stack_path=stack_path,
-        resolution=GenerateResolution.RESOLUTION_256,
+        tier=ResolutionTier.SMALL,
         aspect_ratio=AspectRatio.LANDSCAPE,
         model_factory=lambda *_: FakeReferenceModel(requests),
         source_model_factory=lambda *_: FakeReferenceModel(requests),
@@ -170,10 +164,9 @@ def test_reference_suite_preserves_order_prompts_and_provenance(
     result = json.loads(result_path.read_text())
     assert result["status"] == "success"
     assert len(requests) == 8
-    assert {(request["width"], request["height"]) for request in requests} == {
-        (288, 224)
-    }
-    assert result["settings"]["resolution"] == 256
+    assert {(request["width"], request["height"]) for request in requests} == {(256, 192)}
+    assert result["settings"]["tier"] == "Small"
+    assert result["settings"]["long_edge"] == 256
     assert result["settings"]["aspect_ratio"] == "4:3"
     assert "image_paths" not in requests[0]
     combined = next(case for case in result["cases"] if case["case_id"] == "character-plus-style")
@@ -214,7 +207,7 @@ def test_reference_suite_isolates_failure_and_failed_dependency(
     result_path = run_flux_reference_evaluation(
         output_dir=output_dir,
         stack_path=stack_path,
-        resolution=GenerateResolution.RESOLUTION_256,
+        tier=ResolutionTier.SMALL,
         aspect_ratio=AspectRatio.LANDSCAPE,
         model_factory=lambda *_: FakeReferenceModel(
             requests,

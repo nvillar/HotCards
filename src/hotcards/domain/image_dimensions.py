@@ -1,9 +1,9 @@
-"""Fixed stack aspect ratios and image resolution calculations."""
+"""Fixed stack aspect ratios and named long-edge output tiers."""
 
 from __future__ import annotations
 
 from enum import IntEnum, StrEnum
-from math import floor, sqrt
+from math import floor
 
 
 class AspectRatio(StrEnum):
@@ -21,13 +21,18 @@ class AspectRatio(StrEnum):
         return int(width), int(height)
 
 
-class GenerateResolution(IntEnum):
-    """Supported square-equivalent image generation resolutions."""
+class ResolutionTier(IntEnum):
+    """Supported image-output tiers expressed as long-edge pixels."""
 
-    RESOLUTION_256 = 256
-    RESOLUTION_512 = 512
-    RESOLUTION_768 = 768
-    RESOLUTION_1024 = 1024
+    SMALL = 256
+    MEDIUM = 512
+    LARGE = 768
+    FULL = 1024
+
+    @property
+    def label(self) -> str:
+        """Return the exact user-facing tier name."""
+        return self.name.title()
 
 
 def _nearest_16(value: float) -> int:
@@ -35,52 +40,51 @@ def _nearest_16(value: float) -> int:
 
 
 def output_dimensions(
-    resolution: GenerateResolution | int,
+    tier: ResolutionTier | int,
     aspect_ratio: AspectRatio,
 ) -> tuple[int, int]:
-    """Return REM square-equivalent dimensions aligned to 16 pixels."""
+    """Return dimensions whose long edge equals the selected tier."""
     if not isinstance(aspect_ratio, AspectRatio):
         raise ValueError("aspect_ratio must be a supported AspectRatio")
-    if isinstance(resolution, GenerateResolution):
-        resolution_value = resolution.value
-    elif type(resolution) is int:
+    if isinstance(tier, ResolutionTier):
+        tier_value = tier.value
+    elif type(tier) is int:
         try:
-            resolution_value = GenerateResolution(resolution).value
+            tier_value = ResolutionTier(tier).value
         except ValueError as error:
-            supported = ", ".join(str(item.value) for item in GenerateResolution)
-            raise ValueError(f"resolution must be one of: {supported}") from error
+            supported = ", ".join(str(item.value) for item in ResolutionTier)
+            raise ValueError(f"tier must be one of: {supported}") from error
     else:
-        supported = ", ".join(str(item.value) for item in GenerateResolution)
-        raise ValueError(f"resolution must be one of: {supported}")
+        supported = ", ".join(str(item.value) for item in ResolutionTier)
+        raise ValueError(f"tier must be one of: {supported}")
     ratio_width, ratio_height = aspect_ratio.components
-    width = sqrt(resolution_value**2 * ratio_width / ratio_height)
-    height = sqrt(resolution_value**2 * ratio_height / ratio_width)
-    return _nearest_16(width), _nearest_16(height)
+    if ratio_width == ratio_height:
+        return tier_value, tier_value
+    if ratio_width > ratio_height:
+        return tier_value, _nearest_16(tier_value * ratio_height / ratio_width)
+    return _nearest_16(tier_value * ratio_width / ratio_height), tier_value
 
 
-def higher_output_resolutions(
+def higher_output_tiers(
     current_width: int,
     current_height: int,
     aspect_ratio: AspectRatio,
-) -> tuple[GenerateResolution, ...]:
-    """Return presets whose derived output area exceeds the current image area."""
+) -> tuple[ResolutionTier, ...]:
+    """Return tiers whose derived output area exceeds the current image area."""
     if current_width <= 0 or current_height <= 0:
         raise ValueError("current image dimensions must be positive")
     current_area = current_width * current_height
     return tuple(
-        resolution
-        for resolution in GenerateResolution
-        if (
-            output_dimensions(resolution, aspect_ratio)[0]
-            * output_dimensions(resolution, aspect_ratio)[1]
-        )
+        tier
+        for tier in ResolutionTier
+        if (output_dimensions(tier, aspect_ratio)[0] * output_dimensions(tier, aspect_ratio)[1])
         > current_area
     )
 
 
 __all__ = [
     "AspectRatio",
-    "GenerateResolution",
-    "higher_output_resolutions",
+    "ResolutionTier",
+    "higher_output_tiers",
     "output_dimensions",
 ]

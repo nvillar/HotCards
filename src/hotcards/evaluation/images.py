@@ -14,7 +14,7 @@ from pydantic import Field
 
 from hotcards.domain.image_dimensions import (
     AspectRatio,
-    GenerateResolution,
+    ResolutionTier,
     output_dimensions,
 )
 from hotcards.domain.models import (
@@ -22,6 +22,7 @@ from hotcards.domain.models import (
     GenerateInputs,
     NonEmptyString,
     PositiveInt,
+    PresetOutputSize,
 )
 from hotcards.evaluation.contracts import SafeCaseId
 from hotcards.evaluation.manifest import (
@@ -73,10 +74,11 @@ class ImageEvaluationSettings(DomainModel):
     case_dir: Path = Path("evals/cases/images")
     mflux_models: tuple[NonEmptyString, ...] = DEFAULT_MFLUX_MODELS
     seed: int = 42
-    resolution: GenerateResolution = GenerateResolution.RESOLUTION_1024
+    tier: ResolutionTier = ResolutionTier.FULL
     aspect_ratio: AspectRatio = AspectRatio.LANDSCAPE
     step_count: PositiveInt = 4
     quantization: int | None = None
+
 
 MfluxGeneratorFactory = Callable[[], MfluxGenerator]
 
@@ -129,10 +131,10 @@ def _request(
     settings: ImageEvaluationSettings,
 ) -> MfluxGenerateRequest:
     inputs = case.inputs.model_copy(
-        update={"resolution": settings.resolution},
+        update={"output_size": PresetOutputSize(tier=settings.tier)},
     )
     width, height = output_dimensions(
-        settings.resolution,
+        settings.tier,
         settings.aspect_ratio,
     )
     return MfluxGenerateRequest(

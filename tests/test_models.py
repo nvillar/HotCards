@@ -9,7 +9,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from hotcards.domain.image_dimensions import (
     AspectRatio,
-    GenerateResolution,
+    ResolutionTier,
     output_dimensions,
 )
 from hotcards.domain.models import (
@@ -25,6 +25,7 @@ from hotcards.domain.models import (
     DuplicateProvenance,
     EditPreserveOptions,
     EditProvenance,
+    ExactOutputSize,
     GeneratedBackground,
     GenerateInputs,
     HotspotConditions,
@@ -54,8 +55,8 @@ from hotcards.domain.models import (
 
 def image_settings(
     *,
-    width: int = 592,
-    height: int = 448,
+    width: int = 512,
+    height: int = 384,
 ) -> ImageOperationSettings:
     return ImageOperationSettings(
         model_identifier="flux2-klein-4b",
@@ -164,8 +165,7 @@ def test_stack_serializes_ordered_references() -> None:
     destinations = (Card(name="Portrait"), Card(name="Studio"))
     revision = CardRevision(
         references=tuple(
-            ResolvedCardReference(target_card_id=destination.id)
-            for destination in destinations
+            ResolvedCardReference(target_card_id=destination.id) for destination in destinations
         )
     )
     source = Card(name="Source", revisions=(revision,))
@@ -175,8 +175,7 @@ def test_stack_serializes_ordered_references() -> None:
 
     serialized_revision = values["cards"][0]["revisions"][0]
     assert tuple(
-        reference["target_card_id"]
-        for reference in serialized_revision["references"]
+        reference["target_card_id"] for reference in serialized_revision["references"]
     ) == tuple(str(destination.id) for destination in destinations)
     assert "subject" not in serialized_revision
     assert "style" not in serialized_revision
@@ -260,11 +259,7 @@ def test_stack_rejects_self_and_duplicate_references() -> None:
                         "revisions": (
                             source.active_revision.model_copy(
                                 update={
-                                    "references": (
-                                        ResolvedCardReference(
-                                            target_card_id=source.id
-                                        ),
-                                    )
+                                    "references": (ResolvedCardReference(target_card_id=source.id),)
                                 }
                             ),
                         )
@@ -323,9 +318,7 @@ def test_hotspot_labels_are_derived_from_actions() -> None:
     source = Card(
         name="Source",
         revisions=(
-            CardRevision(
-                hotspot_set=HotspotSet(interactions=(resolved, unresolved, actionless))
-            ),
+            CardRevision(hotspot_set=HotspotSet(interactions=(resolved, unresolved, actionless))),
         ),
     )
 
@@ -356,9 +349,7 @@ def test_hotspot_key_contract_is_closed_and_references_stack_keys() -> None:
         cards=(
             Card(
                 name="Card",
-                revisions=(
-                    CardRevision(hotspot_set=HotspotSet(interactions=(interaction,))),
-                ),
+                revisions=(CardRevision(hotspot_set=HotspotSet(interactions=(interaction,))),),
             ),
         ),
     )
@@ -379,11 +370,7 @@ def test_hotspot_key_contract_is_closed_and_references_stack_keys() -> None:
                         CardRevision(
                             hotspot_set=HotspotSet(
                                 interactions=(
-                                    Interaction(
-                                        conditions=HotspotConditions(
-                                            requires=(uuid4(),)
-                                        )
-                                    ),
+                                    Interaction(conditions=HotspotConditions(requires=(uuid4(),))),
                                 )
                             )
                         ),
@@ -426,22 +413,55 @@ def test_generation_inputs_capture_exact_style_snapshot() -> None:
     assert inputs.style == style
 
 
-def test_generate_resolution_is_revision_local_and_strict() -> None:
+def test_generate_output_size_is_revision_local_and_strict() -> None:
     revision = CardRevision()
 
-    assert revision.generate_resolution is GenerateResolution.RESOLUTION_512
-    assert revision.model_dump(mode="json")["generate_resolution"] == 512
-    with pytest.raises(ValidationError, match="generate_resolution"):
+    assert revision.generate_output_size == PresetOutputSize(tier=ResolutionTier.MEDIUM)
+    assert revision.model_dump(mode="json")["generate_output_size"] == {
+        "mode": "preset",
+        "tier": 512,
+    }
+    with pytest.raises(ValidationError, match="generate_output_size"):
         CardRevision.model_validate(
-            {"generate_resolution": 300},
+            {"generate_output_size": {"mode": "preset", "tier": 300}},
+        )
+
+
+def test_exact_generate_output_size_is_aligned_and_matches_stack_ratio() -> None:
+    revision = CardRevision(generate_output_size=ExactOutputSize(width=640, height=480))
+    Stack(
+        name="Valid",
+        aspect_ratio=AspectRatio.LANDSCAPE,
+        cards=(Card(name="Card", revisions=(revision,)),),
+    )
+
+    with pytest.raises(ValidationError, match="aligned"):
+        ExactOutputSize(width=641, height=480)
+    with pytest.raises(ValidationError, match="stack aspect ratio"):
+        Stack(
+            name="Invalid",
+            aspect_ratio=AspectRatio.LANDSCAPE,
+            cards=(
+                Card(
+                    name="Card",
+                    revisions=(
+                        CardRevision(
+                            generate_output_size=ExactOutputSize(
+                                width=640,
+                                height=496,
+                            )
+                        ),
+                    ),
+                ),
+            ),
         )
 
 
 @pytest.mark.parametrize("aspect_ratio", tuple(AspectRatio))
-@pytest.mark.parametrize("resolution", tuple(GenerateResolution))
+@pytest.mark.parametrize("resolution", tuple(ResolutionTier))
 def test_stack_requires_generate_dimensions_for_every_schema_combination(
     aspect_ratio: AspectRatio,
-    resolution: GenerateResolution,
+    resolution: ResolutionTier,
 ) -> None:
     width, height = output_dimensions(resolution, aspect_ratio)
     background = GeneratedBackground(
@@ -449,7 +469,7 @@ def test_stack_requires_generate_dimensions_for_every_schema_combination(
         provenance=DirectGenerateProvenance(
             inputs=GenerateInputs(
                 description="A courtyard",
-                resolution=resolution,
+                output_size=PresetOutputSize(tier=resolution),
             ),
             render_prompt="A courtyard",
             settings=image_settings(width=width, height=height),
@@ -461,14 +481,10 @@ def test_stack_requires_generate_dimensions_for_every_schema_combination(
 
     Stack(name="Valid", aspect_ratio=aspect_ratio, cards=(card,))
 
-    invalid_settings = background.provenance.settings.model_copy(
-        update={"width": width + 16}
-    )
+    invalid_settings = background.provenance.settings.model_copy(update={"width": width + 16})
     invalid_background = background.model_copy(
         update={
-            "provenance": background.provenance.model_copy(
-                update={"settings": invalid_settings}
-            )
+            "provenance": background.provenance.model_copy(update={"settings": invalid_settings})
         }
     )
     with pytest.raises(ValidationError, match="direct Generate dimensions"):
@@ -479,9 +495,7 @@ def test_stack_requires_generate_dimensions_for_every_schema_combination(
                 card.model_copy(
                     update={
                         "revisions": (
-                            revision.model_copy(
-                                update={"background": invalid_background}
-                            ),
+                            revision.model_copy(update={"background": invalid_background}),
                         )
                     }
                 ),
@@ -494,7 +508,7 @@ def test_legacy_generate_preserves_historic_nonpreset_dimensions() -> None:
         image_path="assets/cards/card/legacy.png",
         provenance=LegacyGenerateProvenance(
             render_prompt="Historical exact prompt",
-            settings=image_settings(width=1001, height=777),
+            settings=image_settings(width=1008, height=784),
         ),
         created_at=datetime.now(UTC),
     )
@@ -532,7 +546,7 @@ def test_image_provenance_union_is_discriminated_strict_and_round_trips() -> Non
             description="A moonlit courtyard",
             edit_lineage=(accepted_edit,),
             render_prompt="A moonlit courtyard. Open the gate.",
-            resolution=GenerateResolution.RESOLUTION_512,
+            output_size=PresetOutputSize(tier=ResolutionTier.MEDIUM),
             transformation=RefineTransformation.BALANCED,
             strength=0.50,
             settings=image_settings(),
@@ -542,12 +556,10 @@ def test_image_provenance_union_is_discriminated_strict_and_round_trips() -> Non
             instruction=accepted_edit.instruction,
             preserve=accepted_edit.preserve,
             expanded_prompt=accepted_edit.expanded_prompt,
-            output_size=PresetOutputSize(
-                resolution=GenerateResolution.RESOLUTION_1024
-            ),
+            output_size=PresetOutputSize(tier=ResolutionTier.FULL),
             edit_lineage=(accepted_edit,),
             prompt_token_count=24,
-            settings=image_settings(width=1184, height=880),
+            settings=image_settings(width=1024, height=768),
         ),
         DuplicateProvenance(
             source=source,
@@ -592,9 +604,7 @@ def test_duplicate_provenance_is_flattened_and_inherits_original_edit_lineage() 
         instruction=accepted_edit.instruction,
         preserve=accepted_edit.preserve,
         expanded_prompt=accepted_edit.expanded_prompt,
-        output_size=PresetOutputSize(
-            resolution=GenerateResolution.RESOLUTION_512
-        ),
+        output_size=PresetOutputSize(tier=ResolutionTier.MEDIUM),
         edit_lineage=(accepted_edit,),
         prompt_token_count=24,
         settings=image_settings(),
@@ -630,9 +640,7 @@ def test_derived_operation_inherits_lineage_from_independent_duplicate() -> None
         instruction=accepted_edit.instruction,
         preserve=accepted_edit.preserve,
         expanded_prompt=accepted_edit.expanded_prompt,
-        output_size=PresetOutputSize(
-            resolution=GenerateResolution.RESOLUTION_512
-        ),
+        output_size=PresetOutputSize(tier=ResolutionTier.MEDIUM),
         edit_lineage=(accepted_edit,),
         prompt_token_count=24,
         settings=image_settings(),
@@ -661,7 +669,7 @@ def test_derived_operation_inherits_lineage_from_independent_duplicate() -> None
                 description="Refined duplicate",
                 edit_lineage=(accepted_edit,),
                 render_prompt="Refined duplicate",
-                resolution=GenerateResolution.RESOLUTION_512,
+                output_size=PresetOutputSize(tier=ResolutionTier.MEDIUM),
                 transformation=RefineTransformation.BALANCED,
                 strength=0.50,
                 settings=image_settings(),
@@ -758,7 +766,7 @@ def test_refine_and_edit_provenance_enforce_operation_invariants() -> None:
             source=source,
             description="A courtyard",
             render_prompt="A courtyard",
-            resolution=GenerateResolution.RESOLUTION_512,
+            output_size=PresetOutputSize(tier=ResolutionTier.MEDIUM),
             transformation=RefineTransformation.BALANCED,
             strength=0.25,
             settings=image_settings(),
@@ -769,12 +777,10 @@ def test_refine_and_edit_provenance_enforce_operation_invariants() -> None:
             instruction="Close the gate.",
             preserve=preserve,
             expanded_prompt="Close the gate. Preserve subject identity.",
-            output_size=PresetOutputSize(
-                resolution=GenerateResolution.RESOLUTION_768
-            ),
+            output_size=PresetOutputSize(tier=ResolutionTier.LARGE),
             edit_lineage=(accepted,),
             prompt_token_count=24,
-            settings=image_settings(width=880, height=672),
+            settings=image_settings(width=768, height=576),
         )
     with pytest.raises(ValidationError, match="512-token budget"):
         EditProvenance(
@@ -782,9 +788,7 @@ def test_refine_and_edit_provenance_enforce_operation_invariants() -> None:
             instruction=accepted.instruction,
             preserve=accepted.preserve,
             expanded_prompt=accepted.expanded_prompt,
-            output_size=PresetOutputSize(
-                resolution=GenerateResolution.RESOLUTION_512
-            ),
+            output_size=PresetOutputSize(tier=ResolutionTier.MEDIUM),
             edit_lineage=(accepted,),
             prompt_token_count=513,
             settings=image_settings(),
@@ -798,7 +802,7 @@ def test_edit_current_output_size_matches_exact_source_dimensions() -> None:
             image_path="assets/cards/card/legacy.png",
             provenance=LegacyGenerateProvenance(
                 render_prompt="Legacy source",
-                settings=image_settings(width=1001, height=777),
+                settings=image_settings(width=1008, height=784),
             ),
             created_at=datetime.now(UTC),
         )
@@ -835,7 +839,7 @@ def test_edit_current_output_size_matches_exact_source_dimensions() -> None:
             )
         )
 
-    matching = edited_revision(1001, 777)
+    matching = edited_revision(1008, 784)
     Stack(
         name="Valid",
         cards=(
@@ -848,8 +852,8 @@ def test_edit_current_output_size_matches_exact_source_dimensions() -> None:
         ),
     )
 
-    mismatched = edited_revision(1000, 777)
-    with pytest.raises(ValidationError, match="current-size Edit output"):
+    mismatched = edited_revision(992, 784)
+    with pytest.raises(ValidationError, match="current-size derived output"):
         Stack(
             name="Invalid",
             cards=(
@@ -864,11 +868,13 @@ def test_edit_current_output_size_matches_exact_source_dimensions() -> None:
 
 
 def test_derived_provenance_requires_a_source_revision_in_the_declared_card() -> None:
-    source = CardRevision(background=GeneratedBackground(
-        image_path="assets/cards/source/image-source.png",
-        provenance=image_provenance(),
-        created_at=datetime.now(UTC),
-    ))
+    source = CardRevision(
+        background=GeneratedBackground(
+            image_path="assets/cards/source/image-source.png",
+            provenance=image_provenance(),
+            created_at=datetime.now(UTC),
+        )
+    )
     source_card = Card(name="Source", revisions=(source,))
     derived = CardRevision(
         background=GeneratedBackground(
@@ -881,7 +887,7 @@ def test_derived_provenance_requires_a_source_revision_in_the_declared_card() ->
                 ),
                 description="A refined courtyard",
                 render_prompt="A refined courtyard",
-                resolution=GenerateResolution.RESOLUTION_512,
+                output_size=PresetOutputSize(tier=ResolutionTier.MEDIUM),
                 transformation=RefineTransformation.PRESERVE,
                 strength=0.75,
                 settings=image_settings(),
@@ -895,17 +901,11 @@ def test_derived_provenance_requires_a_source_revision_in_the_declared_card() ->
     wrong_source = derived.provenance
     assert isinstance(wrong_source, RefineProvenance)
     invalid_provenance = wrong_source.model_copy(
-        update={
-            "source": wrong_source.source.model_copy(
-                update={"card_id": dependent_card.id}
-            )
-        }
+        update={"source": wrong_source.source.model_copy(update={"card_id": dependent_card.id})}
     )
     invalid_derived = derived.model_copy(
         update={
-            "background": derived.background.model_copy(
-                update={"provenance": invalid_provenance}
-            )
+            "background": derived.background.model_copy(update={"provenance": invalid_provenance})
         }
     )
     with pytest.raises(ValidationError, match="source card"):
@@ -917,17 +917,11 @@ def test_derived_provenance_requires_a_source_revision_in_the_declared_card() ->
             ),
         )
     mismatched_source = wrong_source.model_copy(
-        update={
-            "source": wrong_source.source.model_copy(
-                update={"background_id": uuid4()}
-            )
-        }
+        update={"source": wrong_source.source.model_copy(update={"background_id": uuid4()})}
     )
     mismatched_derived = derived.model_copy(
         update={
-            "background": derived.background.model_copy(
-                update={"provenance": mismatched_source}
-            )
+            "background": derived.background.model_copy(update={"provenance": mismatched_source})
         }
     )
     with pytest.raises(ValidationError, match="source background"):
@@ -977,9 +971,7 @@ def test_multistep_refine_and_edit_lineage_must_match_resolved_sources() -> None
                 instruction=edit_one.instruction,
                 preserve=edit_one.preserve,
                 expanded_prompt=edit_one.expanded_prompt,
-                output_size=PresetOutputSize(
-                    resolution=GenerateResolution.RESOLUTION_512
-                ),
+                output_size=PresetOutputSize(tier=ResolutionTier.MEDIUM),
                 edit_lineage=(edit_one,),
                 prompt_token_count=24,
                 settings=image_settings(),
@@ -1000,9 +992,7 @@ def test_multistep_refine_and_edit_lineage_must_match_resolved_sources() -> None
                 instruction=edit_two.instruction,
                 preserve=edit_two.preserve,
                 expanded_prompt=edit_two.expanded_prompt,
-                output_size=PresetOutputSize(
-                    resolution=GenerateResolution.RESOLUTION_512
-                ),
+                output_size=PresetOutputSize(tier=ResolutionTier.MEDIUM),
                 edit_lineage=(edit_one, edit_two),
                 prompt_token_count=24,
                 settings=image_settings(),
@@ -1023,7 +1013,7 @@ def test_multistep_refine_and_edit_lineage_must_match_resolved_sources() -> None
                 description="A refined courtyard",
                 edit_lineage=(edit_one, edit_two),
                 render_prompt="A refined courtyard",
-                resolution=GenerateResolution.RESOLUTION_512,
+                output_size=PresetOutputSize(tier=ResolutionTier.MEDIUM),
                 transformation=RefineTransformation.BALANCED,
                 strength=0.50,
                 settings=image_settings(),
@@ -1044,9 +1034,7 @@ def test_multistep_refine_and_edit_lineage_must_match_resolved_sources() -> None
                 instruction=edit_three.instruction,
                 preserve=edit_three.preserve,
                 expanded_prompt=edit_three.expanded_prompt,
-                output_size=PresetOutputSize(
-                    resolution=GenerateResolution.RESOLUTION_512
-                ),
+                output_size=PresetOutputSize(tier=ResolutionTier.MEDIUM),
                 edit_lineage=(edit_one, edit_two, edit_three),
                 prompt_token_count=24,
                 settings=image_settings(),
@@ -1170,7 +1158,7 @@ def test_legacy_generate_source_has_an_empty_inherited_edit_lineage() -> None:
             image_path="assets/cards/card/legacy.png",
             provenance=LegacyGenerateProvenance(
                 render_prompt="Historical exact prompt",
-                settings=image_settings(width=1001, height=777),
+                settings=image_settings(width=1008, height=784),
             ),
             created_at=datetime.now(UTC),
         )
@@ -1187,7 +1175,7 @@ def test_legacy_generate_source_has_an_empty_inherited_edit_lineage() -> None:
                 ),
                 description="Refined",
                 render_prompt="Refined",
-                resolution=GenerateResolution.RESOLUTION_512,
+                output_size=PresetOutputSize(tier=ResolutionTier.MEDIUM),
                 transformation=RefineTransformation.BALANCED,
                 strength=0.50,
                 settings=image_settings(),
@@ -1219,7 +1207,7 @@ def test_derived_image_source_lineage_rejects_cycles() -> None:
                 ),
                 description="First",
                 render_prompt="First",
-                resolution=GenerateResolution.RESOLUTION_512,
+                output_size=PresetOutputSize(tier=ResolutionTier.MEDIUM),
                 transformation=RefineTransformation.BALANCED,
                 strength=0.50,
                 settings=image_settings(),
@@ -1240,7 +1228,7 @@ def test_derived_image_source_lineage_rejects_cycles() -> None:
                 ),
                 description="Second",
                 render_prompt="Second",
-                resolution=GenerateResolution.RESOLUTION_512,
+                output_size=PresetOutputSize(tier=ResolutionTier.MEDIUM),
                 transformation=RefineTransformation.BALANCED,
                 strength=0.50,
                 settings=image_settings(),

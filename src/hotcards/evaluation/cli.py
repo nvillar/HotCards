@@ -5,7 +5,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from hotcards.domain.image_dimensions import AspectRatio, GenerateResolution
+from hotcards.domain.image_dimensions import AspectRatio, ResolutionTier
 from hotcards.evaluation.flux_references import (
     default_reference_output_dir,
     run_flux_reference_evaluation,
@@ -40,14 +40,16 @@ def _positive_int(value: str) -> int:
     return parsed
 
 
-def _generate_resolution(value: str) -> GenerateResolution:
+def _resolution_tier(value: str) -> ResolutionTier:
+    normalized = value.strip().casefold()
+    for tier in ResolutionTier:
+        if normalized == tier.label.casefold():
+            return tier
     try:
-        return GenerateResolution(int(value))
+        return ResolutionTier(int(value))
     except (TypeError, ValueError) as error:
-        supported = ", ".join(str(item.value) for item in GenerateResolution)
-        raise argparse.ArgumentTypeError(
-            f"resolution must be one of: {supported}"
-        ) from error
+        supported = ", ".join(f"{tier.label} ({tier.value})" for tier in ResolutionTier)
+        raise argparse.ArgumentTypeError(f"tier must be one of: {supported}") from error
 
 
 def _aspect_ratio(value: str) -> AspectRatio:
@@ -55,18 +57,16 @@ def _aspect_ratio(value: str) -> AspectRatio:
         return AspectRatio(value)
     except ValueError as error:
         supported = ", ".join(item.value for item in AspectRatio)
-        raise argparse.ArgumentTypeError(
-            f"aspect ratio must be one of: {supported}"
-        ) from error
+        raise argparse.ArgumentTypeError(f"aspect ratio must be one of: {supported}") from error
 
 
 def _add_generation_dimensions(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
-        "--resolution",
-        type=_generate_resolution,
-        default=GenerateResolution.RESOLUTION_1024,
-        metavar="{256,512,768,1024}",
-        help="supported square-equivalent output resolution (default: 1024)",
+        "--tier",
+        type=_resolution_tier,
+        default=ResolutionTier.FULL,
+        metavar="{Small,Medium,Large,Full}",
+        help="named long-edge output tier in pixels (default: Full, 1024)",
     )
     parser.add_argument(
         "--aspect-ratio",
@@ -162,7 +162,7 @@ def run_cli(arguments: Sequence[str] | None = None) -> int:
                     mflux_model=args.mflux_model,
                     seed=args.seed,
                     quantization=args.quantization,
-                    resolution=args.resolution,
+                    tier=args.tier,
                     aspect_ratio=args.aspect_ratio,
                 )
             )
@@ -174,7 +174,7 @@ def run_cli(arguments: Sequence[str] | None = None) -> int:
                     mflux_models=tuple(args.mflux_models or DEFAULT_MFLUX_MODELS),
                     seed=args.seed,
                     quantization=args.quantization,
-                    resolution=args.resolution,
+                    tier=args.tier,
                     aspect_ratio=args.aspect_ratio,
                 )
             )
@@ -185,7 +185,7 @@ def run_cli(arguments: Sequence[str] | None = None) -> int:
                 model_identifier=args.mflux_model,
                 quantization=args.quantization,
                 seed=args.seed,
-                resolution=args.resolution,
+                tier=args.tier,
                 aspect_ratio=args.aspect_ratio,
                 step_count=args.steps,
             )
@@ -200,7 +200,7 @@ def run_cli(arguments: Sequence[str] | None = None) -> int:
                         experiment_path=args.experiment,
                         model_identifier=args.mflux_model,
                         seeds=tuple(args.seeds or DEFAULT_STYLE_PRESET_SEEDS),
-                        resolution=args.resolution,
+                        tier=args.tier,
                         aspect_ratio=args.aspect_ratio,
                         step_count=args.steps,
                         quantization=args.quantization,

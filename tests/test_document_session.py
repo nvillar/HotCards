@@ -21,7 +21,7 @@ from hotcards.application.commands import (
 )
 from hotcards.application.document_controller import DocumentController, OwnedImageAsset
 from hotcards.application.document_session import DocumentSession, DocumentSessionError
-from hotcards.domain.image_dimensions import GenerateResolution
+from hotcards.domain.image_dimensions import ResolutionTier
 from hotcards.domain.models import (
     AcceptedEdit,
     Card,
@@ -81,8 +81,8 @@ def _duplicate_bundle(
                         model_identifier="test",
                         mflux_version="test",
                         seed=7,
-                        width=592,
-                        height=448,
+                        width=512,
+                        height=384,
                         step_count=4,
                         generated_at=generated_at,
                         duration_seconds=1,
@@ -126,8 +126,8 @@ def _owned_bundle(
         model_identifier="test",
         mflux_version="test",
         seed=7,
-        width=592,
-        height=448,
+        width=512,
+        height=384,
         step_count=4,
         generated_at=generated_at,
         duration_seconds=1,
@@ -136,8 +136,8 @@ def _owned_bundle(
         model_identifier="test",
         mflux_version="test",
         seed=7,
-        width=880 if derived_operation else 592,
-        height=672 if derived_operation else 448,
+        width=768 if derived_operation else 512,
+        height=576 if derived_operation else 384,
         step_count=4,
         generated_at=generated_at,
         duration_seconds=1,
@@ -193,7 +193,7 @@ def _owned_bundle(
             source=source,
             description=name,
             render_prompt=name,
-            resolution=GenerateResolution.RESOLUTION_768,
+            output_size=PresetOutputSize(tier=ResolutionTier.LARGE),
             transformation=RefineTransformation.BALANCED,
             strength=0.5,
             settings=settings,
@@ -209,9 +209,7 @@ def _owned_bundle(
             instruction=accepted.instruction,
             preserve=accepted.preserve,
             expanded_prompt=accepted.expanded_prompt,
-            output_size=PresetOutputSize(
-                resolution=GenerateResolution.RESOLUTION_768
-            ),
+            output_size=PresetOutputSize(tier=ResolutionTier.LARGE),
             edit_lineage=(accepted,),
             prompt_token_count=20,
             settings=settings,
@@ -711,8 +709,8 @@ def test_save_as_copies_assets_and_rebinds_autosave(tmp_path: Path) -> None:
                     model_identifier="test",
                     mflux_version="test",
                     seed=1,
-                    width=592,
-                    height=448,
+                    width=512,
+                    height=384,
                     step_count=4,
                     generated_at=generated_at,
                     duration_seconds=1,

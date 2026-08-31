@@ -28,14 +28,16 @@ from hotcards.application.commands import (
 from hotcards.application.document_controller import DocumentController
 from hotcards.domain.image_dimensions import (
     AspectRatio,
-    GenerateResolution,
+    ResolutionTier,
     output_dimensions,
 )
 from hotcards.domain.models import (
     Card,
     CardRevision,
+    CurrentSourceSize,
     DirectGenerateProvenance,
     EditPreserveOptions,
+    ExactOutputSize,
     GeneratedBackground,
     GenerateInputs,
     HotspotConditions,
@@ -45,6 +47,7 @@ from hotcards.domain.models import (
     Interaction,
     KeyDefinition,
     NavigateAction,
+    PresetOutputSize,
     RefineTransformation,
     ResolvedCardReference,
     Stack,
@@ -80,8 +83,8 @@ def _background() -> GeneratedBackground:
                 model_identifier="test",
                 mflux_version="test",
                 seed=7,
-                width=592,
-                height=448,
+                width=512,
+                height=384,
                 step_count=4,
                 generated_at=generated_at,
                 duration_seconds=1,
@@ -254,13 +257,16 @@ def test_edit_tab_uses_current_or_higher_size_and_emits_exact_inputs(
     inspector.render(
         controller.document,
         card.id,
-        refine_source_size=(1024, 768),
+        refine_source_size=(768, 576),
     )
 
     assert inspector.edit_resolution_combo.count() == 2
-    assert inspector.edit_resolution_combo.itemText(0) == ("Current (1024 x 768)")
-    assert inspector.edit_resolution_combo.itemData(0) == "current"
-    assert inspector.edit_resolution_combo.itemText(1) == ("1024 (1184 x 880)")
+    assert inspector.edit_resolution_combo.itemText(0) == ("Large — 768 × 576 (Current image)")
+    assert inspector.edit_resolution_combo.itemData(0) == CurrentSourceSize(
+        width=768,
+        height=576,
+    )
+    assert inspector.edit_resolution_combo.itemText(1) == ("Full — 1024 × 768")
     inspector.edit_instruction_edit.setPlainText("  Open the gate.  ")
     inspector.edit_background_button.click()
 
@@ -273,7 +279,7 @@ def test_edit_tab_uses_current_or_higher_size_and_emits_exact_inputs(
         composition_and_framing=True,
     )
     assert output.mode == "current"
-    assert (output.width, output.height) == (1024, 768)
+    assert (output.width, output.height) == (768, 576)
     assert "Expanded prompt:" in inspector.edit_background_button.toolTip()
     assert "Token budget: 512" in inspector.edit_background_button.toolTip()
 
@@ -291,7 +297,7 @@ def test_refine_tab_has_transformation_resolution_and_action_only(
     inspector.render(
         controller.document,
         card.id,
-        refine_source_size=(592, 448),
+        refine_source_size=(512, 384),
     )
 
     assert inspector.inspector_tabs.tabText(inspector._refine_tab_index) == "Refine"
@@ -311,9 +317,15 @@ def test_refine_tab_has_transformation_resolution_and_action_only(
         inspector.refine_resolution_combo.itemText(index)
         for index in range(inspector.refine_resolution_combo.count())
     ] == [
-        "768 (880 x 672)",
-        "1024 (1184 x 880)",
+        "Small — 256 × 192",
+        "Medium — 512 × 384 (Current image)",
+        "Large — 768 × 576",
+        "Full — 1024 × 768",
     ]
+    assert inspector.refine_resolution_combo.currentData() == CurrentSourceSize(
+        width=512,
+        height=384,
+    )
     content = inspector.refine_background_button.parentWidget()
     layout = content.layout()
     assert layout is not None
@@ -334,7 +346,7 @@ def test_refine_tab_has_transformation_resolution_and_action_only(
 
     requested: list[tuple[object, object]] = []
     inspector.refine_background_requested.connect(
-        lambda transformation, resolution: requested.append((transformation, resolution))
+        lambda transformation, output_size: requested.append((transformation, output_size))
     )
     inspector.set_refine_capabilities(
         can_refine=True,
@@ -347,15 +359,15 @@ def test_refine_tab_has_transformation_resolution_and_action_only(
     assert requested == [
         (
             RefineTransformation.BALANCED,
-            GenerateResolution.RESOLUTION_768,
+            CurrentSourceSize(width=512, height=384),
         )
     ]
     assert "Current image + Description" in (inspector.refine_background_button.toolTip())
     assert "Balanced (0.50)" in inspector.refine_background_button.toolTip()
-    assert "880 x 672" in inspector.refine_background_button.toolTip()
+    assert "512 × 384" in inspector.refine_background_button.toolTip()
 
 
-def test_refine_resolution_handles_legacy_size_and_maximum(
+def test_refine_resolution_inserts_nonstandard_current_size_by_area(
     application: QApplication,
 ) -> None:
     revision = CardRevision(
@@ -369,20 +381,58 @@ def test_refine_resolution_handles_legacy_size_and_maximum(
     inspector.render(
         controller.document,
         card.id,
-        refine_source_size=(1024, 768),
+        refine_source_size=(640, 480),
     )
-    assert inspector.refine_resolution_combo.count() == 1
-    assert inspector.refine_resolution_combo.currentData() is GenerateResolution.RESOLUTION_1024
+    assert [
+        inspector.refine_resolution_combo.itemText(index)
+        for index in range(inspector.refine_resolution_combo.count())
+    ] == [
+        "Small — 256 × 192",
+        "Medium — 512 × 384",
+        "Current size — 640 × 480",
+        "Large — 768 × 576",
+        "Full — 1024 × 768",
+    ]
+    assert inspector.refine_resolution_combo.currentData() == CurrentSourceSize(
+        width=640,
+        height=480,
+    )
     assert not inspector.refine_error.isVisible()
+
+
+def test_refine_selection_becomes_current_when_new_image_matches_preset(
+    application: QApplication,
+) -> None:
+    revision = CardRevision(
+        description="A moonlit courtyard",
+        background=_background(),
+    )
+    card = Card(name="Courtyard", revisions=(revision,))
+    controller = DocumentController(Stack(name="Demo", cards=(card,)))
+    inspector = Inspector(controller)
+    inspector.render(
+        controller.document,
+        card.id,
+        refine_source_size=(640, 480),
+    )
+    inspector.refine_resolution_combo.setCurrentIndex(
+        inspector._combo_index_for_data(
+            inspector.refine_resolution_combo,
+            PresetOutputSize(tier=ResolutionTier.MEDIUM),
+        )
+    )
 
     inspector.render(
         controller.document,
         card.id,
-        refine_source_size=(1184, 880),
+        refine_source_size=(512, 384),
     )
-    assert inspector.refine_resolution_combo.count() == 0
-    assert not inspector.refine_resolution_combo.isEnabled()
-    assert "maximum Refine resolution" in inspector.refine_error.text()
+
+    assert inspector.refine_resolution_combo.currentData() == CurrentSourceSize(
+        width=512,
+        height=384,
+    )
+    assert inspector.refine_resolution_combo.currentIndex() == 1
 
 
 def test_key_manager_manages_global_names_and_lists_hotspot_usages(
@@ -624,19 +674,17 @@ def test_resolution_selector_shows_actual_dimensions_for_every_preset(
         inspector.resolution_combo.itemText(index)
         for index in range(inspector.resolution_combo.count())
     ] == [
-        f"{resolution.value} "
-        f"({output_dimensions(resolution, aspect_ratio)[0]} x "
-        f"{output_dimensions(resolution, aspect_ratio)[1]})"
-        for resolution in GenerateResolution
+        f"{tier.label} — {output_dimensions(tier, aspect_ratio)[0]} × "
+        f"{output_dimensions(tier, aspect_ratio)[1]}"
+        for tier in ResolutionTier
     ]
-    assert inspector.resolution_combo.currentData() == GenerateResolution.RESOLUTION_512
+    assert inspector.resolution_combo.currentData() == PresetOutputSize(tier=ResolutionTier.MEDIUM)
     width, height = output_dimensions(
-        GenerateResolution.RESOLUTION_512,
+        ResolutionTier.MEDIUM,
         aspect_ratio,
     )
     assert (
-        f"Resolution: 512 square-equivalent ({width} x {height})"
-        in inspector.generate_background_button.toolTip()
+        f"Resolution: Medium ({width} × {height})" in inspector.generate_background_button.toolTip()
     )
 
 
@@ -644,7 +692,7 @@ def test_resolution_selector_is_revision_local_and_undoable(
     application: QApplication,
 ) -> None:
     first = CardRevision()
-    second = CardRevision(generate_resolution=GenerateResolution.RESOLUTION_256)
+    second = CardRevision(generate_output_size=PresetOutputSize(tier=ResolutionTier.SMALL))
     card = Card(
         name="Card",
         revisions=(first, second),
@@ -663,24 +711,99 @@ def test_resolution_selector_is_revision_local_and_undoable(
     inspector.resolution_combo.setCurrentIndex(
         inspector._combo_index_for_data(
             inspector.resolution_combo,
-            GenerateResolution.RESOLUTION_1024,
+            PresetOutputSize(tier=ResolutionTier.FULL),
         )
     )
 
     revisions = controller.document.cards[0].revisions
-    assert revisions[0].generate_resolution is GenerateResolution.RESOLUTION_1024
-    assert revisions[1].generate_resolution is GenerateResolution.RESOLUTION_256
-    assert (
-        autosaves[-1].cards[0].active_revision.generate_resolution
-        is GenerateResolution.RESOLUTION_1024
+    assert revisions[0].generate_output_size == PresetOutputSize(tier=ResolutionTier.FULL)
+    assert revisions[1].generate_output_size == PresetOutputSize(tier=ResolutionTier.SMALL)
+    assert autosaves[-1].cards[0].active_revision.generate_output_size == PresetOutputSize(
+        tier=ResolutionTier.FULL
     )
-    assert applied[-1][0] == "Generate resolution changed"
+    assert applied[-1][0] == "Generate output size changed"
     assert controller.undo_if_current(applied[-1][1])  # type: ignore[arg-type]
     inspector.render(controller.document, card.id)
-    assert inspector.resolution_combo.currentData() == GenerateResolution.RESOLUTION_512
+    assert inspector.resolution_combo.currentData() == PresetOutputSize(tier=ResolutionTier.MEDIUM)
     assert controller.redo()
     inspector.render(controller.document, card.id)
-    assert inspector.resolution_combo.currentData() == GenerateResolution.RESOLUTION_1024
+    assert inspector.resolution_combo.currentData() == PresetOutputSize(tier=ResolutionTier.FULL)
+
+
+def test_generate_output_size_marks_current_without_changing_next_selection(
+    application: QApplication,
+) -> None:
+    revision = CardRevision(
+        generate_output_size=PresetOutputSize(tier=ResolutionTier.MEDIUM),
+        background=_background(),
+    )
+    card = Card(name="Card", revisions=(revision,))
+    controller = DocumentController(Stack(name="Demo", cards=(card,)))
+    inspector = Inspector(controller)
+
+    inspector.render(
+        controller.document,
+        card.id,
+        refine_source_size=(1024, 768),
+    )
+
+    assert inspector.resolution_combo.itemText(3) == ("Full — 1024 × 768 (Current image)")
+    assert inspector.resolution_combo.currentData() == PresetOutputSize(tier=ResolutionTier.MEDIUM)
+
+
+def test_generate_output_size_inserts_selectable_exact_current_size(
+    application: QApplication,
+) -> None:
+    revision = CardRevision(background=_background())
+    card = Card(name="Card", revisions=(revision,))
+    controller = DocumentController(Stack(name="Demo", cards=(card,)))
+    inspector = Inspector(controller)
+    inspector.render(
+        controller.document,
+        card.id,
+        refine_source_size=(640, 480),
+    )
+
+    labels = [
+        inspector.resolution_combo.itemText(index)
+        for index in range(inspector.resolution_combo.count())
+    ]
+    assert labels == [
+        "Small — 256 × 192",
+        "Medium — 512 × 384",
+        "Current size — 640 × 480",
+        "Large — 768 × 576",
+        "Full — 1024 × 768",
+    ]
+    exact_index = labels.index("Current size — 640 × 480")
+    inspector.resolution_combo.setCurrentIndex(exact_index)
+    assert controller.document.cards[0].active_revision.generate_output_size == (
+        ExactOutputSize(width=640, height=480)
+    )
+
+
+def test_edit_resolution_inserts_nonstandard_current_and_only_higher_tiers(
+    application: QApplication,
+) -> None:
+    revision = CardRevision(background=_background())
+    card = Card(name="Card", revisions=(revision,))
+    controller = DocumentController(Stack(name="Demo", cards=(card,)))
+    inspector = Inspector(controller)
+
+    inspector.render(
+        controller.document,
+        card.id,
+        refine_source_size=(640, 480),
+    )
+
+    assert [
+        inspector.edit_resolution_combo.itemText(index)
+        for index in range(inspector.edit_resolution_combo.count())
+    ] == [
+        "Current size — 640 × 480",
+        "Large — 768 × 576",
+        "Full — 1024 × 768",
+    ]
 
 
 def test_reference_selector_assigns_one_card_with_undo(

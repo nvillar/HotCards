@@ -21,7 +21,7 @@ from pydantic import (
 
 from hotcards.domain.image_dimensions import (
     AspectRatio,
-    GenerateResolution,
+    ResolutionTier,
     output_dimensions,
 )
 
@@ -323,25 +323,6 @@ class StyleSnapshot(DomainModel):
     prompt_text: str
 
 
-class GenerateInputs(DomainModel):
-    """Exact author-controlled inputs accepted by direct Generate."""
-
-    description: str
-    references: tuple[ImageReferenceSnapshot, ...] = Field(
-        default_factory=tuple,
-        max_length=2,
-    )
-    style: StyleSnapshot | None = None
-    resolution: GenerateResolution = GenerateResolution.RESOLUTION_512
-
-    @field_validator("description")
-    @classmethod
-    def require_authored_description(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("Generate requires a nonempty Description")
-        return value
-
-
 class ImageOperationSettings(DomainModel):
     """Exact shared execution settings and measured result facts."""
 
@@ -380,34 +361,84 @@ class EditPreserveOptions(DomainModel):
 
 
 class CurrentSourceSize(DomainModel):
-    """Use the source image's exact decoded dimensions for Edit output."""
+    """Use a source image's exact decoded dimensions for derived output."""
 
     mode: Literal["current"] = "current"
     width: PositiveInt
     height: PositiveInt
 
+    @model_validator(mode="after")
+    def require_aligned_dimensions(self) -> CurrentSourceSize:
+        _require_aligned_output_size(self.width, self.height)
+        return self
+
+
+class ExactOutputSize(DomainModel):
+    """Use an exact author-selected size for direct Generate output."""
+
+    mode: Literal["exact"] = "exact"
+    width: PositiveInt
+    height: PositiveInt
+
+    @model_validator(mode="after")
+    def require_aligned_dimensions(self) -> ExactOutputSize:
+        _require_aligned_output_size(self.width, self.height)
+        return self
+
 
 class PresetOutputSize(DomainModel):
-    """Use one square-equivalent output preset at the stack aspect ratio."""
+    """Use one named long-edge tier at the stack aspect ratio."""
 
     mode: Literal["preset"] = "preset"
-    resolution: GenerateResolution
+    tier: ResolutionTier
 
 
+GenerateOutputSize = Annotated[
+    PresetOutputSize | ExactOutputSize,
+    Field(discriminator="mode"),
+]
+RefineOutputSize = Annotated[
+    CurrentSourceSize | PresetOutputSize,
+    Field(discriminator="mode"),
+]
 EditOutputSize = Annotated[
     CurrentSourceSize | PresetOutputSize,
     Field(discriminator="mode"),
 ]
 
 
-def edit_output_dimensions(
-    output_size: EditOutputSize,
+def _require_aligned_output_size(width: int, height: int) -> None:
+    if width % 16 != 0 or height % 16 != 0:
+        raise ValueError("exact output dimensions must be aligned to 16 pixels")
+
+
+def selected_output_dimensions(
+    output_size: GenerateOutputSize | RefineOutputSize | EditOutputSize,
     aspect_ratio: AspectRatio,
 ) -> tuple[int, int]:
-    """Resolve exact Edit output pixels from one strict size selection."""
-    if isinstance(output_size, CurrentSourceSize):
+    """Resolve exact output pixels from one strict size selection."""
+    if isinstance(output_size, (CurrentSourceSize, ExactOutputSize)):
         return output_size.width, output_size.height
-    return output_dimensions(output_size.resolution, aspect_ratio)
+    return output_dimensions(output_size.tier, aspect_ratio)
+
+
+class GenerateInputs(DomainModel):
+    """Exact author-controlled inputs accepted by direct Generate."""
+
+    description: str
+    references: tuple[ImageReferenceSnapshot, ...] = Field(
+        default_factory=tuple,
+        max_length=2,
+    )
+    style: StyleSnapshot | None = None
+    output_size: GenerateOutputSize = PresetOutputSize(tier=ResolutionTier.MEDIUM)
+
+    @field_validator("description")
+    @classmethod
+    def require_authored_description(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Generate requires a nonempty Description")
+        return value
 
 
 class AcceptedEdit(DomainModel):
@@ -462,7 +493,7 @@ class RefineProvenance(DomainModel):
     style: StyleSnapshot | None = None
     edit_lineage: tuple[AcceptedEdit, ...] = Field(default_factory=tuple)
     render_prompt: NonEmptyString
-    resolution: GenerateResolution
+    output_size: RefineOutputSize
     transformation: RefineTransformation
     strength: FiniteFloat = Field(ge=0.0, le=1.0)
     settings: ImageOperationSettings
@@ -510,10 +541,7 @@ class EditProvenance(DomainModel):
 
 
 OriginalImageProvenance = Annotated[
-    DirectGenerateProvenance
-    | LegacyGenerateProvenance
-    | RefineProvenance
-    | EditProvenance,
+    DirectGenerateProvenance | LegacyGenerateProvenance | RefineProvenance | EditProvenance,
     Field(discriminator="operation"),
 ]
 
@@ -602,7 +630,7 @@ class CardRevision(DomainModel):
         max_length=2,
     )
     style_id: UUID | None = None
-    generate_resolution: GenerateResolution = GenerateResolution.RESOLUTION_512
+    generate_output_size: GenerateOutputSize = PresetOutputSize(tier=ResolutionTier.MEDIUM)
 
     @field_validator("hotspot_set")
     @classmethod
@@ -737,14 +765,10 @@ class Stack(DomainModel):
         if len(revision_ids) != len(set(revision_ids)):
             raise ValueError("revision IDs must be unique within a stack")
         revisions_by_id = {
-            revision.id: revision
-            for card in self.cards
-            for revision in card.revisions
+            revision.id: revision for card in self.cards for revision in card.revisions
         }
         revision_card_ids = {
-            revision.id: card.id
-            for card in self.cards
-            for revision in card.revisions
+            revision.id: card.id for card in self.cards for revision in card.revisions
         }
         derived_sources: dict[UUID, UUID] = {}
         style_ids = [style.id for style in self.styles]
@@ -768,15 +792,22 @@ class Stack(DomainModel):
             for revision in card.revisions:
                 if revision.style_id is not None and revision.style_id not in known_style_ids:
                     raise ValueError("revision style_id must identify a Style in this stack")
+                if isinstance(revision.generate_output_size, ExactOutputSize):
+                    ratio_width, ratio_height = self.aspect_ratio.components
+                    if (
+                        revision.generate_output_size.width * ratio_height
+                        != revision.generate_output_size.height * ratio_width
+                    ):
+                        raise ValueError(
+                            "exact Generate output size must match the stack aspect ratio"
+                        )
                 provenance = revision.provenance
                 original_provenance = (
-                    original_image_provenance(provenance)
-                    if provenance is not None
-                    else None
+                    original_image_provenance(provenance) if provenance is not None else None
                 )
                 if isinstance(original_provenance, DirectGenerateProvenance):
-                    expected_dimensions = output_dimensions(
-                        original_provenance.inputs.resolution,
+                    expected_dimensions = selected_output_dimensions(
+                        original_provenance.inputs.output_size,
                         self.aspect_ratio,
                     )
                     if (
@@ -784,24 +815,10 @@ class Stack(DomainModel):
                         original_provenance.settings.height,
                     ) != expected_dimensions:
                         raise ValueError(
-                            "direct Generate dimensions must match its resolution "
-                            "and stack aspect ratio"
+                            "direct Generate dimensions must match its selected output size"
                         )
                 elif isinstance(original_provenance, RefineProvenance):
-                    expected_dimensions = output_dimensions(
-                        original_provenance.resolution,
-                        self.aspect_ratio,
-                    )
-                    if (
-                        original_provenance.settings.width,
-                        original_provenance.settings.height,
-                    ) != expected_dimensions:
-                        raise ValueError(
-                            f"{original_provenance.operation.title()} dimensions must match "
-                            "its resolution and stack aspect ratio"
-                        )
-                elif isinstance(original_provenance, EditProvenance):
-                    expected_dimensions = edit_output_dimensions(
+                    expected_dimensions = selected_output_dimensions(
                         original_provenance.output_size,
                         self.aspect_ratio,
                     )
@@ -810,8 +827,19 @@ class Stack(DomainModel):
                         original_provenance.settings.height,
                     ) != expected_dimensions:
                         raise ValueError(
-                            "Edit dimensions must match its selected output size"
+                            f"{original_provenance.operation.title()} dimensions must match "
+                            "its selected output size"
                         )
+                elif isinstance(original_provenance, EditProvenance):
+                    expected_dimensions = selected_output_dimensions(
+                        original_provenance.output_size,
+                        self.aspect_ratio,
+                    )
+                    if (
+                        original_provenance.settings.width,
+                        original_provenance.settings.height,
+                    ) != expected_dimensions:
+                        raise ValueError("Edit dimensions must match its selected output size")
                 if isinstance(provenance, (RefineProvenance, EditProvenance)):
                     source = provenance.source
                     if source.revision_id not in revision_card_ids:
@@ -819,30 +847,22 @@ class Stack(DomainModel):
                             "derived image sources must identify a revision in this stack"
                         )
                     if revision_card_ids[source.revision_id] != source.card_id:
-                        raise ValueError(
-                            "derived image source card must own the source revision"
-                        )
+                        raise ValueError("derived image source card must own the source revision")
                     if source.revision_id == revision.id:
                         raise ValueError("a revision cannot derive from itself")
                     source_background = revisions_by_id[source.revision_id].background
-                    if (
-                        source_background is None
-                        or source_background.id != source.background_id
-                    ):
+                    if source_background is None or source_background.id != source.background_id:
                         raise ValueError(
-                            "derived image source background must match the source "
-                            "revision"
+                            "derived image source background must match the source revision"
                         )
-                    if (
-                        isinstance(provenance, EditProvenance)
-                        and isinstance(
-                            provenance.output_size,
-                            CurrentSourceSize,
-                        )
+                    if isinstance(
+                        provenance,
+                        (RefineProvenance, EditProvenance),
+                    ) and isinstance(
+                        provenance.output_size,
+                        CurrentSourceSize,
                     ):
-                        source_settings = image_operation_settings(
-                            source_background.provenance
-                        )
+                        source_settings = image_operation_settings(source_background.provenance)
                         if (
                             provenance.output_size.width,
                             provenance.output_size.height,
@@ -851,7 +871,7 @@ class Stack(DomainModel):
                             source_settings.height,
                         ):
                             raise ValueError(
-                                "current-size Edit output must match its source "
+                                "current-size derived output must match its source "
                                 "background dimensions"
                             )
                     derived_sources[revision.id] = source.revision_id
@@ -867,9 +887,7 @@ class Stack(DomainModel):
                         raise ValueError("a card revision cannot reference its own card")
                     resolved_reference_ids.append(reference.target_card_id)
                 if len(resolved_reference_ids) != len(set(resolved_reference_ids)):
-                    raise ValueError(
-                        "a card revision cannot reference the same card twice"
-                    )
+                    raise ValueError("a card revision cannot reference the same card twice")
                 if revision.hotspot_set is None:
                     continue
                 for interaction in revision.hotspot_set.interactions:
@@ -880,9 +898,7 @@ class Stack(DomainModel):
                         *interaction.key_changes.grant,
                     )
                     if any(key_id not in known_key_ids for key_id in referenced_key_ids):
-                        raise ValueError(
-                            "hotspot key references must identify Keys in this stack"
-                        )
+                        raise ValueError("hotspot key references must identify Keys in this stack")
                     if interaction.action is not None:
                         target = interaction.action.target
                         if (
@@ -919,9 +935,7 @@ class Stack(DomainModel):
             source_lineage = image_edit_lineage(source_provenance)
             if isinstance(provenance, RefineProvenance):
                 if provenance.edit_lineage != source_lineage:
-                    raise ValueError(
-                        "Refine lineage must equal its source revision lineage"
-                    )
+                    raise ValueError("Refine lineage must equal its source revision lineage")
             elif provenance.edit_lineage != (
                 *source_lineage,
                 provenance.accepted_edit,

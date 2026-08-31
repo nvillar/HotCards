@@ -16,7 +16,7 @@ from PySide6.QtWidgets import QApplication
 
 from hotcards.domain.image_dimensions import (
     AspectRatio,
-    GenerateResolution,
+    ResolutionTier,
     output_dimensions,
 )
 from hotcards.domain.models import (
@@ -132,12 +132,12 @@ def test_canvas_fits_complete_image_without_cropping_or_stretching(
 
 
 @pytest.mark.parametrize("aspect_ratio", tuple(AspectRatio))
-@pytest.mark.parametrize("resolution", tuple(GenerateResolution))
+@pytest.mark.parametrize("resolution", tuple(ResolutionTier))
 def test_mixed_resolution_backgrounds_keep_hotspots_aligned(
     application: QApplication,
     tmp_path: Path,
     aspect_ratio: AspectRatio,
-    resolution: GenerateResolution,
+    resolution: ResolutionTier,
 ) -> None:
     logical_size = Stack(name="Stack", aspect_ratio=aspect_ratio).canvas
     path = tmp_path / f"{aspect_ratio.name.lower()}-{resolution.value}.png"
@@ -177,16 +177,12 @@ def test_mixed_resolution_backgrounds_keep_hotspots_aligned(
     assert canvas._image_item.sceneBoundingRect() == image_rect
     viewport_point = canvas.viewport_point_for(QPointF(0.2, 0.2))
     assert canvas._vertex_at(viewport_point) == (interaction.id, 0, 0)
-    restored = canvas.document_point_at(
-        canvas.viewport_point_for(QPointF(0.3, 0.3))
-    )
+    restored = canvas.document_point_at(canvas.viewport_point_for(QPointF(0.3, 0.3)))
     assert restored is not None
     assert restored.x() == pytest.approx(0.3, abs=0.01)
     assert restored.y() == pytest.approx(0.3, abs=0.01)
     for corner in (QPointF(0.0, 0.0), QPointF(1.0, 1.0)):
-        restored_corner = canvas.document_point_at(
-            canvas.viewport_point_for(corner)
-        )
+        restored_corner = canvas.document_point_at(canvas.viewport_point_for(corner))
         assert restored_corner is not None
         assert restored_corner.x() == pytest.approx(corner.x(), abs=0.01)
         assert restored_corner.y() == pytest.approx(corner.y(), abs=0.01)

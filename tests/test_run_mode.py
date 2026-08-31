@@ -68,6 +68,7 @@ class FakeBackgroundWorkflow(QObject):
     def cancel(self) -> None:
         pass
 
+
 class FakeSettings:
     def __init__(self) -> None:
         self.values: dict[str, object] = {}
@@ -209,14 +210,10 @@ def test_run_session_filters_conditions_and_applies_keys_before_navigation() -> 
             remove=(red_key.id,),
             grant=(visited.id,),
         ),
-        action=NavigateAction(
-            target=ResolvedCardReference(target_card_id=destination.id)
-        ),
+        action=NavigateAction(target=ResolvedCardReference(target_card_id=destination.id)),
     )
     placeholder = Interaction()
-    revision = CardRevision(
-        hotspot_set=HotspotSet(interactions=(take_key, enter, placeholder))
-    )
+    revision = CardRevision(hotspot_set=HotspotSet(interactions=(take_key, enter, placeholder)))
     source = Card(
         name="Start",
         revisions=(revision,),
@@ -258,13 +255,9 @@ def test_run_session_rechecks_conditions_and_changes_keys_before_link_warning() 
     interaction = Interaction(
         conditions=HotspotConditions(forbids=(red_key.id,)),
         key_changes=HotspotKeyChanges(grant=(red_key.id,)),
-        action=NavigateAction(
-            target=UnresolvedCardReference(target_name="Missing room")
-        ),
+        action=NavigateAction(target=UnresolvedCardReference(target_name="Missing room")),
     )
-    revision = CardRevision(
-        hotspot_set=HotspotSet(interactions=(interaction,))
-    )
+    revision = CardRevision(hotspot_set=HotspotSet(interactions=(interaction,)))
     source = Card(
         name="Start",
         revisions=(revision,),
@@ -316,23 +309,17 @@ def build_run_window(
     third = Card(name="Third")
     to_incomplete = Interaction(
         label="Incomplete",
-        action=NavigateAction(
-            target=ResolvedCardReference(target_card_id=incomplete.id)
-        ),
+        action=NavigateAction(target=ResolvedCardReference(target_card_id=incomplete.id)),
         polygons=(polygon(0.1, 0.1, 0.55, 0.55),),
     )
     to_third = Interaction(
         label="Third",
-        action=NavigateAction(
-            target=ResolvedCardReference(target_card_id=third.id)
-        ),
+        action=NavigateAction(target=ResolvedCardReference(target_card_id=third.id)),
         polygons=(polygon(0.2, 0.15, 0.5, 0.5),),
     )
     unresolved = Interaction(
         label="Missing",
-        action=NavigateAction(
-            target=UnresolvedCardReference(target_name="Missing room")
-        ),
+        action=NavigateAction(target=UnresolvedCardReference(target_name="Missing room")),
         polygons=(polygon(0.1, 0.1, 0.5, 0.5),),
     )
     bundle = tmp_path / "Run.hotcards"
@@ -366,8 +353,8 @@ def build_run_window(
                         model_identifier="test",
                         mflux_version="test",
                         seed=1,
-                        width=592,
-                        height=448,
+                        width=512,
+                        height=384,
                         step_count=4,
                         generated_at=generated_at,
                         duration_seconds=1,
@@ -427,9 +414,7 @@ def test_run_canvas_uses_topmost_hit_with_back_and_restart(
     application: QApplication,
     tmp_path: Path,
 ) -> None:
-    window, _session, _to_incomplete, to_third, unresolved = (
-        build_run_window(tmp_path)
-    )
+    window, _session, _to_incomplete, to_third, unresolved = build_run_window(tmp_path)
     window.resize(1000, 700)
     window.show()
     window.mode_button.click()
@@ -441,9 +426,7 @@ def test_run_canvas_uses_topmost_hit_with_back_and_restart(
     overlap = window.card_canvas.viewport_point_for(QPointF(0.3, 0.3))
     QTest.mouseMove(window.card_canvas.viewport(), overlap)
     assert window.card_canvas._hovered_interaction_id == to_third.id
-    assert window.card_canvas.viewport().cursor().shape() == (
-        Qt.CursorShape.PointingHandCursor
-    )
+    assert window.card_canvas.viewport().cursor().shape() == (Qt.CursorShape.PointingHandCursor)
     assert window.card_canvas._overlay_items == []
     assert window.card_canvas._run_interaction_at(QPointF(-0.1, 0.3)) is None
 
@@ -455,18 +438,14 @@ def test_run_canvas_uses_topmost_hit_with_back_and_restart(
     assert window.canvas_card_name.text() == "Third"
     assert window.back_action.isEnabled()
 
-    unresolved_point = window.card_canvas.viewport_point_for(
-        QPointF(0.2, 0.2)
-    )
+    unresolved_point = window.card_canvas.viewport_point_for(QPointF(0.2, 0.2))
     QTest.mouseClick(
         window.card_canvas.viewport(),
         Qt.MouseButton.LeftButton,
         pos=unresolved_point,
     )
     assert window.canvas_card_name.text() == "Third"
-    assert window.notification_bar.message_label.text() == (
-        'Link to "Missing room" is unresolved.'
-    )
+    assert window.notification_bar.message_label.text() == ('Link to "Missing room" is unresolved.')
 
     window.back_action.trigger()
     assert window.canvas_card_name.text() == "First"
@@ -482,27 +461,19 @@ def test_run_canvas_skips_inactive_overlapping_hotspots_before_z_order(
     application: QApplication,
     tmp_path: Path,
 ) -> None:
-    window, _session, to_incomplete, to_third, _unresolved = build_run_window(
-        tmp_path
-    )
+    window, _session, to_incomplete, to_third, _unresolved = build_run_window(tmp_path)
     locked = KeyDefinition(name="Door unlocked")
     document = window.controller.document
     first = document.cards[0]
     revision = first.active_revision
     assert revision.hotspot_set is not None
     interactions = tuple(
-        interaction.model_copy(
-            update={
-                "conditions": HotspotConditions(requires=(locked.id,))
-            }
-        )
+        interaction.model_copy(update={"conditions": HotspotConditions(requires=(locked.id,))})
         if interaction.id == to_third.id
         else interaction
         for interaction in revision.hotspot_set.interactions
     )
-    revision = revision.model_copy(
-        update={"hotspot_set": HotspotSet(interactions=interactions)}
-    )
+    revision = revision.model_copy(update={"hotspot_set": HotspotSet(interactions=interactions)})
     first = first.model_copy(
         update={
             "revisions": (revision,),
@@ -544,9 +515,7 @@ def test_run_starts_from_current_card_and_toolbar_can_restart(
     application: QApplication,
     tmp_path: Path,
 ) -> None:
-    window, _session, _to_incomplete, _to_third, _unresolved = (
-        build_run_window(tmp_path)
-    )
+    window, _session, _to_incomplete, _to_third, _unresolved = build_run_window(tmp_path)
     third = window.controller.document.cards[2]
     start = window.controller.document.cards[0]
     window.select_card(third.id)
@@ -568,14 +537,10 @@ def test_run_card_without_hotspots_does_not_warn(
     application: QApplication,
     tmp_path: Path,
 ) -> None:
-    window, _session, _to_incomplete, _to_third, _unresolved = (
-        build_run_window(tmp_path)
-    )
+    window, _session, _to_incomplete, _to_third, _unresolved = build_run_window(tmp_path)
     document = window.controller.document
     third = document.cards[2]
-    revision = third.active_revision.model_copy(
-        update={"hotspot_set": HotspotSet()}
-    )
+    revision = third.active_revision.model_copy(update={"hotspot_set": HotspotSet()})
     third = third.model_copy(
         update={
             "revisions": (revision,),
@@ -608,9 +573,7 @@ def test_run_overlays_persist_and_incomplete_cards_warn(
     application: QApplication,
     tmp_path: Path,
 ) -> None:
-    window, session, to_incomplete, _to_third, _unresolved = (
-        build_run_window(tmp_path)
-    )
+    window, session, to_incomplete, _to_third, _unresolved = build_run_window(tmp_path)
     window.resize(1000, 700)
     window.show()
     window.mode_button.click()
@@ -620,9 +583,7 @@ def test_run_overlays_persist_and_incomplete_cards_warn(
     assert window.controller.document.run_overlay_mode is RunOverlayMode.VISIBLE
     assert len(window.card_canvas._overlay_items) == 2
     assert session.flush()
-    assert StackStore(session.state.bundle_path).load().run_overlay_mode is (
-        RunOverlayMode.VISIBLE
-    )
+    assert StackStore(session.state.bundle_path).load().run_overlay_mode is (RunOverlayMode.VISIBLE)
 
     window.overlay_selector.setCurrentText("On hover")
     assert window.card_canvas._overlay_items == []
@@ -634,9 +595,7 @@ def test_run_overlays_persist_and_incomplete_cards_warn(
     window.card_canvas.interaction_activated.emit(to_incomplete.id)
     assert window.canvas_card_name.text() == "Incomplete"
     assert window.card_canvas._message_item is not None
-    assert window.card_canvas._message_item.toPlainText() == (
-        "No image"
-    )
+    assert window.card_canvas._message_item.toPlainText() == ("No image")
     assert window.notification_bar.message_label.text() == (
         '"Incomplete" has no image in this revision.'
     )

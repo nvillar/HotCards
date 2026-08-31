@@ -73,7 +73,6 @@ from hotcards.application.workers import (
     WorkerFailure,
     WorkerOperation,
 )
-from hotcards.domain.image_dimensions import GenerateResolution
 from hotcards.domain.models import (
     Card,
     CurrentSourceSize,
@@ -1526,7 +1525,7 @@ class MainWindow(QMainWindow):
     def _refine_background(
         self,
         transformation: object,
-        resolution: object,
+        output_size: object,
     ) -> None:
         workflow = self.background_workflow
         card_id = self._selected_card_id
@@ -1534,7 +1533,7 @@ class MainWindow(QMainWindow):
             workflow is None
             or card_id is None
             or not isinstance(transformation, RefineTransformation)
-            or not isinstance(resolution, GenerateResolution)
+            or not isinstance(output_size, (CurrentSourceSize, PresetOutputSize))
         ):
             return
         self.notification_bar.clear_notification("background-error")
@@ -1546,7 +1545,7 @@ class MainWindow(QMainWindow):
             workflow.refine(
                 card_id,
                 transformation=transformation,
-                resolution=resolution,
+                output_size=output_size,
             )
         except BackgroundWorkflowError as error:
             self._show_error(
@@ -1844,10 +1843,10 @@ class MainWindow(QMainWindow):
             busy=workflow_busy,
             generating=workflow_busy and active_operation == "generate",
         )
-        refine_resolution = self.inspector.refine_resolution_combo.currentData()
-        has_refine_resolution = isinstance(
-            refine_resolution,
-            GenerateResolution,
+        refine_output_size = self.inspector.refine_resolution_combo.currentData()
+        has_refine_output_size = isinstance(
+            refine_output_size,
+            (CurrentSourceSize, PresetOutputSize),
         )
         refine_reason = "Ready to refine"
         if self.controller.mutation_blocked:
@@ -1870,10 +1869,8 @@ class MainWindow(QMainWindow):
             refine_reason = "Enter a Description before refining"
         elif not has_image:
             refine_reason = "Generate an image before refining"
-        elif not has_refine_resolution:
-            refine_reason = (
-                self.inspector.refine_error.text() or "Select a higher Refine output resolution"
-            )
+        elif not has_refine_output_size:
+            refine_reason = self.inspector.refine_error.text() or "Select a Refine output size"
         elif not mflux_available:
             refine_reason = self._action_diagnostic(AdapterKind.MFLUX)
         self.inspector.set_refine_capabilities(
@@ -1881,7 +1878,7 @@ class MainWindow(QMainWindow):
                 has_card
                 and has_description_input
                 and has_image
-                and has_refine_resolution
+                and has_refine_output_size
                 and mflux_available
             ),
             refine_reason=refine_reason,
@@ -1914,7 +1911,7 @@ class MainWindow(QMainWindow):
         elif not has_edit_output_size:
             edit_reason = (
                 self.inspector.edit_output_error.text()
-                or "Select the current size or a higher Edit resolution"
+                or "Select the current size or a higher Edit output tier"
             )
         elif not mflux_available:
             edit_reason = self._action_diagnostic(AdapterKind.MFLUX)

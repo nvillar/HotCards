@@ -47,7 +47,7 @@ from hotcards.application.workers import (
     AdapterWorkers,
     AvailabilityDiagnostic,
 )
-from hotcards.domain.image_dimensions import AspectRatio, GenerateResolution
+from hotcards.domain.image_dimensions import AspectRatio, ResolutionTier
 from hotcards.domain.models import (
     HYPERCARD_STYLE_ID,
     Card,
@@ -67,6 +67,7 @@ from hotcards.domain.models import (
     NavigateAction,
     Point,
     Polygon,
+    PresetOutputSize,
     RefineProvenance,
     RefineTransformation,
     ResolvedCardReference,
@@ -173,9 +174,9 @@ class FakeBackgroundWorkflow(QObject):
         card_id: object,
         *,
         transformation: object,
-        resolution: object,
+        output_size: object,
     ) -> None:
-        self.refine_calls.append((card_id, transformation, resolution))
+        self.refine_calls.append((card_id, transformation, output_size))
 
     def edit(
         self,
@@ -275,8 +276,8 @@ def _generated_background(
                 model_identifier="test",
                 mflux_version="test",
                 seed=1,
-                width=592,
-                height=448,
+                width=512,
+                height=384,
                 step_count=4,
                 generated_at=generated_at,
                 duration_seconds=1,
@@ -889,7 +890,7 @@ def test_pending_refine_renders_authoritative_revision_and_promotes_undo(
     card = Card(name="Source")
     source_asset_id = uuid4()
     source_png = tmp_path / "source.png"
-    Image.new("RGB", (592, 448), "navy").save(source_png, format="PNG")
+    Image.new("RGB", (512, 384), "navy").save(source_png, format="PNG")
     source_image_path = store.store_image_asset(
         source_png,
         card_id=card.id,
@@ -925,7 +926,7 @@ def test_pending_refine_renders_authoritative_revision_and_promotes_undo(
     )
     refined_asset_id = uuid4()
     refined_png = tmp_path / "refined.png"
-    Image.new("RGB", (880, 672), "teal").save(refined_png, format="PNG")
+    Image.new("RGB", (768, 576), "teal").save(refined_png, format="PNG")
     refined_image_path = store.store_image_asset(
         refined_png,
         card_id=card.id,
@@ -944,10 +945,10 @@ def test_pending_refine_renders_authoritative_revision_and_promotes_undo(
             ),
             description=source_revision.description,
             render_prompt=source_revision.description,
-            resolution=GenerateResolution.RESOLUTION_768,
+            output_size=PresetOutputSize(tier=ResolutionTier.LARGE),
             transformation=RefineTransformation.BALANCED,
             strength=0.5,
-            settings=direct.provenance.settings.model_copy(update={"width": 880, "height": 672}),
+            settings=direct.provenance.settings.model_copy(update={"width": 768, "height": 576}),
         ),
         created_at=direct.created_at,
     )
@@ -1241,11 +1242,11 @@ def test_revision_selection_duplicate_delete_and_undo(
     assert card.id == controller.document.cards[0].id
 
 
-def test_revision_selection_synchronizes_generate_resolution(
+def test_revision_selection_synchronizes_generate_output_size(
     application: QApplication,
 ) -> None:
-    first = CardRevision(generate_resolution=GenerateResolution.RESOLUTION_256)
-    second = CardRevision(generate_resolution=GenerateResolution.RESOLUTION_1024)
+    first = CardRevision(generate_output_size=PresetOutputSize(tier=ResolutionTier.SMALL))
+    second = CardRevision(generate_output_size=PresetOutputSize(tier=ResolutionTier.FULL))
     card = Card(
         name="Card",
         revisions=(first, second),
@@ -1253,11 +1254,15 @@ def test_revision_selection_synchronizes_generate_resolution(
     )
     window, controller, _workers, _background = _window(Stack(name="Demo", cards=(card,)))
 
-    assert window.inspector.resolution_combo.currentData() == GenerateResolution.RESOLUTION_256
+    assert window.inspector.resolution_combo.currentData() == PresetOutputSize(
+        tier=ResolutionTier.SMALL
+    )
     window.revision_combo.setCurrentIndex(1)
 
     assert controller.document.cards[0].active_revision_id == second.id
-    assert window.inspector.resolution_combo.currentData() == GenerateResolution.RESOLUTION_1024
+    assert window.inspector.resolution_combo.currentData() == PresetOutputSize(
+        tier=ResolutionTier.FULL
+    )
 
 
 def test_revision_copy_and_notification_mutations_cancel_generation(
@@ -1269,21 +1274,21 @@ def test_revision_copy_and_notification_mutations_cancel_generation(
     window.add_revision_button.click()
     assert background.cancel_calls == 1
 
-    original_resolution = controller.document.cards[0].active_revision.generate_resolution
+    original_resolution = controller.document.cards[0].active_revision.generate_output_size
     window.inspector.resolution_combo.setCurrentIndex(
         window.inspector._combo_index_for_data(
             window.inspector.resolution_combo,
-            GenerateResolution.RESOLUTION_1024,
+            PresetOutputSize(tier=ResolutionTier.FULL),
         )
     )
     token = controller.current_undo_token
     assert token is not None
-    window._show_undo_notification("Generate resolution changed", token)
+    window._show_undo_notification("Generate output size changed", token)
     background.busy = True
     window._undo_notification()
 
     assert background.cancel_calls == 2
-    assert controller.document.cards[0].active_revision.generate_resolution is original_resolution
+    assert controller.document.cards[0].active_revision.generate_output_size == original_resolution
 
 
 def test_final_revision_cannot_be_deleted(
@@ -1350,7 +1355,7 @@ def test_card_delete_reports_image_source_dependencies(
             ),
             description="A refined source image",
             render_prompt="A refined source image",
-            resolution=GenerateResolution.RESOLUTION_512,
+            output_size=PresetOutputSize(tier=ResolutionTier.MEDIUM),
             transformation=RefineTransformation.BALANCED,
             strength=0.50,
             settings=source_background.provenance.settings,
@@ -1393,15 +1398,14 @@ def test_resolution_change_cancels_in_flight_generation(
     window.inspector.resolution_combo.setCurrentIndex(
         window.inspector._combo_index_for_data(
             window.inspector.resolution_combo,
-            GenerateResolution.RESOLUTION_1024,
+            PresetOutputSize(tier=ResolutionTier.FULL),
         )
     )
 
     assert background.cancel_calls == 1
     assert not background.busy
-    assert (
-        controller.document.cards[0].active_revision.generate_resolution
-        is GenerateResolution.RESOLUTION_1024
+    assert controller.document.cards[0].active_revision.generate_output_size == PresetOutputSize(
+        tier=ResolutionTier.FULL
     )
     assert isinstance(window.settings, FakeSettings)
     assert all("resolution" not in key for key in window.settings.values)
@@ -1923,7 +1927,7 @@ def test_refine_tab_wires_current_image_options_and_cancels_live_changes(
     card = Card(name="Card")
     asset_id = uuid4()
     source = tmp_path / "source.png"
-    Image.new("RGB", (592, 448), "navy").save(source)
+    Image.new("RGB", (512, 384), "navy").save(source)
     image_path = store.store_image_asset(
         source,
         card_id=card.id,
@@ -1962,16 +1966,16 @@ def test_refine_tab_wires_current_image_options_and_cancels_live_changes(
 
     assert window.inspector.inspector_tabs.tabText(1) == "Refine"
     assert window.inspector.refine_background_button.isEnabled()
-    assert (
-        window.inspector.refine_resolution_combo.currentData() is GenerateResolution.RESOLUTION_768
+    assert window.inspector.refine_resolution_combo.currentData() == CurrentSourceSize(
+        width=512, height=384
     )
-    assert "880 x 672" in window.inspector.refine_background_button.toolTip()
+    assert "512 × 384" in window.inspector.refine_background_button.toolTip()
     window.inspector.refine_background_button.click()
     assert background.refine_calls == [
         (
             card.id,
             RefineTransformation.BALANCED,
-            GenerateResolution.RESOLUTION_768,
+            CurrentSourceSize(width=512, height=384),
         )
     ]
 
@@ -2044,8 +2048,10 @@ def test_edit_tab_wires_current_image_defaults_errors_and_cancellation(
 
     assert window.inspector.inspector_tabs.tabText(2) == "Edit"
     assert not window.inspector.edit_background_button.isEnabled()
-    assert window.inspector.edit_resolution_combo.itemText(0) == ("Current (1024 x 768)")
-    assert window.inspector.edit_resolution_combo.itemText(1) == ("1024 (1184 x 880)")
+    assert window.inspector.edit_resolution_combo.count() == 1
+    assert window.inspector.edit_resolution_combo.itemText(0) == (
+        "Full — 1024 × 768 (Current image)"
+    )
     window.inspector.edit_instruction_edit.setPlainText("Open the gate.")
     assert window.inspector.edit_background_button.isEnabled()
     window.inspector.edit_background_button.click()

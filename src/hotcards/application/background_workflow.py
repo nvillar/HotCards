@@ -45,9 +45,8 @@ from hotcards.application.workers import AdapterWorkers, WorkerOperation
 from hotcards.domain.image_dependencies import image_source_dependencies
 from hotcards.domain.image_dimensions import (
     AspectRatio,
-    GenerateResolution,
-    higher_output_resolutions,
-    output_dimensions,
+    ResolutionTier,
+    higher_output_tiers,
 )
 from hotcards.domain.models import (
     AcceptedEdit,
@@ -58,9 +57,11 @@ from hotcards.domain.models import (
     EditPreserveOptions,
     GeneratedBackground,
     GenerateInputs,
+    GenerateOutputSize,
     ImageReferenceSnapshot,
     ImageSourceSnapshot,
     PresetOutputSize,
+    RefineOutputSize,
     RefineTransformation,
     ResolvedCardReference,
     Stack,
@@ -68,6 +69,7 @@ from hotcards.domain.models import (
     UnresolvedCardReference,
     image_edit_lineage,
     image_operation_settings,
+    selected_output_dimensions,
 )
 from hotcards.generation.image_generation import (
     compose_edit_prompt,
@@ -100,6 +102,15 @@ class BackgroundWorkflowError(ValueError):
     """A background operation cannot proceed without losing user intent."""
 
 
+def _current_source_size(width: int, height: int) -> CurrentSourceSize:
+    try:
+        return CurrentSourceSize(width=width, height=height)
+    except ValueError as error:
+        raise BackgroundWorkflowError(
+            "the current image dimensions must be positive and aligned to 16 pixels"
+        ) from error
+
+
 @dataclass(frozen=True, slots=True)
 class BackgroundGenerationSettings:
     """Machine-local effective settings captured before worker submission."""
@@ -121,7 +132,7 @@ class _GenerationTarget:
     bundle_path: Path
     references: tuple[_GenerationReferenceTarget, ...]
     style: StyleSnapshot | None
-    generate_resolution: GenerateResolution
+    generate_output_size: GenerateOutputSize
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,7 +153,7 @@ class _RefineTarget:
     style: StyleSnapshot | None
     edit_lineage: tuple[AcceptedEdit, ...]
     aspect_ratio: AspectRatio
-    resolution: GenerateResolution
+    output_size: RefineOutputSize
     transformation: RefineTransformation
     settings: BackgroundGenerationSettings
     history_token: UndoToken | None
@@ -223,9 +234,9 @@ class BackgroundWorkflow(QObject):
         self._operation: WorkerOperation | None = None
         self._request_id: UUID | None = None
         self._request_target: _GenerationTarget | _RefineTarget | _EditTarget | None = None
-        self._pending_result: (
-            MfluxGenerateResult | MfluxRefineResult | MfluxEditResult | None
-        ) = None
+        self._pending_result: MfluxGenerateResult | MfluxRefineResult | MfluxEditResult | None = (
+            None
+        )
         self._close_requested = Event()
         self._invocation_active = Event()
         self._source_snapshot_lock = Lock()
@@ -251,10 +262,7 @@ class BackgroundWorkflow(QObject):
             return (
                 self._invocation_active.is_set()
                 or self._snapshot_cleanup_in_progress
-                or (
-                    self._source_snapshot is not None
-                    and self._temporary_cleanup_blocked
-                )
+                or (self._source_snapshot is not None and self._temporary_cleanup_blocked)
             )
 
     def generate(self, card_id: UUID) -> WorkerOperation:
@@ -289,7 +297,7 @@ class BackgroundWorkflow(QObject):
             description=revision.description,
             references=reference_snapshots,
             style=self._style_snapshot(document, revision),
-            resolution=revision.generate_resolution,
+            output_size=revision.generate_output_size,
         )
         render_prompt = compose_generation_prompt(inputs)
         reference_image_paths = tuple(
@@ -302,8 +310,8 @@ class BackgroundWorkflow(QObject):
         self._request_id = request_id
         self._request_target = target
         output_path = self._temporary_directory / f"generated-{asset_id}.png"
-        width, height = output_dimensions(
-            revision.generate_resolution,
+        width, height = selected_output_dimensions(
+            revision.generate_output_size,
             document.aspect_ratio,
         )
         request = MfluxGenerateRequest(
@@ -346,11 +354,11 @@ class BackgroundWorkflow(QObject):
         operation.failed.connect(partial(self._operation_failed, request_id))
         return operation
 
-    def available_refine_resolutions(
+    def available_refine_output_sizes(
         self,
         card_id: UUID,
-    ) -> tuple[GenerateResolution, ...]:
-        """Return output presets larger than the current decoded background."""
+    ) -> tuple[RefineOutputSize, ...]:
+        """Return exact current size followed by every named output tier."""
         card = self._card(self.controller.document, card_id)
         revision = card.active_revision
         background = revision.background
@@ -366,10 +374,9 @@ class BackgroundWorkflow(QObject):
             raise BackgroundWorkflowError(
                 "the current image is unavailable or unreadable"
             ) from error
-        return higher_output_resolutions(
-            width,
-            height,
-            self.controller.document.aspect_ratio,
+        return (
+            _current_source_size(width, height),
+            *(PresetOutputSize(tier=tier) for tier in ResolutionTier),
         )
 
     def refine(
@@ -377,7 +384,7 @@ class BackgroundWorkflow(QObject):
         card_id: UUID,
         *,
         transformation: RefineTransformation,
-        resolution: GenerateResolution,
+        output_size: RefineOutputSize,
     ) -> WorkerOperation:
         """Refine the current image into one automatic complete revision."""
         self._require_ready(card_id)
@@ -414,21 +421,21 @@ class BackgroundWorkflow(QObject):
                     source_snapshot.snapshot_path,
                 )
             raise
-        available_resolutions = higher_output_resolutions(
-            source_snapshot.width,
-            source_snapshot.height,
-            document.aspect_ratio,
+        try:
+            current_output_size = _current_source_size(
+                source_snapshot.width,
+                source_snapshot.height,
+            )
+        except BackgroundWorkflowError:
+            self._cleanup_source_snapshot_if_idle()
+            raise
+        available_output_sizes: tuple[RefineOutputSize, ...] = (
+            current_output_size,
+            *(PresetOutputSize(tier=tier) for tier in ResolutionTier),
         )
-        if not available_resolutions:
+        if output_size not in available_output_sizes:
             self._cleanup_source_snapshot_if_idle()
-            raise BackgroundWorkflowError(
-                "the current image is already at the maximum Refine resolution"
-            )
-        if resolution not in available_resolutions:
-            self._cleanup_source_snapshot_if_idle()
-            raise BackgroundWorkflowError(
-                "select a Refine resolution with more pixels than the current image"
-            )
+            raise BackgroundWorkflowError("select the current Refine size or a named output tier")
         try:
             settings = self._settings_provider()
         except Exception:
@@ -446,7 +453,10 @@ class BackgroundWorkflow(QObject):
             revision_id=revision.id,
             background_id=background.id,
         )
-        width, height = output_dimensions(resolution, document.aspect_ratio)
+        width, height = selected_output_dimensions(
+            output_size,
+            document.aspect_ratio,
+        )
         request_id = uuid4()
         asset_id = uuid4()
         target = _RefineTarget(
@@ -457,7 +467,7 @@ class BackgroundWorkflow(QObject):
             style=style,
             edit_lineage=edit_lineage,
             aspect_ratio=document.aspect_ratio,
-            resolution=resolution,
+            output_size=output_size,
             transformation=transformation,
             settings=settings,
             history_token=self.controller.current_undo_token,
@@ -472,7 +482,7 @@ class BackgroundWorkflow(QObject):
             style=style,
             edit_lineage=edit_lineage,
             render_prompt=render_prompt,
-            resolution=resolution,
+            output_size=output_size,
             transformation=transformation,
             image_strength=transformation.strength,
             output_path=self._temporary_directory / f"refined-{asset_id}.png",
@@ -537,10 +547,10 @@ class BackgroundWorkflow(QObject):
                 "the current image is unavailable or unreadable"
             ) from error
         return (
-            CurrentSourceSize(width=width, height=height),
+            _current_source_size(width, height),
             *(
-                PresetOutputSize(resolution=resolution)
-                for resolution in higher_output_resolutions(
+                PresetOutputSize(tier=tier)
+                for tier in higher_output_tiers(
                     width,
                     height,
                     document.aspect_ratio,
@@ -560,14 +570,11 @@ class BackgroundWorkflow(QObject):
         self._require_ready(card_id)
         if not self.session.flush():
             raise BackgroundWorkflowError(
-                self.session.state.error
-                or "the current stack could not be saved"
+                self.session.state.error or "the current stack could not be saved"
             )
         normalized_instruction = instruction.strip()
         if not normalized_instruction:
-            raise BackgroundWorkflowError(
-                "enter an Edit Instruction before editing"
-            )
+            raise BackgroundWorkflowError("enter an Edit Instruction before editing")
         document = self.controller.document
         card = self._card(document, card_id)
         revision = card.active_revision
@@ -595,14 +602,19 @@ class BackgroundWorkflow(QObject):
                     source_snapshot.snapshot_path,
                 )
             raise
+        try:
+            current_output_size = _current_source_size(
+                source_snapshot.width,
+                source_snapshot.height,
+            )
+        except BackgroundWorkflowError:
+            self._cleanup_source_snapshot_if_idle()
+            raise
         available_output_sizes = (
-            CurrentSourceSize(
-                width=source_snapshot.width,
-                height=source_snapshot.height,
-            ),
+            current_output_size,
             *(
-                PresetOutputSize(resolution=resolution)
-                for resolution in higher_output_resolutions(
+                PresetOutputSize(tier=tier)
+                for tier in higher_output_tiers(
                     source_snapshot.width,
                     source_snapshot.height,
                     document.aspect_ratio,
@@ -633,10 +645,7 @@ class BackgroundWorkflow(QObject):
         width, height = (
             (output_size.width, output_size.height)
             if isinstance(output_size, CurrentSourceSize)
-            else output_dimensions(
-                output_size.resolution,
-                document.aspect_ratio,
-            )
+            else selected_output_dimensions(output_size, document.aspect_ratio)
         )
         source = ImageSourceSnapshot(
             card_id=card.id,
@@ -671,8 +680,7 @@ class BackgroundWorkflow(QObject):
             output_size=output_size,
             edit_lineage=edit_lineage,
             seed=secrets.randbelow(2_147_483_648),
-            output_path=self._temporary_directory
-            / f"edited-{asset_id}.png",
+            output_path=self._temporary_directory / f"edited-{asset_id}.png",
             model_identifier=settings.mflux_model,
             aspect_ratio=document.aspect_ratio,
             width=width,
@@ -709,9 +717,7 @@ class BackgroundWorkflow(QObject):
             self._set_busy(False, "Image editing failed")
             raise
         self._operation = operation
-        operation.succeeded.connect(
-            partial(self._edit_succeeded, request_id, target, asset_id)
-        )
+        operation.succeeded.connect(partial(self._edit_succeeded, request_id, target, asset_id))
         operation.failed.connect(partial(self._operation_failed, request_id))
         return operation
 
@@ -787,11 +793,7 @@ class BackgroundWorkflow(QObject):
                 (
                     "Refine cancelled"
                     if operation == "refine"
-                    else (
-                        "Edit cancelled"
-                        if operation == "edit"
-                        else "Generation cancelled"
-                    )
+                    else ("Edit cancelled" if operation == "edit" else "Generation cancelled")
                 ),
             )
 
@@ -812,10 +814,7 @@ class BackgroundWorkflow(QObject):
         if not self._close_requested.is_set():
             return
         self._mflux_generator.release()
-        if (
-            self._owned_temporary_directory is not None
-            and not self._temporary_cleanup_blocked
-        ):
+        if self._owned_temporary_directory is not None and not self._temporary_cleanup_blocked:
             self._owned_temporary_directory.cleanup()
 
     def is_generating_for(self, card_id: UUID) -> bool:
@@ -1045,9 +1044,7 @@ class BackgroundWorkflow(QObject):
             return
         if not isinstance(result, MfluxEditResult):
             self._finish_with_error(
-                BackgroundWorkflowError(
-                    "image editing returned an unexpected result"
-                )
+                BackgroundWorkflowError("image editing returned an unexpected result")
             )
             return
         self._pending_result = result
@@ -1240,11 +1237,7 @@ class BackgroundWorkflow(QObject):
             (
                 "Image refinement failed"
                 if operation == "refine"
-                else (
-                    "Image editing failed"
-                    if operation == "edit"
-                    else "Image generation failed"
-                )
+                else ("Image editing failed" if operation == "edit" else "Image generation failed")
             ),
         )
         self.failed.emit(failure)
@@ -1335,7 +1328,7 @@ class BackgroundWorkflow(QObject):
             bundle_path=bundle_path.resolve(),
             references=references,
             style=self._style_snapshot(document, revision),
-            generate_resolution=revision.generate_resolution,
+            generate_output_size=revision.generate_output_size,
         )
 
     def _target_is_current(self, target: _GenerationTarget) -> bool:
@@ -1357,7 +1350,7 @@ class BackgroundWorkflow(QObject):
             and (revision.background.id if revision.background is not None else None)
             == target.background_id
             and self._style_snapshot(document, revision) == target.style
-            and revision.generate_resolution == target.generate_resolution
+            and revision.generate_output_size == target.generate_output_size
         ):
             return False
         try:
@@ -1404,11 +1397,7 @@ class BackgroundWorkflow(QObject):
         ):
             return False
         card = next(
-            (
-                card
-                for card in document.cards
-                if card.id == target.card_id
-            ),
+            (card for card in document.cards if card.id == target.card_id),
             None,
         )
         if card is None or card.active_revision_id != target.revision.id:
@@ -1418,8 +1407,7 @@ class BackgroundWorkflow(QObject):
             revision != target.revision
             or self._style_snapshot(document, revision) != target.style
             or revision.background is None
-            or image_edit_lineage(revision.background.provenance)
-            != target.edit_lineage[:-1]
+            or image_edit_lineage(revision.background.provenance) != target.edit_lineage[:-1]
         ):
             return False
         return self._settings_provider() == target.settings

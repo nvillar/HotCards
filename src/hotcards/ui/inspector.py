@@ -45,7 +45,7 @@ from hotcards.application.commands import (
     ReorderHotspotCommand,
     SetHotspotConditionsCommand,
     SetHotspotKeyChangesCommand,
-    SetRevisionGenerateResolutionCommand,
+    SetRevisionGenerateOutputSizeCommand,
     SetRevisionReferenceCommand,
     SetRevisionStyleCommand,
 )
@@ -54,8 +54,9 @@ from hotcards.application.document_controller import (
     DocumentMutationBlockedError,
 )
 from hotcards.domain.image_dimensions import (
-    GenerateResolution,
-    higher_output_resolutions,
+    AspectRatio,
+    ResolutionTier,
+    higher_output_tiers,
     output_dimensions,
 )
 from hotcards.domain.models import (
@@ -65,16 +66,20 @@ from hotcards.domain.models import (
     EditOutputSize,
     EditPreserveOptions,
     EditProvenance,
+    ExactOutputSize,
+    GenerateOutputSize,
     HotspotConditions,
     HotspotKeyChanges,
     Interaction,
     PresetOutputSize,
+    RefineOutputSize,
     RefineTransformation,
     ResolvedCardReference,
     Stack,
     UnresolvedCardReference,
     image_edit_lineage,
     original_image_provenance,
+    selected_output_dimensions,
 )
 from hotcards.generation.image_generation import (
     EDIT_PROMPT_TOKEN_BUDGET,
@@ -182,6 +187,43 @@ def _centered_cell_widget(widget: QWidget) -> QWidget:
     layout.setSpacing(0)
     layout.addWidget(widget, 0, Qt.AlignmentFlag.AlignCenter)
     return container
+
+
+def _tier_label(
+    tier: ResolutionTier,
+    aspect_ratio: AspectRatio,
+    *,
+    current: bool = False,
+) -> str:
+    width, height = output_dimensions(tier, aspect_ratio)
+    suffix = " (Current image)" if current else ""
+    return f"{tier.label} — {width} × {height}{suffix}"
+
+
+def _current_tier(
+    source_size: tuple[int, int] | None,
+    aspect_ratio: AspectRatio,
+) -> ResolutionTier | None:
+    if source_size is None:
+        return None
+    return next(
+        (tier for tier in ResolutionTier if output_dimensions(tier, aspect_ratio) == source_size),
+        None,
+    )
+
+
+def _sort_size_rows(
+    rows: list[tuple[str, object, tuple[int, int]]],
+) -> list[tuple[str, object, tuple[int, int]]]:
+    return sorted(
+        rows,
+        key=lambda row: (
+            row[2][0] * row[2][1],
+            row[2][0],
+            row[2][1],
+            row[0],
+        ),
+    )
 
 
 class Inspector(QWidget):
@@ -327,10 +369,8 @@ class Inspector(QWidget):
         layout.addWidget(self.resolution_label)
         self.resolution_combo = QComboBox()
         self.resolution_combo.setObjectName("resolutionCombo")
-        self.resolution_combo.setAccessibleName("Generate resolution")
-        self.resolution_combo.setToolTip(
-            "Square-equivalent Generate resolution and actual output dimensions"
-        )
+        self.resolution_combo.setAccessibleName("Generate output size")
+        self.resolution_combo.setToolTip("Generate output tier or exact current-image size")
         layout.addWidget(self.resolution_combo)
 
         layout.addSpacing(8)
@@ -737,7 +777,11 @@ class Inspector(QWidget):
             )
             self._render_style_selector(document, revision)
             self._render_reference(document, card, revision)
-            self._render_resolution(document, revision)
+            self._render_resolution(
+                document,
+                revision,
+                source_size=refine_source_size,
+            )
             self._render_description_workflow(document, card, revision)
             self._render_refine(
                 document,
@@ -803,14 +847,17 @@ class Inspector(QWidget):
             else ""
         )
         style_suffix = " + Style" if revision.style_id is not None else ""
-        width, height = output_dimensions(
-            revision.generate_resolution,
+        width, height = selected_output_dimensions(
+            revision.generate_output_size,
             document.aspect_ratio,
         )
+        if isinstance(revision.generate_output_size, PresetOutputSize):
+            output_label = revision.generate_output_size.tier.label
+        else:
+            output_label = "Exact size"
         self._generate_using_text = (
             f"Using: Description{style_suffix}{reference_suffix}\n"
-            f"Resolution: {revision.generate_resolution.value} "
-            f"square-equivalent ({width} x {height})"
+            f"Resolution: {output_label} ({width} × {height})"
         )
         self._refresh_generation_tooltips()
 
@@ -1041,22 +1088,68 @@ class Inspector(QWidget):
         self,
         document: Stack,
         revision: CardRevision,
+        *,
+        source_size: tuple[int, int] | None,
     ) -> None:
+        current_tier = _current_tier(source_size, document.aspect_ratio)
+        rows: list[tuple[str, GenerateOutputSize, tuple[int, int]]] = []
+        for tier in ResolutionTier:
+            dimensions = output_dimensions(tier, document.aspect_ratio)
+            output_size: GenerateOutputSize = PresetOutputSize(tier=tier)
+            if (
+                isinstance(revision.generate_output_size, ExactOutputSize)
+                and (
+                    revision.generate_output_size.width,
+                    revision.generate_output_size.height,
+                )
+                == dimensions
+            ):
+                output_size = revision.generate_output_size
+            rows.append(
+                (
+                    _tier_label(
+                        tier,
+                        document.aspect_ratio,
+                        current=tier == current_tier,
+                    ),
+                    output_size,
+                    dimensions,
+                )
+            )
+        exact_sizes: dict[tuple[int, int], tuple[ExactOutputSize, bool]] = {}
+        if isinstance(revision.generate_output_size, ExactOutputSize):
+            exact_sizes[
+                (
+                    revision.generate_output_size.width,
+                    revision.generate_output_size.height,
+                )
+            ] = (revision.generate_output_size, False)
+        if source_size is not None and current_tier is None:
+            current_size = ExactOutputSize(
+                width=source_size[0],
+                height=source_size[1],
+            )
+            exact_sizes[source_size] = (current_size, True)
+        for output_size, current in exact_sizes.values():
+            dimensions = (output_size.width, output_size.height)
+            if any(existing[2] == dimensions for existing in rows):
+                continue
+            label = "Current size" if current else "Exact size"
+            rows.append(
+                (
+                    f"{label} — {output_size.width} × {output_size.height}",
+                    output_size,
+                    dimensions,
+                )
+            )
         with QSignalBlocker(self.resolution_combo):
             self.resolution_combo.clear()
-            for resolution in GenerateResolution:
-                width, height = output_dimensions(
-                    resolution,
-                    document.aspect_ratio,
-                )
-                self.resolution_combo.addItem(
-                    f"{resolution.value} ({width} x {height})",
-                    resolution,
-                )
+            for label, output_size, _dimensions in _sort_size_rows(rows):
+                self.resolution_combo.addItem(label, output_size)
             self.resolution_combo.setCurrentIndex(
                 self._combo_index_for_data(
                     self.resolution_combo,
-                    revision.generate_resolution,
+                    revision.generate_output_size,
                 )
             )
 
@@ -1066,21 +1159,20 @@ class Inspector(QWidget):
         card = self._selected_card()
         if card is None:
             return
-        try:
-            resolution = GenerateResolution(self.resolution_combo.itemData(index))
-        except (TypeError, ValueError):
+        output_size = self.resolution_combo.itemData(index)
+        if not isinstance(output_size, (PresetOutputSize, ExactOutputSize)):
             self.render(self.controller.document, self.selected_card_id)
             return
-        if resolution is card.active_revision.generate_resolution:
+        if output_size == card.active_revision.generate_output_size:
             return
         self._render_inputs_changed()
         self._execute(
-            SetRevisionGenerateResolutionCommand(
+            SetRevisionGenerateOutputSizeCommand(
                 card_id=card.id,
                 revision_id=card.active_revision.id,
-                resolution=resolution,
+                output_size=output_size,
             ),
-            undo_message="Generate resolution changed",
+            undo_message="Generate output size changed",
         )
 
     def _render_refine(
@@ -1090,43 +1182,79 @@ class Inspector(QWidget):
         *,
         source_size: tuple[int, int] | None,
     ) -> None:
-        current_resolution = self.refine_resolution_combo.currentData()
+        previous_selection = self.refine_resolution_combo.currentData()
         self._refine_source_size = source_size
-        available: tuple[GenerateResolution, ...] = ()
         error = ""
         if revision.background is None:
             error = "Generate an image before refining."
         elif source_size is None:
             error = "The current image is unavailable or unreadable."
-        else:
-            available = higher_output_resolutions(
-                source_size[0],
-                source_size[1],
-                document.aspect_ratio,
-            )
-            if not available:
-                error = "The current image is already at the maximum Refine resolution."
         with QSignalBlocker(self.refine_resolution_combo):
             self.refine_resolution_combo.clear()
-            for resolution in available:
-                width, height = output_dimensions(
-                    resolution,
-                    document.aspect_ratio,
+            current_output_size = None
+            current_tier = _current_tier(source_size, document.aspect_ratio)
+            if source_size is not None:
+                current_output_size = CurrentSourceSize(
+                    width=source_size[0],
+                    height=source_size[1],
                 )
-                self.refine_resolution_combo.addItem(
-                    f"{resolution.value} ({width} x {height})",
-                    resolution,
+                for tier in ResolutionTier:
+                    data: RefineOutputSize = PresetOutputSize(tier=tier)
+                    if tier == current_tier:
+                        data = current_output_size
+                    self.refine_resolution_combo.addItem(
+                        _tier_label(
+                            tier,
+                            document.aspect_ratio,
+                            current=tier == current_tier,
+                        ),
+                        data,
+                    )
+                if current_tier is None:
+                    rows = [
+                        (
+                            self.refine_resolution_combo.itemText(index),
+                            self.refine_resolution_combo.itemData(index),
+                            selected_output_dimensions(
+                                self.refine_resolution_combo.itemData(index),
+                                document.aspect_ratio,
+                            ),
+                        )
+                        for index in range(self.refine_resolution_combo.count())
+                    ]
+                    rows.append(
+                        (
+                            f"Current size — {source_size[0]} × {source_size[1]}",
+                            current_output_size,
+                            source_size,
+                        )
+                    )
+                    self.refine_resolution_combo.clear()
+                    for label, data, _dimensions in _sort_size_rows(rows):
+                        self.refine_resolution_combo.addItem(label, data)
+            selection = (
+                current_output_size
+                if not isinstance(
+                    previous_selection,
+                    (PresetOutputSize, CurrentSourceSize),
                 )
+                or isinstance(previous_selection, CurrentSourceSize)
+                or (
+                    isinstance(previous_selection, PresetOutputSize)
+                    and previous_selection.tier == current_tier
+                )
+                else previous_selection
+            )
             selected_index = self._combo_index_for_data(
                 self.refine_resolution_combo,
-                current_resolution,
+                selection,
             )
             self.refine_resolution_combo.setCurrentIndex(
                 selected_index if selected_index >= 0 else 0
             )
-        self.refine_resolution_combo.setEnabled(bool(available))
+        self.refine_resolution_combo.setEnabled(source_size is not None)
         self._set_error(self.refine_error, error)
-        resolution = self.refine_resolution_combo.currentData()
+        output_size = self.refine_resolution_combo.currentData()
         try:
             transformation = RefineTransformation(self.refine_transformation_combo.currentData())
         except (TypeError, ValueError):
@@ -1149,12 +1277,15 @@ class Inspector(QWidget):
             using.append(
                 f"Transformation: {transformation.value.title()} ({transformation.strength:.2f})"
             )
-        if isinstance(resolution, GenerateResolution):
-            width, height = output_dimensions(
-                resolution,
+        if isinstance(output_size, (PresetOutputSize, CurrentSourceSize)):
+            width, height = selected_output_dimensions(
+                output_size,
                 document.aspect_ratio,
             )
-            using.append(f"Resolution: {resolution.value} square-equivalent ({width} x {height})")
+            if isinstance(output_size, CurrentSourceSize):
+                using.append(f"Resolution: Current image ({width} × {height})")
+            else:
+                using.append(f"Resolution: {output_size.tier.label} ({width} × {height})")
         self._refine_using_text = "\n".join(using)
         self._refresh_generation_tooltips()
 
@@ -1163,21 +1294,21 @@ class Inspector(QWidget):
             transformation = RefineTransformation(self.refine_transformation_combo.currentData())
         except (TypeError, ValueError):
             transformation = None
-        resolution = self.refine_resolution_combo.currentData()
+        output_size = self.refine_resolution_combo.currentData()
         if not isinstance(transformation, RefineTransformation):
             self._set_error(
                 self.refine_error,
                 "Select a supported Refine transformation.",
             )
             return
-        if not isinstance(resolution, GenerateResolution):
+        if not isinstance(output_size, (PresetOutputSize, CurrentSourceSize)):
             if not self.refine_error.text():
                 self._set_error(
                     self.refine_error,
-                    "Select a higher Refine output resolution.",
+                    "Select a Refine output size.",
                 )
             return
-        self.refine_background_requested.emit(transformation, resolution)
+        self.refine_background_requested.emit(transformation, output_size)
 
     def _render_edit(
         self,
@@ -1189,36 +1320,56 @@ class Inspector(QWidget):
         previous_selection = self.edit_resolution_combo.currentData()
         self._edit_source_size = source_size
         error = ""
-        available_presets: tuple[GenerateResolution, ...] = ()
         if revision.background is None:
             error = "Generate an image before editing."
         elif source_size is None:
             error = "The current image is unavailable or unreadable."
-        else:
-            available_presets = higher_output_resolutions(
-                source_size[0],
-                source_size[1],
-                document.aspect_ratio,
-            )
         with QSignalBlocker(self.edit_resolution_combo):
             self.edit_resolution_combo.clear()
             if source_size is not None:
-                self.edit_resolution_combo.addItem(
-                    f"Current ({source_size[0]} x {source_size[1]})",
-                    "current",
+                current_output_size = CurrentSourceSize(
+                    width=source_size[0],
+                    height=source_size[1],
                 )
-                for resolution in available_presets:
-                    width, height = output_dimensions(
-                        resolution,
-                        document.aspect_ratio,
-                    )
+                current_tier = _current_tier(
+                    source_size,
+                    document.aspect_ratio,
+                )
+                if current_tier is None:
                     self.edit_resolution_combo.addItem(
-                        f"{resolution.value} ({width} x {height})",
-                        resolution,
+                        f"Current size — {source_size[0]} × {source_size[1]}",
+                        current_output_size,
                     )
+                else:
+                    self.edit_resolution_combo.addItem(
+                        _tier_label(
+                            current_tier,
+                            document.aspect_ratio,
+                            current=True,
+                        ),
+                        current_output_size,
+                    )
+                for tier in higher_output_tiers(
+                    source_size[0],
+                    source_size[1],
+                    document.aspect_ratio,
+                ):
+                    self.edit_resolution_combo.addItem(
+                        _tier_label(tier, document.aspect_ratio),
+                        PresetOutputSize(tier=tier),
+                    )
+                selection = (
+                    current_output_size
+                    if not isinstance(
+                        previous_selection,
+                        (PresetOutputSize, CurrentSourceSize),
+                    )
+                    or isinstance(previous_selection, CurrentSourceSize)
+                    else previous_selection
+                )
                 selected_index = self._combo_index_for_data(
                     self.edit_resolution_combo,
-                    previous_selection,
+                    selection,
                 )
                 self.edit_resolution_combo.setCurrentIndex(
                     selected_index if selected_index >= 0 else 0
@@ -1237,15 +1388,9 @@ class Inspector(QWidget):
 
     def _selected_edit_output_size(self) -> EditOutputSize | None:
         selection = self.edit_resolution_combo.currentData()
-        if selection == "current" and self._edit_source_size is not None:
-            return CurrentSourceSize(
-                width=self._edit_source_size[0],
-                height=self._edit_source_size[1],
-            )
-        try:
-            return PresetOutputSize(resolution=GenerateResolution(selection))
-        except (TypeError, ValueError):
-            return None
+        if isinstance(selection, (CurrentSourceSize, PresetOutputSize)):
+            return selection
+        return None
 
     def _render_edit_tooltip(
         self,
@@ -1277,14 +1422,11 @@ class Inspector(QWidget):
                 width, height = output_size.width, output_size.height
                 using.append(f"Resolution: Current ({width} x {height})")
             else:
-                width, height = output_dimensions(
-                    output_size.resolution,
+                width, height = selected_output_dimensions(
+                    output_size,
                     self.controller.document.aspect_ratio,
                 )
-                using.append(
-                    f"Resolution: {output_size.resolution.value} "
-                    f"square-equivalent ({width} x {height})"
-                )
+                using.append(f"Resolution: {output_size.tier.label} ({width} × {height})")
         using.append(f"Token budget: {EDIT_PROMPT_TOKEN_BUDGET}")
         active_revision = revision
         if active_revision is None:
@@ -1318,7 +1460,7 @@ class Inspector(QWidget):
         if output_size is None:
             self._set_error(
                 self.edit_output_error,
-                "Select the current size or a higher Edit resolution.",
+                "Select the current size or a higher Edit output tier.",
             )
             return
         preserve = self._selected_edit_preserve()

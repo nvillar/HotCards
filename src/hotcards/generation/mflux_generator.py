@@ -21,8 +21,7 @@ from pydantic import Field, FiniteFloat, model_validator
 
 from hotcards.domain.image_dimensions import (
     AspectRatio,
-    GenerateResolution,
-    output_dimensions,
+    ResolutionTier,
 )
 from hotcards.domain.models import (
     AcceptedEdit,
@@ -32,14 +31,17 @@ from hotcards.domain.models import (
     EditPreserveOptions,
     EditProvenance,
     GenerateInputs,
+    GenerateOutputSize,
     ImageOperationSettings,
     ImageSourceSnapshot,
     NonEmptyString,
     PositiveInt,
+    PresetOutputSize,
+    RefineOutputSize,
     RefineProvenance,
     RefineTransformation,
     StyleSnapshot,
-    edit_output_dimensions,
+    selected_output_dimensions,
 )
 from hotcards.generation.errors import (
     ImageGenerationCancelled,
@@ -108,8 +110,8 @@ MfluxRegularModelFactory = Callable[
 ]
 MfluxEditModelFactory = Callable[[str, int | None], MfluxEditModelProtocol]
 MfluxProgressCallback = Callable[[int, int], None]
-_DEFAULT_WIDTH, _DEFAULT_HEIGHT = output_dimensions(
-    GenerateResolution.RESOLUTION_512,
+_DEFAULT_WIDTH, _DEFAULT_HEIGHT = selected_output_dimensions(
+    PresetOutputSize(tier=ResolutionTier.MEDIUM),
     AspectRatio.LANDSCAPE,
 )
 
@@ -174,9 +176,7 @@ class _MfluxStepProgress:
         config = values.get("config")
         total_steps = getattr(config, "num_inference_steps", None)
         if not isinstance(total_steps, int) or total_steps <= 0:
-            raise ImageGenerationError(
-                "MFLUX reported an invalid inference-step count"
-            )
+            raise ImageGenerationError("MFLUX reported an invalid inference-step count")
         self._completed_steps = 0
         self._total_steps = total_steps
         self._last_reported_steps = -1
@@ -203,10 +203,7 @@ class _MfluxStepProgress:
             cancellation.raise_if_cancelled(self._operation)
 
     def _report_steps(self) -> None:
-        if (
-            self._sink is not None
-            and self._completed_steps != self._last_reported_steps
-        ):
+        if self._sink is not None and self._completed_steps != self._last_reported_steps:
             self._sink(self._completed_steps, self._total_steps)
             self._last_reported_steps = self._completed_steps
 
@@ -233,15 +230,16 @@ class _MfluxRequest(DomainModel):
     guidance: FiniteFloat = Field(default=1.0, gt=0.0)
     scheduler: NonEmptyString = "flow_match_euler_discrete"
 
-    def require_dimensions(self, resolution: GenerateResolution) -> None:
-        expected_dimensions = output_dimensions(
-            resolution,
+    def require_dimensions(
+        self,
+        output_size: GenerateOutputSize | RefineOutputSize | EditOutputSize,
+    ) -> None:
+        expected_dimensions = selected_output_dimensions(
+            output_size,
             self.aspect_ratio,
         )
         if (self.width, self.height) != expected_dimensions:
-            raise ValueError(
-                "image dimensions must match the request resolution and aspect ratio"
-            )
+            raise ValueError("image dimensions must match the selected output size")
 
 
 class MfluxGenerateRequest(_MfluxRequest):
@@ -258,11 +256,9 @@ class MfluxGenerateRequest(_MfluxRequest):
 
     @model_validator(mode="after")
     def require_generate_contract(self) -> MfluxGenerateRequest:
-        self.require_dimensions(self.inputs.resolution)
+        self.require_dimensions(self.inputs.output_size)
         if len(self.inputs.references) != len(self.reference_image_paths):
-            raise ValueError(
-                "reference image paths must match captured reference inputs"
-            )
+            raise ValueError("reference image paths must match captured reference inputs")
         return self
 
 
@@ -277,13 +273,13 @@ class MfluxRefineRequest(_MfluxRequest):
     style: StyleSnapshot | None = None
     edit_lineage: tuple[AcceptedEdit, ...] = Field(default_factory=tuple)
     render_prompt: NonEmptyString
-    resolution: GenerateResolution
+    output_size: RefineOutputSize
     transformation: RefineTransformation
     image_strength: FiniteFloat = Field(ge=0.0, le=1.0)
 
     @model_validator(mode="after")
     def require_refine_contract(self) -> MfluxRefineRequest:
-        self.require_dimensions(self.resolution)
+        self.require_dimensions(self.output_size)
         if self.image_strength != self.transformation.strength:
             raise ValueError(
                 f"{self.transformation.value} Refine image strength must be "
@@ -315,23 +311,17 @@ class MfluxEditRequest(_MfluxRequest):
 
     @model_validator(mode="after")
     def require_edit_contract(self) -> MfluxEditRequest:
-        if (self.width, self.height) != edit_output_dimensions(
+        if (self.width, self.height) != selected_output_dimensions(
             self.output_size,
             self.aspect_ratio,
         ):
-            raise ValueError(
-                "Edit dimensions must match the selected output size"
-            )
+            raise ValueError("Edit dimensions must match the selected output size")
         if self.edit_lineage[-1] != self.accepted_edit:
-            raise ValueError(
-                "Edit request lineage must end with the accepted current Edit"
-            )
+            raise ValueError("Edit request lineage must end with the accepted current Edit")
         return self
 
 
-type MfluxOperationRequest = (
-    MfluxGenerateRequest | MfluxRefineRequest | MfluxEditRequest
-)
+type MfluxOperationRequest = MfluxGenerateRequest | MfluxRefineRequest | MfluxEditRequest
 
 
 class MfluxOutputOwnership(DomainModel):
@@ -387,9 +377,7 @@ class MfluxEditResult(_MfluxResult):
     provenance: EditProvenance
 
 
-type MfluxOperationResult = (
-    MfluxGenerateResult | MfluxRefineResult | MfluxEditResult
-)
+type MfluxOperationResult = MfluxGenerateResult | MfluxRefineResult | MfluxEditResult
 
 
 def _package_version(package: str) -> str:
@@ -439,8 +427,7 @@ def _default_edit_model_factory(
     if configuration_factory is None:
         supported = ", ".join(sorted(configurations))
         raise ValueError(
-            f"unsupported MFLUX edit model {model_identifier!r}; "
-            f"choose one of: {supported}"
+            f"unsupported MFLUX edit model {model_identifier!r}; choose one of: {supported}"
         )
     return Flux2KleinEdit(
         quantize=quantization,
@@ -575,8 +562,7 @@ class _OwnedOutput:
             target.parent.mkdir(parents=True, exist_ok=True)
         except OSError as error:
             raise ImageGenerationError(
-                f"MFLUX {operation} could not prepare output directory "
-                f"{target.parent}: {error}"
+                f"MFLUX {operation} could not prepare output directory {target.parent}: {error}"
             ) from error
         if os.path.lexists(target):
             raise ImageGenerationError(
@@ -605,8 +591,7 @@ class _OwnedOutput:
             candidate_identity = self.candidate.stat(follow_symlinks=False)
         except OSError as error:
             raise ImageGenerationError(
-                f"MFLUX {operation} could not inspect reserved candidate "
-                f"{self.candidate}: {error}"
+                f"MFLUX {operation} could not inspect reserved candidate {self.candidate}: {error}"
             ) from error
         try:
             os.link(self.candidate, target)
@@ -637,8 +622,7 @@ class _OwnedOutput:
             shutil.rmtree(self.scope)
         except OSError as error:
             raise ImageGenerationError(
-                f"MFLUX {operation} could not clean private output scope "
-                f"{self.scope}: {error}"
+                f"MFLUX {operation} could not clean private output scope {self.scope}: {error}"
             ) from error
 
 
@@ -767,8 +751,7 @@ class MfluxGenerator:
                 )
             except (AttributeError, RuntimeError, TypeError) as error:
                 raise ImageGenerationError(
-                    f"MFLUX {operation} could not register progress callbacks: "
-                    f"{error}"
+                    f"MFLUX {operation} could not register progress callbacks: {error}"
                 ) from error
             if progress_callback is not None:
                 progress_callback.set_context(
@@ -787,9 +770,7 @@ class MfluxGenerator:
                 serialization_started = perf_counter()
                 image.save(owned_output.candidate, overwrite=False)
                 token.raise_if_cancelled(operation)
-                serialization_duration_seconds = (
-                    perf_counter() - serialization_started
-                )
+                serialization_duration_seconds = perf_counter() - serialization_started
             except ImageGenerationCancelled:
                 raise
             except (
@@ -801,8 +782,7 @@ class MfluxGenerator:
                 ValueError,
             ) as error:
                 raise ImageGenerationError(
-                    f"MFLUX {operation} failed for "
-                    f"{request.model_identifier!r}: {error}"
+                    f"MFLUX {operation} failed for {request.model_identifier!r}: {error}"
                 ) from error
             self._validate_output(
                 owned_output.candidate,
@@ -826,8 +806,7 @@ class MfluxGenerator:
                 guidance=request.guidance,
                 scheduler=request.scheduler,
                 use_kv_cache=(
-                    family is _ModelFamily.EDIT
-                    and request.model_identifier == "flux2-klein-9b-kv"
+                    family is _ModelFamily.EDIT and request.model_identifier == "flux2-klein-9b-kv"
                 ),
                 generated_at=generated_at,
                 duration_seconds=duration_seconds,
@@ -872,9 +851,7 @@ class MfluxGenerator:
         global _CACHED_MODEL
         family = self._family(request)
         factory = (
-            self._model_factory
-            if family is _ModelFamily.REGULAR
-            else self._edit_model_factory
+            self._model_factory if family is _ModelFamily.REGULAR else self._edit_model_factory
         )
         if not _cached_model_is_compatible(
             family=family,
@@ -932,19 +909,11 @@ class MfluxGenerator:
             return _ModelFamily.REGULAR
         if isinstance(request, MfluxEditRequest):
             return _ModelFamily.EDIT
-        return (
-            _ModelFamily.EDIT
-            if request.reference_image_paths
-            else _ModelFamily.REGULAR
-        )
+        return _ModelFamily.EDIT if request.reference_image_paths else _ModelFamily.REGULAR
 
     @staticmethod
     def _seed(request: MfluxOperationRequest) -> int:
-        return (
-            request.source_seed
-            if isinstance(request, MfluxRefineRequest)
-            else request.seed
-        )
+        return request.source_seed if isinstance(request, MfluxRefineRequest) else request.seed
 
     @classmethod
     def _generation_arguments(
@@ -971,18 +940,14 @@ class MfluxGenerator:
             arguments.update(
                 {
                     "image_paths": [request.source_image_path],
-                    "use_kv_cache": (
-                        request.model_identifier == "flux2-klein-9b-kv"
-                    ),
+                    "use_kv_cache": (request.model_identifier == "flux2-klein-9b-kv"),
                 }
             )
         elif request.reference_image_paths:
             arguments.update(
                 {
                     "image_paths": list(request.reference_image_paths),
-                    "use_kv_cache": (
-                        request.model_identifier == "flux2-klein-9b-kv"
-                    ),
+                    "use_kv_cache": (request.model_identifier == "flux2-klein-9b-kv"),
                 }
             )
         return arguments
@@ -1027,9 +992,7 @@ class MfluxGenerator:
                 f"Could not validate the Edit prompt token count: {error}"
             ) from error
         if count <= 0:
-            raise ImageGenerationError(
-                "Could not validate the Edit prompt token count"
-            )
+            raise ImageGenerationError("Could not validate the Edit prompt token count")
         return count
 
     @staticmethod
@@ -1050,8 +1013,7 @@ class MfluxGenerator:
         for position, source in enumerate(sources, start=1):
             if not source.is_file():
                 raise ImageGenerationError(
-                    f"MFLUX {request.operation} source image {position} "
-                    f"does not exist: {source}"
+                    f"MFLUX {request.operation} source image {position} does not exist: {source}"
                 )
 
     @staticmethod
@@ -1074,8 +1036,7 @@ class MfluxGenerator:
                 decoded_image.load()
         except (OSError, UnidentifiedImageError) as error:
             raise ImageGenerationError(
-                f"MFLUX {request.operation} produced an unreadable image at "
-                f"{output_path}: {error}"
+                f"MFLUX {request.operation} produced an unreadable image at {output_path}: {error}"
             ) from error
         if image_format != "PNG" or image_size != (
             request.width,
@@ -1116,7 +1077,7 @@ class MfluxGenerator:
                     style=request.style,
                     edit_lineage=request.edit_lineage,
                     render_prompt=request.render_prompt,
-                    resolution=request.resolution,
+                    output_size=request.output_size,
                     transformation=request.transformation,
                     strength=request.image_strength,
                     settings=settings,

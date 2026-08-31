@@ -1,49 +1,49 @@
-"""Tests for fixed aspect ratios and square-equivalent resolutions."""
+"""Tests for fixed aspect ratios and named long-edge tiers."""
 
 import pytest
 
 from hotcards.domain.image_dimensions import (
     AspectRatio,
-    GenerateResolution,
-    higher_output_resolutions,
+    ResolutionTier,
+    higher_output_tiers,
     output_dimensions,
 )
 
 
 @pytest.mark.parametrize(
-    ("resolution", "aspect_ratio", "expected"),
+    ("tier", "aspect_ratio", "expected"),
     [
         (256, AspectRatio.SQUARE, (256, 256)),
-        (256, AspectRatio.LANDSCAPE, (288, 224)),
-        (256, AspectRatio.PORTRAIT, (224, 288)),
-        (256, AspectRatio.WIDESCREEN, (336, 192)),
+        (256, AspectRatio.LANDSCAPE, (256, 192)),
+        (256, AspectRatio.PORTRAIT, (192, 256)),
+        (256, AspectRatio.WIDESCREEN, (256, 144)),
         (512, AspectRatio.SQUARE, (512, 512)),
-        (512, AspectRatio.LANDSCAPE, (592, 448)),
-        (512, AspectRatio.PORTRAIT, (448, 592)),
-        (512, AspectRatio.WIDESCREEN, (688, 384)),
+        (512, AspectRatio.LANDSCAPE, (512, 384)),
+        (512, AspectRatio.PORTRAIT, (384, 512)),
+        (512, AspectRatio.WIDESCREEN, (512, 288)),
         (768, AspectRatio.SQUARE, (768, 768)),
-        (768, AspectRatio.LANDSCAPE, (880, 672)),
-        (768, AspectRatio.PORTRAIT, (672, 880)),
-        (768, AspectRatio.WIDESCREEN, (1024, 576)),
+        (768, AspectRatio.LANDSCAPE, (768, 576)),
+        (768, AspectRatio.PORTRAIT, (576, 768)),
+        (768, AspectRatio.WIDESCREEN, (768, 432)),
         (1024, AspectRatio.SQUARE, (1024, 1024)),
-        (1024, AspectRatio.LANDSCAPE, (1184, 880)),
-        (1024, AspectRatio.PORTRAIT, (880, 1184)),
-        (1024, AspectRatio.WIDESCREEN, (1360, 768)),
+        (1024, AspectRatio.LANDSCAPE, (1024, 768)),
+        (1024, AspectRatio.PORTRAIT, (768, 1024)),
+        (1024, AspectRatio.WIDESCREEN, (1024, 576)),
     ],
 )
 def test_output_dimensions_cover_every_fixed_format_and_resolution(
-    resolution: int,
+    tier: int,
     aspect_ratio: AspectRatio,
     expected: tuple[int, int],
 ) -> None:
-    assert output_dimensions(resolution, aspect_ratio) == expected
-    assert output_dimensions(GenerateResolution(resolution), aspect_ratio) == expected
+    assert output_dimensions(tier, aspect_ratio) == expected
+    assert output_dimensions(ResolutionTier(tier), aspect_ratio) == expected
 
 
-@pytest.mark.parametrize("resolution", (0, 255, 300, 2048, True, 512.0, "512"))
-def test_output_dimensions_reject_unsupported_resolutions(resolution: object) -> None:
-    with pytest.raises(ValueError, match="resolution must be one of"):
-        output_dimensions(resolution, AspectRatio.LANDSCAPE)  # type: ignore[arg-type]
+@pytest.mark.parametrize("tier", (0, 255, 300, 2048, True, 512.0, "512"))
+def test_output_dimensions_reject_unsupported_tiers(tier: object) -> None:
+    with pytest.raises(ValueError, match="tier must be one of"):
+        output_dimensions(tier, AspectRatio.LANDSCAPE)  # type: ignore[arg-type]
 
 
 def test_output_dimensions_require_typed_aspect_ratio() -> None:
@@ -52,28 +52,38 @@ def test_output_dimensions_require_typed_aspect_ratio() -> None:
 
 
 @pytest.mark.parametrize("aspect_ratio", tuple(AspectRatio))
-@pytest.mark.parametrize("source_resolution", tuple(GenerateResolution))
-def test_higher_output_resolutions_filters_by_actual_pixel_area(
+@pytest.mark.parametrize("source_tier", tuple(ResolutionTier))
+def test_higher_output_tiers_filters_by_actual_pixel_area(
     aspect_ratio: AspectRatio,
-    source_resolution: GenerateResolution,
+    source_tier: ResolutionTier,
 ) -> None:
-    width, height = output_dimensions(source_resolution, aspect_ratio)
+    width, height = output_dimensions(source_tier, aspect_ratio)
 
-    assert higher_output_resolutions(width, height, aspect_ratio) == tuple(
-        resolution
-        for resolution in GenerateResolution
-        if resolution > source_resolution
+    assert higher_output_tiers(width, height, aspect_ratio) == tuple(
+        tier for tier in ResolutionTier if tier > source_tier
     )
 
 
-def test_higher_output_resolutions_handles_legacy_landscape_pixels() -> None:
-    assert higher_output_resolutions(
-        1024,
-        768,
-        AspectRatio.LANDSCAPE,
-    ) == (GenerateResolution.RESOLUTION_1024,)
+def test_full_landscape_pixels_are_the_maximum_tier() -> None:
+    assert (
+        higher_output_tiers(
+            1024,
+            768,
+            AspectRatio.LANDSCAPE,
+        )
+        == ()
+    )
 
 
-def test_higher_output_resolutions_rejects_invalid_source_dimensions() -> None:
+def test_resolution_tiers_expose_exact_user_facing_names() -> None:
+    assert [(tier.label, tier.value) for tier in ResolutionTier] == [
+        ("Small", 256),
+        ("Medium", 512),
+        ("Large", 768),
+        ("Full", 1024),
+    ]
+
+
+def test_higher_output_tiers_rejects_invalid_source_dimensions() -> None:
     with pytest.raises(ValueError, match="positive"):
-        higher_output_resolutions(0, 768, AspectRatio.LANDSCAPE)
+        higher_output_tiers(0, 768, AspectRatio.LANDSCAPE)

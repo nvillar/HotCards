@@ -23,10 +23,12 @@ and defaults to Landscape 4:3; the format cannot be changed after creation.
 
 Each card owns one or more numbered revisions. A revision contains its authored
 Description, selected stack Style, optional generated background, up to two
-ordered Reference cards, selected Generate resolution, and hotspot set. Generate
-resolution is revision-local, defaults to 512 square-equivalent pixels, and is
-copied with the complete revision. The supported presets are 256, 512, 768, and
-1024. The compact
+ordered Reference cards, selected Generate output size, and hotspot set. Generate
+output size is revision-local, defaults to Medium, and is copied with the
+complete revision. The named long-edge tiers are Small (256 px), Medium
+(512 px), Large (768 px), and Full (1024 px). The stack aspect ratio determines
+the shorter edge, aligned to 16 pixels; for example, Landscape Full is
+1024 × 768 and Widescreen Full is 1024 × 576. The compact
 header above the canvas edits the card name and selects, duplicates, or deletes
 revisions; the Author toolbar places the Run toggle on the left and opens the
 stack-global Styles and Keys managers from the right. In Run mode it instead
@@ -39,7 +41,7 @@ after its source. A card duplicate contains exactly the active complete revision
 with new card, revision, background, and hotspot identities. Generated image
 bytes are copied into the duplicate card's own asset namespace, so either card
 can be deleted independently. Self-navigation is remapped to the duplicate;
-other destinations, References, Keys, Style selection, and Generate resolution
+other destinations, References, Keys, Style selection, and Generate output size
 are preserved. The duplicate is one undoable change and is named `Name Copy`,
 then `Name Copy 2`, and so on. The asset and manifest commit as one rollback-safe
 bundle transaction. Undo/Redo history retains the independent bytes only while
@@ -49,7 +51,11 @@ unreferenced duplicate-owned asset without collecting unrelated bundle files.
 The inspector tabs are Generate, Refine, Edit, and Hotspots. Generate
 follows the authoring sequence Description, Style, optional References,
 Resolution, then Generate Image. Resolution labels show the exact output width
-and height for the stack format. Generate requires a nonempty Description and
+and height for the stack format. All three image-operation selectors annotate
+the current image when its decoded size matches a named tier, or insert one
+selectable exact current-size row for an aligned nonstandard size. Generate
+still offers every named tier and keeps its next-output selection independent
+from the current-image annotation. Generate requires a nonempty Description and
 an available MFLUX model. The exact effective prompt is composed
 deterministically from the Description followed by the selected Style text; no
 language model prepares or rewrites it.
@@ -83,8 +89,9 @@ configuration.
 Refine is exposed as an automatic-version workflow for the current canvas
 image. It uses regular Flux2Klein img2img with Reimagine 0.25, Balanced 0.50,
 or Preserve 0.75 transformation strength and reuses the current image's seed.
-Only output presets with a strictly greater pixel area than the decoded current
-image are offered. The current background is the sole image input; Generate
+Output defaults to the decoded current size and offers every named tier, so a
+Refine can reinterpret at the same size or render smaller or larger. The
+current background is the sole image input; Generate
 References are never resent. Its deterministic prompt contains the current
 Description, selected Style, and any ordered accepted Edit instructions already
 present in the source, with the current Description explicitly authoritative.
@@ -99,7 +106,8 @@ six explicit Preserve choices; Description, Style, and Generate References are
 copied into the new revision but are not model inputs. The expanded prompt is
 deterministic and must fit the model's 512-token budget without truncation.
 Output defaults to the current image's exact decoded dimensions, including
-legacy non-preset sizes, and also offers strictly higher-area presets. Each Edit
+aligned non-preset sizes, and also offers only named tiers with strictly greater
+pixel area. Each Edit
 uses a fresh seed and appends its accepted instruction to ordered provenance
 lineage. Later Refine operations preserve that lineage unless it conflicts with
 the current authoritative Description; Generate ignores it.

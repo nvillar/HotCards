@@ -15,7 +15,7 @@ from pydantic import Field, model_validator
 
 from hotcards.domain.image_dimensions import (
     AspectRatio,
-    GenerateResolution,
+    ResolutionTier,
     output_dimensions,
 )
 from hotcards.domain.models import (
@@ -23,6 +23,7 @@ from hotcards.domain.models import (
     GenerateInputs,
     NonEmptyString,
     PositiveInt,
+    PresetOutputSize,
     StyleSnapshot,
 )
 from hotcards.evaluation.contracts import SafeCaseId
@@ -113,7 +114,7 @@ class StylePresetSettings(DomainModel):
     experiment_path: Path = DEFAULT_STYLE_PRESET_EXPERIMENT
     model_identifier: NonEmptyString = "flux2-klein-9b"
     seeds: tuple[int, ...] = Field(default=DEFAULT_STYLE_PRESET_SEEDS, min_length=1)
-    resolution: GenerateResolution = GenerateResolution.RESOLUTION_1024
+    tier: ResolutionTier = ResolutionTier.FULL
     aspect_ratio: AspectRatio = AspectRatio.LANDSCAPE
     step_count: PositiveInt = 4
     quantization: int | None = None
@@ -341,7 +342,7 @@ def _execute_style_preset_evaluation(
     }
     _write_result(settings.output_dir, result)
     width, height = output_dimensions(
-        settings.resolution,
+        settings.tier,
         settings.aspect_ratio,
     )
 
@@ -371,7 +372,7 @@ def _execute_style_preset_evaluation(
                     inputs=GenerateInputs(
                         description=scene.description,
                         style=style_snapshot,
-                        resolution=settings.resolution,
+                        output_size=PresetOutputSize(tier=settings.tier),
                     ),
                     render_prompt=render_prompt,
                     output_path=output_path,

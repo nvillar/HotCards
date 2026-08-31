@@ -10,10 +10,15 @@ from pydantic import PositiveInt
 
 from hotcards.domain.image_dimensions import (
     AspectRatio,
-    GenerateResolution,
+    ResolutionTier,
     output_dimensions,
 )
-from hotcards.domain.models import DomainModel, GenerateInputs, NonEmptyString
+from hotcards.domain.models import (
+    DomainModel,
+    GenerateInputs,
+    NonEmptyString,
+    PresetOutputSize,
+)
 from hotcards.evaluation.manifest import (
     EnvironmentProvider,
     RunLifecycle,
@@ -53,7 +58,7 @@ class SmokeSettings(DomainModel):
     output_dir: Path
     mflux_model: NonEmptyString = "flux2-klein-4b"
     seed: int = 42
-    resolution: GenerateResolution = GenerateResolution.RESOLUTION_1024
+    tier: ResolutionTier = ResolutionTier.FULL
     aspect_ratio: AspectRatio = AspectRatio.LANDSCAPE
     step_count: PositiveInt = 4
     quantization: int | None = None
@@ -115,12 +120,12 @@ def run_smoke(
         )
         inputs = GenerateInputs(
             description=prompt,
-            resolution=settings.resolution,
+            output_size=PresetOutputSize(tier=settings.tier),
         )
         render_prompt = compose_generation_prompt(inputs)
         result["render_prompt"] = render_prompt
         width, height = output_dimensions(
-            settings.resolution,
+            settings.tier,
             settings.aspect_ratio,
         )
         for phase in ("cold", "warm"):

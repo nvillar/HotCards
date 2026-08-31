@@ -300,9 +300,7 @@ def test_mflux_deadline_cancels_adapter_before_single_failure_delivery(
             self.callbacks = CallbackRegistry()
 
         def generate_image(self, **kwargs: object) -> object:
-            config = SimpleNamespace(
-                num_inference_steps=kwargs["num_inference_steps"]
-            )
+            config = SimpleNamespace(num_inference_steps=kwargs["num_inference_steps"])
             for callback in self.callbacks.registered:
                 callback.call_before_loop(config=config)
             entered.set()
@@ -391,16 +389,14 @@ def test_cancel_after_mflux_return_disposes_owned_output_before_delivery(
     class GeneratedImage:
         def save(self, path: Path, *, overwrite: bool) -> None:
             assert not overwrite
-            Image.new("RGB", (592, 448), "navy").save(path, format="PNG")
+            Image.new("RGB", (512, 384), "navy").save(path, format="PNG")
 
     class Model:
         def __init__(self) -> None:
             self.callbacks = CallbackRegistry()
 
         def generate_image(self, **kwargs: object) -> GeneratedImage:
-            config = SimpleNamespace(
-                num_inference_steps=kwargs["num_inference_steps"]
-            )
+            config = SimpleNamespace(num_inference_steps=kwargs["num_inference_steps"])
             for callback in self.callbacks.registered:
                 callback.call_before_loop(config=config)
                 callback.call_after_loop()

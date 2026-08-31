@@ -14,10 +14,14 @@ from PIL import Image
 
 from hotcards.domain.image_dimensions import (
     AspectRatio,
-    GenerateResolution,
+    ResolutionTier,
     output_dimensions,
 )
-from hotcards.domain.models import GenerateInputs, ImageReferenceSnapshot
+from hotcards.domain.models import (
+    GenerateInputs,
+    ImageReferenceSnapshot,
+    PresetOutputSize,
+)
 from hotcards.evaluation.manifest import (
     EnvironmentProvider,
     RunLifecycle,
@@ -235,7 +239,7 @@ def _generate(
     seed: int,
     model_identifier: str,
     quantization: int | None,
-    resolution: GenerateResolution,
+    tier: ResolutionTier,
     aspect_ratio: AspectRatio,
     width: int,
     height: int,
@@ -243,13 +247,11 @@ def _generate(
 ) -> dict[str, object]:
     rss_before = _resident_bytes()
     peak_before = _peak_resident_bytes()
-    snapshots = tuple(
-        _reference_snapshot(key, references.get(key)) for key in reference_keys
-    )
+    snapshots = tuple(_reference_snapshot(key, references.get(key)) for key in reference_keys)
     inputs = GenerateInputs(
         description=prompt,
         references=snapshots,
-        resolution=resolution,
+        output_size=PresetOutputSize(tier=tier),
     )
     generated = generator.generate(
         MfluxGenerateRequest(
@@ -316,7 +318,7 @@ def _generate_source(
     seed: int,
     model_identifier: str,
     quantization: int | None,
-    resolution: GenerateResolution,
+    tier: ResolutionTier,
     aspect_ratio: AspectRatio,
     width: int,
     height: int,
@@ -332,7 +334,7 @@ def _generate_source(
         seed=seed,
         model_identifier=model_identifier,
         quantization=quantization,
-        resolution=resolution,
+        tier=tier,
         aspect_ratio=aspect_ratio,
         width=width,
         height=height,
@@ -347,7 +349,7 @@ def run_flux_reference_evaluation(
     model_identifier: str = "flux2-klein-4b",
     quantization: int | None = None,
     seed: int = 42,
-    resolution: GenerateResolution = GenerateResolution.RESOLUTION_1024,
+    tier: ResolutionTier = ResolutionTier.FULL,
     aspect_ratio: AspectRatio = AspectRatio.LANDSCAPE,
     step_count: int = 4,
     model_factory: MfluxEditModelFactory | None = None,
@@ -355,13 +357,14 @@ def run_flux_reference_evaluation(
     environment_provider: EnvironmentProvider = default_environment,
 ) -> Path:
     """Run supported one- and two-Reference experiments with auditable inputs."""
-    width, height = output_dimensions(resolution, aspect_ratio)
+    width, height = output_dimensions(tier, aspect_ratio)
     settings = {
         "stack_path": str(stack_path),
         "model_identifier": model_identifier,
         "quantization": quantization,
         "seed": seed,
-        "resolution": resolution.value,
+        "tier": tier.label,
+        "long_edge": tier.value,
         "aspect_ratio": aspect_ratio.value,
         "width": width,
         "height": height,
@@ -420,7 +423,7 @@ def run_flux_reference_evaluation(
             seed=seed,
             model_identifier=model_identifier,
             quantization=quantization,
-            resolution=resolution,
+            tier=tier,
             aspect_ratio=aspect_ratio,
             width=width,
             height=height,
@@ -475,9 +478,7 @@ def run_flux_reference_evaluation(
         for case in _case_specs():
             case_id = str(case["case_id"])
             reference_keys = tuple(case["reference_keys"])
-            prompt = compose_generation_prompt(
-                GenerateInputs(description=str(case["scene"]))
-            )
+            prompt = compose_generation_prompt(GenerateInputs(description=str(case["scene"])))
             stage = f"case:{case_id}"
             lifecycle.set_stage(stage)
             record: dict[str, object] = {
@@ -514,7 +515,7 @@ def run_flux_reference_evaluation(
                     seed=seed,
                     model_identifier=model_identifier,
                     quantization=quantization,
-                    resolution=resolution,
+                    tier=tier,
                     aspect_ratio=aspect_ratio,
                     width=width,
                     height=height,

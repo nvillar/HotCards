@@ -54,9 +54,7 @@ def _bound_source(
     with_background: bool,
 ) -> tuple[CardDuplicationWorkflow, DocumentController, DocumentSession, Card]:
     card = Card(name="Scene")
-    controller = DocumentController(
-        Stack(name="Stack", cards=(card,), start_card_id=card.id)
-    )
+    controller = DocumentController(Stack(name="Stack", cards=(card,), start_card_id=card.id))
     session = DocumentSession(controller)
     session.create(controller.document, tmp_path / "Stack.hotcards")
     if with_background:
@@ -80,8 +78,8 @@ def _bound_source(
                     model_identifier="test",
                     mflux_version="test",
                     seed=7,
-                    width=592,
-                    height=448,
+                    width=512,
+                    height=384,
                     step_count=4,
                     generated_at=generated_at,
                     duration_seconds=1,
@@ -134,9 +132,9 @@ def test_duplicate_is_persisted_undoable_and_redoable(
         assert duplicate_background is not None
         assert source_background.id != duplicate_background.id
         assert source_background.image_path != duplicate_background.image_path
-        assert _checksum(
-            session.store.asset_path(source_background.image_path)
-        ) == _checksum(session.store.asset_path(duplicate_background.image_path))
+        assert _checksum(session.store.asset_path(source_background.image_path)) == _checksum(
+            session.store.asset_path(duplicate_background.image_path)
+        )
         assert isinstance(duplicate_background.provenance, DuplicateProvenance)
 
     assert controller.undo_if_current(change.token)
@@ -166,9 +164,9 @@ def test_duplicate_remains_valid_after_source_card_is_deleted(
 
     loaded = StackStore(session.state.bundle_path).load()
     assert loaded.cards == (duplicate,)
-    assert StackStore(session.state.bundle_path).asset_path(
-        duplicate_background.image_path
-    ).is_file()
+    assert (
+        StackStore(session.state.bundle_path).asset_path(duplicate_background.image_path).is_file()
+    )
 
     assert controller.undo()
     assert controller.undo_if_current(duplicate_change.token)
@@ -376,9 +374,7 @@ def test_indeterminate_observed_duplicate_becomes_history_only_after_retry(
 
     pending_document = controller.document
     blocked_operations = (
-        lambda: controller.execute(
-            RenameCardCommand(card_id=source.id, name="Blocked edit")
-        ),
+        lambda: controller.execute(RenameCardCommand(card_id=source.id, name="Blocked edit")),
         controller.undo,
         controller.redo,
     )
@@ -449,18 +445,14 @@ def test_duplicate_rejects_unsafe_source_asset_path_without_orphan(
     unsafe_background = source.active_revision.background.model_copy(
         update={"image_path": "../escape.png"}
     )
-    unsafe_revision = source.active_revision.model_copy(
-        update={"background": unsafe_background}
-    )
+    unsafe_revision = source.active_revision.model_copy(update={"background": unsafe_background})
     unsafe_card = source.model_copy(
         update={
             "revisions": (unsafe_revision,),
             "active_revision_id": unsafe_revision.id,
         }
     )
-    controller.replace_document(
-        controller.document.model_copy(update={"cards": (unsafe_card,)})
-    )
+    controller.replace_document(controller.document.model_copy(update={"cards": (unsafe_card,)}))
     assert session.store is not None
     before_assets = set(session.store.bundle_path.rglob("*.png"))
 
@@ -482,8 +474,7 @@ def test_duplicate_rejects_source_path_from_another_asset_namespace(
     mismatched_background = source.active_revision.background.model_copy(
         update={
             "image_path": (
-                f"assets/cards/{uuid4()}/"
-                f"image-{source.active_revision.background.id}.png"
+                f"assets/cards/{uuid4()}/image-{source.active_revision.background.id}.png"
             )
         }
     )
@@ -639,9 +630,7 @@ def test_secure_duplicate_destination_swap_never_writes_or_deletes_outside(
             return
         cards_directory = session.store.bundle_path / "assets" / "cards"
         destination_directories = [
-            path
-            for path in cards_directory.iterdir()
-            if path.name != str(source.id)
+            path for path in cards_directory.iterdir() if path.name != str(source.id)
         ]
         assert len(destination_directories) == 1
         image_paths = list(destination_directories[0].glob("image-*.png"))
@@ -969,9 +958,7 @@ def test_rollback_directory_cleanup_preserves_swapped_foreign_directory(
         if name != "destination-directory-cleanup" or swapped:
             return
         destination_directories = [
-            path
-            for path in cards_directory.iterdir()
-            if path.name != str(source.id)
+            path for path in cards_directory.iterdir() if path.name != str(source.id)
         ]
         assert len(destination_directories) == 1
         original_directory = destination_directories[0]
@@ -1034,9 +1021,7 @@ def test_rollback_file_quarantine_preserves_post_precheck_swap(
     )
     before = controller.document
     changed = command.apply(before)
-    destination_directory = (
-        session.store.bundle_path / "assets" / "cards" / str(duplicate_card_id)
-    )
+    destination_directory = session.store.bundle_path / "assets" / "cards" / str(duplicate_card_id)
     destination_file = destination_directory / Path(duplicate_path).name
     held_owned_file = destination_directory / "owned-held.png"
     operation_failed = False
@@ -1073,11 +1058,7 @@ def test_rollback_file_quarantine_preserves_post_precheck_swap(
     assert captured.value.owned_asset is not None
     assert session.store.load() == before
     assert held_owned_file.is_file()
-    quarantines = list(
-        destination_directory.glob(
-            f".{destination_file.name}.owned-file-*.tmp"
-        )
-    )
+    quarantines = list(destination_directory.glob(f".{destination_file.name}.owned-file-*.tmp"))
     assert len(quarantines) == 1
     assert quarantines[0].read_bytes() == b"foreign bytes"
 
@@ -1126,9 +1107,7 @@ def test_history_directory_quarantine_preserves_post_precheck_swap_for_retry(
     assert held_owned_directory.is_dir()
     assert list(held_owned_directory.iterdir()) == []
     quarantines = list(
-        duplicate_directory.parent.glob(
-            f".{duplicate_directory.name}.owned-directory-*.tmp"
-        )
+        duplicate_directory.parent.glob(f".{duplicate_directory.name}.owned-directory-*.tmp")
     )
     assert len(quarantines) == 1
     assert (quarantines[0] / "foreign.txt").read_bytes() == b"foreign directory"

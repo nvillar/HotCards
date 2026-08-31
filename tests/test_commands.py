@@ -37,7 +37,7 @@ from hotcards.application.commands import (
     ReplaceRevisionBackgroundCommand,
     SetHotspotConditionsCommand,
     SetHotspotKeyChangesCommand,
-    SetRevisionGenerateResolutionCommand,
+    SetRevisionGenerateOutputSizeCommand,
     SetRevisionReferenceCommand,
     SetRevisionStyleCommand,
     SetStartCardCommand,
@@ -46,7 +46,7 @@ from hotcards.application.commands import (
 )
 from hotcards.application.document_controller import DocumentController
 from hotcards.domain.image_dependencies import image_source_dependencies
-from hotcards.domain.image_dimensions import AspectRatio, GenerateResolution
+from hotcards.domain.image_dimensions import AspectRatio, ResolutionTier
 from hotcards.domain.models import (
     Card,
     CardRevision,
@@ -64,6 +64,7 @@ from hotcards.domain.models import (
     NavigateAction,
     Point,
     Polygon,
+    PresetOutputSize,
     RefineProvenance,
     RefineTransformation,
     ResolvedCardReference,
@@ -110,8 +111,8 @@ def operation_settings() -> ImageOperationSettings:
         model_identifier="test",
         mflux_version="test",
         seed=1,
-        width=592,
-        height=448,
+        width=512,
+        height=384,
         step_count=4,
         generated_at=datetime.now(UTC),
         duration_seconds=1,
@@ -150,7 +151,7 @@ def refined_background(
             ),
             description="Refined card",
             render_prompt="Refined card",
-            resolution=GenerateResolution.RESOLUTION_512,
+            output_size=PresetOutputSize(tier=ResolutionTier.MEDIUM),
             transformation=RefineTransformation.BALANCED,
             strength=0.5,
             settings=operation_settings(),
@@ -190,26 +191,20 @@ def test_duplicate_card_copies_only_active_revision_with_independent_ids() -> No
     self_interaction = Interaction(
         conditions=HotspotConditions(requires=(key.id,)),
         key_changes=HotspotKeyChanges(grant=(key.id,)),
-        action=NavigateAction(
-            target=ResolvedCardReference(target_card_id=source_id)
-        ),
+        action=NavigateAction(target=ResolvedCardReference(target_card_id=source_id)),
         polygons=(polygon(),),
     )
     external_interaction = Interaction(
-        action=NavigateAction(
-            target=ResolvedCardReference(target_card_id=destination.id)
-        ),
+        action=NavigateAction(target=ResolvedCardReference(target_card_id=destination.id)),
         polygons=(polygon(0.2),),
     )
     active = CardRevision(
         description="Active",
         background=background,
-        hotspot_set=HotspotSet(
-            interactions=(self_interaction, external_interaction)
-        ),
+        hotspot_set=HotspotSet(interactions=(self_interaction, external_interaction)),
         references=(ResolvedCardReference(target_card_id=destination.id),),
         style_id=style.id,
-        generate_resolution=GenerateResolution.RESOLUTION_1024,
+        generate_output_size=PresetOutputSize(tier=ResolutionTier.FULL),
     )
     source = Card(
         id=source_id,
@@ -254,11 +249,12 @@ def test_duplicate_card_copies_only_active_revision_with_independent_ids() -> No
     assert revision.description == active.description
     assert revision.references == active.references
     assert revision.style_id == style.id
-    assert revision.generate_resolution is GenerateResolution.RESOLUTION_1024
+    assert revision.generate_output_size == PresetOutputSize(tier=ResolutionTier.FULL)
     assert revision.hotspot_set is not None
-    assert tuple(
-        copied.id for copied in revision.hotspot_set.interactions
-    ) == duplicate_interaction_ids
+    assert (
+        tuple(copied.id for copied in revision.hotspot_set.interactions)
+        == duplicate_interaction_ids
+    )
     copied_self, copied_external = revision.hotspot_set.interactions
     assert copied_self.conditions == self_interaction.conditions
     assert copied_self.key_changes == self_interaction.key_changes
@@ -276,10 +272,7 @@ def test_duplicate_card_copies_only_active_revision_with_independent_ids() -> No
         revision_id=active.id,
         background_id=background.id,
     )
-    assert (
-        revision.background.provenance.original_provenance
-        == background.provenance
-    )
+    assert revision.background.provenance.original_provenance == background.provenance
 
 
 def test_duplicate_card_name_is_case_insensitively_unique() -> None:
@@ -336,9 +329,7 @@ def test_duplicate_card_flattens_provenance_and_survives_source_deletion() -> No
         card_id=first_card_id,
         revision_id=first_revision_id,
         background_id=first_background_id,
-        background_image_path=(
-            f"assets/cards/{first_card_id}/image-{first_background_id}.png"
-        ),
+        background_image_path=(f"assets/cards/{first_card_id}/image-{first_background_id}.png"),
     ).apply(document)
     first_duplicate = first.cards[1]
     second_card_id, second_revision_id, second_background_id = (
@@ -352,9 +343,7 @@ def test_duplicate_card_flattens_provenance_and_survives_source_deletion() -> No
         card_id=second_card_id,
         revision_id=second_revision_id,
         background_id=second_background_id,
-        background_image_path=(
-            f"assets/cards/{second_card_id}/image-{second_background_id}.png"
-        ),
+        background_image_path=(f"assets/cards/{second_card_id}/image-{second_background_id}.png"),
     ).apply(first)
 
     first_provenance = first_duplicate.active_revision.provenance
@@ -362,10 +351,7 @@ def test_duplicate_card_flattens_provenance_and_survives_source_deletion() -> No
     assert isinstance(first_provenance, DuplicateProvenance)
     assert isinstance(second_provenance, DuplicateProvenance)
     assert isinstance(second_provenance.original_provenance, RefineProvenance)
-    assert (
-        second_provenance.original_provenance
-        == first_provenance.original_provenance
-    )
+    assert second_provenance.original_provenance == first_provenance.original_provenance
     assert second_provenance.source.card_id == first_duplicate.id
 
     without_source = DeleteCardCommand(card_id=source.id).apply(changed)
@@ -487,19 +473,17 @@ def test_create_key_and_hotspot_reference_is_atomic() -> None:
 
     changed = command.apply(document)
 
-    assert changed.keys == (
-        KeyDefinition(id=command.key_id, name="Visited castle"),
-    )
+    assert changed.keys == (KeyDefinition(id=command.key_id, name="Visited castle"),)
     hotspot_set = changed.cards[0].active_revision.hotspot_set
     assert hotspot_set is not None
     assert hotspot_set.interactions[0].key_changes.grant == (command.key_id,)
 
 
-def test_revision_generate_resolution_is_typed_and_copied_completely() -> None:
+def test_revision_generate_output_size_is_typed_and_copied_completely() -> None:
     style = StyleDefinition(name="Ink", prompt_text="Rendered in ink")
     revision = CardRevision(
         style_id=style.id,
-        generate_resolution=GenerateResolution.RESOLUTION_768,
+        generate_output_size=PresetOutputSize(tier=ResolutionTier.LARGE),
     )
     card = Card(name="Card", revisions=(revision,))
     document = Stack(
@@ -509,10 +493,10 @@ def test_revision_generate_resolution_is_typed_and_copied_completely() -> None:
         cards=(card,),
     )
 
-    changed = SetRevisionGenerateResolutionCommand(
+    changed = SetRevisionGenerateOutputSizeCommand(
         card_id=card.id,
         revision_id=revision.id,
-        resolution=GenerateResolution.RESOLUTION_1024,
+        output_size=PresetOutputSize(tier=ResolutionTier.FULL),
     ).apply(document)
     changed = DuplicateRevisionCommand(
         card_id=card.id,
@@ -520,16 +504,15 @@ def test_revision_generate_resolution_is_typed_and_copied_completely() -> None:
     ).apply(changed)
 
     assert changed.cards[0].active_revision.style_id == style.id
-    assert (
-        changed.cards[0].active_revision.generate_resolution
-        is GenerateResolution.RESOLUTION_1024
+    assert changed.cards[0].active_revision.generate_output_size == PresetOutputSize(
+        tier=ResolutionTier.FULL
     )
 
 
 def test_create_generated_revision_preserves_resolution_on_both_complete_versions() -> None:
     previous = CardRevision(
         description="Before",
-        generate_resolution=GenerateResolution.RESOLUTION_768,
+        generate_output_size=PresetOutputSize(tier=ResolutionTier.LARGE),
     )
     generated = previous.model_copy(
         update={
@@ -550,11 +533,9 @@ def test_create_generated_revision_preserves_resolution_on_both_complete_version
         previous_revision=previous,
     ).apply(document)
 
-    assert tuple(
-        revision.generate_resolution for revision in changed.cards[0].revisions
-    ) == (
-        GenerateResolution.RESOLUTION_768,
-        GenerateResolution.RESOLUTION_768,
+    assert tuple(revision.generate_output_size for revision in changed.cards[0].revisions) == (
+        PresetOutputSize(tier=ResolutionTier.LARGE),
+        PresetOutputSize(tier=ResolutionTier.LARGE),
     )
 
 
@@ -569,7 +550,7 @@ def test_create_refined_revision_copies_complete_source_automatically(
         hotspot_set=hotspot_set,
         references=(ResolvedCardReference(target_card_id=reference.id),),
         style_id=style.id,
-        generate_resolution=GenerateResolution.RESOLUTION_768,
+        generate_output_size=PresetOutputSize(tier=ResolutionTier.LARGE),
         background=generated_background("Source"),
     )
     card = Card(name="Card", revisions=(source,))
@@ -598,9 +579,8 @@ def test_create_refined_revision_copies_complete_source_automatically(
     assert changed_card.active_revision.style_id == source.style_id
     assert changed_card.active_revision.references == source.references
     assert changed_card.active_revision.hotspot_set == hotspot_set
-    assert (
-        changed_card.active_revision.generate_resolution
-        is GenerateResolution.RESOLUTION_768
+    assert changed_card.active_revision.generate_output_size == PresetOutputSize(
+        tier=ResolutionTier.LARGE
     )
     assert changed_card.active_revision.background == new_background
 
@@ -625,9 +605,7 @@ def test_revision_description_and_reference_edits_are_typed_changes() -> None:
 
     changed = document.cards[0].active_revision
     assert changed.description == "A quiet library"
-    assert changed.references == (
-        ResolvedCardReference(target_card_id=reference.id),
-    )
+    assert changed.references == (ResolvedCardReference(target_card_id=reference.id),)
 
 
 def test_revision_activation_and_complete_hotspot_replacement() -> None:
@@ -730,7 +708,7 @@ def test_source_revision_deletion_is_blocked_by_derived_revision() -> None:
         ).apply(document)
     with pytest.raises(
         CommandError,
-        match='cannot replace this source background.*Refine revision 2',
+        match="cannot replace this source background.*Refine revision 2",
     ):
         ReplaceRevisionBackgroundCommand(
             card_id=card.id,
@@ -914,13 +892,7 @@ def test_delete_card_converts_all_inbound_references_and_clears_start() -> None:
         update={
             "revisions": (
                 source.active_revision.model_copy(
-                    update={
-                        "references": (
-                            ResolvedCardReference(
-                                target_card_id=destination.id
-                            ),
-                        )
-                    }
+                    update={"references": (ResolvedCardReference(target_card_id=destination.id),)}
                 ),
             )
         }
@@ -990,8 +962,8 @@ def test_reference_assignment_and_background_replacement_are_guarded() -> None:
                 model_identifier="test",
                 mflux_version="test",
                 seed=1,
-                width=592,
-                height=448,
+                width=512,
+                height=384,
                 step_count=4,
                 generated_at=generated_at,
                 duration_seconds=1,

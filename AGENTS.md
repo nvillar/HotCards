@@ -49,24 +49,24 @@ for live MFLUX runs.
   in the evaluation harness. Do not fork generation behavior.
 - Keep each card's complete authoring state in one of its numbered revisions:
   Description, selected stack Style, optional background, ordered Reference
-  cards, selected Generate resolution, and hotspot set. Visible revision
+  cards, selected Generate output size, and hotspot set. Visible revision
   numbers are positional; stable UUIDs remain internal.
 - Store one immutable stack aspect ratio using only Square 1:1, Landscape 4:3,
-  Portrait 3:4, or Widescreen 16:9. Generate resolution is revision-local,
-  defaults to 512, and permits only 256, 512, 768, or 1024 square-equivalent
-  pixels. Derive output dimensions with REM's area-preserving square-equivalent
-  formulas `width = sqrt(resolution² × ratio_w / ratio_h)` and
-  `height = sqrt(resolution² × ratio_h / ratio_w)`, then round each dimension
-  to the nearest multiple of 16, minimum 16. Continue storing exact actual
-  output width and height in image provenance.
+  Portrait 3:4, or Widescreen 16:9. Generate output size is revision-local and
+  defaults to Medium. Use named long-edge tiers only: Small 256 px, Medium
+  512 px, Large 768 px, and Full 1024 px. Square uses the tier on both edges;
+  landscape and widescreen use it as width; portrait uses it as height. Derive
+  the shorter edge from the aspect ratio and round it to the nearest multiple
+  of 16, minimum 16. Continue storing exact actual output width and height in
+  image provenance.
 - Keep at least one revision per card. Duplicate a complete revision, including
-  its Generate resolution, hotspot semantics, and immutable background
+  its Generate output size, hotspot semantics, and immutable background
   reference.
 - Duplicate the selected card from only its active complete revision and insert
   it immediately after the source as one undoable change. Mint new card,
   revision, background, and Interaction IDs; remap self-navigation to the new
   card and preserve other destinations, References, Keys, Style selection, and
-  Generate resolution. Copy exact background bytes into the duplicate card's
+  Generate output size. Copy exact background bytes into the duplicate card's
   own validated asset namespace through one rollback-safe asset/manifest
   transaction. Bind copy and cleanup to securely opened bundle objects and the
   owned file identity; never follow asset symlinks. Retain duplicate-owned bytes
@@ -92,10 +92,16 @@ for live MFLUX runs.
   background, project, revision, model, or mode changes must suppress an
   in-flight stale image result. Hotspots must not alter image-generation
   prompts.
+- In Generate, Refine, and Edit output selectors, annotate a matching named
+  tier with `(Current image)` without duplicating the row. Insert one selectable
+  `Current size — W × H` row for an aligned nonstandard current image. Keep
+  Generate's next-output selection independent; default Refine and Edit to the
+  exact current size.
 - Refine only the readable current background through regular Flux2Klein
   img2img; never resend its Generate References. Offer Reimagine 0.25,
-  Balanced 0.50, and Preserve 0.75, plus only resolution presets whose derived
-  pixel area is strictly greater than the decoded source image. Reuse the
+  Balanced 0.50, and Preserve 0.75, default output to the exact current size,
+  and offer all named tiers including lower, same-size, and higher output.
+  Reuse the
   source operation seed after flattening duplicate provenance. Pass MFLUX a
   private immutable snapshot copied from a securely opened source asset, and
   reject the result if that logical asset changes before acceptance. Compose
@@ -127,8 +133,10 @@ for live MFLUX runs.
   background. A Refine inherits its source revision's accepted Edit lineage
   unchanged; an Edit appends exactly its accepted current Edit to that source
   lineage. Current Generate and Refine dimensions must match their typed
-  resolution and the stack aspect ratio. Edit dimensions must match either its
-  exact current-source size or its typed preset and stack aspect ratio. Legacy
+  output-size selection. Preset output must match the stack aspect ratio;
+  exact Generate output must be positive, 16-aligned, and aspect-compatible;
+  current Refine/Edit output must equal its resolved source dimensions. Edit
+  preset dimensions must match its named tier and stack aspect ratio. Legacy
   Generate preserves its exact historical prompt and dimensions without
   imposing a modern preset. Block
   source revision deletion or background replacement while any retained
