@@ -474,13 +474,53 @@ class EditProvenance(DomainModel):
         return self
 
 
-ImageProvenance = Annotated[
+OriginalImageProvenance = Annotated[
     DirectGenerateProvenance
     | LegacyGenerateProvenance
     | RefineProvenance
     | EditProvenance,
     Field(discriminator="operation"),
 ]
+
+
+class DuplicateProvenance(DomainModel):
+    """Independent copy attribution without a live source dependency."""
+
+    operation: Literal["duplicate"] = "duplicate"
+    source: ImageSourceSnapshot
+    original_provenance: OriginalImageProvenance
+
+    @property
+    def settings(self) -> ImageOperationSettings:
+        """Expose the copied operation settings to provenance consumers."""
+        return self.original_provenance.settings
+
+
+ImageProvenance = Annotated[
+    DirectGenerateProvenance
+    | LegacyGenerateProvenance
+    | RefineProvenance
+    | EditProvenance
+    | DuplicateProvenance,
+    Field(discriminator="operation"),
+]
+
+
+def original_image_provenance(
+    provenance: ImageProvenance,
+) -> OriginalImageProvenance:
+    """Flatten duplicate attribution to the exact original image operation."""
+    if isinstance(provenance, DuplicateProvenance):
+        return provenance.original_provenance
+    return provenance
+
+
+def image_edit_lineage(provenance: ImageProvenance) -> tuple[AcceptedEdit, ...]:
+    """Return the accepted Edit lineage inherited by a derived operation."""
+    original = original_image_provenance(provenance)
+    if isinstance(original, (RefineProvenance, EditProvenance)):
+        return original.edit_lineage
+    return ()
 
 
 class HotspotSet(DomainModel):
@@ -689,30 +729,38 @@ class Stack(DomainModel):
                 if revision.style_id is not None and revision.style_id not in known_style_ids:
                     raise ValueError("revision style_id must identify a Style in this stack")
                 provenance = revision.provenance
-                if isinstance(provenance, DirectGenerateProvenance):
+                original_provenance = (
+                    original_image_provenance(provenance)
+                    if provenance is not None
+                    else None
+                )
+                if isinstance(original_provenance, DirectGenerateProvenance):
                     expected_dimensions = output_dimensions(
-                        provenance.inputs.resolution,
+                        original_provenance.inputs.resolution,
                         self.aspect_ratio,
                     )
                     if (
-                        provenance.settings.width,
-                        provenance.settings.height,
+                        original_provenance.settings.width,
+                        original_provenance.settings.height,
                     ) != expected_dimensions:
                         raise ValueError(
                             "direct Generate dimensions must match its resolution "
                             "and stack aspect ratio"
                         )
-                elif isinstance(provenance, (RefineProvenance, EditProvenance)):
+                elif isinstance(
+                    original_provenance,
+                    (RefineProvenance, EditProvenance),
+                ):
                     expected_dimensions = output_dimensions(
-                        provenance.resolution,
+                        original_provenance.resolution,
                         self.aspect_ratio,
                     )
                     if (
-                        provenance.settings.width,
-                        provenance.settings.height,
+                        original_provenance.settings.width,
+                        original_provenance.settings.height,
                     ) != expected_dimensions:
                         raise ValueError(
-                            f"{provenance.operation.title()} dimensions must match "
+                            f"{original_provenance.operation.title()} dimensions must match "
                             "its resolution and stack aspect ratio"
                         )
                 if isinstance(provenance, (RefineProvenance, EditProvenance)):
@@ -798,11 +846,7 @@ class Stack(DomainModel):
             source_provenance = revisions_by_id[source_revision_id].provenance
             assert isinstance(provenance, (RefineProvenance, EditProvenance))
             assert source_provenance is not None
-            source_lineage = (
-                source_provenance.edit_lineage
-                if isinstance(source_provenance, (RefineProvenance, EditProvenance))
-                else ()
-            )
+            source_lineage = image_edit_lineage(source_provenance)
             if isinstance(provenance, RefineProvenance):
                 if provenance.edit_lineage != source_lineage:
                     raise ValueError(

@@ -13,9 +13,12 @@ from hotcards.domain.models import (
     Card,
     CardReference,
     CardRevision,
+    DuplicateProvenance,
+    GeneratedBackground,
     HotspotConditions,
     HotspotKeyChanges,
     HotspotSet,
+    ImageSourceSnapshot,
     Interaction,
     KeyDefinition,
     NavigateAction,
@@ -25,7 +28,9 @@ from hotcards.domain.models import (
     Stack,
     StyleDefinition,
     UnresolvedCardReference,
+    original_image_provenance,
 )
+from hotcards.domain.validation import normalize_card_name
 
 
 class CommandError(ValueError):
@@ -233,6 +238,148 @@ def _unresolve_inbound_references(
         updates["hotspot_set"] = hotspot_set
         revisions.append(revision.model_copy(update=updates))
     return card.model_copy(update={"revisions": tuple(revisions)})
+
+
+def next_duplicate_card_name(document: Stack, source_name: str) -> str:
+    """Return the first case-insensitively unique copy name for a card."""
+    existing_names = {normalize_card_name(card.name) for card in document.cards}
+    candidate = f"{source_name} Copy"
+    if normalize_card_name(candidate) not in existing_names:
+        return candidate
+    copy_number = 2
+    while normalize_card_name(f"{source_name} Copy {copy_number}") in existing_names:
+        copy_number += 1
+    return f"{source_name} Copy {copy_number}"
+
+
+def _duplicate_interaction(
+    interaction: Interaction,
+    *,
+    source_card_id: UUID,
+    duplicate_card_id: UUID,
+    interaction_id: UUID,
+) -> Interaction:
+    action = interaction.action
+    if (
+        action is not None
+        and isinstance(action.target, ResolvedCardReference)
+        and action.target.target_card_id == source_card_id
+    ):
+        action = NavigateAction(
+            target=ResolvedCardReference(target_card_id=duplicate_card_id)
+        )
+    return interaction.model_copy(
+        deep=True,
+        update={"id": interaction_id, "action": action},
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class DuplicateCardCommand:
+    """Insert one independent card copied from a source card's active revision."""
+
+    source_card_id: UUID
+    name: str
+    card_id: UUID = field(default_factory=uuid4)
+    revision_id: UUID = field(default_factory=uuid4)
+    background_id: UUID | None = None
+    background_image_path: str | None = None
+    interaction_ids: tuple[UUID, ...] = field(default_factory=tuple)
+
+    def apply(self, document: Stack) -> Stack:
+        source_index = _card_index(document, self.source_card_id)
+        source_card = document.cards[source_index]
+        source_revision = source_card.active_revision
+        if any(card.id == self.card_id for card in document.cards):
+            raise CommandError(f"card {self.card_id} already exists")
+        if any(
+            revision.id == self.revision_id
+            for card in document.cards
+            for revision in card.revisions
+        ):
+            raise CommandError(f"revision {self.revision_id} already exists")
+
+        source_interactions = (
+            source_revision.hotspot_set.interactions
+            if source_revision.hotspot_set is not None
+            else ()
+        )
+        if len(self.interaction_ids) != len(source_interactions):
+            raise CommandError(
+                "duplicate interaction IDs must match the active hotspot set"
+            )
+        if len(self.interaction_ids) != len(set(self.interaction_ids)):
+            raise CommandError("duplicate interaction IDs must be unique")
+        source_interaction_ids = {interaction.id for interaction in source_interactions}
+        if source_interaction_ids & set(self.interaction_ids):
+            raise CommandError("duplicate interactions must use new IDs")
+        hotspot_set = (
+            HotspotSet(
+                interactions=tuple(
+                    _duplicate_interaction(
+                        interaction,
+                        source_card_id=source_card.id,
+                        duplicate_card_id=self.card_id,
+                        interaction_id=interaction_id,
+                    )
+                    for interaction, interaction_id in zip(
+                        source_interactions,
+                        self.interaction_ids,
+                        strict=True,
+                    )
+                )
+            )
+            if source_revision.hotspot_set is not None
+            else None
+        )
+
+        source_background = source_revision.background
+        if source_background is None:
+            if self.background_id is not None or self.background_image_path is not None:
+                raise CommandError(
+                    "a blank source revision cannot have a duplicate background asset"
+                )
+            background = None
+        else:
+            if self.background_id is None or self.background_image_path is None:
+                raise CommandError(
+                    "a generated source revision requires a duplicate background asset"
+                )
+            if self.background_id == source_background.id:
+                raise CommandError("duplicate background must use a new ID")
+            background = GeneratedBackground(
+                id=self.background_id,
+                image_path=self.background_image_path,
+                provenance=DuplicateProvenance(
+                    source=ImageSourceSnapshot(
+                        card_id=source_card.id,
+                        revision_id=source_revision.id,
+                        background_id=source_background.id,
+                    ),
+                    original_provenance=original_image_provenance(
+                        source_background.provenance
+                    ),
+                ),
+                created_at=source_background.created_at,
+            )
+
+        revision = source_revision.model_copy(
+            deep=True,
+            update={
+                "id": self.revision_id,
+                "background": background,
+                "hotspot_set": hotspot_set,
+            },
+        )
+        duplicate = Card(
+            id=self.card_id,
+            name=self.name,
+            revisions=(revision,),
+            active_revision_id=revision.id,
+        )
+        cards = list(document.cards)
+        cards.insert(source_index + 1, duplicate)
+        return validated_copy(document.model_copy(update={"cards": tuple(cards)}))
 
 
 @dataclass(frozen=True, slots=True)
@@ -1055,6 +1202,7 @@ __all__ = [
     "DeleteStyleCommand",
     "DeletePolygonCommand",
     "DocumentCommand",
+    "DuplicateCardCommand",
     "DuplicateRevisionCommand",
     "EditRevisionDescriptionCommand",
     "SetRevisionStyleCommand",
@@ -1073,4 +1221,5 @@ __all__ = [
     "SetRevisionGenerateResolutionCommand",
     "SetStartCardCommand",
     "UpdateStyleCommand",
+    "next_duplicate_card_name",
 ]

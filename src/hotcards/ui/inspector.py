@@ -783,13 +783,19 @@ class Inspector(QWidget):
             render_change=render_change,
         )
 
-    def commit_card_metadata(self) -> bool:
+    def commit_card_metadata(self, *, render_change: bool = True) -> bool:
         """Commit every visible authoring draft before a context change or save."""
-        if self._selected_style() is not None and not self._commit_style():
+        if (
+            self._selected_style() is not None
+            and not self._commit_style(render_change=render_change)
+        ):
             return False
-        if self._selected_key_id is not None and not self._commit_key():
+        if (
+            self._selected_key_id is not None
+            and not self._commit_key(render_change=render_change)
+        ):
             return False
-        return self.commit_revision_metadata()
+        return self.commit_revision_metadata(render_change=render_change)
 
     def has_description_input(self) -> bool:
         card = self._selected_card()

@@ -15,7 +15,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtCore import QObject, QSize, Qt, Signal
-from PySide6.QtGui import QCloseEvent, QColor, QPixmap
+from PySide6.QtGui import QCloseEvent, QColor, QKeySequence, QPixmap
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel
 
@@ -413,18 +413,21 @@ def test_card_browser_uses_thumbnails_and_compact_action_row(
         "Make the selected card the start card"
     )
     assert sidebar.add_button.toolTip() == "Add a new card"
+    assert sidebar.duplicate_button.toolTip() == "Duplicate the selected card"
     assert sidebar.delete_button.toolTip() == "Delete the selected card"
     assert sidebar.card_actions.indexOf(sidebar.move_up_button) == 0
     assert sidebar.card_actions.indexOf(sidebar.move_down_button) == 1
     assert sidebar.card_actions.indexOf(sidebar.start_button) == 3
-    assert sidebar.card_actions.indexOf(sidebar.delete_button) == 4
-    assert sidebar.card_actions.indexOf(sidebar.add_button) == 5
+    assert sidebar.card_actions.indexOf(sidebar.duplicate_button) == 4
+    assert sidebar.card_actions.indexOf(sidebar.delete_button) == 5
+    assert sidebar.card_actions.indexOf(sidebar.add_button) == 6
     control_sizes = {
         button.size()
         for button in (
             sidebar.move_up_button,
             sidebar.move_down_button,
             sidebar.start_button,
+            sidebar.duplicate_button,
             sidebar.add_button,
             sidebar.delete_button,
         )
@@ -433,6 +436,106 @@ def test_card_browser_uses_thumbnails_and_compact_action_row(
     assert sidebar.add_button.font().pointSizeF() > (
         sidebar.move_up_button.font().pointSizeF()
     )
+
+
+def test_duplicate_card_sidebar_action_commits_cancels_and_restores_selection(
+    application: QApplication,
+    tmp_path: Path,
+) -> None:
+    leading = Card(name="Leading")
+    source = Card(name="Source")
+    stack = Stack(
+        name="Demo",
+        cards=(leading, source),
+        start_card_id=leading.id,
+    )
+    controller = DocumentController(stack)
+    session = DocumentSession(controller)
+    session.create(stack, tmp_path / "Demo.hotcards")
+    workers = FakeWorkers()
+    background = FakeBackgroundWorkflow(controller)
+    window = MainWindow(
+        controller,
+        workers,  # type: ignore[arg-type]
+        FakeSettings(),
+        availability_checks={AdapterKind.MFLUX: lambda: None},
+        document_session=session,
+        background_workflow=background,  # type: ignore[arg-type]
+        start_diagnostics=False,
+    )
+    window.select_card(source.id)
+    window.canvas_card_name.setText("Renamed")
+    window.inspector.description_edit.setPlainText("Committed before copy")
+    background.busy = True
+
+    window.card_sidebar.duplicate_button.click()
+
+    changed = controller.document
+    assert [card.name for card in changed.cards] == [
+        "Leading",
+        "Renamed",
+        "Renamed Copy",
+    ]
+    duplicate = changed.cards[2]
+    assert duplicate.active_revision.description == "Committed before copy"
+    assert background.cancel_calls == 1
+    assert window.card_sidebar.selected_card_id == duplicate.id
+    assert window.notification_bar.message_label.text() == "Card duplicated"
+    assert not window.notification_bar.primary_button.isHidden()
+    duplicate_id = duplicate.id
+
+    window.notification_bar.primary_button.click()
+    assert [card.name for card in controller.document.cards] == [
+        "Leading",
+        "Renamed",
+    ]
+    assert window.card_sidebar.selected_card_id == source.id
+
+    window.redo()
+    assert controller.document.cards[2].id == duplicate_id
+    assert window.card_sidebar.selected_card_id == duplicate_id
+    window.close()
+
+
+def test_duplicate_card_shortcut_is_author_only(
+    application: QApplication,
+    tmp_path: Path,
+) -> None:
+    source = Card(name="Source")
+    stack = Stack(name="Demo", cards=(source,), start_card_id=source.id)
+    controller = DocumentController(stack)
+    session = DocumentSession(controller)
+    session.create(stack, tmp_path / "Demo.hotcards")
+    window = MainWindow(
+        controller,
+        FakeWorkers(),  # type: ignore[arg-type]
+        FakeSettings(),
+        availability_checks={AdapterKind.MFLUX: lambda: None},
+        document_session=session,
+        background_workflow=FakeBackgroundWorkflow(controller),  # type: ignore[arg-type]
+        start_diagnostics=False,
+    )
+
+    assert (
+        window.duplicate_card_action.shortcut().toString(
+            QKeySequence.SequenceFormat.PortableText
+        )
+        == "Ctrl+D"
+    )
+    assert window.duplicate_card_action.isEnabled()
+    window.duplicate_card_action.trigger()
+    assert [card.name for card in controller.document.cards] == [
+        "Source",
+        "Source Copy",
+    ]
+
+    window.mode_button.click()
+    assert window._is_running
+    assert not window.duplicate_card_action.isEnabled()
+    assert window.card_sidebar.isHidden()
+    window.duplicate_card_action.trigger()
+    assert len(controller.document.cards) == 2
+    window.close()
 
 
 def test_selecting_scrolled_card_survives_focus_out_render(

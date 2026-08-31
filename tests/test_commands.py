@@ -23,6 +23,7 @@ from hotcards.application.commands import (
     DeletePolygonCommand,
     DeleteRevisionCommand,
     DeleteStyleCommand,
+    DuplicateCardCommand,
     DuplicateRevisionCommand,
     EditRevisionDescriptionCommand,
     RenameCardCommand,
@@ -40,6 +41,7 @@ from hotcards.application.commands import (
     SetRevisionStyleCommand,
     SetStartCardCommand,
     UpdateStyleCommand,
+    next_duplicate_card_name,
 )
 from hotcards.application.document_controller import DocumentController
 from hotcards.domain.image_dependencies import image_source_dependencies
@@ -48,6 +50,7 @@ from hotcards.domain.models import (
     Card,
     CardRevision,
     DirectGenerateProvenance,
+    DuplicateProvenance,
     GeneratedBackground,
     GenerateInputs,
     HotspotConditions,
@@ -174,6 +177,201 @@ def test_card_create_rename_reorder_and_start_selection() -> None:
     assert [card.name for card in document.cards] == ["First", "Renamed"]
     assert document.start_card_id == created_id
     assert SetStartCardCommand(card_id=None).apply(document).start_card_id is None
+
+
+def test_duplicate_card_copies_only_active_revision_with_independent_ids() -> None:
+    key = KeyDefinition(name="Key")
+    style = StyleDefinition(name="Style", prompt_text="Treatment")
+    destination = Card(name="Destination")
+    inactive = CardRevision(description="Inactive")
+    background = generated_background("Active")
+    source_id = uuid4()
+    self_interaction = Interaction(
+        conditions=HotspotConditions(requires=(key.id,)),
+        key_changes=HotspotKeyChanges(grant=(key.id,)),
+        action=NavigateAction(
+            target=ResolvedCardReference(target_card_id=source_id)
+        ),
+        polygons=(polygon(),),
+    )
+    external_interaction = Interaction(
+        action=NavigateAction(
+            target=ResolvedCardReference(target_card_id=destination.id)
+        ),
+        polygons=(polygon(0.2),),
+    )
+    active = CardRevision(
+        description="Active",
+        background=background,
+        hotspot_set=HotspotSet(
+            interactions=(self_interaction, external_interaction)
+        ),
+        references=(ResolvedCardReference(target_card_id=destination.id),),
+        style_id=style.id,
+        generate_resolution=GenerateResolution.RESOLUTION_1024,
+    )
+    source = Card(
+        id=source_id,
+        name="Source",
+        revisions=(inactive, active),
+        active_revision_id=active.id,
+    )
+    document = Stack(
+        name="Stack",
+        styles=(style,),
+        new_card_style_id=style.id,
+        keys=(key,),
+        cards=(source, destination),
+    )
+    duplicate_card_id = uuid4()
+    duplicate_revision_id = uuid4()
+    duplicate_background_id = uuid4()
+    duplicate_interaction_ids = (uuid4(), uuid4())
+
+    changed = DuplicateCardCommand(
+        source_card_id=source.id,
+        name="Source Copy",
+        card_id=duplicate_card_id,
+        revision_id=duplicate_revision_id,
+        background_id=duplicate_background_id,
+        background_image_path=(
+            f"assets/cards/{duplicate_card_id}/image-{duplicate_background_id}.png"
+        ),
+        interaction_ids=duplicate_interaction_ids,
+    ).apply(document)
+
+    assert [card.name for card in changed.cards] == [
+        "Source",
+        "Source Copy",
+        "Destination",
+    ]
+    duplicate = changed.cards[1]
+    assert duplicate.id == duplicate_card_id
+    assert len(duplicate.revisions) == 1
+    revision = duplicate.active_revision
+    assert revision.id == duplicate_revision_id
+    assert revision.description == active.description
+    assert revision.references == active.references
+    assert revision.style_id == style.id
+    assert revision.generate_resolution is GenerateResolution.RESOLUTION_1024
+    assert revision.hotspot_set is not None
+    assert tuple(
+        copied.id for copied in revision.hotspot_set.interactions
+    ) == duplicate_interaction_ids
+    copied_self, copied_external = revision.hotspot_set.interactions
+    assert copied_self.conditions == self_interaction.conditions
+    assert copied_self.key_changes == self_interaction.key_changes
+    assert copied_self.polygons == self_interaction.polygons
+    assert copied_self.action == NavigateAction(
+        target=ResolvedCardReference(target_card_id=duplicate.id)
+    )
+    assert copied_external.action == external_interaction.action
+    assert revision.background is not None
+    assert revision.background.id == duplicate_background_id
+    assert revision.background.id != background.id
+    assert isinstance(revision.background.provenance, DuplicateProvenance)
+    assert revision.background.provenance.source == ImageSourceSnapshot(
+        card_id=source.id,
+        revision_id=active.id,
+        background_id=background.id,
+    )
+    assert (
+        revision.background.provenance.original_provenance
+        == background.provenance
+    )
+
+
+def test_duplicate_card_name_is_case_insensitively_unique() -> None:
+    source = Card(name="Scene")
+    document = Stack(
+        name="Stack",
+        cards=(
+            source,
+            Card(name="scene copy"),
+            Card(name="SCENE COPY 2"),
+        ),
+    )
+
+    assert next_duplicate_card_name(document, source.name) == "Scene Copy 3"
+
+
+def test_deleting_blank_duplicate_does_not_change_source() -> None:
+    source = Card(name="Source")
+    document = Stack(name="Stack", cards=(source,))
+    duplicate = DuplicateCardCommand(
+        source_card_id=source.id,
+        name="Source Copy",
+    ).apply(document)
+
+    changed = DeleteCardCommand(card_id=duplicate.cards[1].id).apply(duplicate)
+
+    assert changed.cards == (source,)
+
+
+def test_duplicate_card_flattens_provenance_and_survives_source_deletion() -> None:
+    source_card_id = uuid4()
+    direct = CardRevision(background=generated_background("Direct"))
+    refined = CardRevision(
+        background=refined_background(
+            source_card_id=source_card_id,
+            source_revision=direct,
+        )
+    )
+    source = Card(
+        id=source_card_id,
+        name="Source",
+        revisions=(direct, refined),
+        active_revision_id=refined.id,
+    )
+    document = Stack(name="Stack", cards=(source,))
+    first_card_id, first_revision_id, first_background_id = (
+        uuid4(),
+        uuid4(),
+        uuid4(),
+    )
+    first = DuplicateCardCommand(
+        source_card_id=source.id,
+        name="Source Copy",
+        card_id=first_card_id,
+        revision_id=first_revision_id,
+        background_id=first_background_id,
+        background_image_path=(
+            f"assets/cards/{first_card_id}/image-{first_background_id}.png"
+        ),
+    ).apply(document)
+    first_duplicate = first.cards[1]
+    second_card_id, second_revision_id, second_background_id = (
+        uuid4(),
+        uuid4(),
+        uuid4(),
+    )
+    changed = DuplicateCardCommand(
+        source_card_id=first_duplicate.id,
+        name="Source Copy Copy",
+        card_id=second_card_id,
+        revision_id=second_revision_id,
+        background_id=second_background_id,
+        background_image_path=(
+            f"assets/cards/{second_card_id}/image-{second_background_id}.png"
+        ),
+    ).apply(first)
+
+    first_provenance = first_duplicate.active_revision.provenance
+    second_provenance = changed.cards[2].active_revision.provenance
+    assert isinstance(first_provenance, DuplicateProvenance)
+    assert isinstance(second_provenance, DuplicateProvenance)
+    assert isinstance(second_provenance.original_provenance, RefineProvenance)
+    assert (
+        second_provenance.original_provenance
+        == first_provenance.original_provenance
+    )
+    assert second_provenance.source.card_id == first_duplicate.id
+
+    without_source = DeleteCardCommand(card_id=source.id).apply(changed)
+    assert [card.name for card in without_source.cards] == [
+        "Source Copy",
+        "Source Copy Copy",
+    ]
 
 
 def test_commands_preserve_immutable_stack_aspect_ratio() -> None:

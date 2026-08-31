@@ -18,6 +18,7 @@ from hotcards.domain.models import (
     CardReference,
     CardRevision,
     DirectGenerateProvenance,
+    DuplicateProvenance,
     EditPreserveOptions,
     EditProvenance,
     GeneratedBackground,
@@ -33,6 +34,7 @@ from hotcards.domain.models import (
     KeyDefinition,
     LegacyGenerateProvenance,
     NavigateAction,
+    OriginalImageProvenance,
     Point,
     Polygon,
     RefineProvenance,
@@ -41,6 +43,8 @@ from hotcards.domain.models import (
     RunOverlayMode,
     Stack,
     UnresolvedCardReference,
+    image_edit_lineage,
+    original_image_provenance,
 )
 from hotcards.domain.validation import normalize_card_name, require_unique_card_names
 
@@ -54,6 +58,7 @@ __all__ = [
     "CardRevision",
     "CardReference",
     "DirectGenerateProvenance",
+    "DuplicateProvenance",
     "EditPreserveOptions",
     "EditProvenance",
     "GenerateInputs",
@@ -71,6 +76,7 @@ __all__ = [
     "KeyDefinition",
     "LegacyGenerateProvenance",
     "NavigateAction",
+    "OriginalImageProvenance",
     "Point",
     "Polygon",
     "RefineProvenance",
@@ -79,8 +85,10 @@ __all__ = [
     "RunOverlayMode",
     "Stack",
     "UnresolvedCardReference",
+    "image_edit_lineage",
     "image_source_dependencies",
     "normalize_card_name",
     "output_dimensions",
+    "original_image_provenance",
     "require_unique_card_names",
 ]

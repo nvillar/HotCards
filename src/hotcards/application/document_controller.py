@@ -9,6 +9,7 @@ from hotcards.application.commands import DocumentCommand, validated_copy
 from hotcards.domain.models import Stack
 
 AutosaveHook = Callable[[Stack], None]
+PersistenceHook = Callable[[Stack], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +61,11 @@ class DocumentController:
         """Identify the latest command while it remains directly undoable."""
         return self._undo_stack[-1].token if self._undo_stack else None
 
+    @property
+    def current_redo_token(self) -> UndoToken | None:
+        """Identify the next command while it remains directly redoable."""
+        return self._redo_stack[-1].token if self._redo_stack else None
+
     def set_autosave_hook(self, hook: AutosaveHook | None) -> None:
         """Replace the callback signaled after each effective document change."""
         self._autosave_hook = hook
@@ -74,6 +80,26 @@ class DocumentController:
         """Apply one command and record one session undo boundary."""
         before = self._document
         after = validated_copy(command.apply(validated_copy(before)))
+        self._record_change(before, after)
+        if after != before:
+            self._signal_autosave()
+        return self.document
+
+    def execute_persisted(
+        self,
+        command: DocumentCommand,
+        persist: PersistenceHook,
+    ) -> Stack:
+        """Persist a command result before exposing it or recording history."""
+        before = self._document
+        after = validated_copy(command.apply(validated_copy(before)))
+        if after == before:
+            return self.document
+        persist(validated_copy(after))
+        self._record_change(before, after)
+        return self.document
+
+    def _record_change(self, before: Stack, after: Stack) -> None:
         if after != before:
             self._document = after
             token = UndoToken(self._next_undo_sequence)
@@ -82,8 +108,6 @@ class DocumentController:
                 _HistoryEntry(before=before, after=after, token=token)
             )
             self._redo_stack.clear()
-            self._signal_autosave()
-        return self.document
 
     def undo(self) -> bool:
         """Undo the latest command in this session."""

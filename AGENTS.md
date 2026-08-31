@@ -62,6 +62,14 @@ for live MFLUX runs.
 - Keep at least one revision per card. Duplicate a complete revision, including
   its Generate resolution, hotspot semantics, and immutable background
   reference.
+- Duplicate the selected card from only its active complete revision and insert
+  it immediately after the source as one undoable change. Mint new card,
+  revision, background, and Interaction IDs; remap self-navigation to the new
+  card and preserve other destinations, References, Keys, Style selection, and
+  Generate resolution. Copy exact background bytes into the duplicate card's
+  own validated asset namespace. Flatten duplicate provenance to the original
+  non-duplicate operation while recording the immediate source informationally,
+  so deleting the source never invalidates the duplicate.
 - Keep an ordered collection of at most two optional Reference cards per
   revision and reject self-references and duplicates. Display slots as `1.` and
   `2.` under one References section; clearing slot 1 promotes slot 2. Resolve
@@ -81,7 +89,8 @@ for live MFLUX runs.
   in-flight stale image result. Hotspots must not alter image-generation
   prompts.
 - Persist generated backgrounds with a strict discriminated provenance union
-  for direct Generate, externally patched legacy Generate, Refine, and Edit.
+  for direct Generate, externally patched legacy Generate, Refine, Edit, and
+  independent card duplication.
   Keep operation-specific prompts and settings typed rather than accumulating
   nullable fields. Refine and Edit identify their exact source revision and
   background. A Refine inherits its source revision's accepted Edit lineage

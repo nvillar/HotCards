@@ -100,6 +100,11 @@ class StackStore:
         """Resolve one validated bundle-relative asset path."""
         return self._resolved_asset(_relative_asset_path(relative_path))
 
+    @staticmethod
+    def image_asset_path(card_id: UUID, asset_id: UUID) -> str:
+        """Return the deterministic bundle-relative path for one image asset."""
+        return _image_asset_path(card_id, asset_id).as_posix()
+
     def _validate_assets(self, stack: Stack) -> None:
         for card in stack.cards:
             for revision in card.revisions:
@@ -254,6 +259,37 @@ class StackStore:
             if temporary_path is not None:
                 temporary_path.unlink(missing_ok=True)
         return relative_path.as_posix()
+
+    def copy_image_asset(
+        self,
+        source_relative_path: str,
+        *,
+        source_card_id: UUID,
+        source_asset_id: UUID,
+        card_id: UUID,
+        asset_id: UUID,
+    ) -> str:
+        """Copy one validated bundle image into a new owned asset namespace."""
+        parsed_source_path = _relative_asset_path(source_relative_path)
+        expected_source_path = _image_asset_path(
+            source_card_id,
+            source_asset_id,
+        )
+        if parsed_source_path != expected_source_path:
+            raise StackStoreError(
+                f"image asset path {parsed_source_path} does not match its "
+                f"card and asset IDs; expected {expected_source_path}"
+            )
+        source_path = self._resolved_asset(parsed_source_path)
+        if not source_path.is_file():
+            raise StackStoreError(
+                f"stack references a missing image asset: {source_relative_path}"
+            )
+        return self.store_image_asset(
+            source_path,
+            card_id=card_id,
+            asset_id=asset_id,
+        )
 
     def remove_image_asset_if_unreferenced(
         self,

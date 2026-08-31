@@ -33,6 +33,15 @@ hotspot visibility. An
 adjacent step label and progress bar to the left of the image-model selector
 show actual MFLUX inference-step completion during image generation.
 
+The Cards sidebar and Command-D shortcut duplicate the selected card immediately
+after its source. A card duplicate contains exactly the active complete revision
+with new card, revision, background, and hotspot identities. Generated image
+bytes are copied into the duplicate card's own asset namespace, so either card
+can be deleted independently. Self-navigation is remapped to the duplicate;
+other destinations, References, Keys, Style selection, and Generate resolution
+are preserved. The duplicate is one undoable change and is named `Name Copy`,
+then `Name Copy 2`, and so on.
+
 The inspector tabs are Generate, Styles, Hotspots, and Keys. Generate follows
 the authoring sequence Description, Style, optional References, Resolution,
 then Generate Image. Resolution labels show the exact output width and height
@@ -50,7 +59,10 @@ snapshots, Style ID/name/text, and composed render prompt are retained in
 generated-image provenance.
 
 Image provenance is a strict typed operation record for direct Generate,
-externally patched historical Generate, Refine, or Edit. It retains exact
+externally patched historical Generate, Refine, Edit, or an independent card
+duplicate. Duplicate provenance records its immediate source and a flattened
+snapshot of the original image operation without retaining a live source
+dependency. Provenance retains exact
 prompts, model execution settings, seed, and actual output width and height;
 derived operations also identify their source revision and background. A source
 revision cannot be deleted or have its background replaced while another

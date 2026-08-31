@@ -5,6 +5,11 @@ from hotcards.application.background_workflow import (
     BackgroundWorkflow,
     BackgroundWorkflowError,
 )
+from hotcards.application.card_duplication import (
+    CardDuplicationError,
+    CardDuplicationWorkflow,
+    DuplicatedCardChange,
+)
 from hotcards.application.commands import (
     ActivateRevisionCommand,
     AddInteractionCommand,
@@ -16,6 +21,7 @@ from hotcards.application.commands import (
     DeleteCardCommand,
     DeleteRevisionCommand,
     DocumentCommand,
+    DuplicateCardCommand,
     DuplicateRevisionCommand,
     EditRevisionDescriptionCommand,
     RenameCardCommand,
@@ -61,6 +67,8 @@ __all__ = [
     "BackgroundGenerationSettings",
     "BackgroundWorkflow",
     "BackgroundWorkflowError",
+    "CardDuplicationError",
+    "CardDuplicationWorkflow",
     "ChangeHotspotDestinationCommand",
     "CommandError",
     "CreateCardAndResolveCommand",
@@ -74,6 +82,8 @@ __all__ = [
     "DocumentSessionError",
     "DocumentSessionState",
     "DuplicateRevisionCommand",
+    "DuplicateCardCommand",
+    "DuplicatedCardChange",
     "EditRevisionDescriptionCommand",
     "GeneratedRevisionChange",
     "OperationStatus",

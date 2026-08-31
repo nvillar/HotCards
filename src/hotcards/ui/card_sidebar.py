@@ -37,6 +37,7 @@ class CardSidebar(QWidget):
     """Render card order and route all document mutations through the controller."""
 
     card_selected = Signal(object)
+    duplicate_requested = Signal(object)
     delete_requested = Signal(object)
     document_changed = Signal(object)
 
@@ -73,6 +74,14 @@ class CardSidebar(QWidget):
         self.start_button.setAccessibleName("Make start card")
         self.start_button.setToolTip("Make the selected card the start card")
         self.start_button.clicked.connect(self.set_selected_as_start)
+        self.duplicate_button = QToolButton()
+        self.duplicate_button.setObjectName("duplicateCardButton")
+        self.duplicate_button.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon)
+        )
+        self.duplicate_button.setAccessibleName("Duplicate card")
+        self.duplicate_button.setToolTip("Duplicate the selected card")
+        self.duplicate_button.clicked.connect(self._request_duplicate)
         self.move_up_button = QToolButton()
         self.move_up_button.setObjectName("moveCardUpButton")
         self.move_up_button.setIcon(
@@ -106,6 +115,7 @@ class CardSidebar(QWidget):
                 self.move_up_button,
                 self.move_down_button,
                 self.start_button,
+                self.duplicate_button,
                 self.add_button,
                 self.delete_button,
             )
@@ -114,6 +124,7 @@ class CardSidebar(QWidget):
             self.move_up_button,
             self.move_down_button,
             self.start_button,
+            self.duplicate_button,
             self.add_button,
             self.delete_button,
         ):
@@ -129,6 +140,7 @@ class CardSidebar(QWidget):
         self.card_actions.addWidget(self.move_down_button)
         self.card_actions.addStretch(1)
         self.card_actions.addWidget(self.start_button)
+        self.card_actions.addWidget(self.duplicate_button)
         self.card_actions.addWidget(self.delete_button)
         self.card_actions.addWidget(self.add_button)
 
@@ -257,6 +269,11 @@ class CardSidebar(QWidget):
         if card_id is not None:
             self.delete_requested.emit(card_id)
 
+    def _request_duplicate(self) -> None:
+        card_id = self.selected_card_id
+        if card_id is not None:
+            self.duplicate_requested.emit(card_id)
+
     def _rows_moved(
         self,
         _source_parent: object,
@@ -285,6 +302,7 @@ class CardSidebar(QWidget):
         self.start_button.setEnabled(has_selection)
         self.move_up_button.setEnabled(has_selection and row > 0)
         self.move_down_button.setEnabled(has_selection and row < self.card_list.count() - 1)
+        self.duplicate_button.setEnabled(has_selection)
         self.delete_button.setEnabled(has_selection)
 
     def _row_for(self, card_id: UUID | None) -> int:

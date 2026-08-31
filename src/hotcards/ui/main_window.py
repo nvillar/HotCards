@@ -36,6 +36,10 @@ from hotcards.application.background_workflow import (
     BackgroundWorkflow,
     BackgroundWorkflowError,
 )
+from hotcards.application.card_duplication import (
+    CardDuplicationError,
+    CardDuplicationWorkflow,
+)
 from hotcards.application.commands import (
     AddInteractionCommand,
     AddPolygonCommand,
@@ -111,6 +115,7 @@ class MainWindow(QMainWindow):
         settings_dialog_factory: SettingsDialogFactory = SettingsDialog,
         document_session: DocumentSession | None = None,
         background_workflow: BackgroundWorkflow | None = None,
+        card_duplication_workflow: CardDuplicationWorkflow | None = None,
         project_directory: Path | None = None,
         start_diagnostics: bool = True,
         owns_workers: bool = False,
@@ -121,6 +126,7 @@ class MainWindow(QMainWindow):
         self.settings = settings if settings is not None else QSettings()
         self.document_session = document_session
         self.background_workflow = background_workflow
+        self.card_duplication_workflow = card_duplication_workflow
         self.project_directory = project_directory or default_project_directory()
         self._availability_checks = dict(availability_checks or {})
         self._availability_checks_factory = availability_checks_factory
@@ -139,6 +145,10 @@ class MainWindow(QMainWindow):
         self._service_notification_dismissed = False
         self._undo_notification_token: UndoToken | None = None
         self._generated_revision_change: GeneratedRevisionChange | None = None
+        self._card_selection_history: dict[
+            UndoToken,
+            tuple[UUID | None, UUID | None],
+        ] = {}
         self._card_name_commit_failed = False
         self._rendering = False
         self._is_running = False
@@ -152,6 +162,14 @@ class MainWindow(QMainWindow):
                 workers,
                 self._background_generation_settings,
                 parent=self,
+            )
+        if (
+            self.card_duplication_workflow is None
+            and self.document_session is not None
+        ):
+            self.card_duplication_workflow = CardDuplicationWorkflow(
+                controller,
+                self.document_session,
             )
         self.setWindowTitle(f"HotCards — {controller.document.name}")
         self.setObjectName("mainWindow")
@@ -246,6 +264,7 @@ class MainWindow(QMainWindow):
         )
         self.card_sidebar.card_selected.connect(self.select_card)
         self.card_sidebar.document_changed.connect(self.render_document)
+        self.card_sidebar.duplicate_requested.connect(self._duplicate_card)
         self.card_sidebar.delete_requested.connect(self._delete_card)
 
         self.canvas_pages = QStackedWidget()
@@ -506,6 +525,12 @@ class MainWindow(QMainWindow):
         self.redo_action.setShortcut(QKeySequence.StandardKey.Redo)
         self.redo_action.triggered.connect(self.redo)
         edit_menu.addAction(self.redo_action)
+        edit_menu.addSeparator()
+        self.duplicate_card_action = QAction("Duplicate Card", self)
+        self.duplicate_card_action.setObjectName("duplicateCardAction")
+        self.duplicate_card_action.setShortcut(QKeySequence("Ctrl+D"))
+        self.duplicate_card_action.triggered.connect(self._duplicate_card)
+        edit_menu.addAction(self.duplicate_card_action)
 
         self.advanced_settings_action = QAction("Advanced Settings…", self)
         self.advanced_settings_action.setObjectName("advancedSettingsAction")
@@ -650,7 +675,7 @@ class MainWindow(QMainWindow):
         self.inspector.show_interaction(interaction_id)
         self.card_canvas.select_interaction(interaction_id)
 
-    def _commit_canvas_card_name(self) -> bool:
+    def _commit_canvas_card_name(self, *, render_change: bool = True) -> bool:
         if self._rendering or self._selected_card_id is None or self._is_running:
             return True
         if self._card_name_commit_failed:
@@ -678,7 +703,8 @@ class MainWindow(QMainWindow):
             return False
         self._card_name_commit_failed = False
         self._set_canvas_card_name_error("")
-        self.render_document(changed)
+        if render_change:
+            self.render_document(changed)
         return True
 
     def _card_name_edited(self) -> None:
@@ -692,9 +718,9 @@ class MainWindow(QMainWindow):
     def _commit_authoring_metadata(self) -> bool:
         if self._selected_card_id is None:
             return True
-        if not self._commit_canvas_card_name():
+        if not self.inspector.commit_card_metadata(render_change=False):
             return False
-        return self.inspector.commit_card_metadata()
+        return self._commit_canvas_card_name(render_change=False)
 
     def _revision_selection_changed(self, index: int) -> None:
         if self._rendering or self._selected_card_id is None or index < 0:
@@ -777,6 +803,7 @@ class MainWindow(QMainWindow):
         if self.background_workflow is not None and self.background_workflow.busy:
             self._cancel_background_generation()
         if token is not None and self.controller.undo_if_current(token):
+            self._restore_card_selection(token, undoing=True)
             self.render_document()
 
     def _create_generated_revision(self) -> None:
@@ -982,15 +1009,30 @@ class MainWindow(QMainWindow):
         self._clear_undo_notification()
         if self.background_workflow is not None and self.background_workflow.busy:
             self._cancel_background_generation()
+        token = self.controller.current_undo_token
         if self.controller.undo():
+            self._restore_card_selection(token, undoing=True)
             self.render_document()
 
     def redo(self) -> None:
         self._clear_undo_notification()
         if self.background_workflow is not None and self.background_workflow.busy:
             self._cancel_background_generation()
+        token = self.controller.current_redo_token
         if self.controller.redo():
+            self._restore_card_selection(token, undoing=False)
             self.render_document()
+
+    def _restore_card_selection(
+        self,
+        token: UndoToken | None,
+        *,
+        undoing: bool,
+    ) -> None:
+        if token is None or token not in self._card_selection_history:
+            return
+        before, after = self._card_selection_history[token]
+        self._selected_card_id = before if undoing else after
 
     def _authoring_inputs_changed(self) -> None:
         if self.background_workflow is not None and self.background_workflow.busy:
@@ -1004,6 +1046,39 @@ class MainWindow(QMainWindow):
             self.new_stack()
         else:
             self.card_sidebar.add_card()
+
+    def _duplicate_card(self, requested_card_id: object = None) -> None:
+        if self._is_running or self.card_duplication_workflow is None:
+            return
+        card_id = (
+            requested_card_id
+            if isinstance(requested_card_id, UUID)
+            else self._selected_card_id
+        )
+        if card_id is None or card_id != self._selected_card_id:
+            return
+        if not self._commit_authoring_metadata():
+            return
+        if self.background_workflow is not None and self.background_workflow.busy:
+            self._cancel_background_generation()
+        self.notification_bar.clear_notification("card-error")
+        previous_selection = self._selected_card_id
+        try:
+            change = self.card_duplication_workflow.duplicate(card_id)
+        except CardDuplicationError as error:
+            self._show_error(
+                "card-error",
+                "Could not duplicate card",
+                detail=str(error),
+            )
+            return
+        self._selected_card_id = change.duplicate_card_id
+        self._card_selection_history[change.token] = (
+            previous_selection,
+            change.duplicate_card_id,
+        )
+        self.render_document(change.document)
+        self._show_undo_notification("Card duplicated", change.token)
 
     def _delete_card(self, card_id: object) -> None:
         if not isinstance(card_id, UUID):
@@ -1067,6 +1142,7 @@ class MainWindow(QMainWindow):
     def _document_replaced(self, _document: object) -> None:
         self._cancel_background_generation()
         self._clear_undo_notification()
+        self._card_selection_history.clear()
         self._rendered_card_id = None
         self._card_name_commit_failed = False
         self._set_canvas_card_name_error("")
@@ -1118,6 +1194,12 @@ class MainWindow(QMainWindow):
         )
         self.undo_action.setEnabled(bound and not self._is_running and self.controller.can_undo)
         self.redo_action.setEnabled(bound and not self._is_running and self.controller.can_redo)
+        self.duplicate_card_action.setEnabled(
+            bound
+            and not self._is_running
+            and self._selected_card_id is not None
+            and self.card_duplication_workflow is not None
+        )
         self.advanced_settings_action.setEnabled(not self._is_running)
         self.mode_button.setEnabled(bound)
         self.overlay_selector.setEnabled(bound and self._is_running)

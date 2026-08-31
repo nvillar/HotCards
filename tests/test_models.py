@@ -21,6 +21,7 @@ from hotcards.domain.models import (
     Card,
     CardRevision,
     DirectGenerateProvenance,
+    DuplicateProvenance,
     EditPreserveOptions,
     EditProvenance,
     GeneratedBackground,
@@ -543,6 +544,10 @@ def test_image_provenance_union_is_discriminated_strict_and_round_trips() -> Non
             edit_lineage=(accepted_edit,),
             settings=image_settings(width=1184, height=880),
         ),
+        DuplicateProvenance(
+            source=source,
+            original_provenance=image_provenance(),
+        ),
     )
     adapter = TypeAdapter(ImageProvenance)
 
@@ -563,6 +568,130 @@ def test_image_provenance_union_is_discriminated_strict_and_round_trips() -> Non
                 **image_provenance().model_dump(mode="python"),
                 "instruction": "Not a Generate field",
             }
+        )
+
+
+def test_duplicate_provenance_is_flattened_and_inherits_original_edit_lineage() -> None:
+    source = ImageSourceSnapshot(
+        card_id=uuid4(),
+        revision_id=uuid4(),
+        background_id=uuid4(),
+    )
+    accepted_edit = AcceptedEdit(
+        instruction="Open the gate.",
+        preserve=EditPreserveOptions(subject_identity=True),
+        expanded_prompt="Open the gate. Preserve subject identity.",
+    )
+    original = EditProvenance(
+        source=source,
+        instruction=accepted_edit.instruction,
+        preserve=accepted_edit.preserve,
+        expanded_prompt=accepted_edit.expanded_prompt,
+        resolution=GenerateResolution.RESOLUTION_512,
+        edit_lineage=(accepted_edit,),
+        settings=image_settings(),
+    )
+    duplicate = DuplicateProvenance(
+        source=source,
+        original_provenance=original,
+    )
+
+    assert duplicate.settings == original.settings
+    with pytest.raises(ValidationError, match="union_tag_invalid"):
+        DuplicateProvenance.model_validate(
+            {
+                "source": source.model_dump(mode="python"),
+                "original_provenance": duplicate.model_dump(mode="python"),
+            }
+        )
+
+
+def test_derived_operation_inherits_lineage_from_independent_duplicate() -> None:
+    original_source = ImageSourceSnapshot(
+        card_id=uuid4(),
+        revision_id=uuid4(),
+        background_id=uuid4(),
+    )
+    accepted_edit = AcceptedEdit(
+        instruction="Open the gate.",
+        preserve=EditPreserveOptions(subject_identity=True),
+        expanded_prompt="Open the gate. Preserve subject identity.",
+    )
+    original = EditProvenance(
+        source=original_source,
+        instruction=accepted_edit.instruction,
+        preserve=accepted_edit.preserve,
+        expanded_prompt=accepted_edit.expanded_prompt,
+        resolution=GenerateResolution.RESOLUTION_512,
+        edit_lineage=(accepted_edit,),
+        settings=image_settings(),
+    )
+    duplicate_card_id = uuid4()
+    duplicate_revision = CardRevision(
+        background=GeneratedBackground(
+            image_path="assets/cards/duplicate.png",
+            provenance=DuplicateProvenance(
+                source=original_source,
+                original_provenance=original,
+            ),
+            created_at=datetime.now(UTC),
+        )
+    )
+    assert duplicate_revision.background is not None
+    refined = CardRevision(
+        background=GeneratedBackground(
+            image_path="assets/cards/refined.png",
+            provenance=RefineProvenance(
+                source=ImageSourceSnapshot(
+                    card_id=duplicate_card_id,
+                    revision_id=duplicate_revision.id,
+                    background_id=duplicate_revision.background.id,
+                ),
+                description="Refined duplicate",
+                edit_lineage=(accepted_edit,),
+                render_prompt="Refined duplicate",
+                resolution=GenerateResolution.RESOLUTION_512,
+                transformation=RefineTransformation.BALANCED,
+                strength=0.50,
+                settings=image_settings(),
+            ),
+            created_at=datetime.now(UTC),
+        )
+    )
+
+    Stack(
+        name="Valid",
+        cards=(
+            Card(
+                id=duplicate_card_id,
+                name="Duplicate",
+                revisions=(duplicate_revision, refined),
+            ),
+        ),
+    )
+
+    assert refined.background is not None
+    invalid_refined = refined.model_copy(
+        update={
+            "background": refined.background.model_copy(
+                update={
+                    "provenance": refined.background.provenance.model_copy(
+                        update={"edit_lineage": ()}
+                    )
+                }
+            )
+        }
+    )
+    with pytest.raises(ValidationError, match="Refine lineage"):
+        Stack(
+            name="Invalid",
+            cards=(
+                Card(
+                    id=duplicate_card_id,
+                    name="Duplicate",
+                    revisions=(duplicate_revision, invalid_refined),
+                ),
+            ),
         )
 
 

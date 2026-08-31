@@ -7,6 +7,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QTimer, Signal, Slot
 
+from hotcards.application.commands import DocumentCommand
 from hotcards.application.document_controller import DocumentController
 from hotcards.domain.models import Stack
 from hotcards.storage.stack_store import StackStore, StackStoreError
@@ -120,6 +121,24 @@ class DocumentSession(QObject):
             raise DocumentSessionError(str(error)) from error
         self.controller.clear_history()
         return self._bind(store, stack, replace_document=False)
+
+    def execute_persisted(self, command: DocumentCommand) -> Stack:
+        """Apply one command only after its complete snapshot is durably saved."""
+        if self._store is None:
+            raise DocumentSessionError("Document is not bound to a .hotcards bundle")
+        self._timer.stop()
+        try:
+            document = self.controller.execute_persisted(command, self._store.save)
+        except StackStoreError as error:
+            self._error = str(error)
+            self._dirty = self._pending_snapshot is not None
+            self._emit_state()
+            raise DocumentSessionError(str(error)) from error
+        self._pending_snapshot = None
+        self._dirty = False
+        self._error = None
+        self._emit_state()
+        return document
 
     @Slot(object)
     def schedule_autosave(self, snapshot: object) -> None:
