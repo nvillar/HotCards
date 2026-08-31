@@ -38,8 +38,8 @@ from hotcards.generation.image_generation import (
     compose_generation_prompt,
 )
 from hotcards.generation.mflux_generator import (
-    MfluxGenerationRequest,
-    MfluxGenerationResult,
+    MfluxGenerateRequest,
+    MfluxGenerateResult,
     MfluxGenerator,
 )
 
@@ -106,7 +106,7 @@ def load_image_cases(case_dir: Path) -> tuple[ImageEvaluationCase, ...]:
 
 
 def _generation_record(
-    result: MfluxGenerationResult,
+    result: MfluxGenerateResult,
     output_dir: Path,
 ) -> dict[str, object]:
     return {
@@ -127,7 +127,7 @@ def _request(
     output_path: Path,
     model: str,
     settings: ImageEvaluationSettings,
-) -> MfluxGenerationRequest:
+) -> MfluxGenerateRequest:
     inputs = case.inputs.model_copy(
         update={"resolution": settings.resolution},
     )
@@ -135,7 +135,7 @@ def _request(
         settings.resolution,
         settings.aspect_ratio,
     )
-    return MfluxGenerationRequest(
+    return MfluxGenerateRequest(
         inputs=inputs,
         render_prompt=render_prompt,
         output_path=output_path,

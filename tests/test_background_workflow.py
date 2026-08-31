@@ -48,6 +48,7 @@ from hotcards.domain.models import (
     Stack,
     UnresolvedCardReference,
 )
+from hotcards.generation.errors import ImageGenerationCancelled
 from hotcards.generation.mflux_generator import MfluxGenerator
 from hotcards.storage.stack_store import StackStore
 
@@ -55,10 +56,11 @@ from hotcards.storage.stack_store import StackStore
 class FakeOperation(QObject):
     succeeded = Signal(object)
     failed = Signal(object)
+    cancelled = Signal()
 
     def __init__(self) -> None:
         super().__init__()
-        self.cancelled = False
+        self.was_cancelled = False
         self.finished_state = False
 
     @property
@@ -66,8 +68,9 @@ class FakeOperation(QObject):
         return self.finished_state
 
     def cancel(self) -> None:
-        self.cancelled = True
+        self.was_cancelled = True
         self.finished_state = True
+        self.cancelled.emit()
 
 
 class FakeWorkers:
@@ -420,6 +423,24 @@ def test_description_and_style_changes_suppress_in_flight_generation(
 
     assert controller.document.cards[0].active_revision.background is None
     assert all("changed before generation completed" in str(failure) for failure in failures)
+    assert not list((tmp_path / "temporary").glob("generated-*.png"))
+
+
+def test_cancelled_generation_cannot_publish_or_leave_output(tmp_path: Path) -> None:
+    workflow, controller, _session, workers, _model, card = _bound_workflow(tmp_path)
+    original = controller.document
+
+    workflow.generate(card.id)
+    operation = workers.operations[-1]
+    work = workers.calls[-1]
+    assert callable(work)
+
+    workflow.cancel()
+
+    assert operation.was_cancelled
+    with pytest.raises(ImageGenerationCancelled, match="cancelled"):
+        work()
+    assert controller.document == original
     assert not list((tmp_path / "temporary").glob("generated-*.png"))
 
 

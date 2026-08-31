@@ -55,6 +55,14 @@ revision cannot be deleted or have its background replaced while another
 retained revision derives from it. Deleting an entire card may remove an
 image-evolution chain contained wholly inside that card.
 
+The production MFLUX 0.19.1 adapter routes plain Generate and Refine through
+the regular model family, and Reference-backed Generate and Edit through the
+Edit family. Model loading and inference share one process-local serialized
+boundary with at most one compatible cached family/configuration. Cancellation
+discards candidate output, and changing the selected model releases the prior
+configuration. Refine and Edit execution primitives are not yet exposed as
+authoring workflows.
+
 Generated images are the only supported background source. Generate and image
 removal apply to the active revision through document commands. Completed
 generation can be kept there, moved into a new complete revision, or undone.

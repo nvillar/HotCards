@@ -38,8 +38,8 @@ from hotcards.evaluation.reports import create_contact_sheet
 from hotcards.generation.errors import ImageGenerationError, ModelLoadError
 from hotcards.generation.image_generation import compose_generation_prompt
 from hotcards.generation.mflux_generator import (
-    MfluxGenerationRequest,
-    MfluxGenerationResult,
+    MfluxGenerateRequest,
+    MfluxGenerateResult,
     MfluxGenerator,
 )
 
@@ -128,7 +128,7 @@ class StylePresetSettings(DomainModel):
 class ImageGeneratorProtocol(Protocol):
     """Production MFLUX surface consumed by the Style runner."""
 
-    def generate(self, request: MfluxGenerationRequest) -> MfluxGenerationResult: ...
+    def generate(self, request: MfluxGenerateRequest) -> MfluxGenerateResult: ...
 
 
 ImageGeneratorFactory = Callable[[], ImageGeneratorProtocol]
@@ -169,7 +169,7 @@ def compose_style_preset_prompt(description: str, prompt_text: str | None) -> st
 
 
 def _generation_record(
-    generated: MfluxGenerationResult,
+    generated: MfluxGenerateResult,
     *,
     output_dir: Path,
 ) -> dict[str, object]:
@@ -367,7 +367,7 @@ def _execute_style_preset_evaluation(
                 stage = f"render:{scene.case_id}:seed-{seed}:{style.style_id}"
                 lifecycle.set_stage(stage)
                 output_path = outputs_dir / scene.case_id / f"seed-{seed}" / f"{style.style_id}.png"
-                request = MfluxGenerationRequest(
+                request = MfluxGenerateRequest(
                     inputs=GenerateInputs(
                         description=scene.description,
                         style=style_snapshot,

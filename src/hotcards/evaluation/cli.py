@@ -119,11 +119,6 @@ def build_parser() -> argparse.ArgumentParser:
     references.add_argument("--quantization", type=int)
     _add_generation_dimensions(references)
     references.add_argument("--steps", type=_positive_int, default=4)
-    references.add_argument(
-        "--kv-cache",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-    )
     style_presets = subparsers.add_parser(
         "style-presets",
         help="screen proposed deterministic Style suffixes through MFLUX",
@@ -193,7 +188,6 @@ def run_cli(arguments: Sequence[str] | None = None) -> int:
                 resolution=args.resolution,
                 aspect_ratio=args.aspect_ratio,
                 step_count=args.steps,
-                use_kv_cache=args.kv_cache,
             )
         elif args.command == "style-presets":
             if args.validate_only:

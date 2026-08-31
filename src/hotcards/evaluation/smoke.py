@@ -33,7 +33,7 @@ from hotcards.generation.image_generation import (
     compose_generation_prompt,
 )
 from hotcards.generation.mflux_generator import (
-    MfluxGenerationRequest,
+    MfluxGenerateRequest,
     MfluxGenerator,
 )
 
@@ -127,7 +127,7 @@ def run_smoke(
             stage = f"image_generation_{phase}"
             lifecycle.set_stage(stage)
             generated = mflux.generate(
-                MfluxGenerationRequest(
+                MfluxGenerateRequest(
                     inputs=inputs,
                     render_prompt=render_prompt,
                     output_path=settings.output_dir / f"generated-{phase}.png",

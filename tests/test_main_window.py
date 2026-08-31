@@ -128,6 +128,7 @@ class FakeBackgroundWorkflow(QObject):
         self.generate_calls: list[object] = []
         self.clear_calls: list[object] = []
         self.cancel_calls = 0
+        self.release_model_calls = 0
         self.closed = False
 
     def generate(self, card_id: object) -> None:
@@ -177,6 +178,9 @@ class FakeBackgroundWorkflow(QObject):
 
     def close(self) -> None:
         self.closed = True
+
+    def release_model(self) -> None:
+        self.release_model_calls += 1
 
 
 @pytest.fixture(scope="module")
@@ -893,6 +897,7 @@ def test_bottom_model_selectors_persist_and_follow_operation_state(
     )
     assert settings.values["generation/mflux_model"] == "flux2-klein-9b-kv"
     assert window.image_model_combo.currentText() == "FLUX.2 Klein 9B KV"
+    assert background.release_model_calls == 1
 
     background.busy = True
     window._update_generation_actions()

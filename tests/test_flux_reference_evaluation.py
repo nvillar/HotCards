@@ -20,7 +20,6 @@ from hotcards.domain.models import (
 )
 from hotcards.evaluation.cli import build_parser
 from hotcards.evaluation.flux_references import (
-    _model_config,
     run_flux_reference_evaluation,
 )
 from hotcards.storage.stack_store import StackStore
@@ -131,13 +130,6 @@ def _write_reference_stack(tmp_path: Path) -> Path:
     return bundle
 
 
-def test_reference_model_config_selects_every_supported_variant() -> None:
-    assert _model_config("flux2-klein-4b", edit=True).model_name.endswith("klein-4B")
-    assert _model_config("flux2-klein-9b", edit=True).model_name.endswith("klein-9B")
-    assert _model_config("flux2-klein-9b-kv", edit=True).model_name.endswith("klein-9b-kv")
-    assert _model_config("flux2-klein-9b-kv", edit=False).model_name.endswith("klein-9B")
-
-
 def test_reference_cli_rejects_obsolete_arbitrary_dimensions() -> None:
     defaults = build_parser().parse_args(
         ["flux-references", "--stack", "Stack.hotcards"]
@@ -147,6 +139,12 @@ def test_reference_cli_rejects_obsolete_arbitrary_dimensions() -> None:
     with pytest.raises(SystemExit) as caught:
         build_parser().parse_args(
             ["flux-references", "--stack", "Stack.hotcards", "--width", "48"]
+        )
+
+    assert caught.value.code == 2
+    with pytest.raises(SystemExit) as caught:
+        build_parser().parse_args(
+            ["flux-references", "--stack", "Stack.hotcards", "--kv-cache"]
         )
 
     assert caught.value.code == 2
@@ -233,7 +231,7 @@ def test_reference_suite_isolates_failure_and_failed_dependency(
         for case in result["cases"]
         if case["generation"]["status"] == "failed"
     }
-    assert failed["building-new-view"] == "candidate failed"
+    assert failed["building-new-view"].endswith("candidate failed")
     assert "building-new-view" in failed["building-two-views"]
     failed_dependency = next(
         case for case in result["cases"] if case["case_id"] == "building-two-views"

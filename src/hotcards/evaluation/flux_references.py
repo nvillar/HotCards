@@ -6,12 +6,9 @@ import os
 import resource
 import shutil
 import subprocess
-from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
-from gc import collect
 from pathlib import Path
-from time import perf_counter
-from typing import Protocol
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from PIL import Image
 
@@ -20,7 +17,7 @@ from hotcards.domain.image_dimensions import (
     GenerateResolution,
     output_dimensions,
 )
-from hotcards.domain.models import GenerateInputs
+from hotcards.domain.models import GenerateInputs, ImageReferenceSnapshot
 from hotcards.evaluation.manifest import (
     EnvironmentProvider,
     RunLifecycle,
@@ -30,105 +27,20 @@ from hotcards.evaluation.manifest import (
 )
 from hotcards.evaluation.reports import create_contact_sheet
 from hotcards.generation.image_generation import compose_generation_prompt
+from hotcards.generation.mflux_generator import (
+    MfluxEditModelFactory,
+    MfluxGenerateRequest,
+    MfluxGenerator,
+    MfluxRegularModelFactory,
+)
 from hotcards.storage.stack_store import StackStore
 
 REFERENCE_RESULT_VERSION = "flux-reference-result-v1"
 
 
-class GeneratedImageProtocol(Protocol):
-    def save(self, path: Path, *, overwrite: bool) -> None: ...
-
-
-class ReferenceModelProtocol(Protocol):
-    def generate_image(
-        self,
-        *,
-        seed: int,
-        prompt: str,
-        num_inference_steps: int,
-        height: int,
-        width: int,
-        guidance: float,
-        image_paths: list[Path],
-        scheduler: str,
-        use_kv_cache: bool | None,
-    ) -> GeneratedImageProtocol: ...
-
-
-class SourceModelProtocol(Protocol):
-    def generate_image(
-        self,
-        *,
-        seed: int,
-        prompt: str,
-        num_inference_steps: int,
-        height: int,
-        width: int,
-        guidance: float,
-        scheduler: str,
-    ) -> GeneratedImageProtocol: ...
-
-
-ReferenceModelFactory = Callable[[str, int | None], ReferenceModelProtocol]
-SourceModelFactory = Callable[[str, int | None], SourceModelProtocol]
-
-
 def default_reference_output_dir() -> Path:
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S.%fZ")
     return Path("evals/runs") / f"flux-references-{timestamp}"
-
-
-def _model_config(model_identifier: str, *, edit: bool) -> object:
-    from mflux.models.common.config import ModelConfig
-
-    configurations = {
-        "flux2-klein-4b": ModelConfig.flux2_klein_4b,
-        "flux2-klein-9b": ModelConfig.flux2_klein_9b,
-        "flux2-klein-9b-kv": (
-            ModelConfig.flux2_klein_9b_kv if edit else ModelConfig.flux2_klein_9b
-        ),
-    }
-    configuration_factory = configurations.get(model_identifier)
-    if configuration_factory is None:
-        supported = ", ".join(sorted(configurations))
-        raise ValueError(
-            f"unsupported reference model {model_identifier!r}; choose one of: {supported}"
-        )
-    return configuration_factory()
-
-
-def _default_model_factory(
-    model_identifier: str,
-    quantization: int | None,
-) -> ReferenceModelProtocol:
-    from mflux.models.flux2.variants import Flux2KleinEdit
-
-    return Flux2KleinEdit(
-        quantize=quantization,
-        model_config=_model_config(model_identifier, edit=True),
-    )
-
-
-def _default_source_model_factory(
-    model_identifier: str,
-    quantization: int | None,
-) -> SourceModelProtocol:
-    from mflux.models.flux2.variants import Flux2Klein
-
-    return Flux2Klein(
-        quantize=quantization,
-        model_config=_model_config(model_identifier, edit=False),
-    )
-
-
-def _release_model_cache() -> None:
-    collect()
-    try:
-        import mlx.core as mx
-
-        mx.clear_cache()
-    except (AttributeError, ImportError):
-        return
 
 
 def _resident_bytes() -> int | None:
@@ -314,43 +226,56 @@ def _case_specs() -> tuple[dict[str, object], ...]:
 
 def _generate(
     *,
-    model: ReferenceModelProtocol,
+    generator: MfluxGenerator,
     output_path: Path,
     prompt: str,
-    image_paths: Sequence[Path],
+    reference_keys: tuple[str, ...],
+    image_paths: tuple[Path, ...],
+    references: dict[str, dict[str, object]],
     seed: int,
+    model_identifier: str,
+    quantization: int | None,
+    resolution: GenerateResolution,
+    aspect_ratio: AspectRatio,
     width: int,
     height: int,
     step_count: int,
-    use_kv_cache: bool | None,
 ) -> dict[str, object]:
-    output_path.parent.mkdir(parents=True, exist_ok=True)
     rss_before = _resident_bytes()
     peak_before = _peak_resident_bytes()
-    started = perf_counter()
-    generated = model.generate_image(
-        seed=seed,
-        prompt=prompt,
-        num_inference_steps=step_count,
-        height=height,
-        width=width,
-        guidance=1.0,
-        image_paths=list(image_paths),
-        scheduler="flow_match_euler_discrete",
-        use_kv_cache=use_kv_cache,
+    snapshots = tuple(
+        _reference_snapshot(key, references.get(key)) for key in reference_keys
     )
-    inference_seconds = perf_counter() - started
-    serialization_started = perf_counter()
-    generated.save(output_path, overwrite=False)
-    serialization_seconds = perf_counter() - serialization_started
-    _validate_png(output_path, (width, height))
+    inputs = GenerateInputs(
+        description=prompt,
+        references=snapshots,
+        resolution=resolution,
+    )
+    generated = generator.generate(
+        MfluxGenerateRequest(
+            output_path=output_path,
+            model_identifier=model_identifier,
+            aspect_ratio=aspect_ratio,
+            width=width,
+            height=height,
+            step_count=step_count,
+            quantization=quantization,
+            inputs=inputs,
+            render_prompt=prompt,
+            seed=seed,
+            reference_image_paths=image_paths,
+        )
+    )
     rss_after = _resident_bytes()
     peak_after = _peak_resident_bytes()
     return {
         "status": "success",
         "artifact_path": output_path,
-        "inference_seconds": inference_seconds,
-        "serialization_seconds": serialization_seconds,
+        "queue_seconds": generated.queue_duration_seconds,
+        "model_load_seconds": generated.load_duration_seconds,
+        "inference_seconds": generated.generation_duration_seconds,
+        "serialization_seconds": generated.serialization_duration_seconds,
+        "settings": generated.provenance.settings.model_dump(mode="json"),
         "resident_bytes_before": rss_before,
         "resident_bytes_after": rss_after,
         "resident_bytes_delta": (
@@ -362,77 +287,57 @@ def _generate(
             peak_after - peak_before if peak_before is not None and peak_after is not None else None
         ),
     }
+
+
+def _reference_snapshot(
+    key: str,
+    source: dict[str, object] | None,
+) -> ImageReferenceSnapshot:
+    identifiers: list[UUID] = []
+    for field in ("card_id", "revision_id", "background_id"):
+        value = source.get(field) if source is not None else None
+        identifiers.append(
+            UUID(value)
+            if isinstance(value, str)
+            else uuid5(NAMESPACE_URL, f"hotcards:flux-reference:{key}:{field}")
+        )
+    return ImageReferenceSnapshot(
+        card_id=identifiers[0],
+        revision_id=identifiers[1],
+        background_id=identifiers[2],
+    )
 
 
 def _generate_source(
     *,
-    model: SourceModelProtocol,
+    generator: MfluxGenerator,
     output_path: Path,
     prompt: str,
     seed: int,
+    model_identifier: str,
+    quantization: int | None,
+    resolution: GenerateResolution,
+    aspect_ratio: AspectRatio,
     width: int,
     height: int,
     step_count: int,
 ) -> dict[str, object]:
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    rss_before = _resident_bytes()
-    peak_before = _peak_resident_bytes()
-    started = perf_counter()
-    generated = model.generate_image(
-        seed=seed,
+    return _generate(
+        generator=generator,
+        output_path=output_path,
         prompt=prompt,
-        num_inference_steps=step_count,
-        height=height,
+        reference_keys=(),
+        image_paths=(),
+        references={},
+        seed=seed,
+        model_identifier=model_identifier,
+        quantization=quantization,
+        resolution=resolution,
+        aspect_ratio=aspect_ratio,
         width=width,
-        guidance=1.0,
-        scheduler="flow_match_euler_discrete",
+        height=height,
+        step_count=step_count,
     )
-    inference_seconds = perf_counter() - started
-    serialization_started = perf_counter()
-    generated.save(output_path, overwrite=False)
-    serialization_seconds = perf_counter() - serialization_started
-    _validate_png(output_path, (width, height))
-    rss_after = _resident_bytes()
-    peak_after = _peak_resident_bytes()
-    return {
-        "status": "success",
-        "artifact_path": output_path,
-        "inference_seconds": inference_seconds,
-        "serialization_seconds": serialization_seconds,
-        "resident_bytes_before": rss_before,
-        "resident_bytes_after": rss_after,
-        "resident_bytes_delta": (
-            rss_after - rss_before if rss_before is not None and rss_after is not None else None
-        ),
-        "peak_resident_bytes_before": peak_before,
-        "peak_resident_bytes_after": peak_after,
-        "peak_resident_bytes_delta": (
-            peak_after - peak_before if peak_before is not None and peak_after is not None else None
-        ),
-    }
-
-
-def _model_load_record(
-    *,
-    started: float,
-    rss_before: int | None,
-    peak_before: int | None,
-) -> dict[str, object]:
-    rss_after = _resident_bytes()
-    peak_after = _peak_resident_bytes()
-    return {
-        "duration_seconds": perf_counter() - started,
-        "resident_bytes_before": rss_before,
-        "resident_bytes_after": rss_after,
-        "resident_bytes_delta": (
-            rss_after - rss_before if rss_before is not None and rss_after is not None else None
-        ),
-        "peak_resident_bytes_before": peak_before,
-        "peak_resident_bytes_after": peak_after,
-        "peak_resident_bytes_delta": (
-            peak_after - peak_before if peak_before is not None and peak_after is not None else None
-        ),
-    }
 
 
 def run_flux_reference_evaluation(
@@ -445,9 +350,8 @@ def run_flux_reference_evaluation(
     resolution: GenerateResolution = GenerateResolution.RESOLUTION_1024,
     aspect_ratio: AspectRatio = AspectRatio.LANDSCAPE,
     step_count: int = 4,
-    use_kv_cache: bool | None = None,
-    model_factory: ReferenceModelFactory = _default_model_factory,
-    source_model_factory: SourceModelFactory = _default_source_model_factory,
+    model_factory: MfluxEditModelFactory | None = None,
+    source_model_factory: MfluxRegularModelFactory | None = None,
     environment_provider: EnvironmentProvider = default_environment,
 ) -> Path:
     """Run supported one- and two-Reference experiments with auditable inputs."""
@@ -462,8 +366,12 @@ def run_flux_reference_evaluation(
         "width": width,
         "height": height,
         "step_count": step_count,
-        "use_kv_cache": use_kv_cache,
+        "use_kv_cache": model_identifier == "flux2-klein-9b-kv",
     }
+    generator = MfluxGenerator(
+        model_factory=source_model_factory,
+        edit_model_factory=model_factory,
+    )
     lifecycle = RunLifecycle.create(
         run_dir=output_dir,
         suite="flux-references",
@@ -503,48 +411,31 @@ def run_flux_reference_evaluation(
             "sash tied at the waist, and a round brass shield. Centered neutral pose, "
             "entire silhouette visible, detailed restrained storybook illustration."
         )
-        lifecycle.set_stage("load-source-model")
-        source_load_rss = _resident_bytes()
-        source_load_peak = _peak_resident_bytes()
-        source_load_started = perf_counter()
-        source_model = source_model_factory(model_identifier, quantization)
-        source_model_load = _model_load_record(
-            started=source_load_started,
-            rss_before=source_load_rss,
-            peak_before=source_load_peak,
-        )
-        lifecycle.complete_stage("load-source-model")
         lifecycle.set_stage("source:character-identity")
         character_output = inputs_dir / "character_identity.png"
         character_generation = _generate_source(
-            model=source_model,
+            generator=generator,
             output_path=character_output,
             prompt=character_prompt,
             seed=seed,
+            model_identifier=model_identifier,
+            quantization=quantization,
+            resolution=resolution,
+            aspect_ratio=aspect_ratio,
             width=width,
             height=height,
             step_count=step_count,
         )
-        del source_model
-        _release_model_cache()
+        character_snapshot = _reference_snapshot("character_identity", None)
         references["character_identity"] = {
             "path": character_output,
+            "card_id": str(character_snapshot.card_id),
+            "revision_id": str(character_snapshot.revision_id),
+            "background_id": str(character_snapshot.background_id),
             "description": character_prompt,
             "generation": character_generation,
         }
         lifecycle.complete_stage("source:character-identity")
-
-        lifecycle.set_stage("load-edit-model")
-        edit_load_rss = _resident_bytes()
-        edit_load_peak = _peak_resident_bytes()
-        edit_load_started = perf_counter()
-        model = model_factory(model_identifier, quantization)
-        edit_model_load = _model_load_record(
-            started=edit_load_started,
-            rss_before=edit_load_rss,
-            peak_before=edit_load_peak,
-        )
-        lifecycle.complete_stage("load-edit-model")
 
         result["sources"] = {
             key: {
@@ -570,10 +461,13 @@ def run_flux_reference_evaluation(
             }
             for key, source in references.items()
         }
-        result["model_load"] = {
-            "source": source_model_load,
-            "edit": edit_model_load,
+        model_load: dict[str, object] = {
+            "source": {
+                "duration_seconds": character_generation["model_load_seconds"],
+            },
+            "edit": None,
         }
+        result["model_load"] = model_load
         atomic_write_json(result_path, result)
 
         cases: list[dict[str, object]] = result["cases"]  # type: ignore[assignment]
@@ -611,19 +505,37 @@ def run_flux_reference_evaluation(
                     path.relative_to(output_dir).as_posix() for path in image_paths
                 ]
                 generation = _generate(
-                    model=model,
+                    generator=generator,
                     output_path=output_path,
                     prompt=prompt,
-                    image_paths=image_paths,  # type: ignore[arg-type]
+                    reference_keys=reference_keys,
+                    image_paths=tuple(image_paths),  # type: ignore[arg-type]
+                    references=references,
                     seed=seed,
+                    model_identifier=model_identifier,
+                    quantization=quantization,
+                    resolution=resolution,
+                    aspect_ratio=aspect_ratio,
                     width=width,
                     height=height,
                     step_count=step_count,
-                    use_kv_cache=use_kv_cache,
                 )
+                if model_load["edit"] is None:
+                    model_load["edit"] = {
+                        "duration_seconds": generation["model_load_seconds"],
+                    }
                 generation["artifact_path"] = output_path.relative_to(output_dir).as_posix()
                 record["generation"] = generation
                 output_by_case[case_id] = output_path
+                if case_id == "building-new-view":
+                    snapshot = _reference_snapshot("building_new_view", None)
+                    references["building_new_view"] = {
+                        "path": output_path,
+                        "card_id": str(snapshot.card_id),
+                        "revision_id": str(snapshot.revision_id),
+                        "background_id": str(snapshot.background_id),
+                        "description": prompt,
+                    }
                 lifecycle.complete_stage(stage)
             except Exception as error:
                 record["generation"] = {
@@ -706,6 +618,8 @@ def run_flux_reference_evaluation(
             failure=result["failure"],  # type: ignore[arg-type]
         )
         raise
+    finally:
+        generator.release()
 
 
 __all__ = [

@@ -68,6 +68,9 @@ class FakeBackgroundWorkflow(QObject):
     def cancel(self) -> None:
         pass
 
+    def release_model(self) -> None:
+        pass
+
 
 class FakeSettings:
     def __init__(self) -> None:

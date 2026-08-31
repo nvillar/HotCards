@@ -92,6 +92,13 @@ for live MFLUX runs.
   source revision deletion or background replacement while any retained
   revision derives from it. Whole card deletion may remove dependencies wholly
   contained in that card, but must reject dependencies from retained cards.
+- Route all production and evaluation Generate, Refine, and Edit inference
+  through one typed MFLUX adapter. Plain Generate and Refine use the regular
+  family; Reference-backed Generate and Edit use the Edit family. Serialize
+  model loading and inference through one process-local boundary, cache at most
+  one compatible family/model/quantization configuration, and release it when
+  switching configuration. Cancellation while queued or running must publish
+  no output; interrupted active models must not be reused.
 - Keep one Description editor in the Background inspector. Place the Style
   selector above References and before Generate, show positional Reference
   guidance, and keep generation provenance in button tooltips. Keep inspector

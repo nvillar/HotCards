@@ -372,11 +372,11 @@ class EditPreserveOptions(DomainModel):
     """Six deterministic preservation controls captured for Edit."""
 
     subject_identity: bool = False
-    composition: bool = False
-    camera: bool = False
-    lighting: bool = False
-    color_palette: bool = False
-    visual_style: bool = False
+    pose_and_expression: bool = False
+    composition_and_framing: bool = False
+    background: bool = False
+    lighting_and_color: bool = False
+    existing_text_and_logos: bool = False
 
 
 class AcceptedEdit(DomainModel):

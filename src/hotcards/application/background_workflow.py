@@ -43,8 +43,9 @@ from hotcards.domain.models import (
 )
 from hotcards.generation.image_generation import compose_generation_prompt
 from hotcards.generation.mflux_generator import (
-    MfluxGenerationRequest,
-    MfluxGenerationResult,
+    MfluxCancellationToken,
+    MfluxGenerateRequest,
+    MfluxGenerateResult,
     MfluxGenerator,
 )
 from hotcards.storage.stack_store import StackStore, StackStoreError
@@ -134,6 +135,8 @@ class BackgroundWorkflow(QObject):
         self._request_id: UUID | None = None
         self._request_target: _GenerationTarget | None = None
         self._pending_image_path: Path | None = None
+        self._active_output_path: Path | None = None
+        self._cancellation: MfluxCancellationToken | None = None
         self._busy = False
 
     @property
@@ -189,7 +192,7 @@ class BackgroundWorkflow(QObject):
             revision.generate_resolution,
             document.aspect_ratio,
         )
-        request = MfluxGenerationRequest(
+        request = MfluxGenerateRequest(
             inputs=inputs,
             render_prompt=render_prompt,
             output_path=output_path,
@@ -204,6 +207,9 @@ class BackgroundWorkflow(QObject):
             quantization=settings.quantization,
             reference_image_paths=reference_image_paths,
         )
+        cancellation = MfluxCancellationToken()
+        self._cancellation = cancellation
+        self._active_output_path = output_path
         self._set_busy(True, "Generating image...")
         operation = self.workers.run_mflux(
             lambda: self._mflux_generator.generate(
@@ -212,10 +218,12 @@ class BackgroundWorkflow(QObject):
                     self._generation_progress,
                     request_id,
                 ),
+                cancellation=cancellation,
             ),
             stage="generating background image",
         )
         self._operation = operation
+        operation.cancelled.connect(cancellation.cancel)
         operation.succeeded.connect(
             partial(self._generation_succeeded, request_id, target, asset_id)
         )
@@ -278,19 +286,27 @@ class BackgroundWorkflow(QObject):
         return changed
 
     def cancel(self) -> None:
+        if self._cancellation is not None:
+            self._cancellation.cancel()
         if self._operation is not None and not self._operation.is_finished:
             self._operation.cancel()
         self._request_id = None
         self._request_target = None
         self._operation = None
         self._discard_pending_image()
+        self._discard_active_output()
         if self._busy:
             self._set_busy(False, "Generation cancelled")
 
     def close(self) -> None:
         self.cancel()
+        self._mflux_generator.release()
         if self._owned_temporary_directory is not None:
             self._owned_temporary_directory.cleanup()
+
+    def release_model(self) -> None:
+        """Release the process-local model cached for this workflow."""
+        self._mflux_generator.release()
 
     def is_generating_for(self, card_id: UUID) -> bool:
         return (
@@ -307,10 +323,10 @@ class BackgroundWorkflow(QObject):
         result: object,
     ) -> None:
         if request_id != self._request_id:
-            if isinstance(result, MfluxGenerationResult):
+            if isinstance(result, MfluxGenerateResult):
                 result.output_path.unlink(missing_ok=True)
             return
-        if not isinstance(result, MfluxGenerationResult):
+        if not isinstance(result, MfluxGenerateResult):
             self._finish_with_error(
                 BackgroundWorkflowError("image generation returned an unexpected result")
             )
@@ -360,6 +376,8 @@ class BackgroundWorkflow(QObject):
             self._finish_with_error(error)
             return
         self._pending_image_path = None
+        self._active_output_path = None
+        self._cancellation = None
         result.output_path.unlink(missing_ok=True)
         self._operation = None
         self._request_id = None
@@ -431,7 +449,9 @@ class BackgroundWorkflow(QObject):
         self._operation = None
         self._request_id = None
         self._request_target = None
+        self._cancellation = None
         self._discard_pending_image()
+        self._discard_active_output()
         self._set_busy(False, "Image generation failed")
         self.failed.emit(failure)
 
@@ -439,6 +459,11 @@ class BackgroundWorkflow(QObject):
         if self._pending_image_path is not None:
             self._pending_image_path.unlink(missing_ok=True)
             self._pending_image_path = None
+
+    def _discard_active_output(self) -> None:
+        if self._active_output_path is not None:
+            self._active_output_path.unlink(missing_ok=True)
+            self._active_output_path = None
 
     def _set_busy(self, busy: bool, progress: str) -> None:
         self._busy = busy

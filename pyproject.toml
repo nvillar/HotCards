@@ -7,7 +7,7 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
-    "mflux>=0.18.0",
+    "mflux>=0.19.1",
     "pillow>=12",
     "pydantic>=2",
     "pyside6>=6.11.1",

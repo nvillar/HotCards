@@ -15,3 +15,7 @@ class ModelLoadError(GenerationError):
 
 class ImageGenerationError(GenerationError):
     """MFLUX failed while generating or saving an image."""
+
+
+class ImageGenerationCancelled(GenerationError):
+    """A queued or active MFLUX image operation was explicitly cancelled."""

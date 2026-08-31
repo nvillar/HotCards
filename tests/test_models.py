@@ -511,7 +511,7 @@ def test_image_provenance_union_is_discriminated_strict_and_round_trips() -> Non
     )
     preserve = EditPreserveOptions(
         subject_identity=True,
-        composition=True,
+        composition_and_framing=True,
     )
     accepted_edit = AcceptedEdit(
         instruction="Open the gate.",
@@ -569,6 +569,35 @@ def test_image_provenance_union_is_discriminated_strict_and_round_trips() -> Non
 def test_direct_generate_provenance_requires_authored_inputs() -> None:
     with pytest.raises(ValidationError, match="nonempty Description"):
         GenerateInputs(description=" \n ")
+
+
+def test_edit_preserve_options_use_only_approved_serialized_categories() -> None:
+    preserve = EditPreserveOptions(
+        subject_identity=True,
+        pose_and_expression=True,
+        composition_and_framing=True,
+        background=True,
+        lighting_and_color=True,
+        existing_text_and_logos=True,
+    )
+
+    assert preserve.model_dump(mode="json") == {
+        "subject_identity": True,
+        "pose_and_expression": True,
+        "composition_and_framing": True,
+        "background": True,
+        "lighting_and_color": True,
+        "existing_text_and_logos": True,
+    }
+    for obsolete_name in (
+        "composition",
+        "camera",
+        "lighting",
+        "color_palette",
+        "visual_style",
+    ):
+        with pytest.raises(ValidationError, match="extra_forbidden"):
+            EditPreserveOptions.model_validate({obsolete_name: True})
 
 
 def test_refine_and_edit_provenance_enforce_operation_invariants() -> None:
@@ -692,12 +721,12 @@ def test_multistep_refine_and_edit_lineage_must_match_resolved_sources() -> None
     )
     edit_two = AcceptedEdit(
         instruction="Add ivy.",
-        preserve=EditPreserveOptions(composition=True),
+        preserve=EditPreserveOptions(composition_and_framing=True),
         expanded_prompt="Add ivy. Preserve composition.",
     )
     edit_three = AcceptedEdit(
         instruction="Light the lanterns.",
-        preserve=EditPreserveOptions(color_palette=True),
+        preserve=EditPreserveOptions(lighting_and_color=True),
         expanded_prompt="Light the lanterns. Preserve the color palette.",
     )
     direct = CardRevision(
