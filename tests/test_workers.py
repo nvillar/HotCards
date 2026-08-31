@@ -76,13 +76,16 @@ def test_mflux_success_runs_off_the_main_thread() -> None:
 
 
 def test_mflux_operations_share_one_stable_invocation_thread() -> None:
-    workers = AdapterWorkers(mflux_timeout_seconds=0.5)
-    first = workers.run_mflux(
+    first_workers = AdapterWorkers(mflux_timeout_seconds=0.5)
+    first = first_workers.run_mflux(
         current_thread,
         stage="generating first image",
     )
     wait_for(first)
-    second = workers.run_mflux(
+    first_workers.shutdown(wait_milliseconds=500)
+
+    second_workers = AdapterWorkers(mflux_timeout_seconds=0.5)
+    second = second_workers.run_mflux(
         current_thread,
         stage="generating second image",
     )
@@ -91,7 +94,7 @@ def test_mflux_operations_share_one_stable_invocation_thread() -> None:
     assert first.status is OperationStatus.SUCCEEDED
     assert second.status is OperationStatus.SUCCEEDED
     assert second.result is first.result
-    workers.shutdown(wait_milliseconds=500)
+    second_workers.shutdown(wait_milliseconds=500)
 
 
 def test_cached_mflux_model_is_reused_on_its_creation_thread(
@@ -119,16 +122,19 @@ def test_cached_mflux_model_is_reused_on_its_creation_thread(
         return model
 
     generator = MfluxGenerator(model_factory=model_factory)  # type: ignore[arg-type]
-    workers = AdapterWorkers(mflux_timeout_seconds=0.5)
+    workers = [
+        AdapterWorkers(mflux_timeout_seconds=0.5),
+        AdapterWorkers(mflux_timeout_seconds=0.5),
+    ]
     operations = []
-    for name in ("first", "second"):
+    for name, worker in zip(("first", "second"), workers, strict=True):
         request = MfluxGenerateRequest(
             output_path=tmp_path / f"{name}.png",
             inputs=GenerateInputs(description=f"{name} image"),
             render_prompt=f"{name} image",
             seed=42,
         )
-        operation = workers.run_mflux(
+        operation = worker.run_mflux(
             lambda request=request: generator.generate(request),
             stage=f"generating {name} image",
             dispose_result=dispose_mflux_result,
@@ -142,6 +148,33 @@ def test_cached_mflux_model_is_reused_on_its_creation_thread(
     ]
     assert len(models) == 1
     generator.release()
+    for worker in workers:
+        worker.shutdown(wait_milliseconds=500)
+
+
+def test_invocation_callback_failure_does_not_break_later_work(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    workers = AdapterWorkers(mflux_timeout_seconds=0.5)
+
+    def fail_completion() -> None:
+        raise RuntimeError("injected completion failure")
+
+    first = workers.run_mflux(
+        lambda: "first",
+        stage="generating first image",
+        invocation_finished=fail_completion,
+    )
+    wait_for(first)
+    second = workers.run_mflux(
+        lambda: "second",
+        stage="generating second image",
+    )
+    wait_for(second)
+
+    assert first.result == "first"
+    assert second.result == "second"
+    assert "MFLUX invocation lifecycle cleanup failed" in caplog.text
     workers.shutdown(wait_milliseconds=500)
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
@@ -20,6 +21,8 @@ from hotcards.generation.errors import (
     ModelLoadError,
     ModelUnavailableError,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class AdapterKind(StrEnum):
@@ -186,16 +189,11 @@ class _InvocationTask:
     outcomes: Queue[_Success | _Error]
 
 
-_STOP_INVOCATIONS = object()
-
-
 class _InvocationThread:
     """Keep thread-affine adapter state on one daemon thread."""
 
     def __init__(self) -> None:
-        self._tasks: Queue[_InvocationTask | object] = Queue()
-        self._lock = Lock()
-        self._closed = False
+        self._tasks: Queue[_InvocationTask] = Queue()
         self._thread = Thread(
             target=self._run,
             name="hotcards-mflux-invocations",
@@ -204,40 +202,39 @@ class _InvocationThread:
         self._thread.start()
 
     def submit(self, task: _InvocationTask) -> None:
-        with self._lock:
-            if self._closed:
-                raise RuntimeError("adapter invocation thread is shut down")
-            self._tasks.put(task)
-
-    def shutdown(self) -> None:
-        with self._lock:
-            if self._closed:
-                return
-            self._closed = True
-            self._tasks.put(_STOP_INVOCATIONS)
+        self._tasks.put(task)
 
     def _run(self) -> None:
         while True:
             task = self._tasks.get()
-            if task is _STOP_INVOCATIONS:
-                return
-            assert isinstance(task, _InvocationTask)
             try:
-                try:
-                    outcome: _Success | _Error = _Success(
-                        task.operation(),
-                        task.dispose_result,
-                    )
-                except Exception as error:
-                    outcome = _Error(error)
-                if not isinstance(outcome, _Success) or task.cancellation.offer_success(outcome):
-                    task.outcomes.put(outcome)
+                self._invoke(task)
+            except Exception:
+                logger.exception("MFLUX invocation lifecycle cleanup failed")
+
+    @staticmethod
+    def _invoke(task: _InvocationTask) -> None:
+        try:
+            if task.cancellation.event.is_set():
+                return
+            try:
+                outcome: _Success | _Error = _Success(
+                    task.operation(),
+                    task.dispose_result,
+                )
+            except Exception as error:
+                outcome = _Error(error)
+            if not isinstance(outcome, _Success) or task.cancellation.offer_success(outcome):
+                task.outcomes.put(outcome)
+        finally:
+            try:
+                if task.invocation_finished is not None:
+                    task.invocation_finished()
             finally:
-                try:
-                    if task.invocation_finished is not None:
-                        task.invocation_finished()
-                finally:
-                    task.invocation_slots.release()
+                task.invocation_slots.release()
+
+
+_PROCESS_MFLUX_INVOCATIONS = _InvocationThread()
 
 
 class _CancellationControl:
@@ -420,7 +417,7 @@ class AdapterWorkers(QObject):
         self._invocation_slots = {
             AdapterKind.MFLUX: BoundedSemaphore(1),
         }
-        self._invocation_thread = _InvocationThread()
+        self._invocation_thread = _PROCESS_MFLUX_INVOCATIONS
         self._dispatcher = _CompletionDispatcher(self)
         self._dispatcher.completed.connect(self._complete)
         self._deadline_timer = QTimer(self)
@@ -490,7 +487,6 @@ class AdapterWorkers(QObject):
         self._mflux_pool.clear()
         self._records.clear()
         self._deadline_timer.stop()
-        self._invocation_thread.shutdown()
         if wait_milliseconds > 0:
             self._mflux_pool.waitForDone(wait_milliseconds)
 
