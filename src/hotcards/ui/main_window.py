@@ -339,6 +339,7 @@ class MainWindow(QMainWindow):
             geometry = self.settings.value(self._STYLE_MANAGER_GEOMETRY_KEY)
             if geometry is not None:
                 window.restoreGeometry(geometry)
+            window.resize(UTILITY_WINDOW_WIDTH, UTILITY_WINDOW_HEIGHT)
         window.set_mutation_allowed(not self.controller.mutation_blocked)
         window.render(self.controller.document)
         window.show()
@@ -414,6 +415,7 @@ class MainWindow(QMainWindow):
             geometry = self.settings.value(self._KEY_MANAGER_GEOMETRY_KEY)
             if geometry is not None:
                 window.restoreGeometry(geometry)
+            window.resize(UTILITY_WINDOW_WIDTH, UTILITY_WINDOW_HEIGHT)
         window.set_mutation_allowed(not self.controller.mutation_blocked)
         window.render(self.controller.document)
         window.show()

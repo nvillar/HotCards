@@ -54,7 +54,7 @@ from hotcards.domain.models import (
 )
 
 UTILITY_WINDOW_WIDTH = 420
-UTILITY_WINDOW_HEIGHT = 560
+UTILITY_WINDOW_HEIGHT = 600
 UTILITY_USAGE_LIST_HEIGHT = 70
 
 
@@ -171,6 +171,16 @@ class _ControllerUtilityWindow(QWidget):
         self._discard_pending_on_close = True
         return self.close()
 
+    def _add_done_button(self, layout: QVBoxLayout) -> None:
+        button_row = QHBoxLayout()
+        button_row.addStretch(1)
+        self.done_button = QPushButton("Done")
+        self.done_button.setObjectName("doneButton")
+        self.done_button.setAccessibleName("Done")
+        self.done_button.clicked.connect(self.close)
+        button_row.addWidget(self.done_button)
+        layout.addLayout(button_row)
+
     def commit_pending_edits(self, *, render_change: bool) -> bool:
         raise NotImplementedError
 
@@ -258,6 +268,7 @@ class StyleManagerWindow(_ControllerUtilityWindow):
         self.error_label.setWordWrap(True)
         self.error_label.setVisible(False)
         layout.addWidget(self.error_label)
+        self._add_done_button(layout)
 
         self.style_list.currentItemChanged.connect(self._selection_changed)
         self.add_button.clicked.connect(self._add_style)
@@ -534,6 +545,7 @@ class KeyManagerWindow(_ControllerUtilityWindow):
         self.error_label.setWordWrap(True)
         self.error_label.setVisible(False)
         layout.addWidget(self.error_label)
+        self._add_done_button(layout)
 
         self.key_list.currentItemChanged.connect(self._selection_changed)
         self.add_button.clicked.connect(self._add_key)
@@ -907,6 +919,7 @@ class SoundManagerWindow(_ControllerUtilityWindow):
         self.error_label.setWordWrap(True)
         self.error_label.setVisible(False)
         layout.addWidget(self.error_label)
+        self._add_done_button(layout)
 
         self.sound_list.currentItemChanged.connect(self._selection_changed)
         self.add_button.clicked.connect(self._add_sound)

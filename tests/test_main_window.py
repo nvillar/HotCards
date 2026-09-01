@@ -420,9 +420,15 @@ def test_author_utility_windows_are_modeless_singletons_and_reopen(
         window.sound_manager_window,
         window.key_manager_window,
     )
-    assert {manager.size() for manager in managers} == {QSize(420, 560)}
+    assert {manager.size() for manager in managers} == {QSize(420, 600)}
     assert all(
         manager.windowFlags() & Qt.WindowType.WindowStaysOnTopHint
+        for manager in managers
+    )
+    assert all(manager.done_button.text() == "Done" for manager in managers)
+    assert all(
+        manager.done_button.geometry().right()
+        <= manager.done_button.parentWidget().contentsRect().right()
         for manager in managers
     )
     assert not hasattr(window.sound_manager_window, "model_label")
@@ -431,6 +437,12 @@ def test_author_utility_windows_are_modeless_singletons_and_reopen(
     )
     assert window.sound_manager_window.usage_list.height() == 70
     assert window.key_manager_window.usage_list.height() == 70
+    for manager in managers:
+        manager.done_button.click()
+    application.processEvents()
+    assert window.style_manager_window is None
+    assert window.sound_manager_window is None
+    assert window.key_manager_window is None
     window.close()
     application.processEvents()
 
