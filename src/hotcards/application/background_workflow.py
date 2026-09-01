@@ -650,7 +650,11 @@ class BackgroundWorkflow(QObject):
             )
         try:
             settings = self._settings_provider()
-            expanded_prompt = compose_edit_prompt(normalized_instruction)
+            style = self._style_snapshot(document, revision)
+            expanded_prompt = compose_edit_prompt(
+                normalized_instruction,
+                style,
+            )
         except Exception:
             self._cleanup_source_snapshot_if_idle()
             raise
@@ -682,7 +686,7 @@ class BackgroundWorkflow(QObject):
             instruction=normalized_instruction,
             preserve=preserve,
             expanded_prompt=expanded_prompt,
-            style=self._style_snapshot(document, revision),
+            style=style,
             edit_lineage=edit_lineage,
             aspect_ratio=document.aspect_ratio,
             output_size=output_size,

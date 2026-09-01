@@ -744,10 +744,10 @@ class MfluxGenerator:
                 )
                 if prompt_token_count > EDIT_PROMPT_TOKEN_BUDGET:
                     raise ImageGenerationError(
-                        "Edit Instruction expands to "
+                        "The effective Edit prompt uses "
                         f"{prompt_token_count} model tokens; the limit is "
-                        f"{EDIT_PROMPT_TOKEN_BUDGET}. Shorten the instruction "
-                        "or select fewer Preserve options."
+                        f"{EDIT_PROMPT_TOKEN_BUDGET}. Shorten the Edit Instruction "
+                        "or the selected Style text."
                     )
             try:
                 progress_callback = self._progress_callback_for(

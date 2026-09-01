@@ -153,6 +153,34 @@ def test_edit_prompt_trims_instruction_and_preserves_every_unrequested_detail() 
     )
 
 
+def test_edit_prompt_injects_selected_style_after_the_authored_instruction() -> None:
+    style = StyleSnapshot(
+        style_id=uuid4(),
+        name="Ink",
+        prompt_text="Rendered with bold black ink contours.",
+    )
+
+    result = compose_edit_prompt("Open the garden gate.", style)
+
+    assert result.endswith(
+        "Unless the Edit Instruction explicitly changes the visual treatment, "
+        "keep the result consistent with this selected Style:\n\n"
+        "Rendered with bold black ink contours."
+    )
+    assert result.index("Open the garden gate.") < result.index(style.prompt_text)
+
+
+def test_blank_selected_style_does_not_change_edit_prompt() -> None:
+    instruction = "Open the garden gate."
+    style = StyleSnapshot(
+        style_id=uuid4(),
+        name="Draft Style",
+        prompt_text="",
+    )
+
+    assert compose_edit_prompt(instruction, style) == compose_edit_prompt(instruction)
+
+
 @pytest.mark.parametrize("value", ("", "   "))
 def test_edit_prompt_requires_instruction(value: str) -> None:
     with pytest.raises(ValueError, match="Edit Instruction"):

@@ -65,22 +65,30 @@ def compose_refine_prompt(
     return "\n\n".join(parts)
 
 
-def compose_edit_prompt(instruction: str) -> str:
+def compose_edit_prompt(
+    instruction: str,
+    style: StyleSnapshot | None = None,
+) -> str:
     """Build the exact deterministic minimal-change Flux Edit prompt."""
     normalized_instruction = instruction.strip()
     if not normalized_instruction:
         raise ValueError("enter an Edit Instruction before editing")
-    return "\n\n".join(
-        (
-            f"Edit the provided image according to this instruction:\n\n{normalized_instruction}",
-            "The source image is authoritative for everything not explicitly "
-            "changed by the instruction. Make only the requested change and the "
-            "minimum accompanying changes necessary for visual coherence. Preserve "
-            "all other subjects, identities, objects, text, composition, framing, "
-            "background, lighting, colors, and visual style. Do not add, remove, or "
-            "reinterpret unrelated details.",
+    parts = [
+        f"Edit the provided image according to this instruction:\n\n{normalized_instruction}",
+        "The source image is authoritative for everything not explicitly "
+        "changed by the instruction. Make only the requested change and the "
+        "minimum accompanying changes necessary for visual coherence. Preserve "
+        "all other subjects, identities, objects, text, composition, framing, "
+        "background, lighting, colors, and visual style. Do not add, remove, or "
+        "reinterpret unrelated details.",
+    ]
+    if style is not None and style.prompt_text.strip():
+        parts.append(
+            "Unless the Edit Instruction explicitly changes the visual treatment, "
+            "keep the result consistent with this selected Style:\n\n"
+            f"{style.prompt_text.strip()}"
         )
-    )
+    return "\n\n".join(parts)
 
 
 __all__ = [

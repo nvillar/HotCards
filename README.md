@@ -103,12 +103,15 @@ rollback-safe transaction, and Undo/Redo retain its owned asset only while
 needed.
 
 Edit is also an automatic-version workflow for the current canvas image. It
-sends that image alone to Flux2KleinEdit with the authored Edit Instruction.
-The source image is authoritative: only the requested change and the minimum
-accompanying changes needed for visual coherence should be made, while all
-unrelated details are preserved. Description, Style, and Generate References
-are copied into the new revision but are not model inputs. The expanded prompt
-is deterministic and must fit the model's 512-token budget without truncation.
+sends that image alone to Flux2KleinEdit with the authored Edit Instruction and
+the selected Style text injected behind the UI to maintain visual continuity.
+The authored instruction takes precedence when it explicitly changes the visual
+treatment. The source image is authoritative: only the requested change and the
+minimum accompanying changes needed for visual coherence should be made, while
+all unrelated details are preserved. Description and Generate References are
+copied into the new revision but are not model inputs. The expanded prompt is
+deterministic, retained in provenance, and must fit the model's 512-token budget
+without truncation.
 Output defaults to the current image's exact decoded dimensions, including
 aligned non-preset sizes, and also offers only named tiers with strictly greater
 pixel area. Each Edit

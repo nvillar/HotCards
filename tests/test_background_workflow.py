@@ -522,11 +522,12 @@ def test_edit_uses_only_secure_current_image_and_creates_complete_version(
         width=512,
         height=384,
     )
-    assert style.prompt_text not in provenance.expanded_prompt
+    assert style.prompt_text in provenance.expanded_prompt
     assert "visual style" in provenance.expanded_prompt
     assert provenance.settings.seed == 8675309
     assert provenance.prompt_token_count == 24
     assert model.calls[-1]["image_paths"] == [snapshot_path]
+    assert model.calls[-1]["prompt"] == provenance.expanded_prompt
     assert "image_path" not in model.calls[-1]
     assert "image_strength" not in model.calls[-1]
     assert "description" not in model.calls[-1]
