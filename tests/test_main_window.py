@@ -18,7 +18,7 @@ from PIL import Image
 from PySide6.QtCore import QObject, QSize, Qt, Signal
 from PySide6.QtGui import QCloseEvent, QColor, QKeySequence, QPixmap
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QLabel
+from PySide6.QtWidgets import QApplication, QDialog, QLabel
 
 import hotcards.generation.mflux_generator as mflux_module
 import hotcards.ui.main_window as main_window_module
@@ -1794,8 +1794,8 @@ def test_author_and_run_modes_apply_consistent_read_only_chrome(
     assert not window.overlay_selector.isHidden()
     assert not hasattr(window, "llm_model_label")
     assert not hasattr(window, "llm_model_combo")
-    assert window.image_model_label.isHidden()
-    assert window.image_model_combo.isHidden()
+    assert not hasattr(window, "image_model_label")
+    assert not hasattr(window, "image_model_combo")
     assert window.styles_button.isHidden()
     assert window.keys_button.isHidden()
     assert window.style_manager_window is None
@@ -1811,8 +1811,6 @@ def test_author_and_run_modes_apply_consistent_read_only_chrome(
     assert not window.revision_combo.isHidden()
     assert window.revision_combo.isEnabled()
     assert not window.add_revision_button.isHidden()
-    assert not window.image_model_label.isHidden()
-    assert not window.image_model_combo.isHidden()
     assert not window.styles_button.isHidden()
     assert not window.keys_button.isHidden()
     assert not window.run_controls_separator.isVisible()
@@ -1844,7 +1842,8 @@ def test_status_bar_is_passive_and_ai_recovery_uses_notification_bar(
     assert not hasattr(window, "check_services_button")
     assert not hasattr(window, "review_settings_button")
     assert not hasattr(window, "service_status_label")
-    assert "MFLUX is unavailable" in window.image_model_combo.toolTip()
+    assert not hasattr(window, "image_model_combo")
+    assert "MFLUX is unavailable" in window._service_status_detail
     assert window.notification_bar.current_key == "ai-services"
     assert window.notification_bar.primary_button.text() == "Settings"
     assert window.notification_bar.secondary_button.text() == "Check Again"
@@ -1875,25 +1874,51 @@ def test_status_bar_is_passive_and_ai_recovery_uses_notification_bar(
     assert window.notification_bar.current_key == "undo"
 
 
-def test_bottom_model_selectors_persist_and_follow_operation_state(
+def test_settings_models_menu_persists_image_model_and_cancels_active_work(
     application: QApplication,
 ) -> None:
-    window, _controller, _workers, background = _window()
-    settings = window.settings
-    assert isinstance(settings, FakeSettings)
+    settings = FakeSettings()
+    controller = DocumentController(_stack())
+    workers = FakeWorkers()
+    background = FakeBackgroundWorkflow(controller)
+    sound_workflow = FakeSoundWorkflow()
 
-    window.image_model_combo.setCurrentIndex(window.image_model_combo.findData("flux2-klein-9b-kv"))
+    class AcceptedModelDialog:
+        def __init__(self, settings_store: FakeSettings, _parent: object) -> None:
+            self.settings_store = settings_store
+
+        def exec(self) -> QDialog.DialogCode:
+            self.settings_store.setValue(
+                "generation/mflux_model",
+                "flux2-klein-9b-kv",
+            )
+            return QDialog.DialogCode.Accepted
+
+    window = MainWindow(
+        controller,
+        workers,  # type: ignore[arg-type]
+        settings,
+        availability_checks={AdapterKind.MFLUX: lambda: None},
+        settings_dialog_factory=AcceptedModelDialog,  # type: ignore[arg-type]
+        background_workflow=background,  # type: ignore[arg-type]
+        sound_workflow=sound_workflow,  # type: ignore[arg-type]
+        start_diagnostics=False,
+    )
+
+    assert window.settings_menu.title() == "Settings"
+    assert [action.text() for action in window.settings_menu.actions()] == ["Models…"]
+    assert not hasattr(window, "image_model_label")
+    assert not hasattr(window, "image_model_combo")
+
+    window.models_action.trigger()
+
     assert settings.values["generation/mflux_model"] == "flux2-klein-9b-kv"
-    assert window.image_model_combo.currentText() == "FLUX.2 Klein 9B KV"
     assert background.cancel_calls == 1
+    assert sound_workflow.cancel_calls == 0
+    assert len(workers.mflux_operations) == 1
 
-    background.busy = True
-    window._update_generation_actions()
-    assert not window.image_model_combo.isEnabled()
-
-    background.busy = False
     window.mode_button.click()
-    assert not window.image_model_combo.isEnabled()
+    assert not window.models_action.isEnabled()
 
 
 def test_timed_out_mflux_model_change_and_window_close_never_block_qt_thread(
@@ -1959,10 +1984,24 @@ def test_timed_out_mflux_model_change_and_window_close_never_block_qt_thread(
         mflux_generator=MfluxGenerator(model_factory=lambda *_: BlockingModel()),
     )
     temporary_directory = workflow._temporary_directory
+    settings = FakeSettings()
+
+    class AcceptedModelDialog:
+        def __init__(self, settings_store: FakeSettings, _parent: object) -> None:
+            self.settings_store = settings_store
+
+        def exec(self) -> QDialog.DialogCode:
+            self.settings_store.setValue(
+                "generation/mflux_model",
+                "flux2-klein-9b-kv",
+            )
+            return QDialog.DialogCode.Accepted
+
     window = MainWindow(
         controller,
         workers,
-        FakeSettings(),
+        settings,
+        settings_dialog_factory=AcceptedModelDialog,  # type: ignore[arg-type]
         document_session=session,
         background_workflow=workflow,
         start_diagnostics=False,
@@ -1980,7 +2019,7 @@ def test_timed_out_mflux_model_change_and_window_close_never_block_qt_thread(
     assert len(failures) == 1
 
     changed_started = monotonic()
-    window.image_model_combo.setCurrentIndex(window.image_model_combo.findData("flux2-klein-9b-kv"))
+    window.open_model_settings()
     assert monotonic() - changed_started < 0.25
 
     close_event = QCloseEvent()
@@ -2173,7 +2212,6 @@ def test_refine_tab_wires_current_image_options_and_cancels_live_changes(
     window._update_generation_actions()
     assert window.inspector.refine_background_button.text() == "Reinterpreting…"
     assert not window.inspector.generate_background_button.isEnabled()
-    assert not window.image_model_combo.isEnabled()
     window.inspector.refine_transformation_combo.setCurrentIndex(
         window.inspector._combo_index_for_data(
             window.inspector.refine_transformation_combo,

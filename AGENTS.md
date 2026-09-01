@@ -225,11 +225,12 @@ for live MFLUX runs.
   Run-entry notification. Use one action-oriented mode button labeled Run in
   Author mode and Author in Run mode. Show standard-size Back, Restart, and
   overlay controls only in Run mode; hide the card name, version authoring
-  header, and bottom model selectors there.
-- Keep the image-model selector in the status bar and persist it through Qt
-  settings. Offer FLUX.2 Klein 4B and FLUX.2 Klein 9B KV. Keep the model field
-  out of Advanced Settings. Disable the selector while any image operation is
-  running; changing the model must cancel work using the previous setting.
+  header there.
+- Keep machine-local model selection under Settings → Models, with Image and
+  Sound selectors persisted through Qt settings. Offer FLUX.2 Klein 4B and
+  FLUX.2 Klein 9B KV for Image and Stable Audio 3 Small-SFX for Sound. Keep
+  inference, quantization, seed, credentials, and model selectors out of the
+  status bar. Changing a model must cancel work using the previous setting.
 - Represent a revision's applied hotspot set as `HotspotSet | None`.
   `None` means no set has been applied; an empty `HotspotSet` means an applied
   set currently contains no interactions.

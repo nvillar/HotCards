@@ -34,8 +34,8 @@ header above the canvas edits the card name and selects, duplicates, or deletes
 revisions; the Author toolbar places the Run toggle on the left and opens the
 stack-global Styles, Sounds, and Keys managers from the right. In Run mode it instead
 shows navigation and hotspot visibility controls. An
-adjacent step label and progress bar to the left of the image-model selector
-show actual MFLUX inference-step completion during image generation.
+image-generation step label and progress bar in the status bar show actual
+MFLUX inference-step completion.
 
 The Cards sidebar and Command-D shortcut duplicate the selected card immediately
 after its source. A card duplicate contains exactly the active complete revision
@@ -196,8 +196,9 @@ authoring-only card name and version header. Run-only navigation and overlay
 controls stay hidden in Author mode. Cards without hotspots are valid terminal
 cards and do not produce a warning.
 Local MFLUX availability is checked automatically when Author mode is entered;
-Run mode starts no AI work and hides model selection. In Author mode, the
-status bar selects either FLUX.2 Klein 4B or FLUX.2 Klein 9B KV.
+Run mode starts no AI work. Settings → Models selects the Image and Sound
+models. Image offers FLUX.2 Klein 4B and FLUX.2 Klein 9B KV; Sound currently
+uses Stable Audio 3 Small-SFX.
 
 Transient outcomes, failures, Run warnings, and Undo actions appear in one
 notification bar beneath the main panes and directly above the status bar.
@@ -206,8 +207,7 @@ image generation also offers Create New Version, which restores
 the prior current revision and activates a complete new revision containing the
 result, plus an explicit Keep action that retains it on the current revision.
 Field validation remains beside the responsible input.
-AI failures and recovery actions stay in the notification bar rather than the
-model selectors.
+AI failures and recovery actions stay in the notification bar.
 
 ## Setup and run
 

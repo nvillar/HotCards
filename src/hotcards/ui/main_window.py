@@ -100,8 +100,6 @@ from hotcards.ui.notification_bar import (
 )
 from hotcards.ui.project_paths import bundle_path, default_project_directory
 from hotcards.ui.settings_dialog import (
-    MFLUX_MODEL_KEY,
-    MFLUX_MODEL_OPTIONS,
     SettingsDialog,
     SettingsStore,
     load_machine_settings,
@@ -621,16 +619,6 @@ class MainWindow(QMainWindow):
         central_layout.addWidget(self.notification_bar)
         self.setCentralWidget(central_widget)
 
-        values = load_machine_settings(self.settings)
-        self.image_model_label = QLabel("Image")
-        self.image_model_combo = QComboBox()
-        self.image_model_combo.setObjectName("imageModelCombo")
-        self.image_model_combo.setAccessibleName("Image model")
-        for label, model in MFLUX_MODEL_OPTIONS:
-            self.image_model_combo.addItem(label, model)
-        self.image_model_combo.setCurrentIndex(
-            max(0, self.image_model_combo.findData(values.mflux_model))
-        )
         self.generation_progress_bar = QProgressBar()
         self.generation_progress_bar.setObjectName("generationProgressBar")
         self.generation_progress_bar.setAccessibleName("Generation progress")
@@ -658,9 +646,6 @@ class MainWindow(QMainWindow):
         self.generation_progress_layout.addWidget(self.cancel_generation_button)
         self.generation_progress_container.hide()
         self.statusBar().addWidget(self.generation_progress_container, 1)
-        self.statusBar().addPermanentWidget(self.image_model_label)
-        self.statusBar().addPermanentWidget(self.image_model_combo)
-        self.image_model_combo.currentIndexChanged.connect(self._image_model_changed)
         self._service_status_detail = "MFLUX availability check pending"
         self.create_first_card_button.clicked.connect(self._primary_empty_action)
 
@@ -706,10 +691,12 @@ class MainWindow(QMainWindow):
         self.duplicate_card_action.triggered.connect(self._duplicate_card)
         edit_menu.addAction(self.duplicate_card_action)
 
-        self.advanced_settings_action = QAction("Advanced Settings…", self)
-        self.advanced_settings_action.setObjectName("advancedSettingsAction")
-        self.advanced_settings_action.triggered.connect(self.open_advanced_settings)
-        self.menuBar().addMenu("HotCards").addAction(self.advanced_settings_action)
+        self.settings_menu = self.menuBar().addMenu("Settings")
+        self.settings_menu.setObjectName("settingsMenu")
+        self.models_action = QAction("Models…", self)
+        self.models_action.setObjectName("modelsAction")
+        self.models_action.triggered.connect(self.open_model_settings)
+        self.settings_menu.addAction(self.models_action)
 
     def render_document(
         self,
@@ -1083,7 +1070,7 @@ class MainWindow(QMainWindow):
         elif action_id == "create-generated-revision" and not self._is_running:
             self._create_generated_revision()
         elif action_id == "open-settings" and not self._is_running:
-            self.open_advanced_settings()
+            self.open_model_settings()
         elif action_id == "check-services" and not self._is_running:
             self.run_availability_checks()
 
@@ -1485,7 +1472,7 @@ class MainWindow(QMainWindow):
             and self._selected_card_id is not None
             and self.card_duplication_workflow is not None
         )
-        self.advanced_settings_action.setEnabled(not self._is_running)
+        self.models_action.setEnabled(not self._is_running)
         self.mode_button.setEnabled(bound)
         self.overlay_selector.setEnabled(mutation_allowed and self._is_running)
         self.card_sidebar.set_document_editable(mutation_allowed and not self._is_running)
@@ -1954,8 +1941,6 @@ class MainWindow(QMainWindow):
             busy=workflow_busy,
             editing=workflow_busy and active_operation == "edit",
         )
-        authoring = not self._is_running
-        self.image_model_combo.setEnabled(authoring and not workflow_busy)
         pending = [
             adapter for adapter, available in self._availability.items() if available is None
         ]
@@ -1978,7 +1963,6 @@ class MainWindow(QMainWindow):
             )
             for adapter in AdapterKind
         )
-        self.image_model_combo.setToolTip(self._service_status_detail)
         if (
             unavailable
             and not pending
@@ -2006,17 +1990,6 @@ class MainWindow(QMainWindow):
             self.notification_bar.clear_notification("ai-services")
         elif self._is_running:
             self.notification_bar.clear_notification("ai-services")
-
-    def _image_model_changed(self, index: int) -> None:
-        model = self.image_model_combo.itemData(index)
-        if not isinstance(model, str) or not model:
-            return
-        if model == load_machine_settings(self.settings).mflux_model:
-            return
-        self._cancel_background_generation()
-        self.settings.setValue(MFLUX_MODEL_KEY, model)
-        self.settings.sync()
-        self._restart_availability_checks()
 
     def _refine_source_size(
         self,
@@ -2422,8 +2395,6 @@ class MainWindow(QMainWindow):
         self.card_sidebar.setVisible(authoring)
         self.inspector.setVisible(authoring)
         self.create_first_card_button.setVisible(authoring)
-        self.image_model_label.setVisible(authoring)
-        self.image_model_combo.setVisible(authoring)
         self.empty_canvas_title.setText(
             "Create your first card" if authoring else "No cards to run"
         )
@@ -2497,10 +2468,20 @@ class MainWindow(QMainWindow):
         self._cancel_diagnostics()
         self.run_availability_checks()
 
-    def open_advanced_settings(self) -> None:
+    def open_model_settings(self) -> None:
+        previous = load_machine_settings(self.settings)
         dialog = self._settings_dialog_factory(self.settings, self)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        current = load_machine_settings(self.settings)
+        if current.mflux_model != previous.mflux_model:
+            self._cancel_background_generation()
             self._restart_availability_checks()
+        if (
+            current.stable_audio_model != previous.stable_audio_model
+            and self.sound_workflow is not None
+        ):
+            self.sound_workflow.cancel()
 
     def _ask_retry_failed_close_save(self, message: str) -> bool:
         dialog = QMessageBox(
