@@ -62,11 +62,13 @@ language model prepares or rewrites it.
 
 Reference order is authoritative. The first selected card is `image 1` and the
 optional second card is `image 2`; authors use those positional labels directly
-in the Description. Each active Reference background is sent to MFLUX exactly
-once in that stable order, with no hidden role instructions, card-name alias
-translation, or source-card prose. The exact Description, ordered Reference
-snapshots, Style ID/name/text, and composed render prompt are retained in
-generated-image provenance.
+in the Description. When an unassigned Reference or Hotspot destination menu
+opens, it focuses the card immediately after the current card, or the preceding
+card when there is no next card, without assigning it until selected. Each
+active Reference background is sent to MFLUX exactly once in that stable order,
+with no hidden role instructions, card-name alias translation, or source-card
+prose. The exact Description, ordered Reference snapshots, Style ID/name/text,
+and composed render prompt are retained in generated-image provenance.
 
 Image provenance is a strict typed operation record for direct Generate,
 externally patched historical Generate, Reinterpret (stored as `refine`), Edit,

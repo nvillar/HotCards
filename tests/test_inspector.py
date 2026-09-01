@@ -95,6 +95,16 @@ def _background() -> GeneratedBackground:
     )
 
 
+def _popup_focused_data(combo: QComboBox, application: QApplication) -> object:
+    combo.showPopup()
+    application.processEvents()
+    current_index = combo.view().currentIndex()
+    assert combo.view().selectionModel().selectedIndexes() == [current_index]
+    value = combo.itemData(current_index.row())
+    combo.hidePopup()
+    return value
+
+
 def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     application: QApplication,
 ) -> None:
@@ -1015,6 +1025,59 @@ def test_reference_selector_assigns_one_card_with_undo(
     assert controller.undo_if_current(applied[-1][1])  # type: ignore[arg-type]
     inspector.render(controller.document, source.id)
     assert controller.document.cards[0].active_revision.references == ()
+
+
+def test_unassigned_card_selectors_focus_the_next_available_card(
+    application: QApplication,
+) -> None:
+    previous = Card(name="Previous")
+    interaction = Interaction()
+    source = Card(
+        name="Source",
+        revisions=(
+            CardRevision(
+                hotspot_set=HotspotSet(interactions=(interaction,)),
+            ),
+        ),
+    )
+    following = Card(name="Following")
+    controller = DocumentController(Stack(name="Demo", cards=(previous, source, following)))
+    inspector = Inspector(controller)
+    inspector.render(controller.document, source.id)
+    inspector.show()
+    application.processEvents()
+
+    assert inspector.reference_combo.currentData() is None
+    assert _popup_focused_data(inspector.reference_combo, application) == following.id
+    assert inspector.reference_combo.currentData() is None
+    assert inspector.hotspot_destination_combo.currentData() is None
+    assert _popup_focused_data(inspector.hotspot_destination_combo, application) == following.id
+    assert inspector.hotspot_destination_combo.currentData() is None
+
+    inspector.reference_combo.setCurrentIndex(
+        inspector._combo_index_for_data(inspector.reference_combo, previous.id)
+    )
+    assert inspector.additional_reference_combo.isEnabled()
+    assert inspector.additional_reference_combo.currentData() is None
+    assert _popup_focused_data(inspector.additional_reference_combo, application) == following.id
+    assert inspector.additional_reference_combo.currentData() is None
+    inspector.close()
+
+
+def test_unassigned_card_selector_focuses_previous_card_at_end(
+    application: QApplication,
+) -> None:
+    previous = Card(name="Previous")
+    source = Card(name="Source")
+    controller = DocumentController(Stack(name="Demo", cards=(previous, source)))
+    inspector = Inspector(controller)
+    inspector.render(controller.document, source.id)
+    inspector.show()
+    application.processEvents()
+
+    assert _popup_focused_data(inspector.reference_combo, application) == previous.id
+    assert inspector.reference_combo.currentData() is None
+    inspector.close()
 
 
 def test_second_reference_is_ordered_unique_and_promoted_when_first_clears(

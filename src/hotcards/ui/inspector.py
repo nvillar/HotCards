@@ -6,7 +6,7 @@ from typing import Literal
 from uuid import UUID
 
 from pydantic import ValidationError
-from PySide6.QtCore import QSignalBlocker, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QItemSelectionModel, QSignalBlocker, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QFocusEvent, QStandardItemModel
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -93,6 +93,60 @@ class _CommitLineEdit(QLineEdit):
     def focusOutEvent(self, event: QFocusEvent) -> None:
         super().focusOutEvent(event)
         self.editing_finished.emit(QApplication.focusWidget(), event.reason())
+
+
+class _AdjacentCardComboBox(QComboBox):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._popup_anchor_data: object | None = None
+
+    def set_popup_anchor_data(self, value: object | None) -> None:
+        self._popup_anchor_data = value
+
+    def showPopup(self) -> None:
+        super().showPopup()
+        if self.currentData() is not None or self._popup_anchor_data is None:
+            return
+        index = self.findData(self._popup_anchor_data)
+        if index < 0:
+            return
+        model_index = self.model().index(
+            index,
+            self.modelColumn(),
+            self.rootModelIndex(),
+        )
+        self.view().selectionModel().setCurrentIndex(
+            model_index,
+            QItemSelectionModel.SelectionFlag.ClearAndSelect,
+        )
+        self.view().scrollTo(
+            model_index,
+            QAbstractItemView.ScrollHint.PositionAtCenter,
+        )
+
+
+def _adjacent_card_id(
+    document: Stack,
+    current_card_id: UUID,
+    eligible_card_ids: set[UUID],
+) -> UUID | None:
+    current_index = next(
+        (
+            index
+            for index, candidate in enumerate(document.cards)
+            if candidate.id == current_card_id
+        ),
+        -1,
+    )
+    if current_index < 0:
+        return None
+    for adjacent_index in (current_index + 1, current_index - 1):
+        if (
+            0 <= adjacent_index < len(document.cards)
+            and document.cards[adjacent_index].id in eligible_card_ids
+        ):
+            return document.cards[adjacent_index].id
+    return None
 
 
 def _configure_rule_table(
@@ -379,7 +433,7 @@ class Inspector(QWidget):
         reference_layout.setSpacing(4)
         first_reference_row = QHBoxLayout()
         first_reference_row.addWidget(QLabel("1."))
-        self.reference_combo = QComboBox()
+        self.reference_combo = _AdjacentCardComboBox()
         self.reference_combo.setObjectName("referenceCombo")
         self.reference_combo.setAccessibleName("Reference card 1")
         self.reference_combo.setToolTip(
@@ -389,7 +443,7 @@ class Inspector(QWidget):
         reference_layout.addLayout(first_reference_row)
         second_reference_row = QHBoxLayout()
         second_reference_row.addWidget(QLabel("2."))
-        self.additional_reference_combo = QComboBox()
+        self.additional_reference_combo = _AdjacentCardComboBox()
         self.additional_reference_combo.setObjectName("additionalReferenceCombo")
         self.additional_reference_combo.setAccessibleName("Reference card 2")
         self.additional_reference_combo.setToolTip(
@@ -661,7 +715,7 @@ class Inspector(QWidget):
         self.hotspot_target_label = QLabel("Go to")
         self.hotspot_target_label.setObjectName("hotspotTargetLabel")
         then_layout.addWidget(self.hotspot_target_label)
-        self.hotspot_destination_combo = QComboBox()
+        self.hotspot_destination_combo = _AdjacentCardComboBox()
         self.hotspot_destination_combo.setObjectName("hotspotDestinationCombo")
         self.hotspot_destination_combo.setAccessibleName("Hotspot destination")
         then_layout.addWidget(self.hotspot_destination_combo)
@@ -1088,6 +1142,18 @@ class Inspector(QWidget):
                     combo.setCurrentIndex(combo.count() - 1)
                 else:
                     combo.setCurrentIndex(0)
+                eligible_card_ids = {
+                    value
+                    for index in range(combo.count())
+                    if isinstance((value := combo.itemData(index)), UUID)
+                }
+                combo.set_popup_anchor_data(
+                    _adjacent_card_id(
+                        document,
+                        card.id,
+                        eligible_card_ids,
+                    )
+                )
         self.additional_reference_combo.setEnabled(bool(references))
 
     def _reference_changed(self, position: int, index: int) -> None:
@@ -1652,6 +1718,24 @@ class Inspector(QWidget):
                 )
             else:
                 self.hotspot_destination_combo.setCurrentIndex(0)
+            eligible_card_ids = {
+                value
+                for index in range(self.hotspot_destination_combo.count())
+                if isinstance(
+                    (value := self.hotspot_destination_combo.itemData(index)),
+                    UUID,
+                )
+            }
+            selected_card_id = self.selected_card_id
+            self.hotspot_destination_combo.set_popup_anchor_data(
+                _adjacent_card_id(
+                    document,
+                    selected_card_id,
+                    eligible_card_ids,
+                )
+                if selected_card_id is not None
+                else None
+            )
 
     def _render_condition_rows(
         self,
