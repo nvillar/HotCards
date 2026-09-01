@@ -48,6 +48,8 @@ from hotcards.domain.models import (
     Interaction,
     KeyDefinition,
     NavigateAction,
+    Point,
+    Polygon,
     PresetOutputSize,
     RefineTransformation,
     ResolvedCardReference,
@@ -65,10 +67,21 @@ def application() -> QApplication:
     return QApplication.instance() or QApplication([])
 
 
+def _polygon() -> Polygon:
+    return Polygon(
+        points=(
+            Point(x=0.1, y=0.1),
+            Point(x=0.4, y=0.1),
+            Point(x=0.2, y=0.4),
+        )
+    )
+
+
 def _interaction(label: str = "Door") -> Interaction:
     return Interaction(
         label=label,
         action=NavigateAction(target=UnresolvedCardReference()),
+        polygons=(_polygon(),),
     )
 
 
@@ -218,12 +231,8 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     )
     then_layout = inspector.hotspot_then_panel.layout()
     assert then_layout is not None
-    assert inspector.key_change_controls_layout.indexOf(
-        inspector.key_change_rows_widget
-    ) < (
-        inspector.key_change_controls_layout.indexOf(
-            inspector.key_change_add_row
-        )
+    assert inspector.key_change_controls_layout.indexOf(inspector.key_change_rows_widget) < (
+        inspector.key_change_controls_layout.indexOf(inspector.key_change_add_row)
     )
     assert then_layout.indexOf(inspector.key_change_controls_layout) < (
         then_layout.indexOf(inspector.hotspot_target_label)
@@ -499,6 +508,7 @@ def test_key_manager_manages_global_names_and_lists_hotspot_usages(
     interaction = Interaction(
         key_changes=HotspotKeyChanges(remove=(red_key.id,)),
         conditions=HotspotConditions(requires=(red_key.id,)),
+        polygons=(_polygon(),),
     )
     card = Card(
         name="Castle",
@@ -562,6 +572,7 @@ def test_hotspot_pipeline_edits_conditions_changes_and_navigation(
             remove=(red_key.id,),
             grant=(door_open.id,),
         ),
+        polygons=(_polygon(),),
         action=NavigateAction(target=ResolvedCardReference(target_card_id=destination.id)),
     )
     source = Card(
@@ -643,7 +654,7 @@ def test_hotspot_pipeline_edits_conditions_changes_and_navigation(
 def test_empty_hotspot_rule_sections_show_only_disabled_add_actions_without_keys(
     application: QApplication,
 ) -> None:
-    interaction = Interaction()
+    interaction = Interaction(polygons=(_polygon(),))
     card = Card(
         name="Card",
         revisions=(CardRevision(hotspot_set=HotspotSet(interactions=(interaction,))),),
@@ -667,14 +678,12 @@ def test_hotspot_play_selector_assigns_catalog_sound(
     application: QApplication,
 ) -> None:
     sound = SoundDefinition(name="Door knock")
-    interaction = Interaction()
+    interaction = Interaction(polygons=(_polygon(),))
     card = Card(
         name="Card",
         revisions=(CardRevision(hotspot_set=HotspotSet(interactions=(interaction,))),),
     )
-    controller = DocumentController(
-        Stack(name="Demo", sounds=(sound,), cards=(card,))
-    )
+    controller = DocumentController(Stack(name="Demo", sounds=(sound,), cards=(card,)))
     inspector = Inspector(controller)
     inspector.render(controller.document, card.id)
 
@@ -695,14 +704,12 @@ def test_hotspot_key_add_actions_use_latest_eligible_catalog_key(
 ) -> None:
     first_key = KeyDefinition(name="First")
     latest_key = KeyDefinition(name="Latest")
-    interaction = Interaction()
+    interaction = Interaction(polygons=(_polygon(),))
     card = Card(
         name="Card",
         revisions=(CardRevision(hotspot_set=HotspotSet(interactions=(interaction,))),),
     )
-    controller = DocumentController(
-        Stack(name="Demo", keys=(first_key, latest_key), cards=(card,))
-    )
+    controller = DocumentController(Stack(name="Demo", keys=(first_key, latest_key), cards=(card,)))
     inspector = Inspector(controller)
     inspector.render(controller.document, card.id)
 
@@ -726,14 +733,13 @@ def test_hotspot_key_rows_fit_long_names_with_visible_remove_controls(
     interaction = Interaction(
         conditions=HotspotConditions(requires=(key.id,)),
         key_changes=HotspotKeyChanges(grant=(key.id,)),
+        polygons=(_polygon(),),
     )
     card = Card(
         name="Card",
         revisions=(CardRevision(hotspot_set=HotspotSet(interactions=(interaction,))),),
     )
-    inspector = Inspector(
-        DocumentController(Stack(name="Demo", keys=(key,), cards=(card,)))
-    )
+    inspector = Inspector(DocumentController(Stack(name="Demo", keys=(key,), cards=(card,))))
     inspector.resize(320, 700)
     inspector.render(inspector.controller.document, card.id)
     inspector.show()
@@ -1126,7 +1132,7 @@ def test_unassigned_card_selectors_focus_the_next_available_card(
     application: QApplication,
 ) -> None:
     previous = Card(name="Previous")
-    interaction = Interaction()
+    interaction = Interaction(polygons=(_polygon(),))
     source = Card(
         name="Source",
         revisions=(
@@ -1468,7 +1474,7 @@ def test_using_labels_name_single_reference(
     assert "image 1" in inspector.reference_combo.toolTip()
 
 
-def test_add_hotspot_persists_and_selects_area_less_entry(
+def test_add_hotspot_requests_drawing_without_mutating_document(
     application: QApplication,
 ) -> None:
     card = Card(name="Card")
@@ -1476,15 +1482,14 @@ def test_add_hotspot_persists_and_selects_area_less_entry(
     inspector = Inspector(controller)
     inspector.render(controller.document, card.id)
 
+    requests: list[None] = []
+    inspector.hotspot_drawing_requested.connect(lambda: requests.append(None))
+
     inspector.add_hotspot_button.click()
 
-    hotspot_set = controller.document.cards[0].active_revision.hotspot_set
-    assert hotspot_set is not None
-    assert len(hotspot_set.interactions) == 1
-    interaction = hotspot_set.interactions[0]
-    assert interaction.label == "New Hotspot"
-    assert interaction.polygons == ()
-    assert inspector.selected_interaction_id == interaction.id
+    assert requests == [None]
+    assert controller.document.cards[0].active_revision.hotspot_set is None
+    assert inspector.selected_interaction_id is None
 
 
 def test_hotspot_properties_reorder_and_delete_use_commands(

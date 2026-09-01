@@ -31,7 +31,6 @@ from PySide6.QtWidgets import (
 )
 
 from hotcards.application.commands import (
-    AddInteractionCommand,
     ChangeHotspotDestinationCommand,
     ChangeHotspotSoundCommand,
     CommandError,
@@ -296,6 +295,7 @@ class Inspector(QWidget):
     refine_background_requested = Signal(object, object)
     edit_background_requested = Signal(str, object)
     hotspot_selected = Signal(object)
+    hotspot_drawing_requested = Signal()
     change_applied = Signal(str, object)
     render_inputs_changed = Signal()
 
@@ -585,8 +585,8 @@ class Inspector(QWidget):
         self.add_hotspot_button = _compact_text_button(
             "+",
             object_name="addHotspotButton",
-            accessible_name="Add hotspot",
-            tooltip="Add hotspot",
+            accessible_name="Draw hotspot",
+            tooltip="Draw a new hotspot",
         )
         self.delete_hotspot_button = _compact_text_button(
             "−",
@@ -747,7 +747,7 @@ class Inspector(QWidget):
         self.hotspot_list.currentItemChanged.connect(self._hotspot_selection_changed)
         self.move_hotspot_up_button.clicked.connect(lambda: self._move_hotspot(-1))
         self.move_hotspot_down_button.clicked.connect(lambda: self._move_hotspot(1))
-        self.add_hotspot_button.clicked.connect(self._add_hotspot)
+        self.add_hotspot_button.clicked.connect(self._request_hotspot_drawing)
         self.delete_hotspot_button.clicked.connect(self._delete_hotspot)
         self.add_condition_button.clicked.connect(self._add_condition)
         self.add_key_change_button.clicked.connect(self._add_key_change)
@@ -1781,9 +1781,13 @@ class Inspector(QWidget):
     ) -> None:
         self._clear_rule_rows(self.condition_rows_layout)
         rows = (
-            *(("Has", key_id) for key_id in interaction.conditions.requires),
-            *(("Lacks", key_id) for key_id in interaction.conditions.forbids),
-        ) if interaction is not None else ()
+            (
+                *(("Has", key_id) for key_id in interaction.conditions.requires),
+                *(("Lacks", key_id) for key_id in interaction.conditions.forbids),
+            )
+            if interaction is not None
+            else ()
+        )
         for row, (state, key_id) in enumerate(rows):
             key_combo = self._key_combo(document, key_id)
             key_combo.setObjectName(f"conditionKeyCombo{row}")
@@ -1844,9 +1848,13 @@ class Inspector(QWidget):
     ) -> None:
         self._clear_rule_rows(self.key_change_rows_layout)
         rows = (
-            *(("Lose", key_id) for key_id in interaction.key_changes.remove),
-            *(("Gain", key_id) for key_id in interaction.key_changes.grant),
-        ) if interaction is not None else ()
+            (
+                *(("Lose", key_id) for key_id in interaction.key_changes.remove),
+                *(("Gain", key_id) for key_id in interaction.key_changes.grant),
+            )
+            if interaction is not None
+            else ()
+        )
         for row, (change, key_id) in enumerate(rows):
             change_combo = QComboBox()
             change_combo.setObjectName(f"keyChangeActionCombo{row}")
@@ -1918,9 +1926,7 @@ class Inspector(QWidget):
                 key.name,
                 Qt.ItemDataRole.ToolTipRole,
             )
-        combo.setSizeAdjustPolicy(
-            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
-        )
+        combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         combo.setMinimumContentsLength(8)
         combo.setMinimumWidth(0)
         combo.setSizePolicy(
@@ -1946,20 +1952,8 @@ class Inspector(QWidget):
         )
         self.hotspot_selected.emit(interaction_id)
 
-    def _add_hotspot(self) -> None:
-        card = self._selected_card()
-        if card is None:
-            return
-        interaction = Interaction()
-        if self._execute(
-            AddInteractionCommand(
-                card_id=card.id,
-                revision_id=card.active_revision.id,
-                interaction=interaction,
-            )
-        ):
-            self.select_interaction(interaction.id)
-            self.hotspot_selected.emit(interaction.id)
+    def _request_hotspot_drawing(self) -> None:
+        self.hotspot_drawing_requested.emit()
 
     def _add_condition(self) -> None:
         interaction = self._selected_interaction()

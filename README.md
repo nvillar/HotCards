@@ -148,14 +148,14 @@ transaction. The manager previews audio, lists every hotspot usage, jumps to
 the selected usage, and blocks deletion while the Sound is referenced.
 
 The Hotspots inspector is the sole source of revision-local interaction
-semantics. A new hotspot is persisted and selected immediately, even before it
-has an area. Its label is derived automatically in Remove, Grant, then
-destination order, with long labels using two-line list entries. The bordered
-When section requires every Present key to exist and every Absent key not to
-exist. The bordered Then section applies disjoint explicit Remove and Grant
-sets before its optional Go to destination and optional Play Sound action.
-Renaming a Sound preserves hotspot assignments through stable IDs. Keys are
-stack-global free-form names with stable internal IDs.
+semantics. Every persisted hotspot has exactly one polygon. Its label is derived
+automatically from its highest-priority effect: Go to, Play, Gain, then Lose,
+with long labels using two-line list entries. The bordered When section requires
+every Present key to exist and every Absent key not to exist. The bordered Then
+section applies disjoint explicit Remove and Grant sets before its optional Go
+to destination and optional Play Sound action. Renaming a Sound preserves
+hotspot assignments through stable IDs. Keys are stack-global free-form names
+with stable internal IDs.
 
 The modeless Keys utility window manages that global catalog with the same list,
 compact remove/add, and full-width Name patterns as Styles. It reports every
@@ -165,19 +165,19 @@ existing window. Renaming updates every display through stable references.
 In-use keys cannot be deleted. Keys can also be created while adding a
 condition or key change.
 
-While the Hotspots tab is active, clicking empty canvas begins a polygon for the
-selected hotspot and creates one first when needed. Leaving the tab cancels any
-unfinished polygon and hides its authoring overlays. Canvas editing uses
-hierarchical hotspot, area, and vertex selection. While drawing, overlapping
-vertex clicks are ignored and clicking the first vertex closes a valid polygon.
-Drag an area or vertex to move it, use the edge `+` or double-click an edge to
-add a vertex, press Delete to remove the selected vertex or area, and press
-Escape to step back through the selection. Context menus expose the same
-geometry actions, and successful edits offer a dismissible Undo. Replacing a
-background preserves its hotspots so the author can review and adjust them
-manually. Complete backgrounds at different pixel resolutions are smoothly
-fitted and centered inside the stack's fixed logical card format without
-stretching or cropping; narrow rounding differences use letterboxing or
+While the Hotspots tab is active, clicking empty canvas or pressing the
+inspector `+` begins drawing a new hotspot. The draft is not persisted until a
+valid polygon is completed, so Escape or leaving the tab cancels without
+creating a hotspot. While drawing, overlapping vertex clicks are ignored and
+clicking the first vertex closes a valid polygon. Drag a hotspot or vertex to
+move it, use the edge `+` or double-click an edge to add a vertex, and press
+Delete to remove the selected vertex or hotspot. Context menus expose vertex
+editing and hotspot deletion, but not alternate creation actions. Successful
+edits offer a dismissible Undo. Replacing a background preserves its hotspots
+so the author can review and adjust them manually. Complete backgrounds at
+different pixel resolutions are smoothly fitted and centered inside the
+stack's fixed logical card format without stretching or cropping; narrow
+rounding differences use letterboxing or
 pillarboxing. The canvas remains automatically fitted without zoom, pan, manual
 fit, or image-clear controls. Normalized hotspot geometry follows the fitted
 image bounds in Author and Run modes.

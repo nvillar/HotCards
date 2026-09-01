@@ -10,7 +10,6 @@ from hotcards.application.commands import (
     ActivateRevisionCommand,
     AddInteractionCommand,
     AddKeyCommand,
-    AddPolygonCommand,
     AddSoundCommand,
     AddStyleCommand,
     ChangeHotspotDestinationCommand,
@@ -23,7 +22,6 @@ from hotcards.application.commands import (
     DeleteCardCommand,
     DeleteInteractionCommand,
     DeleteKeyCommand,
-    DeletePolygonCommand,
     DeleteRevisionCommand,
     DeleteSoundCommand,
     DeleteStyleCommand,
@@ -36,7 +34,6 @@ from hotcards.application.commands import (
     ReorderHotspotCommand,
     ReplaceGeneratedSoundCommand,
     ReplaceHotspotSetCommand,
-    ReplaceInteractionPolygonsCommand,
     ReplacePolygonCommand,
     ReplaceRevisionBackgroundCommand,
     SetHotspotConditionsCommand,
@@ -422,7 +419,7 @@ def test_style_lifecycle_and_new_card_default_are_typed_changes() -> None:
 
 def test_key_lifecycle_and_hotspot_behavior_are_typed_changes() -> None:
     key_id = uuid4()
-    interaction = Interaction()
+    interaction = Interaction(polygons=(polygon(),))
     source, revision = card_with_revision(interaction)
     document = Stack(name="Stack", cards=(source,))
 
@@ -468,7 +465,7 @@ def test_key_lifecycle_and_hotspot_behavior_are_typed_changes() -> None:
 
 def test_sound_lifecycle_and_hotspot_assignment_are_typed_changes() -> None:
     sound_id = uuid4()
-    interaction = Interaction()
+    interaction = Interaction(polygons=(polygon(),))
     source, revision = card_with_revision(interaction)
     document = Stack(name="Stack", cards=(source,))
 
@@ -525,7 +522,7 @@ def test_sound_lifecycle_and_hotspot_assignment_are_typed_changes() -> None:
 
 
 def test_create_key_and_hotspot_reference_is_atomic() -> None:
-    interaction = Interaction()
+    interaction = Interaction(polygons=(polygon(),))
     source, revision = card_with_revision(interaction)
     document = Stack(name="Stack", cards=(source,))
     command = CreateKeyAndAddHotspotReferenceCommand(
@@ -702,8 +699,8 @@ def test_revision_activation_and_complete_hotspot_replacement() -> None:
         item.id for item in replacement.interactions
     ]
     assert [item.label for item in changed_revision.hotspot_set.interactions] == [
-        "Garden",
-        "Tower",
+        "Go to Garden",
+        "Go to Tower",
     ]
     assert (
         ReplaceHotspotSetCommand(
@@ -829,7 +826,6 @@ def test_polygon_destination_and_hotspot_order_changes() -> None:
     destination = Card(name="Hall")
     document = Stack(name="Stack", cards=(source, destination))
     replacement = polygon(0.2)
-    extra = polygon(0.4)
 
     document = ReplacePolygonCommand(
         card_id=source.id,
@@ -837,12 +833,6 @@ def test_polygon_destination_and_hotspot_order_changes() -> None:
         interaction_id=first.id,
         polygon_index=0,
         polygon=replacement,
-    ).apply(document)
-    document = ReplaceInteractionPolygonsCommand(
-        card_id=source.id,
-        revision_id=revision.id,
-        interaction_id=first.id,
-        polygons=(replacement, extra),
     ).apply(document)
     document = ChangeHotspotDestinationCommand(
         card_id=source.id,
@@ -860,11 +850,11 @@ def test_polygon_destination_and_hotspot_order_changes() -> None:
     hotspots = document.cards[0].revisions[0].hotspot_set
     assert hotspots is not None
     assert [item.id for item in hotspots.interactions] == [second.id, first.id]
-    assert hotspots.interactions[1].polygons == (replacement, extra)
+    assert hotspots.interactions[1].polygons == (replacement,)
     assert hotspots.interactions[1].action.target == ResolvedCardReference(
         target_card_id=destination.id
     )
-    assert hotspots.interactions[1].label == "Hall"
+    assert hotspots.interactions[1].label == "Go to Hall"
 
     renamed = RenameCardCommand(
         card_id=destination.id,
@@ -872,32 +862,18 @@ def test_polygon_destination_and_hotspot_order_changes() -> None:
     ).apply(document)
     renamed_hotspots = renamed.cards[0].active_revision.hotspot_set
     assert renamed_hotspots is not None
-    assert renamed_hotspots.interactions[1].label == "Great Hall"
+    assert renamed_hotspots.interactions[1].label == "Go to Great Hall"
 
 
-def test_interaction_and_polygon_component_lifecycle() -> None:
+def test_interaction_lifecycle() -> None:
     first = interaction("Door", "Hall")
     second = interaction("Window", "Garden")
     source, revision = card_with_revision(first)
     document = Stack(name="Stack", cards=(source,))
-    extra = polygon(0.4)
-
     document = AddInteractionCommand(
         card_id=source.id,
         revision_id=revision.id,
         interaction=second,
-    ).apply(document)
-    document = AddPolygonCommand(
-        card_id=source.id,
-        revision_id=revision.id,
-        interaction_id=first.id,
-        polygon=extra,
-    ).apply(document)
-    document = DeletePolygonCommand(
-        card_id=source.id,
-        revision_id=revision.id,
-        interaction_id=first.id,
-        polygon_index=0,
     ).apply(document)
     document = DeleteInteractionCommand(
         card_id=source.id,
@@ -908,24 +884,7 @@ def test_interaction_and_polygon_component_lifecycle() -> None:
     hotspot_set = document.cards[0].revisions[0].hotspot_set
     assert hotspot_set is not None
     assert len(hotspot_set.interactions) == 1
-    assert hotspot_set.interactions[0].label == "Hall"
-    assert hotspot_set.interactions[0].polygons == (extra,)
-
-
-def test_polygon_component_deletion_can_leave_an_area_less_interaction() -> None:
-    first = interaction("Door", "Hall")
-    source, revision = card_with_revision(first)
-    document = Stack(name="Stack", cards=(source,))
-
-    changed = DeletePolygonCommand(
-        card_id=source.id,
-        revision_id=revision.id,
-        interaction_id=first.id,
-        polygon_index=0,
-    ).apply(document)
-
-    assert changed.cards[0].active_revision.hotspot_set is not None
-    assert changed.cards[0].active_revision.hotspot_set.interactions[0].polygons == ()
+    assert hotspot_set.interactions[0].label == "Go to Hall"
 
 
 def test_targeted_undo_uses_command_identity_not_repeated_document_values() -> None:
@@ -976,7 +935,7 @@ def test_delete_card_converts_all_inbound_references_and_clears_start() -> None:
     assert hotspot_set is not None
     target = hotspot_set.interactions[0].action.target
     assert target == UnresolvedCardReference(target_name="Former Hall")
-    assert hotspot_set.interactions[0].label == "Former Hall"
+    assert hotspot_set.interactions[0].label == "Go to Former Hall"
     assert changed.cards[0].active_revision.references == (
         UnresolvedCardReference(target_name="Former Hall"),
     )

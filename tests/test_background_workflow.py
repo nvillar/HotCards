@@ -59,6 +59,8 @@ from hotcards.domain.models import (
     ImageSourceSnapshot,
     Interaction,
     NavigateAction,
+    Point,
+    Polygon,
     PresetOutputSize,
     RefineProvenance,
     RefineTransformation,
@@ -225,6 +227,15 @@ def _bound_workflow(
     hotspot = Interaction(
         label="Gate",
         action=NavigateAction(target=UnresolvedCardReference()),
+        polygons=(
+            Polygon(
+                points=(
+                    Point(x=0.1, y=0.1),
+                    Point(x=0.4, y=0.1),
+                    Point(x=0.2, y=0.4),
+                )
+            ),
+        ),
     )
     revision = CardRevision(
         description="A garden",

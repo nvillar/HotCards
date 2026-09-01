@@ -143,7 +143,10 @@ def run_stack() -> tuple[Stack, Interaction, Interaction]:
 
 def test_sound_only_hotspot_is_actionable_and_returns_its_sound() -> None:
     sound = SoundDefinition(name="Knock")
-    hotspot = Interaction(sound_id=sound.id)
+    hotspot = Interaction(
+        sound_id=sound.id,
+        polygons=(polygon(0.1, 0.1, 0.4, 0.4),),
+    )
     revision = CardRevision(
         hotspot_set=HotspotSet(interactions=(hotspot,)),
     )
@@ -155,7 +158,8 @@ def test_sound_only_hotspot_is_actionable_and_returns_its_sound() -> None:
     active = session.active_hotspot_set(document)
 
     assert active is not None
-    assert active.interactions == (hotspot,)
+    assert active.interactions[0].id == hotspot.id
+    assert active.interactions[0].label == "Play Knock"
     assert session.activation_sound_id(document, hotspot.id) == sound.id
 
 
@@ -219,6 +223,7 @@ def test_run_session_filters_conditions_and_applies_keys_before_navigation() -> 
     destination = Card(name="Castle")
     take_key = Interaction(
         key_changes=HotspotKeyChanges(grant=(red_key.id,)),
+        polygons=(polygon(0.1, 0.1, 0.3, 0.3),),
     )
     enter = Interaction(
         conditions=HotspotConditions(
@@ -230,8 +235,9 @@ def test_run_session_filters_conditions_and_applies_keys_before_navigation() -> 
             grant=(visited.id,),
         ),
         action=NavigateAction(target=ResolvedCardReference(target_card_id=destination.id)),
+        polygons=(polygon(0.4, 0.1, 0.6, 0.3),),
     )
-    placeholder = Interaction()
+    placeholder = Interaction(polygons=(polygon(0.7, 0.1, 0.9, 0.3),))
     revision = CardRevision(hotspot_set=HotspotSet(interactions=(take_key, enter, placeholder)))
     source = Card(
         name="Start",
@@ -275,6 +281,7 @@ def test_run_session_rechecks_conditions_and_changes_keys_before_link_warning() 
         conditions=HotspotConditions(forbids=(red_key.id,)),
         key_changes=HotspotKeyChanges(grant=(red_key.id,)),
         action=NavigateAction(target=UnresolvedCardReference(target_name="Missing room")),
+        polygons=(polygon(0.1, 0.1, 0.4, 0.4),),
     )
     revision = CardRevision(hotspot_set=HotspotSet(interactions=(interaction,)))
     source = Card(

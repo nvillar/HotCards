@@ -103,6 +103,16 @@ class FakeSettings:
         pass
 
 
+def _hotspot_polygon() -> Polygon:
+    return Polygon(
+        points=(
+            Point(x=0.1, y=0.1),
+            Point(x=0.4, y=0.1),
+            Point(x=0.2, y=0.4),
+        )
+    )
+
+
 class FakeOperation(QObject):
     succeeded = Signal(object)
     failed = Signal(object)
@@ -421,10 +431,7 @@ def test_author_utility_windows_are_modeless_singletons_and_reopen(
         window.key_manager_window,
     )
     assert {manager.size() for manager in managers} == {QSize(420, 600)}
-    assert all(
-        manager.windowFlags() & Qt.WindowType.WindowStaysOnTopHint
-        for manager in managers
-    )
+    assert all(manager.windowFlags() & Qt.WindowType.WindowStaysOnTopHint for manager in managers)
     assert all(manager.done_button.text() == "Done" for manager in managers)
     assert all(
         manager.done_button.geometry().right()
@@ -504,7 +511,9 @@ def test_sound_manager_edits_catalog_shows_usage_and_starts_generation(
 ) -> None:
     sound = SoundDefinition(name="Knock", prompt="A wooden knock")
     revision = CardRevision(
-        hotspot_set=HotspotSet(interactions=(Interaction(sound_id=sound.id),))
+        hotspot_set=HotspotSet(
+            interactions=(Interaction(sound_id=sound.id, polygons=(_hotspot_polygon(),)),)
+        )
     )
     window, controller, _workers, _background = _window(
         Stack(
@@ -579,14 +588,11 @@ def test_run_hotspot_stops_previous_audio_then_plays_after_navigation(
     )
     destination = Card(name="Destination")
     hotspot = Interaction(
-        action=NavigateAction(
-            target=ResolvedCardReference(target_card_id=destination.id)
-        ),
+        action=NavigateAction(target=ResolvedCardReference(target_card_id=destination.id)),
         sound_id=sound.id,
+        polygons=(_hotspot_polygon(),),
     )
-    revision = CardRevision(
-        hotspot_set=HotspotSet(interactions=(hotspot,))
-    )
+    revision = CardRevision(hotspot_set=HotspotSet(interactions=(hotspot,)))
     source = Card(name="Source", revisions=(revision,))
     window, _controller, _workers, _background = _window(
         Stack(
@@ -698,6 +704,7 @@ def test_hotspot_rule_editor_scrolls_without_growing_the_window(
         key_changes=HotspotKeyChanges(
             grant=tuple(key.id for key in keys[3:]),
         ),
+        polygons=(_hotspot_polygon(),),
     )
     card = Card(
         name="Card",
@@ -1502,7 +1509,7 @@ def test_final_revision_cannot_be_deleted(
     application: QApplication,
 ) -> None:
     card = Card(name="Only")
-    window, _controller, _workers, _background = _window(Stack(name="Demo", cards=(card,)))
+    window, controller, _workers, _background = _window(Stack(name="Demo", cards=(card,)))
     assert not window.delete_revision_button.isEnabled()
 
 
@@ -1528,7 +1535,11 @@ def test_card_delete_ignores_destinationless_hotspots(
     destination = Card(name="Destination")
     source = Card(
         name="Source",
-        revisions=(CardRevision(hotspot_set=HotspotSet(interactions=(Interaction(),))),),
+        revisions=(
+            CardRevision(
+                hotspot_set=HotspotSet(interactions=(Interaction(polygons=(_hotspot_polygon(),)),))
+            ),
+        ),
     )
     window, controller, _workers, _background = _window(
         Stack(
@@ -2374,6 +2385,7 @@ def test_generated_result_can_move_to_a_new_complete_version(
             Interaction(
                 label="Door",
                 action=NavigateAction(target=UnresolvedCardReference()),
+                polygons=(_hotspot_polygon(),),
             ),
         )
     )
@@ -2609,7 +2621,7 @@ def test_clean_session_state_clears_previous_document_error(
     assert window.notification_bar.isHidden()
 
 
-def test_hotspot_geometry_change_shows_targeted_undo(
+def test_hotspot_deletion_shows_targeted_undo(
     application: QApplication,
 ) -> None:
     interaction = Interaction(
@@ -2629,34 +2641,44 @@ def test_hotspot_geometry_change_shows_targeted_undo(
     card = Card(name="Card", revisions=(revision,))
     window, controller, _workers, _background = _window(Stack(name="Demo", cards=(card,)))
 
-    window._delete_hotspot_polygon(interaction.id, 0)
+    window._delete_hotspot_interaction(interaction.id)
 
     changed = controller.document.cards[0].active_revision.hotspot_set
     assert changed is not None
-    assert changed.interactions[0].polygons == ()
-    assert window.notification_bar.message_label.text() == "Hotspot area deleted"
+    assert changed.interactions == ()
+    assert window.notification_bar.message_label.text() == "Hotspot deleted"
     assert not window.notification_bar.isHidden()
 
     window._undo_notification()
 
     restored = controller.document.cards[0].active_revision.hotspot_set
     assert restored is not None
+    assert restored.interactions[0].id == interaction.id
     assert restored.interactions[0].polygons == interaction.polygons
+    assert restored.interactions[0].label == "Go to Unresolved destination"
 
 
-def test_empty_canvas_request_creates_and_selects_blank_hotspot(
+def test_completed_polygon_creates_and_selects_hotspot(
     application: QApplication,
 ) -> None:
     card = Card(name="Card")
     window, controller, _workers, _background = _window(Stack(name="Demo", cards=(card,)))
 
-    window._begin_implicit_hotspot_area(Point(x=0.2, y=0.3))
+    polygon = Polygon(
+        points=(
+            Point(x=0.2, y=0.2),
+            Point(x=0.4, y=0.2),
+            Point(x=0.3, y=0.4),
+        )
+    )
+    window.card_canvas.polygon_created.emit(polygon)
 
     hotspot_set = controller.document.cards[0].active_revision.hotspot_set
     assert hotspot_set is not None
     assert len(hotspot_set.interactions) == 1
-    assert hotspot_set.interactions[0].polygons == ()
+    assert hotspot_set.interactions[0].polygons == (polygon,)
     assert window.inspector.selected_interaction_id == hotspot_set.interactions[0].id
+    assert window.notification_bar.message_label.text() == "Hotspot created"
 
 
 def test_hotspot_editing_is_scoped_to_hotspots_tab(
@@ -2690,7 +2712,7 @@ def test_hotspot_editing_is_scoped_to_hotspots_tab(
         hotspot_set=HotspotSet(interactions=(interaction,)),
     )
     card = Card(name="Card", revisions=(revision,))
-    window, _controller, _workers, _background = _window(Stack(name="Demo", cards=(card,)))
+    window, controller, _workers, _background = _window(Stack(name="Demo", cards=(card,)))
     window.document_session = SimpleNamespace(
         store=SimpleNamespace(
             asset_path=lambda _path: image_path,
@@ -2708,11 +2730,11 @@ def test_hotspot_editing_is_scoped_to_hotspots_tab(
     assert window.inspector.hotspots_active
     assert window.card_canvas._editable
     assert window.card_canvas._overlay_items
-    window.card_canvas.begin_polygon(
-        interaction.id,
-        initial_point=Point(x=0.6, y=0.6),
-    )
+    original_hotspots = controller.document.cards[0].active_revision.hotspot_set
+    window.inspector.add_hotspot_button.click()
     assert window.card_canvas.drawing
+    assert controller.document.cards[0].active_revision.hotspot_set == original_hotspots
+    assert window.inspector.selected_interaction_id is None
 
     window.inspector.inspector_tabs.setCurrentIndex(0)
     assert not window.card_canvas.drawing
@@ -2731,6 +2753,15 @@ def test_image_operation_explicitly_cancels_and_blocks_hotspot_draft(
     interaction = Interaction(
         label="Door",
         action=NavigateAction(target=UnresolvedCardReference()),
+        polygons=(
+            Polygon(
+                points=(
+                    Point(x=0.1, y=0.1),
+                    Point(x=0.4, y=0.1),
+                    Point(x=0.2, y=0.4),
+                )
+            ),
+        ),
     )
     asset_id = uuid4()
     revision = CardRevision(
@@ -2760,10 +2791,7 @@ def test_image_operation_explicitly_cancels_and_blocks_hotspot_draft(
     )
     assert window.inspector.refine_background_button.isEnabled()
     window.inspector.inspector_tabs.setCurrentIndex(window.inspector._hotspots_tab_index)
-    window.card_canvas.begin_polygon(
-        interaction.id,
-        initial_point=Point(x=0.3, y=0.3),
-    )
+    window.card_canvas.begin_polygon(initial_point=Point(x=0.3, y=0.3))
     assert window.card_canvas.drawing
 
     background.busy = True
@@ -2774,12 +2802,9 @@ def test_image_operation_explicitly_cancels_and_blocks_hotspot_draft(
     assert not window.card_canvas._editable
     assert (
         window.notification_bar.message_label.text()
-        == "Unfinished hotspot area cancelled before image processing"
+        == "Unfinished hotspot drawing cancelled before image processing"
     )
-    window.card_canvas.begin_polygon(
-        interaction.id,
-        initial_point=Point(x=0.4, y=0.4),
-    )
+    window.card_canvas.begin_polygon(initial_point=Point(x=0.4, y=0.4))
     assert not window.card_canvas.drawing
 
     background.busy = False

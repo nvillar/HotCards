@@ -208,10 +208,12 @@ for live MFLUX runs.
   manually.
 - Keep the canvas automatically fitted to the complete image. Do not expose
   zoom, pan, manual fit, or image-clear controls.
-- Hotspots may have no polygons. Derive one simple label from their
-  highest-priority action: `Go to <Card>`, then `Play <Sound>`, then
-  `Gain <Key>`, then `Lose <Key>`. Area-less hotspots retain all semantics in
-  storage and are ignored by Run-mode hit testing.
+- Require exactly one polygon per persisted hotspot. Begin new hotspots as
+  transient canvas drafts and persist the hotspot and polygon atomically only
+  after valid completion. Canceling a draft must not mutate the document, and
+  deleting the polygon deletes the hotspot through one undoable command.
+  Derive one simple label from each hotspot's highest-priority action:
+  `Go to <Card>`, then `Play <Sound>`, then `Gain <Key>`, then `Lose <Key>`.
 - Keep Author canvas selection hierarchical: a selected vertex belongs to a
   selected polygon, which belongs to the selected hotspot. Inspector
   synchronization and same-revision edits must not discard a valid more

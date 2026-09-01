@@ -138,9 +138,7 @@ class KeyDefinition(DomainModel):
 class SoundGenerationProvenance(DomainModel):
     """Exact settings used to generate one persisted sound asset."""
 
-    model: Literal["stabilityai/stable-audio-3-small-sfx"] = (
-        "stabilityai/stable-audio-3-small-sfx"
-    )
+    model: Literal["stabilityai/stable-audio-3-small-sfx"] = "stabilityai/stable-audio-3-small-sfx"
     runtime: Literal["stable-audio-3-optimized-mlx"] = "stable-audio-3-optimized-mlx"
     prompt: NonEmptyString
     duration_seconds: int = Field(ge=1, le=30, strict=True)
@@ -212,7 +210,7 @@ class HotspotKeyChanges(DomainModel):
 
 
 class Interaction(DomainModel):
-    """One conditional interaction with key changes, navigation, sound, and geometry."""
+    """One polygon hotspot with conditions, key changes, navigation, and sound."""
 
     id: UUID = Field(default_factory=uuid4)
     label: NonEmptyString = "New Hotspot"
@@ -220,7 +218,7 @@ class Interaction(DomainModel):
     key_changes: HotspotKeyChanges = Field(default_factory=HotspotKeyChanges)
     action: NavigateAction | None = None
     sound_id: UUID | None = None
-    polygons: tuple[Polygon, ...] = Field(default_factory=tuple)
+    polygons: tuple[Polygon, ...] = Field(min_length=1, max_length=1)
 
 
 class ImageReferenceSnapshot(DomainModel):

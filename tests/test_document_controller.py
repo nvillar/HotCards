@@ -159,10 +159,7 @@ def test_text_edits_have_sensible_per_commit_undo_boundaries() -> None:
     )
 
     assert controller.undo()
-    assert (
-        controller.document.cards[0].active_revision.description
-        == "First committed edit"
-    )
+    assert controller.document.cards[0].active_revision.description == "First committed edit"
     assert controller.undo()
     assert controller.document.cards[0].active_revision.description == ""
 
@@ -184,13 +181,16 @@ def test_complete_hotspot_replacement_is_one_atomic_undo_step() -> None:
     assert [item.id for item in changed.interactions] == [
         item.id for item in replacement.interactions
     ]
-    assert [item.label for item in changed.interactions] == ["One", "Two"]
+    assert [item.label for item in changed.interactions] == [
+        "Go to One",
+        "Go to Two",
+    ]
 
     assert controller.undo()
     restored = controller.document.cards[0].revisions[0].hotspot_set
     assert restored is not None
     assert restored.interactions[0].id == original.id
-    assert restored.interactions[0].label == "Retained destination"
+    assert restored.interactions[0].label == "Go to Retained destination"
     assert restored.interactions[0].action == original.action
     assert restored.interactions[0].polygons == original.polygons
     assert controller.redo()
@@ -199,7 +199,10 @@ def test_complete_hotspot_replacement_is_one_atomic_undo_step() -> None:
     assert [item.id for item in redone.interactions] == [
         item.id for item in replacement.interactions
     ]
-    assert [item.label for item in redone.interactions] == ["One", "Two"]
+    assert [item.label for item in redone.interactions] == [
+        "Go to One",
+        "Go to Two",
+    ]
 
 
 def test_destination_resolution_is_one_undoable_command() -> None:
@@ -237,7 +240,7 @@ def test_manual_interaction_add_has_an_undo_boundary() -> None:
     )
     hotspot_set = controller.document.cards[0].revisions[0].hotspot_set
     assert hotspot_set is not None
-    assert hotspot_set.interactions[-1].label == "New destination"
+    assert hotspot_set.interactions[-1].label == "Go to New destination"
     assert controller.undo()
     hotspot_set = controller.document.cards[0].revisions[0].hotspot_set
     assert hotspot_set is not None
@@ -355,9 +358,7 @@ def test_pending_persisted_change_blocks_mutations_until_confirmed() -> None:
     assert not controller.can_redo
 
     blocked_operations = (
-        lambda: controller.execute(
-            RenameCardCommand(card_id=card.id, name="Blocked")
-        ),
+        lambda: controller.execute(RenameCardCommand(card_id=card.id, name="Blocked")),
         controller.undo,
         controller.redo,
         controller.clear_history,
@@ -404,9 +405,7 @@ def test_observed_before_indeterminate_failure_does_not_block_mutations() -> Non
 
     assert controller.document == before
     assert not controller.mutation_blocked
-    changed = controller.execute(
-        RenameCardCommand(card_id=card.id, name="Allowed")
-    )
+    changed = controller.execute(RenameCardCommand(card_id=card.id, name="Allowed"))
     assert changed.cards[0].name == "Allowed"
 
 

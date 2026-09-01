@@ -47,13 +47,11 @@ class CardCanvas(QGraphicsView):
     """Display one active revision image using stable document coordinates."""
 
     interaction_selected = Signal(object)
-    polygon_created = Signal(object, object)
+    polygon_created = Signal(object)
     polygon_changed = Signal(object, int, object)
-    polygon_deletion_requested = Signal(object, int)
     interaction_deletion_requested = Signal(object)
     editing_error = Signal(str)
     interaction_activated = Signal(object)
-    empty_area_requested = Signal(object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -84,7 +82,6 @@ class CardCanvas(QGraphicsView):
         self._overlay_mode = RunOverlayMode.HIDDEN
         self._hovered_interaction_id: UUID | None = None
         self._overlay_items: list[QGraphicsItem] = []
-        self._drawing_interaction_id: UUID | None = None
         self._draft_points: list[QPointF] | None = None
         self._drag_kind: str | None = None
         self._drag_origin: QPointF | None = None
@@ -154,17 +151,16 @@ class CardCanvas(QGraphicsView):
             if hotspot_set is not None
             else set()
         )
-        drawing_target_changed = self._draft_points is not None and (
-            self._drawing_interaction_id not in interaction_ids
-            or selected_interaction_id != self._drawing_interaction_id
+        drawing_selection_changed = (
+            self._draft_points is not None
+            and selected_interaction_id != self._selected_interaction_id
         )
         preserve_geometry_selection = (
             context_id is not None
             and not context_changed
             and selected_interaction_id == self._selected_interaction_id
         )
-        if context_changed or drawing_target_changed or not editable:
-            self._drawing_interaction_id = None
+        if context_changed or drawing_selection_changed or not editable:
             self._draft_points = None
         selected_polygon_index = (
             self._selected_polygon_index if preserve_geometry_selection else None
@@ -228,7 +224,7 @@ class CardCanvas(QGraphicsView):
         self._fit_to_window()
 
     def select_interaction(self, interaction_id: UUID | None) -> None:
-        if self._draft_points is not None and interaction_id != self._drawing_interaction_id:
+        if self._draft_points is not None and interaction_id != self._selected_interaction_id:
             self.cancel_drawing()
         if interaction_id == self._selected_interaction_id:
             return
@@ -256,23 +252,22 @@ class CardCanvas(QGraphicsView):
 
     def begin_polygon(
         self,
-        interaction_id: UUID | None = None,
         *,
         initial_point: Point | None = None,
     ) -> None:
-        """Begin a new interaction polygon or another component."""
+        """Begin drawing a new hotspot without mutating the document."""
         if not self._editable or self._image_item is None:
             self.editing_error.emit("Apply a background before drawing hotspots.")
             return
-        if interaction_id is not None and self._interaction(interaction_id) is None:
-            self.editing_error.emit("The selected hotspot no longer exists.")
-            return
-        self._drawing_interaction_id = interaction_id
+        selection_changed = self._selected_interaction_id is not None
+        self._selected_interaction_id = None
+        self._selected_polygon_index = None
+        self._selected_vertex_index = None
+        if selection_changed:
+            self.interaction_selected.emit(None)
         self._draft_points = (
             [QPointF(initial_point.x, initial_point.y)] if initial_point is not None else []
         )
-        self._selected_polygon_index = None
-        self._selected_vertex_index = None
         self._hovered_edge_insertion = None
         self._drag_kind = None
         self.viewport().setCursor(Qt.CursorShape.CrossCursor)
@@ -282,7 +277,6 @@ class CardCanvas(QGraphicsView):
     def cancel_drawing(self) -> None:
         if self._draft_points is None:
             return
-        self._drawing_interaction_id = None
         self._draft_points = None
         self.viewport().unsetCursor()
         self._render_hotspots()
@@ -416,13 +410,7 @@ class CardCanvas(QGraphicsView):
         hit = self._polygon_at(normalized)
         if hit is None:
             point = Point(x=normalized.x(), y=normalized.y())
-            if self._selected_interaction_id is not None:
-                self.begin_polygon(
-                    self._selected_interaction_id,
-                    initial_point=point,
-                )
-            else:
-                self.empty_area_requested.emit(point)
+            self.begin_polygon(initial_point=point)
             event.accept()
             return
         interaction_id, polygon_index = hit
@@ -607,16 +595,16 @@ class CardCanvas(QGraphicsView):
             self._select_geometry(*vertex)
         elif hit is not None:
             self._select_geometry(*hit)
-        if vertex is not None or hit is not None:
-            self._render_hotspots()
+        else:
+            event.accept()
+            return
+        self._render_hotspots()
 
         menu = QMenu(self)
         delete_vertex_action = None
         add_vertex_action = None
-        delete_area_action = None
-        add_area_action = None
+        delete_hotspot_action = None
         insertion: tuple[int, Point] | None = None
-        interaction: Interaction | None = None
         if hit is not None:
             interaction = self._interaction(hit[0])
             if interaction is not None:
@@ -631,11 +619,7 @@ class CardCanvas(QGraphicsView):
                 )
                 if insertion is not None:
                     add_vertex_action = menu.addAction("Add Vertex on Nearest Edge")
-                delete_area_action = menu.addAction("Delete Area")
-        else:
-            interaction = self._interaction(self._selected_interaction_id)
-            label = interaction.label if interaction is not None else "New Hotspot"
-            add_area_action = menu.addAction(f"Add Area to {label}")
+                delete_hotspot_action = menu.addAction("Delete Hotspot")
 
         selected_action = menu.exec(event.globalPos())
         if selected_action is None:
@@ -645,15 +629,9 @@ class CardCanvas(QGraphicsView):
             self._delete_selected_geometry()
         elif selected_action == add_vertex_action and hit is not None and insertion is not None:
             self._insert_vertex(hit[0], hit[1], *insertion)
-        elif selected_action == delete_area_action:
+        elif selected_action == delete_hotspot_action:
             self._selected_vertex_index = None
             self._delete_selected_geometry()
-        elif selected_action == add_area_action:
-            point = Point(x=normalized.x(), y=normalized.y())
-            if interaction is not None:
-                self.begin_polygon(interaction.id, initial_point=point)
-            else:
-                self.empty_area_requested.emit(point)
         event.accept()
 
     def resizeEvent(self, event: QResizeEvent) -> None:
@@ -897,9 +875,8 @@ class CardCanvas(QGraphicsView):
         except ValidationError as error:
             self.editing_error.emit(self._geometry_error(error))
             return
-        interaction_id = self._drawing_interaction_id
         self.cancel_drawing()
-        self.polygon_created.emit(interaction_id, polygon)
+        self.polygon_created.emit(polygon)
 
     def _select_geometry(
         self,
@@ -952,8 +929,7 @@ class CardCanvas(QGraphicsView):
         if self._selected_vertex_index is not None:
             if len(polygon.points) == 3:
                 self.editing_error.emit(
-                    "A polygon must retain at least three vertices. "
-                    "Delete the area or hotspot instead."
+                    "A polygon must retain at least three vertices. Delete the hotspot instead."
                 )
                 return
             points = list(polygon.points)
@@ -968,8 +944,10 @@ class CardCanvas(QGraphicsView):
                 self.polygon_changed.emit(interaction_id, polygon_index, changed)
             return
         self._selected_polygon_index = None
+        self._selected_interaction_id = None
         self._hovered_edge_insertion = None
-        self.polygon_deletion_requested.emit(interaction_id, polygon_index)
+        self.interaction_selected.emit(None)
+        self.interaction_deletion_requested.emit(interaction_id)
 
     def _update_authoring_hover(self, viewport_point: QPoint) -> None:
         normalized = self.document_point_at(viewport_point)
@@ -1020,16 +998,12 @@ class CardCanvas(QGraphicsView):
         if hit is not None:
             self.viewport().setCursor(Qt.CursorShape.OpenHandCursor)
             self.setToolTip(
-                "Click to select this area, or drag to move it. Delete removes the selected area."
+                "Click to select this hotspot, or drag to move it. "
+                "Delete removes the selected hotspot."
             )
             return
         self.viewport().setCursor(Qt.CursorShape.CrossCursor)
-        selected = self._interaction(self._selected_interaction_id)
-        self.setToolTip(
-            f"Click to add an area to {selected.label}."
-            if selected is not None
-            else "Click to create a hotspot and draw its first area."
-        )
+        self.setToolTip("Click to draw a new hotspot.")
 
     def _set_hovered_edge_insertion(
         self,

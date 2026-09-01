@@ -89,7 +89,7 @@ def test_canvas_wheel_input_does_not_zoom(
     canvas.close()
 
 
-def test_clicking_empty_image_requests_an_implicit_hotspot_area(
+def test_clicking_empty_image_begins_a_new_hotspot_draft(
     application: QApplication,
     tmp_path: Path,
 ) -> None:
@@ -99,9 +99,19 @@ def test_clicking_empty_image_requests_an_implicit_hotspot_area(
     canvas.resize(800, 600)
     canvas.show()
     canvas.show_image(image_path)
-    canvas.set_hotspots(None, None, editable=True)
-    requested: list[object] = []
-    canvas.empty_area_requested.connect(requested.append)
+    polygon = Polygon(
+        points=(
+            Point(x=0.1, y=0.1),
+            Point(x=0.4, y=0.1),
+            Point(x=0.2, y=0.4),
+        )
+    )
+    interaction = Interaction(polygons=(polygon,))
+    canvas.set_hotspots(
+        HotspotSet(interactions=(interaction,)),
+        interaction.id,
+        editable=True,
+    )
     application.processEvents()
 
     QTest.mouseClick(
@@ -110,10 +120,11 @@ def test_clicking_empty_image_requests_an_implicit_hotspot_area(
         pos=canvas.viewport_point_for(QPointF(0.5, 0.5)),
     )
 
-    assert len(requested) == 1
-    point = requested[0]
-    assert point.x == pytest.approx(0.5, abs=0.01)  # type: ignore[union-attr]
-    assert point.y == pytest.approx(0.5, abs=0.01)  # type: ignore[union-attr]
+    assert canvas.drawing
+    assert canvas._selected_interaction_id is None
+    assert canvas._draft_points is not None
+    assert canvas._draft_points[0].x() == pytest.approx(0.5, abs=0.01)
+    assert canvas._draft_points[0].y() == pytest.approx(0.5, abs=0.01)
     canvas.close()
 
 
@@ -267,7 +278,7 @@ def test_mixed_resolution_backgrounds_keep_hotspots_aligned(
             editable=True,
             context_id=Card(name="Card").active_revision.id,
         )
-        canvas.begin_polygon(interaction.id, initial_point=Point(x=0.5, y=0.5))
+        canvas.begin_polygon(initial_point=Point(x=0.5, y=0.5))
         assert canvas._draft_points is not None
         QTest.mouseClick(
             canvas.viewport(),

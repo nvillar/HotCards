@@ -72,6 +72,16 @@ def generated_sound() -> GeneratedSoundAsset:
     )
 
 
+def hotspot_polygon(offset: float = 0.0) -> Polygon:
+    return Polygon(
+        points=(
+            Point(x=0.1 + offset, y=0.1),
+            Point(x=0.3 + offset, y=0.1),
+            Point(x=0.2 + offset, y=0.4),
+        )
+    )
+
+
 def image_settings(
     *,
     width: int = 512,
@@ -107,7 +117,9 @@ def test_stack_round_trips_sound_catalog_and_hotspot_reference() -> None:
         generated=generated_sound(),
     )
     revision = CardRevision(
-        hotspot_set=HotspotSet(interactions=(Interaction(sound_id=sound.id),))
+        hotspot_set=HotspotSet(
+            interactions=(Interaction(sound_id=sound.id, polygons=(hotspot_polygon(),)),)
+        )
     )
     stack = Stack(
         name="Sound stack",
@@ -124,7 +136,9 @@ def test_stack_round_trips_sound_catalog_and_hotspot_reference() -> None:
 
 def test_stack_rejects_unknown_or_ambiguously_named_sounds() -> None:
     revision = CardRevision(
-        hotspot_set=HotspotSet(interactions=(Interaction(sound_id=uuid4()),))
+        hotspot_set=HotspotSet(
+            interactions=(Interaction(sound_id=uuid4(), polygons=(hotspot_polygon(),)),)
+        )
     )
     with pytest.raises(ValidationError, match="must identify Sounds"):
         Stack(name="Unknown sound", cards=(Card(name="Card", revisions=(revision,)),))
@@ -370,6 +384,7 @@ def test_hotspot_labels_are_derived_from_actions() -> None:
             remove=(red_key.id,),
             grant=(door_open.id,),
         ),
+        polygons=(hotspot_polygon(),),
     )
     sound_only = Interaction(
         sound_id=chime.id,
@@ -377,20 +392,24 @@ def test_hotspot_labels_are_derived_from_actions() -> None:
             remove=(red_key.id,),
             grant=(door_open.id,),
         ),
+        polygons=(hotspot_polygon(0.1),),
     )
     grant_only = Interaction(
         key_changes=HotspotKeyChanges(
             remove=(red_key.id,),
             grant=(door_open.id,),
         ),
+        polygons=(hotspot_polygon(0.2),),
     )
     remove_only = Interaction(
         key_changes=HotspotKeyChanges(remove=(red_key.id,)),
+        polygons=(hotspot_polygon(0.3),),
     )
     unresolved = Interaction(
         action=NavigateAction(target=UnresolvedCardReference(target_name="Former room")),
+        polygons=(hotspot_polygon(0.4),),
     )
-    actionless = Interaction()
+    actionless = Interaction(polygons=(hotspot_polygon(0.5),))
     source = Card(
         name="Source",
         revisions=(
@@ -433,6 +452,7 @@ def test_hotspot_key_contract_is_closed_and_references_stack_keys() -> None:
     interaction = Interaction(
         conditions=HotspotConditions(requires=(red_key.id,)),
         key_changes=HotspotKeyChanges(remove=(red_key.id,)),
+        polygons=(hotspot_polygon(),),
     )
     stack = Stack(
         name="Castle",
@@ -461,7 +481,10 @@ def test_hotspot_key_contract_is_closed_and_references_stack_keys() -> None:
                         CardRevision(
                             hotspot_set=HotspotSet(
                                 interactions=(
-                                    Interaction(conditions=HotspotConditions(requires=(uuid4(),))),
+                                    Interaction(
+                                        conditions=HotspotConditions(requires=(uuid4(),)),
+                                        polygons=(hotspot_polygon(),),
+                                    ),
                                 )
                             )
                         ),
@@ -1602,7 +1625,7 @@ def test_hotspots_are_nested_in_their_image_revision() -> None:
     assert loaded.cards[0].revisions[0].hotspot_set is not None
     loaded_interaction = loaded.cards[0].revisions[0].hotspot_set.interactions[0]
     assert loaded_interaction.id == interaction.id
-    assert loaded_interaction.label == "Garden"
+    assert loaded_interaction.label == "Go to Garden"
     assert loaded_interaction.action == interaction.action
     assert loaded_interaction.polygons == interaction.polygons
 
@@ -1706,8 +1729,10 @@ def test_revision_cannot_be_attached_to_multiple_cards() -> None:
         )
 
 
-def test_blank_hotspot_is_valid_but_has_no_hit_geometry() -> None:
-    interaction = Interaction()
-
-    assert interaction.label == "New Hotspot"
-    assert interaction.polygons == ()
+def test_hotspot_requires_exactly_one_polygon() -> None:
+    with pytest.raises(ValidationError, match="polygons"):
+        Interaction()
+    with pytest.raises(ValidationError, match="at least 1"):
+        Interaction(polygons=())
+    with pytest.raises(ValidationError, match="at most 1"):
+        Interaction(polygons=(hotspot_polygon(), hotspot_polygon(0.2)))

@@ -43,11 +43,9 @@ from hotcards.application.card_duplication import (
 )
 from hotcards.application.commands import (
     AddInteractionCommand,
-    AddPolygonCommand,
     CommandError,
     CreateGeneratedRevisionCommand,
     DeleteInteractionCommand,
-    DeletePolygonCommand,
     DocumentCommand,
     RenameCardCommand,
     ReplacePolygonCommand,
@@ -566,11 +564,10 @@ class MainWindow(QMainWindow):
         self.inspector.edit_background_requested.connect(self._edit_background)
         self.inspector.change_applied.connect(self._show_undo_notification)
         self.inspector.hotspot_selected.connect(self.card_canvas.select_interaction)
+        self.inspector.hotspot_drawing_requested.connect(self.card_canvas.begin_polygon)
         self.card_canvas.interaction_selected.connect(self.inspector.select_interaction)
-        self.card_canvas.empty_area_requested.connect(self._begin_implicit_hotspot_area)
         self.card_canvas.polygon_created.connect(self._create_hotspot_polygon)
         self.card_canvas.polygon_changed.connect(self._replace_hotspot_polygon)
-        self.card_canvas.polygon_deletion_requested.connect(self._delete_hotspot_polygon)
         self.card_canvas.interaction_deletion_requested.connect(self._delete_hotspot_interaction)
         self.card_canvas.editing_error.connect(self.inspector.set_hotspot_error)
         self.card_canvas.interaction_activated.connect(self._run_interaction_activated)
@@ -1429,7 +1426,7 @@ class MainWindow(QMainWindow):
             self.card_canvas.cancel_drawing()
             self._show_info(
                 "hotspot-draft-cancelled",
-                "Unfinished hotspot area cancelled before image processing",
+                "Unfinished hotspot drawing cancelled before image processing",
             )
         card = next(
             (card for card in self.controller.document.cards if card.id == self._selected_card_id),
@@ -2078,74 +2075,22 @@ class MainWindow(QMainWindow):
 
     def _create_hotspot_polygon(
         self,
-        interaction_id: object,
         polygon: object,
     ) -> None:
         context = self._active_hotspot_context()
         if context is None or not isinstance(polygon, Polygon):
             return
-        card_id, revision_id, hotspot_set = context
-        if isinstance(interaction_id, UUID):
-            interaction = next(
-                (
-                    interaction
-                    for interaction in hotspot_set.interactions
-                    if interaction.id == interaction_id
-                ),
-                None,
-            )
-            if interaction is None:
-                self.inspector.set_hotspot_error("The hotspot being edited no longer exists.")
-                self.render_document()
-                return
-            command = AddPolygonCommand(
-                card_id=card_id,
-                revision_id=revision_id,
-                interaction_id=interaction_id,
-                polygon=polygon,
-            )
-            selected_id = interaction_id
-            selected_polygon_index = len(interaction.polygons)
-        else:
-            interaction = Interaction(polygons=(polygon,))
-            command = AddInteractionCommand(
+        card_id, revision_id, _hotspot_set = context
+        interaction = Interaction(polygons=(polygon,))
+        self._execute_hotspot_canvas_command(
+            AddInteractionCommand(
                 card_id=card_id,
                 revision_id=revision_id,
                 interaction=interaction,
-            )
-            selected_id = interaction.id
-            selected_polygon_index = 0
-        self._execute_hotspot_canvas_command(
-            command,
-            selected_id,
-            selected_polygon_index=selected_polygon_index,
-            undo_message="Hotspot area added",
-        )
-
-    def _begin_implicit_hotspot_area(self, point: object) -> None:
-        from hotcards.domain.models import Point
-
-        if not isinstance(point, Point):
-            return
-        context = self._active_hotspot_context()
-        if context is None:
-            return
-        card_id, revision_id, hotspot_set = context
-        interaction_id = self.inspector.selected_interaction_id
-        if interaction_id is None:
-            interaction = Interaction()
-            interaction_id = interaction.id
-            self._execute_hotspot_canvas_command(
-                AddInteractionCommand(
-                    card_id=card_id,
-                    revision_id=revision_id,
-                    interaction=interaction,
-                ),
-                interaction_id,
-            )
-        self.card_canvas.begin_polygon(
-            interaction_id,
-            initial_point=point,
+            ),
+            interaction.id,
+            selected_polygon_index=0,
+            undo_message="Hotspot created",
         )
 
     def _replace_hotspot_polygon(
@@ -2172,26 +2117,6 @@ class MainWindow(QMainWindow):
             ),
             interaction_id,
             undo_message="Hotspot geometry updated",
-        )
-
-    def _delete_hotspot_polygon(
-        self,
-        interaction_id: object,
-        polygon_index: int,
-    ) -> None:
-        context = self._active_hotspot_context()
-        if context is None or not isinstance(interaction_id, UUID):
-            return
-        card_id, revision_id, _hotspot_set = context
-        self._execute_hotspot_canvas_command(
-            DeletePolygonCommand(
-                card_id=card_id,
-                revision_id=revision_id,
-                interaction_id=interaction_id,
-                polygon_index=polygon_index,
-            ),
-            interaction_id,
-            undo_message="Hotspot area deleted",
         )
 
     def _delete_hotspot_interaction(self, interaction_id: object) -> None:

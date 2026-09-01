@@ -1073,13 +1073,14 @@ class DeleteInteractionCommand:
 
 
 @dataclass(frozen=True, slots=True)
-class ReplaceInteractionPolygonsCommand:
-    """Replace all polygon components of one interaction."""
+class ReplacePolygonCommand:
+    """Replace the polygon of one interaction."""
 
     card_id: UUID
     revision_id: UUID
     interaction_id: UUID
-    polygons: tuple[Polygon, ...]
+    polygon_index: int
+    polygon: Polygon
 
     def apply(self, document: Stack) -> Stack:
         interaction = _interaction(
@@ -1087,96 +1088,18 @@ class ReplaceInteractionPolygonsCommand:
             card_id=self.card_id,
             revision_id=self.revision_id,
             interaction_id=self.interaction_id,
-        ).model_copy(update={"polygons": self.polygons})
+        )
+        if not 0 <= self.polygon_index < len(interaction.polygons):
+            raise CommandError(f"polygon index {self.polygon_index} is out of range")
+        replacement = interaction.model_copy(update={"polygons": (self.polygon,)})
         changed = _replace_interaction(
             document,
             card_id=self.card_id,
             revision_id=self.revision_id,
             interaction_id=self.interaction_id,
-            replacement=interaction,
+            replacement=replacement,
         )
         return validated_copy(changed)
-
-
-@dataclass(frozen=True, slots=True)
-class AddPolygonCommand:
-    """Append one polygon component to an interaction."""
-
-    card_id: UUID
-    revision_id: UUID
-    interaction_id: UUID
-    polygon: Polygon
-
-    def apply(self, document: Stack) -> Stack:
-        interaction = _interaction(
-            document,
-            card_id=self.card_id,
-            revision_id=self.revision_id,
-            interaction_id=self.interaction_id,
-        )
-        return ReplaceInteractionPolygonsCommand(
-            card_id=self.card_id,
-            revision_id=self.revision_id,
-            interaction_id=self.interaction_id,
-            polygons=(*interaction.polygons, self.polygon),
-        ).apply(document)
-
-
-@dataclass(frozen=True, slots=True)
-class DeletePolygonCommand:
-    """Delete one polygon component, retaining an area-less interaction."""
-
-    card_id: UUID
-    revision_id: UUID
-    interaction_id: UUID
-    polygon_index: int
-
-    def apply(self, document: Stack) -> Stack:
-        interaction = _interaction(
-            document,
-            card_id=self.card_id,
-            revision_id=self.revision_id,
-            interaction_id=self.interaction_id,
-        )
-        if not 0 <= self.polygon_index < len(interaction.polygons):
-            raise CommandError(f"polygon index {self.polygon_index} is out of range")
-        polygons = list(interaction.polygons)
-        polygons.pop(self.polygon_index)
-        return ReplaceInteractionPolygonsCommand(
-            card_id=self.card_id,
-            revision_id=self.revision_id,
-            interaction_id=self.interaction_id,
-            polygons=tuple(polygons),
-        ).apply(document)
-
-
-@dataclass(frozen=True, slots=True)
-class ReplacePolygonCommand:
-    """Replace one polygon component of an interaction."""
-
-    card_id: UUID
-    revision_id: UUID
-    interaction_id: UUID
-    polygon_index: int
-    polygon: Polygon
-
-    def apply(self, document: Stack) -> Stack:
-        interaction = _interaction(
-            document,
-            card_id=self.card_id,
-            revision_id=self.revision_id,
-            interaction_id=self.interaction_id,
-        )
-        if not 0 <= self.polygon_index < len(interaction.polygons):
-            raise CommandError(f"polygon index {self.polygon_index} is out of range")
-        polygons = list(interaction.polygons)
-        polygons[self.polygon_index] = self.polygon
-        return ReplaceInteractionPolygonsCommand(
-            card_id=self.card_id,
-            revision_id=self.revision_id,
-            interaction_id=self.interaction_id,
-            polygons=tuple(polygons),
-        ).apply(document)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1374,7 +1297,6 @@ __all__ = [
     "AddSoundCommand",
     "AddStyleCommand",
     "AddInteractionCommand",
-    "AddPolygonCommand",
     "ChangeHotspotDestinationCommand",
     "ChangeHotspotSoundCommand",
     "CommandError",
@@ -1388,7 +1310,6 @@ __all__ = [
     "DeleteRevisionCommand",
     "DeleteSoundCommand",
     "DeleteStyleCommand",
-    "DeletePolygonCommand",
     "DocumentCommand",
     "DuplicateCardCommand",
     "DuplicateRevisionCommand",
@@ -1399,7 +1320,6 @@ __all__ = [
     "ReorderCardCommand",
     "ReorderHotspotCommand",
     "ReplaceHotspotSetCommand",
-    "ReplaceInteractionPolygonsCommand",
     "ReplacePolygonCommand",
     "ReplaceRevisionBackgroundCommand",
     "ReplaceGeneratedSoundCommand",

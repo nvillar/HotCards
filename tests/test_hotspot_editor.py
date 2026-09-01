@@ -78,12 +78,8 @@ def test_canvas_renders_selected_hotspot_and_draws_new_polygon(
     tmp_path: Path,
 ) -> None:
     canvas, interaction = configured_canvas(application, tmp_path)
-    created: list[tuple[object, Polygon]] = []
-    canvas.polygon_created.connect(
-        lambda interaction_id, polygon: created.append(
-            (interaction_id, polygon)
-        )
-    )
+    created: list[Polygon] = []
+    canvas.polygon_created.connect(created.append)
 
     assert len(canvas._overlay_items) == 1
     canvas.begin_polygon()
@@ -100,27 +96,10 @@ def test_canvas_renders_selected_hotspot_and_draws_new_polygon(
     QTest.keyClick(canvas, Qt.Key.Key_Return)
 
     assert len(created) == 1
-    assert created[0][0] is None
-    assert created[0][1].points[0].x == pytest.approx(0.55, abs=0.01)
+    assert created[0].points[0].x == pytest.approx(0.55, abs=0.01)
     assert not canvas.drawing
 
-    canvas.begin_polygon(interaction.id)
-    for point in (QPointF(0.5, 0.6), QPointF(0.8, 0.6)):
-        QTest.mouseClick(
-            canvas.viewport(),
-            Qt.MouseButton.LeftButton,
-            pos=canvas.viewport_point_for(point),
-        )
-    QTest.mouseDClick(
-        canvas.viewport(),
-        Qt.MouseButton.LeftButton,
-        pos=canvas.viewport_point_for(QPointF(0.65, 0.85)),
-    )
-    assert len(created) == 2
-    assert created[-1][0] == interaction.id
-    assert not canvas.drawing
-
-    canvas.begin_polygon(interaction.id)
+    canvas.begin_polygon()
     QTest.keyClick(canvas, Qt.Key.Key_Escape)
     assert not canvas.drawing
     canvas.close()
@@ -133,9 +112,7 @@ def test_drawing_ignores_overlapping_vertices_and_first_vertex_closes(
     canvas, interaction = configured_canvas(application, tmp_path)
     created: list[Polygon] = []
     errors: list[str] = []
-    canvas.polygon_created.connect(
-        lambda _interaction_id, polygon: created.append(polygon)
-    )
+    canvas.polygon_created.connect(created.append)
     canvas.editing_error.connect(errors.append)
     points = (
         QPointF(0.55, 0.2),
@@ -143,7 +120,7 @@ def test_drawing_ignores_overlapping_vertices_and_first_vertex_closes(
         QPointF(0.7, 0.55),
     )
 
-    canvas.begin_polygon(interaction.id)
+    canvas.begin_polygon()
     for point in points[:2]:
         QTest.mouseClick(
             canvas.viewport(),
@@ -203,13 +180,7 @@ def test_canvas_vertex_move_and_edge_insertion_emit_valid_polygons(
     assert changed[-1].points[0].x == pytest.approx(0.12, abs=0.02)
 
     canvas.set_hotspots(
-        HotspotSet(
-            interactions=(
-                interaction.model_copy(
-                    update={"polygons": (changed[-1],)}
-                ),
-            )
-        ),
+        HotspotSet(interactions=(interaction.model_copy(update={"polygons": (changed[-1],)}),)),
         interaction.id,
         editable=True,
     )
@@ -307,10 +278,7 @@ def test_revision_context_change_cancels_polygon_drawing(
     tmp_path: Path,
 ) -> None:
     canvas, interaction = configured_canvas(application, tmp_path)
-    canvas.begin_polygon(
-        interaction.id,
-        initial_point=Point(x=0.6, y=0.6),
-    )
+    canvas.begin_polygon(initial_point=Point(x=0.6, y=0.6))
     assert canvas.drawing
 
     canvas.set_hotspots(
@@ -321,7 +289,6 @@ def test_revision_context_change_cancels_polygon_drawing(
     )
 
     assert not canvas.drawing
-    assert canvas._drawing_interaction_id is None
     canvas.close()
 
 
@@ -338,10 +305,7 @@ def test_disabling_editing_cancels_drawing_and_hides_authoring_overlays(
         editable=True,
         context_id=context_id,
     )
-    canvas.begin_polygon(
-        interaction.id,
-        initial_point=Point(x=0.6, y=0.6),
-    )
+    canvas.begin_polygon(initial_point=Point(x=0.6, y=0.6))
 
     canvas.set_hotspots(
         hotspot_set,
@@ -372,15 +336,11 @@ def test_selecting_another_hotspot_cancels_polygon_drawing(
         editable=True,
         context_id=uuid4(),
     )
-    canvas.begin_polygon(
-        first.id,
-        initial_point=Point(x=0.6, y=0.6),
-    )
+    canvas.begin_polygon(initial_point=Point(x=0.6, y=0.6))
 
     canvas.select_interaction(second.id)
 
     assert not canvas.drawing
-    assert canvas._drawing_interaction_id is None
     assert canvas._selected_interaction_id == second.id
     canvas.close()
 
@@ -427,7 +387,7 @@ def test_double_clicking_selected_edge_adds_one_vertex(
     canvas.close()
 
 
-def test_vertex_and_area_deletion_leave_parent_selection(
+def test_vertex_deletion_retains_hotspot_and_shape_deletion_removes_it(
     application: QApplication,
     tmp_path: Path,
 ) -> None:
@@ -465,19 +425,18 @@ def test_vertex_and_area_deletion_leave_parent_selection(
             context_id=context_id,
         )
 
-    def delete_polygon(_interaction_id: object, _polygon_index: int) -> None:
-        nonlocal current, interaction
-        interaction = interaction.model_copy(update={"polygons": ()})
-        current = HotspotSet(interactions=(interaction,))
+    def delete_interaction(_interaction_id: object) -> None:
+        nonlocal current
+        current = HotspotSet()
         canvas.set_hotspots(
             current,
-            interaction.id,
+            None,
             editable=True,
             context_id=context_id,
         )
 
     canvas.polygon_changed.connect(replace_polygon)
-    canvas.polygon_deletion_requested.connect(delete_polygon)
+    canvas.interaction_deletion_requested.connect(delete_interaction)
     inside = canvas.viewport_point_for(QPointF(0.25, 0.25))
     QTest.mouseClick(canvas.viewport(), Qt.MouseButton.LeftButton, pos=inside)
     vertex = canvas.viewport_point_for(QPointF(0.1, 0.1))
@@ -491,8 +450,8 @@ def test_vertex_and_area_deletion_leave_parent_selection(
 
     QTest.keyClick(canvas, Qt.Key.Key_Delete)
 
-    assert interaction.polygons == ()
-    assert canvas._selected_interaction_id == interaction.id
+    assert current.interactions == ()
+    assert canvas._selected_interaction_id is None
     assert canvas._selected_polygon_index is None
     canvas.close()
 
@@ -505,12 +464,8 @@ def test_context_menu_dismissal_does_not_delete_selected_area(
     canvas, interaction = configured_canvas(application, tmp_path)
     inside = canvas.viewport_point_for(QPointF(0.23, 0.2))
     QTest.mouseClick(canvas.viewport(), Qt.MouseButton.LeftButton, pos=inside)
-    deletions: list[tuple[object, int]] = []
-    canvas.polygon_deletion_requested.connect(
-        lambda interaction_id, polygon_index: deletions.append(
-            (interaction_id, polygon_index)
-        )
-    )
+    deletions: list[object] = []
+    canvas.interaction_deletion_requested.connect(deletions.append)
 
     class FakeAction:
         def setEnabled(self, _enabled: bool) -> None:
@@ -559,19 +514,12 @@ def test_drawing_and_minimum_vertex_deletion_are_non_destructive(
     assert not deletions
     assert "at least three vertices" in errors[-1]
 
-    polygon_deletions: list[tuple[object, int]] = []
-    canvas.polygon_deletion_requested.connect(
-        lambda interaction_id, polygon_index: polygon_deletions.append(
-            (interaction_id, polygon_index)
-        )
-    )
     canvas._selected_vertex_index = None
     canvas._selected_polygon_index = 0
     QTest.keyClick(canvas, Qt.Key.Key_Delete)
-    assert polygon_deletions == [(interaction.id, 0)]
-    assert not deletions
+    assert deletions == [interaction.id]
 
-    canvas.begin_polygon(interaction.id)
+    canvas.begin_polygon()
     draft_point = canvas.viewport_point_for(QPointF(0.7, 0.7))
     QTest.mouseClick(
         canvas.viewport(),
@@ -581,33 +529,5 @@ def test_drawing_and_minimum_vertex_deletion_are_non_destructive(
     QTest.keyClick(canvas, Qt.Key.Key_Delete)
     assert canvas.drawing
     assert canvas._draft_points == []
-    assert not deletions
-
-    second_component = triangle(0.4)
-    canvas.cancel_drawing()
-    canvas.set_hotspots(
-        HotspotSet(
-            interactions=(
-                interaction.model_copy(
-                    update={
-                        "polygons": (
-                            interaction.polygons[0],
-                            second_component,
-                        )
-                    }
-                ),
-            )
-        ),
-        interaction.id,
-        editable=True,
-    )
-    canvas._selected_polygon_index = 1
-    canvas.set_hotspots(
-        HotspotSet(interactions=(interaction,)),
-        interaction.id,
-        editable=True,
-    )
-    assert canvas._selected_polygon_index is None
-    QTest.keyClick(canvas, Qt.Key.Key_Delete)
-    assert not deletions
+    assert deletions == [interaction.id]
     canvas.close()
