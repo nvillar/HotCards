@@ -55,7 +55,7 @@ from hotcards.domain.models import (
 
 UTILITY_WINDOW_WIDTH = 420
 UTILITY_WINDOW_HEIGHT = 560
-UTILITY_USAGE_LIST_HEIGHT = 140
+UTILITY_USAGE_LIST_HEIGHT = 70
 
 
 class _CommitPlainTextEdit(QPlainTextEdit):

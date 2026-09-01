@@ -429,8 +429,8 @@ def test_author_utility_windows_are_modeless_singletons_and_reopen(
     assert window.sound_manager_window.prompt_edit.minimumHeight() == (
         window.sound_manager_window.prompt_edit.maximumHeight()
     )
-    assert window.sound_manager_window.usage_list.height() == 140
-    assert window.key_manager_window.usage_list.height() == 140
+    assert window.sound_manager_window.usage_list.height() == 70
+    assert window.key_manager_window.usage_list.height() == 70
     window.close()
     application.processEvents()
 
