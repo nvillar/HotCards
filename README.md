@@ -9,8 +9,9 @@ experience. All generation runs on-device.
 
 **Status:** early developer proof of concept. Not packaged for end users.
 
-**Platform:** Apple Silicon macOS. Local generation requires a locally cached
-MFLUX image model; the authoring shell remains usable when it is unavailable.
+**Platform:** Apple Silicon macOS. Local generation requires locally cached
+MFLUX image and Stable Audio sound models; the authoring shell remains usable
+when either is unavailable.
 
 Stacks are stored as self-contained `.hotcards` directory bundles and
 autosaved atomically after creation or opening. At startup, HotCards lists
@@ -31,10 +32,10 @@ the shorter edge, aligned to 16 pixels; for example, Landscape Full is
 1024 × 768 and Widescreen Full is 1024 × 576. The compact
 header above the canvas edits the card name and selects, duplicates, or deletes
 revisions; the Author toolbar places the Run toggle on the left and opens the
-stack-global Styles and Keys managers from the right. In Run mode it instead
+stack-global Styles, Sounds, and Keys managers from the right. In Run mode it instead
 shows navigation and hotspot visibility controls. An
-adjacent step label and progress bar to the left of the image-model selector
-show actual MFLUX inference-step completion during image generation.
+image-generation step label and progress bar in the status bar show actual
+MFLUX inference-step completion.
 
 The Cards sidebar and Command-D shortcut duplicate the selected card immediately
 after its source. A card duplicate contains exactly the active complete revision
@@ -132,14 +133,26 @@ explicit Style or No Style selection becomes the default for subsequently
 created cards. Deleting a Style clears every revision that selected it and is
 reversible through Undo.
 
+The modeless Sounds utility window manages an ordered stack-global catalog of
+named sound effects. Each Sound keeps an editable generation Prompt and a
+duration from 1–30 seconds, defaulting to 2 seconds. Generate and Re-generate use
+Stable Audio 3 Small-SFX through its optimized MLX runtime with the Pingpong
+sampler, 8 steps, CFG 1.0, and a fresh random seed. Output is stored as 16-bit
+PCM stereo WAV at 44.1 kHz with exact prompt, duration, seed, model, runtime,
+sampler, and timing provenance. Existing audio remains available while a
+replacement is generated, and replacement is one undoable asset-and-manifest
+transaction. The manager previews audio, lists every hotspot usage, jumps to
+the selected usage, and blocks deletion while the Sound is referenced.
+
 The Hotspots inspector is the sole source of revision-local interaction
 semantics. A new hotspot is persisted and selected immediately, even before it
 has an area. Its label is derived automatically in Remove, Grant, then
 destination order, with long labels using two-line list entries. The bordered
 When section requires every Present key to exist and every Absent key not to
 exist. The bordered Then section applies disjoint explicit Remove and Grant
-sets before its optional Go to destination. Keys are stack-global free-form
-names with stable internal IDs.
+sets before its optional Go to destination and optional Play Sound action.
+Renaming a Sound preserves hotspot assignments through stable IDs. Keys are
+stack-global free-form names with stable internal IDs.
 
 The modeless Keys utility window manages that global catalog with the same list,
 compact remove/add, and full-width Name patterns as Styles. It reports every
@@ -171,8 +184,11 @@ retains keys, Restart clears them, and leaving Run discards them. Condition-
 failing and actionless placeholder hotspots are omitted from hover, overlays,
 and hit testing; existing z-order selects the topmost remaining hotspot.
 Activation rechecks conditions, removes keys, grants keys, and finally
-navigates, so the destination sees the updated state. Pure key actions are
-valid. Run also retains deterministic Back/Restart navigation history and
+navigates, so the destination sees the updated state. A clicked Sound starts
+after that navigation and continues on the destination card. New playback
+replaces existing playback; navigation, Back, Restart, and leaving Run first
+stop the previous sound. Pure key and sound actions are valid. Run also retains
+deterministic Back/Restart navigation history and
 configurable overlays. It opens on the current Author card and, when that
 differs from the configured start card, offers a dismissible restart action.
 Run presents Back and Restart as standard-size controls and hides the
@@ -180,8 +196,9 @@ authoring-only card name and version header. Run-only navigation and overlay
 controls stay hidden in Author mode. Cards without hotspots are valid terminal
 cards and do not produce a warning.
 Local MFLUX availability is checked automatically when Author mode is entered;
-Run mode starts no AI work and hides model selection. In Author mode, the
-status bar selects either FLUX.2 Klein 4B or FLUX.2 Klein 9B KV.
+Run mode starts no AI work. Settings → Models selects the Image and Sound
+models. Image offers FLUX.2 Klein 4B and FLUX.2 Klein 9B KV; Sound currently
+uses Stable Audio 3 Small-SFX.
 
 Transient outcomes, failures, Run warnings, and Undo actions appear in one
 notification bar beneath the main panes and directly above the status bar.
@@ -190,13 +207,15 @@ image generation also offers Create New Version, which restores
 the prior current revision and activates a complete new revision containing the
 result, plus an explicit Keep action that retains it on the current revision.
 Field validation remains beside the responsible input.
-AI failures and recovery actions stay in the notification bar rather than the
-model selectors.
+AI failures and recovery actions stay in the notification bar.
 
 ## Setup and run
 
 Prerequisites: Python 3.12 and [uv](https://docs.astral.sh/uv/). To enable
-generation, cache the selected MFLUX model locally. FLUX.2 Klein 4B uses
+generation, cache the selected MFLUX model and
+`stabilityai/stable-audio-3-optimized` Small-SFX MLX weights locally. Accept the
+Stable Audio model terms and authenticate with Hugging Face outside HotCards;
+credentials are never stored in a stack or Qt settings. FLUX.2 Klein 4B uses
 Apache 2.0; FLUX.2 Klein 9B KV uses the FLUX Non-Commercial License. The 9B KV
 choice requires both the regular 9B weights for text-only generation and the
 9B KV weights for reference generation.
@@ -233,8 +252,8 @@ subject and composition preservation, consistency, and artifact leakage.
 
 - `domain/` — in-memory stack model, geometry, validation.
 - `storage/` — human-readable `*.hotcards` bundle storage.
-- `generation/` — deterministic MFLUX prompt composition, image generation,
-  and Reference delivery.
+- `generation/` — deterministic MFLUX image generation and attributed Stable
+  Audio 3 Small-SFX MLX sound generation.
 - `application/` — document controller, typed commands, session undo, workers.
 - `ui/` — PySide6 Author and Run interface.
 - `evaluation/` — `hotcards-eval` harness reusing production adapters.

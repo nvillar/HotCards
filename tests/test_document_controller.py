@@ -1,5 +1,9 @@
 """Focused tests for authoritative document history and autosave signaling."""
 
+from datetime import UTC, datetime
+from pathlib import Path
+from uuid import uuid4
+
 import pytest
 
 from hotcards.application.commands import (
@@ -8,23 +12,29 @@ from hotcards.application.commands import (
     CreateCardAndResolveCommand,
     CreateCardCommand,
     DeleteCardCommand,
+    DeleteSoundCommand,
     EditRevisionDescriptionCommand,
     RenameCardCommand,
+    ReplaceGeneratedSoundCommand,
     ReplaceHotspotSetCommand,
 )
 from hotcards.application.document_controller import (
     DocumentController,
     DocumentMutationBlockedError,
+    OwnedSoundAsset,
 )
 from hotcards.domain.models import (
     Card,
     CardRevision,
+    GeneratedSoundAsset,
     HotspotSet,
     Interaction,
     NavigateAction,
     Point,
     Polygon,
     ResolvedCardReference,
+    SoundDefinition,
+    SoundGenerationProvenance,
     Stack,
     UnresolvedCardReference,
 )
@@ -59,6 +69,49 @@ def document_with_hotspot() -> tuple[Stack, Card, CardRevision, Interaction]:
         active_revision_id=revision.id,
     )
     return Stack(name="Stack", cards=(source,), start_card_id=source.id), source, revision, hotspot
+
+
+def test_owned_sound_is_released_only_after_history_cannot_restore_it() -> None:
+    sound = SoundDefinition(name="Knock", prompt="A wooden knock")
+    controller = DocumentController(Stack(name="Sounds", sounds=(sound,)))
+    releases: list[OwnedSoundAsset] = []
+    controller.set_owned_asset_release_hook(
+        lambda assets: releases.extend(
+            asset for asset in assets if isinstance(asset, OwnedSoundAsset)
+        )
+    )
+    generated = GeneratedSoundAsset(
+        audio_path=f"assets/sounds/{sound.id}/sound-{uuid4()}.wav",
+        provenance=SoundGenerationProvenance(
+            prompt="A wooden knock",
+            duration_seconds=2,
+            seed=42,
+            generation_duration_milliseconds=800,
+        ),
+        created_at=datetime.now(UTC),
+    )
+    owned = OwnedSoundAsset(
+        bundle_path=Path("/tmp/Sounds.hotcards"),
+        relative_path=generated.audio_path,
+        sound_id=sound.id,
+        asset_id=generated.id,
+        device=1,
+        inode=2,
+        directory_device=1,
+        directory_inode=3,
+    )
+    controller.execute_persisted(
+        ReplaceGeneratedSoundCommand(sound_id=sound.id, generated=generated),
+        lambda _stack: None,
+        owned_assets=(owned,),
+    )
+    controller.execute(DeleteSoundCommand(sound_id=sound.id))
+
+    assert releases == []
+
+    controller.clear_history()
+
+    assert releases == [owned]
 
 
 def hotspot_target(controller: DocumentController) -> object:
@@ -313,7 +366,7 @@ def test_pending_persisted_change_blocks_mutations_until_confirmed() -> None:
     for operation in blocked_operations:
         with pytest.raises(
             DocumentMutationBlockedError,
-            match="Save the stack to finish the pending image change",
+            match="Save the stack to finish the pending asset change",
         ):
             operation()
         assert controller.document == observed_after

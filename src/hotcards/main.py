@@ -12,9 +12,11 @@ from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
 
 from hotcards.application.document_controller import DocumentController
 from hotcards.application.document_session import DocumentSession, DocumentSessionError
+from hotcards.application.sound_workflow import SoundWorkflow
 from hotcards.application.workers import AdapterKind, AdapterWorkers
 from hotcards.domain.models import Stack
 from hotcards.generation.errors import ModelUnavailableError
+from hotcards.generation.stable_audio import StableAudioGenerator
 from hotcards.ui.branding import application_icon
 from hotcards.ui.main_window import AvailabilityChecksFactory, MainWindow
 from hotcards.ui.project_paths import default_project_directory
@@ -64,8 +66,12 @@ def build_availability_checks(
                     "outside HotCards, then retry."
                 ) from error
 
+    def check_stable_audio() -> None:
+        StableAudioGenerator().check_available()
+
     return {
         AdapterKind.MFLUX: check_mflux,
+        AdapterKind.STABLE_AUDIO: check_stable_audio,
     }
 
 
@@ -91,6 +97,16 @@ def build_main_window(
         if document_session is not None
         else (DocumentSession(document_controller) if controller is None else None)
     )
+    sound_workflow = (
+        SoundWorkflow(
+            document_controller,
+            active_session,
+            adapter_workers,
+            StableAudioGenerator(),
+        )
+        if active_session is not None
+        else None
+    )
     return MainWindow(
         document_controller,
         adapter_workers,
@@ -98,6 +114,7 @@ def build_main_window(
         availability_checks=availability_checks,
         availability_checks_factory=availability_checks_factory,
         document_session=active_session,
+        sound_workflow=sound_workflow,
         project_directory=project_directory,
         start_diagnostics=start_diagnostics,
         owns_workers=workers is None,

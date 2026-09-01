@@ -171,6 +171,51 @@ class RunSession:
         self._warning = None
         return self.state
 
+    def activation_sound_id(
+        self,
+        document: Stack,
+        interaction_id: UUID,
+    ) -> UUID | None:
+        """Return the Sound for one currently eligible hotspot activation."""
+        interaction = self._eligible_interaction(document, interaction_id)
+        return interaction.sound_id if interaction is not None else None
+
+    def activation_has_navigation(
+        self,
+        document: Stack,
+        interaction_id: UUID,
+    ) -> bool:
+        """Return whether one currently eligible activation attempts navigation."""
+        interaction = self._eligible_interaction(document, interaction_id)
+        return interaction is not None and interaction.action is not None
+
+    def _eligible_interaction(
+        self,
+        document: Stack,
+        interaction_id: UUID,
+    ) -> Interaction | None:
+        card = next(
+            (card for card in document.cards if card.id == self._current_card_id),
+            None,
+        )
+        if card is None or card.active_revision.hotspot_set is None:
+            return None
+        interaction = next(
+            (
+                candidate
+                for candidate in card.active_revision.hotspot_set.interactions
+                if candidate.id == interaction_id
+            ),
+            None,
+        )
+        if (
+            interaction is None
+            or not self._is_active(interaction)
+            or not self._has_effect(interaction)
+        ):
+            return None
+        return interaction
+
     def back(self) -> RunSessionState:
         if not self._history:
             self._warning = "There is no previous card."
@@ -208,6 +253,7 @@ class RunSession:
         changes = interaction.key_changes
         return (
             interaction.action is not None
+            or interaction.sound_id is not None
             or bool(changes.remove)
             or bool(changes.grant)
         )

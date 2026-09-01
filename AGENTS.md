@@ -169,7 +169,7 @@ for live MFLUX runs.
   titles. Reinterpret contains Source Similarity, Resolution, and Reinterpret;
   Edit contains Edit Instruction, Resolution, and Edit.
   The current canvas/header is the implicit source for both. Open
-  Styles and Keys from right-aligned Author-toolbar actions into separate
+  Styles, Sounds, and Keys from right-aligned Author-toolbar actions into separate
   modeless singleton utility windows. Keep them as stack-global list managers
   backed by the authoritative controller, with compact remove/add controls and
   vertically stacked full-width fields. Hide the manager actions and windows in
@@ -204,10 +204,10 @@ for live MFLUX runs.
   manually.
 - Keep the canvas automatically fitted to the complete image. Do not expose
   zoom, pan, manual fit, or image-clear controls.
-- Hotspots may have no polygons. Derive their labels from Remove, Grant, then
-  destination actions and display long labels on at most two lines. Area-less
-  hotspots retain all semantics in storage and are ignored by Run-mode hit
-  testing.
+- Hotspots may have no polygons. Derive one simple label from their
+  highest-priority action: `Go to <Card>`, then `Play <Sound>`, then
+  `Gain <Key>`, then `Lose <Key>`. Area-less hotspots retain all semantics in
+  storage and are ignored by Run-mode hit testing.
 - Keep Author canvas selection hierarchical: a selected vertex belongs to a
   selected polygon, which belongs to the selected hotspot. Inspector
   synchronization and same-revision edits must not discard a valid more
@@ -225,25 +225,43 @@ for live MFLUX runs.
   Run-entry notification. Use one action-oriented mode button labeled Run in
   Author mode and Author in Run mode. Show standard-size Back, Restart, and
   overlay controls only in Run mode; hide the card name, version authoring
-  header, and bottom model selectors there.
-- Keep the image-model selector in the status bar and persist it through Qt
-  settings. Offer FLUX.2 Klein 4B and FLUX.2 Klein 9B KV. Keep the model field
-  out of Advanced Settings. Disable the selector while any image operation is
-  running; changing the model must cancel work using the previous setting.
+  header there.
+- Keep machine-local model selection under Settings → Models, with Image and
+  Sound selectors persisted through Qt settings. Offer FLUX.2 Klein 4B and
+  FLUX.2 Klein 9B KV for Image and Stable Audio 3 Small-SFX for Sound. Keep
+  inference, quantization, seed, credentials, and model selectors out of the
+  status bar. Changing a model must cancel work using the previous setting.
 - Represent a revision's applied hotspot set as `HotspotSet | None`.
   `None` means no set has been applied; an empty `HotspotSet` means an applied
   set currently contains no interactions.
 - Use discriminated resolved/unresolved types for persisted references, not a
   nullable UUID plus status boolean. Store resolved runtime targets by UUID
-  after selection. If a destination card is deleted, convert inbound references to
-  unresolved while retaining the former target name; do not delete inbound
-  hotspots.
+  after selection. Go to assigns only existing catalog cards; create cards
+  through the Cards sidebar. If a destination card is deleted, convert inbound
+  references to unresolved while retaining the former target name; do not
+  delete inbound hotspots.
 - Keep an ordered, stack-owned catalog of free-form named binary Keys with
   stable UUIDs. Key names are trimmed, nonempty, and case-insensitively unique.
   Renaming preserves references; block deletion while any hotspot in any
-  revision references the Key. Keep Key assignment controls in Hotspots and
-  show every reference grouped by hotspot revision and semantic role in the
-  Keys utility window.
+  revision references the Key. Create Keys only through the Keys utility
+  window. Keep flat, headerless condition and key-change rows in Hotspots;
+  adding a row immediately selects the newest eligible catalog Key for inline
+  editing. Show every reference by hotspot revision in the Keys utility window.
+- Keep an ordered, stack-owned Sound catalog with stable UUIDs, trimmed
+  case-insensitively unique names, editable prompts, 1–30 second durations, and
+  optional immutable generated WAV assets. Generate only with Stable Audio 3
+  Small-SFX through the attributed official optimized MLX subset: Pingpong,
+  8 steps, CFG 1.0, random retained seed, 44.1 kHz stereo 16-bit PCM. Do not
+  vendor weights or credentials. Store WAVs under deterministic
+  `assets/sounds/<sound-id>/sound-<asset-id>.wav` paths, validate them as
+  untrusted data, and commit each replacement with the manifest transactionally.
+  Retain replaced bytes only while Undo/Redo can restore them.
+- Keep one optional Sound reference per hotspot and place Play after Go to in
+  Then. Block deletion of referenced Sounds and show all usages in the modeless
+  Sounds manager. In Run, stop prior playback before hotspot navigation, then
+  start the clicked Sound so it can continue on the destination. New playback
+  replaces current playback; also stop on Back, Restart, project replacement,
+  and Run exit. Treat sound-only hotspots as actionable.
 - Keep hotspot state behavior closed and typed: all required Keys must be
   present, all forbidden Keys absent, and explicit Remove and Grant sets must be
   disjoint. Do not add clear-all behavior, values, counters, expressions,
@@ -253,6 +271,10 @@ for live MFLUX runs.
   them on exit. Filter condition-failing and actionless hotspots before
   z-order hit testing, recheck conditions on activation, then execute Remove,
   Grant, and optional navigation in that order.
+- Serialize MFLUX and Stable Audio loading/inference through the same stable
+  process-local Metal invocation boundary. Stable Audio cancellation must be
+  checked between stages and at every sampling step; ordinary tests use fakes
+  and never invoke or download the live model.
 - Do not add a database, web server, browser UI, plugin system,
   dependency-injection framework, event bus, arbitrary scripting engine, model
   downloader, or hosted experiment platform.

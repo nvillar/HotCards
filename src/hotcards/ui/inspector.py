@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Literal
 from uuid import UUID
 
 from pydantic import ValidationError
@@ -15,8 +14,6 @@ from PySide6.QtWidgets import (
     QFrame,
     QGroupBox,
     QHBoxLayout,
-    QHeaderView,
-    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -24,9 +21,9 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QStackedWidget,
     QStyle,
-    QTableWidget,
     QTabWidget,
     QToolButton,
     QVBoxLayout,
@@ -36,9 +33,8 @@ from PySide6.QtWidgets import (
 from hotcards.application.commands import (
     AddInteractionCommand,
     ChangeHotspotDestinationCommand,
+    ChangeHotspotSoundCommand,
     CommandError,
-    CreateCardAndResolveCommand,
-    CreateKeyAndAddHotspotReferenceCommand,
     DeleteInteractionCommand,
     DocumentCommand,
     EditRevisionDescriptionCommand,
@@ -149,27 +145,6 @@ def _adjacent_card_id(
     return None
 
 
-def _configure_rule_table(
-    table: QTableWidget,
-    headers: tuple[str, str, str],
-    *,
-    stretch_column: int,
-) -> None:
-    table.setHorizontalHeaderLabels(headers)
-    table.verticalHeader().setVisible(False)
-    table.horizontalHeader().setSectionResizeMode(stretch_column, QHeaderView.ResizeMode.Stretch)
-    for column in range(2):
-        if column != stretch_column:
-            table.horizontalHeader().setSectionResizeMode(
-                column, QHeaderView.ResizeMode.ResizeToContents
-            )
-    table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
-    table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
-    table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-    table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-    table.setFrameShape(QFrame.Shape.NoFrame)
-
-
 def _rule_panel(object_name: str) -> tuple[QGroupBox, QVBoxLayout]:
     panel = QGroupBox()
     panel.setObjectName(object_name)
@@ -212,15 +187,6 @@ def _compact_text_button(
     font.setBold(True)
     button.setFont(font)
     return button
-
-
-def _centered_cell_widget(widget: QWidget) -> QWidget:
-    container = QWidget()
-    layout = QHBoxLayout(container)
-    layout.setContentsMargins(0, 0, 0, 0)
-    layout.setSpacing(0)
-    layout.addWidget(widget, 0, Qt.AlignmentFlag.AlignCenter)
-    return container
 
 
 _SOURCE_SIMILARITY_TOOLTIPS = {
@@ -667,50 +633,66 @@ class Inspector(QWidget):
         self.hotspot_when_label.setObjectName("hotspotWhenLabel")
         layout.addWidget(self.hotspot_when_label)
         self.hotspot_when_panel, when_layout = _rule_panel("hotspotWhenPanel")
-        self.condition_table = QTableWidget(0, 3)
-        self.condition_table.setObjectName("hotspotConditionTable")
-        _configure_rule_table(
-            self.condition_table,
-            ("State", "Key", ""),
-            stretch_column=1,
+        self.condition_controls_layout = QVBoxLayout()
+        self.condition_controls_layout.setContentsMargins(0, 0, 0, 0)
+        self.condition_controls_layout.setSpacing(3)
+        self.condition_rows_widget = QWidget()
+        self.condition_rows_widget.setObjectName("hotspotConditionRows")
+        self.condition_rows_layout = QVBoxLayout(self.condition_rows_widget)
+        self.condition_rows_layout.setContentsMargins(0, 0, 0, 0)
+        self.condition_controls_layout.addWidget(self.condition_rows_widget)
+        self.add_condition_button = _compact_text_button(
+            "+",
+            object_name="addConditionButton",
+            accessible_name="Add condition",
+            tooltip="Add a condition",
+            prominent=False,
         )
-        when_layout.addWidget(self.condition_table)
-        self.no_conditions_label = QLabel("No conditions (always activates)")
-        self.no_conditions_label.setObjectName("noHotspotConditionsLabel")
-        when_layout.addWidget(self.no_conditions_label)
-        self.add_condition_button = QPushButton("+ Add condition")
-        self.add_condition_button.setObjectName("addConditionButton")
-        self.add_condition_button.setFlat(True)
-        when_layout.addWidget(
-            self.add_condition_button,
-            0,
-            Qt.AlignmentFlag.AlignLeft,
-        )
+        self.add_condition_button.setFixedSize(20, 20)
+        self.condition_add_row = QWidget()
+        self.condition_add_row.setObjectName("addConditionRow")
+        condition_add_layout = QHBoxLayout(self.condition_add_row)
+        condition_add_layout.setContentsMargins(0, 0, 0, 0)
+        condition_add_layout.setSpacing(4)
+        condition_add_layout.addWidget(self.add_condition_button)
+        self.add_condition_label = QLabel("Key condition")
+        condition_add_layout.addWidget(self.add_condition_label)
+        condition_add_layout.addStretch(1)
+        self.condition_controls_layout.addWidget(self.condition_add_row)
+        when_layout.addLayout(self.condition_controls_layout)
         layout.addWidget(self.hotspot_when_panel)
 
         self.hotspot_then_label = QLabel("Then")
         self.hotspot_then_label.setObjectName("hotspotThenLabel")
         layout.addWidget(self.hotspot_then_label)
         self.hotspot_then_panel, then_layout = _rule_panel("hotspotThenPanel")
-        self.key_change_table = QTableWidget(0, 3)
-        self.key_change_table.setObjectName("hotspotKeyChangeTable")
-        _configure_rule_table(
-            self.key_change_table,
-            ("Change", "Key", ""),
-            stretch_column=1,
+        self.key_change_controls_layout = QVBoxLayout()
+        self.key_change_controls_layout.setContentsMargins(0, 0, 0, 0)
+        self.key_change_controls_layout.setSpacing(3)
+        self.key_change_rows_widget = QWidget()
+        self.key_change_rows_widget.setObjectName("hotspotKeyChangeRows")
+        self.key_change_rows_layout = QVBoxLayout(self.key_change_rows_widget)
+        self.key_change_rows_layout.setContentsMargins(0, 0, 0, 0)
+        self.key_change_controls_layout.addWidget(self.key_change_rows_widget)
+        self.add_key_change_button = _compact_text_button(
+            "+",
+            object_name="addKeyChangeButton",
+            accessible_name="Add key change",
+            tooltip="Add a key change",
+            prominent=False,
         )
-        then_layout.addWidget(self.key_change_table)
-        self.no_key_changes_label = QLabel("No key changes")
-        self.no_key_changes_label.setObjectName("noHotspotKeyChangesLabel")
-        then_layout.addWidget(self.no_key_changes_label)
-        self.add_key_change_button = QPushButton("+ Add key change")
-        self.add_key_change_button.setObjectName("addKeyChangeButton")
-        self.add_key_change_button.setFlat(True)
-        then_layout.addWidget(
-            self.add_key_change_button,
-            0,
-            Qt.AlignmentFlag.AlignLeft,
-        )
+        self.add_key_change_button.setFixedSize(20, 20)
+        self.key_change_add_row = QWidget()
+        self.key_change_add_row.setObjectName("addKeyChangeRow")
+        key_change_add_layout = QHBoxLayout(self.key_change_add_row)
+        key_change_add_layout.setContentsMargins(0, 0, 0, 0)
+        key_change_add_layout.setSpacing(4)
+        key_change_add_layout.addWidget(self.add_key_change_button)
+        self.add_key_change_label = QLabel("Key change")
+        key_change_add_layout.addWidget(self.add_key_change_label)
+        key_change_add_layout.addStretch(1)
+        self.key_change_controls_layout.addWidget(self.key_change_add_row)
+        then_layout.addLayout(self.key_change_controls_layout)
 
         self.hotspot_target_label = QLabel("Go to")
         self.hotspot_target_label.setObjectName("hotspotTargetLabel")
@@ -719,6 +701,13 @@ class Inspector(QWidget):
         self.hotspot_destination_combo.setObjectName("hotspotDestinationCombo")
         self.hotspot_destination_combo.setAccessibleName("Hotspot destination")
         then_layout.addWidget(self.hotspot_destination_combo)
+        self.hotspot_sound_label = QLabel("Play")
+        self.hotspot_sound_label.setObjectName("hotspotSoundLabel")
+        then_layout.addWidget(self.hotspot_sound_label)
+        self.hotspot_sound_combo = QComboBox()
+        self.hotspot_sound_combo.setObjectName("hotspotSoundCombo")
+        self.hotspot_sound_combo.setAccessibleName("Hotspot Sound")
+        then_layout.addWidget(self.hotspot_sound_combo)
         layout.addWidget(self.hotspot_then_panel)
 
         self.hotspot_error = QLabel()
@@ -763,6 +752,7 @@ class Inspector(QWidget):
         self.add_condition_button.clicked.connect(self._add_condition)
         self.add_key_change_button.clicked.connect(self._add_key_change)
         self.hotspot_destination_combo.currentIndexChanged.connect(self._destination_changed)
+        self.hotspot_sound_combo.currentIndexChanged.connect(self._sound_changed)
 
     def _render_inputs_changed(self) -> None:
         if not self._rendering:
@@ -1663,11 +1653,40 @@ class Inspector(QWidget):
         self.hotspot_when_panel.setVisible(has_interaction)
         self.hotspot_then_label.setVisible(has_interaction)
         self.hotspot_then_panel.setVisible(has_interaction)
-        self.condition_table.setEnabled(has_interaction)
-        self.add_condition_button.setEnabled(has_interaction)
-        self.key_change_table.setEnabled(has_interaction)
-        self.add_key_change_button.setEnabled(has_interaction)
+        self.condition_rows_widget.setEnabled(has_interaction)
+        self.key_change_rows_widget.setEnabled(has_interaction)
+        condition_key_ids = (
+            set(interaction.conditions.requires) | set(interaction.conditions.forbids)
+            if interaction is not None
+            else set()
+        )
+        change_key_ids = (
+            set(interaction.key_changes.remove) | set(interaction.key_changes.grant)
+            if interaction is not None
+            else set()
+        )
+        has_condition_key = any(key.id not in condition_key_ids for key in document.keys)
+        has_change_key = any(key.id not in change_key_ids for key in document.keys)
+        self.add_condition_button.setEnabled(has_interaction and has_condition_key)
+        self.add_key_change_button.setEnabled(has_interaction and has_change_key)
+        self.add_condition_label.setEnabled(has_interaction and has_condition_key)
+        self.add_key_change_label.setEnabled(has_interaction and has_change_key)
+        self.add_condition_button.setToolTip(
+            "Add a condition"
+            if has_condition_key
+            else "Add a Key in the Keys window before adding a condition"
+            if not document.keys
+            else "Every Key already has a condition"
+        )
+        self.add_key_change_button.setToolTip(
+            "Add a key change"
+            if has_change_key
+            else "Add a Key in the Keys window before adding a key change"
+            if not document.keys
+            else "Every Key already has a key change"
+        )
         self.hotspot_destination_combo.setEnabled(has_interaction)
+        self.hotspot_sound_combo.setEnabled(has_interaction)
         self.delete_hotspot_button.setEnabled(has_interaction)
         current_row = self.hotspot_list.currentRow()
         self.move_hotspot_up_button.setEnabled(has_interaction and current_row > 0)
@@ -1695,7 +1714,6 @@ class Inspector(QWidget):
                     ),
                     target,
                 )
-            self.hotspot_destination_combo.addItem("Create New Card...", "create")
             if interaction is None:
                 self.hotspot_destination_combo.setCurrentIndex(-1)
             elif interaction.action is not None and isinstance(
@@ -1736,29 +1754,41 @@ class Inspector(QWidget):
                 if selected_card_id is not None
                 else None
             )
+        with QSignalBlocker(self.hotspot_sound_combo):
+            self.hotspot_sound_combo.clear()
+            self.hotspot_sound_combo.addItem("No Sound", None)
+            for sound in document.sounds:
+                self.hotspot_sound_combo.addItem(sound.name, sound.id)
+                if sound.generated is None:
+                    self.hotspot_sound_combo.setItemData(
+                        self.hotspot_sound_combo.count() - 1,
+                        "This Sound has not been generated yet.",
+                        Qt.ItemDataRole.ToolTipRole,
+                    )
+            self.hotspot_sound_combo.setCurrentIndex(
+                -1
+                if interaction is None
+                else self._combo_index_for_data(
+                    self.hotspot_sound_combo,
+                    interaction.sound_id,
+                )
+            )
 
     def _render_condition_rows(
         self,
         document: Stack,
         interaction: Interaction | None,
     ) -> None:
-        self.condition_table.setRowCount(0)
-        if interaction is None:
-            self._finish_rule_table(
-                self.condition_table,
-                self.no_conditions_label,
-                (),
-            )
-            return
+        self._clear_rule_rows(self.condition_rows_layout)
         rows = (
             *(("Has", key_id) for key_id in interaction.conditions.requires),
             *(("Lacks", key_id) for key_id in interaction.conditions.forbids),
-        )
-        row_heights: list[int] = []
+        ) if interaction is not None else ()
         for row, (state, key_id) in enumerate(rows):
-            self.condition_table.insertRow(row)
             key_combo = self._key_combo(document, key_id)
+            key_combo.setObjectName(f"conditionKeyCombo{row}")
             state_combo = QComboBox()
+            state_combo.setObjectName(f"conditionStateCombo{row}")
             state_combo.addItem("Has", "requires")
             state_combo.addItem("Lacks", "forbids")
             state_combo.setCurrentIndex(0 if state == "Has" else 1)
@@ -1769,21 +1799,16 @@ class Inspector(QWidget):
                 tooltip="Remove condition",
                 prominent=False,
             )
-            control_extent = max(
-                key_combo.sizeHint().height(),
-                state_combo.sizeHint().height(),
-            )
             remove_button.setFixedSize(20, 20)
-            row_height = control_extent + 4
-            self.condition_table.setRowHeight(row, row_height)
-            row_heights.append(row_height)
-            self.condition_table.setCellWidget(row, 0, state_combo)
-            self.condition_table.setCellWidget(row, 1, key_combo)
-            self.condition_table.setCellWidget(
-                row,
-                2,
-                _centered_cell_widget(remove_button),
-            )
+            row_widget = QWidget()
+            row_widget.setObjectName(f"conditionRow{row}")
+            row_layout = QHBoxLayout(row_widget)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(3)
+            row_layout.addWidget(state_combo)
+            row_layout.addWidget(key_combo, 1)
+            row_layout.addWidget(remove_button, 0, Qt.AlignmentFlag.AlignVCenter)
+            self.condition_rows_layout.addWidget(row_widget)
             role = "requires" if state == "Has" else "forbids"
             key_combo.currentIndexChanged.connect(
                 lambda _index, old_key_id=key_id, old_role=role, combo=key_combo: (
@@ -1810,37 +1835,26 @@ class Inspector(QWidget):
                     self._remove_condition(existing_key_id, existing_role)
                 )
             )
-        self._finish_rule_table(
-            self.condition_table,
-            self.no_conditions_label,
-            tuple(row_heights),
-        )
+        self.condition_rows_widget.setVisible(bool(rows))
 
     def _render_key_change_rows(
         self,
         document: Stack,
         interaction: Interaction | None,
     ) -> None:
-        self.key_change_table.setRowCount(0)
-        if interaction is None:
-            self._finish_rule_table(
-                self.key_change_table,
-                self.no_key_changes_label,
-                (),
-            )
-            return
+        self._clear_rule_rows(self.key_change_rows_layout)
         rows = (
             *(("Lose", key_id) for key_id in interaction.key_changes.remove),
             *(("Gain", key_id) for key_id in interaction.key_changes.grant),
-        )
-        row_heights: list[int] = []
+        ) if interaction is not None else ()
         for row, (change, key_id) in enumerate(rows):
-            self.key_change_table.insertRow(row)
             change_combo = QComboBox()
+            change_combo.setObjectName(f"keyChangeActionCombo{row}")
             change_combo.addItem("Lose", "remove")
             change_combo.addItem("Gain", "grant")
             change_combo.setCurrentIndex(0 if change == "Lose" else 1)
             key_combo = self._key_combo(document, key_id)
+            key_combo.setObjectName(f"keyChangeKeyCombo{row}")
             remove_button = _compact_text_button(
                 "−",
                 object_name=f"removeKeyChangeButton{row}",
@@ -1848,21 +1862,16 @@ class Inspector(QWidget):
                 tooltip="Remove key change",
                 prominent=False,
             )
-            control_extent = max(
-                change_combo.sizeHint().height(),
-                key_combo.sizeHint().height(),
-            )
             remove_button.setFixedSize(20, 20)
-            row_height = control_extent + 4
-            self.key_change_table.setRowHeight(row, row_height)
-            row_heights.append(row_height)
-            self.key_change_table.setCellWidget(row, 0, change_combo)
-            self.key_change_table.setCellWidget(row, 1, key_combo)
-            self.key_change_table.setCellWidget(
-                row,
-                2,
-                _centered_cell_widget(remove_button),
-            )
+            row_widget = QWidget()
+            row_widget.setObjectName(f"keyChangeRow{row}")
+            row_layout = QHBoxLayout(row_widget)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(3)
+            row_layout.addWidget(change_combo)
+            row_layout.addWidget(key_combo, 1)
+            row_layout.addWidget(remove_button, 0, Qt.AlignmentFlag.AlignVCenter)
+            self.key_change_rows_layout.addWidget(row_widget)
             role = "remove" if change == "Lose" else "grant"
             change_combo.currentIndexChanged.connect(
                 lambda _index, old_key_id=key_id, old_role=role, combo=change_combo: (
@@ -1889,45 +1898,38 @@ class Inspector(QWidget):
                     self._remove_key_change(existing_key_id, existing_role)
                 )
             )
-        self._finish_rule_table(
-            self.key_change_table,
-            self.no_key_changes_label,
-            tuple(row_heights),
-        )
+        self.key_change_rows_widget.setVisible(bool(rows))
 
     @staticmethod
-    def _finish_rule_table(
-        table: QTableWidget,
-        placeholder: QLabel,
-        row_heights: tuple[int, ...],
-    ) -> None:
-        has_rows = bool(row_heights)
-        table.setVisible(has_rows)
-        placeholder.setVisible(not has_rows)
-        if not has_rows:
-            return
-        remove_width = max(
-            table.cellWidget(row, 2).findChild(QToolButton).width()
-            for row in range(table.rowCount())
-        )
-        table.setColumnWidth(2, remove_width + 4)
-        visible_rows = min(len(row_heights), 3)
-        content_height = (
-            table.horizontalHeader().sizeHint().height() + sum(row_heights[:visible_rows]) + 2
-        )
-        table.setFixedHeight(content_height)
-        table.setVerticalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAsNeeded
-            if len(row_heights) > visible_rows
-            else Qt.ScrollBarPolicy.ScrollBarAlwaysOff
-        )
+    def _clear_rule_rows(layout: QVBoxLayout) -> None:
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
 
     @staticmethod
     def _key_combo(document: Stack, selected_key_id: UUID) -> QComboBox:
         combo = QComboBox()
         for key in document.keys:
             combo.addItem(key.name, key.id)
+            combo.setItemData(
+                combo.count() - 1,
+                key.name,
+                Qt.ItemDataRole.ToolTipRole,
+            )
+        combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        combo.setMinimumContentsLength(8)
+        combo.setMinimumWidth(0)
+        combo.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Fixed,
+        )
         combo.setCurrentIndex(Inspector._combo_index_for_data(combo, selected_key_id))
+        _sync_combo_tooltip(combo)
+        combo.currentIndexChanged.connect(lambda _index: _sync_combo_tooltip(combo))
         return combo
 
     def _hotspot_selection_changed(
@@ -1964,92 +1966,22 @@ class Inspector(QWidget):
         if interaction is None:
             return
         used = set(interaction.conditions.requires) | set(interaction.conditions.forbids)
-        self._choose_key_reference(
-            title="Add Condition",
-            role="requires",
-            excluded=used,
-        )
+        available = [key for key in self.controller.document.keys if key.id not in used]
+        if not available:
+            self.set_hotspot_error("Add a Key in the Keys window before assigning one.")
+            return
+        self._append_condition(available[-1].id, "requires")
 
     def _add_key_change(self) -> None:
         interaction = self._selected_interaction()
         if interaction is None:
             return
         used = set(interaction.key_changes.remove) | set(interaction.key_changes.grant)
-        self._choose_key_reference(
-            title="Add Key Change",
-            role="grant",
-            excluded=used,
-        )
-
-    def _choose_key_reference(
-        self,
-        *,
-        title: str,
-        role: Literal["requires", "forbids", "remove", "grant"],
-        excluded: set[UUID],
-    ) -> None:
-        available = [key for key in self.controller.document.keys if key.id not in excluded]
-        create_label = "Create New Key..."
-        labels = [key.name for key in available]
-        while create_label.casefold() in {label.casefold() for label in labels}:
-            create_label += "."
-        selected, accepted = QInputDialog.getItem(
-            self,
-            title,
-            "Key",
-            (*labels, create_label),
-            editable=False,
-        )
-        if not accepted:
+        available = [key for key in self.controller.document.keys if key.id not in used]
+        if not available:
+            self.set_hotspot_error("Add a Key in the Keys window before assigning one.")
             return
-        if selected == create_label:
-            self._create_key_reference(title=title, role=role)
-            return
-        key = next((key for key in available if key.name == selected), None)
-        if key is None:
-            return
-        if role in {"requires", "forbids"}:
-            self._append_condition(key.id, role)
-        else:
-            self._append_key_change(key.id, role)
-
-    def _create_key_reference(
-        self,
-        *,
-        title: str,
-        role: Literal["requires", "forbids", "remove", "grant"],
-    ) -> None:
-        card = self._selected_card()
-        interaction = self._selected_interaction()
-        if card is None or interaction is None:
-            return
-        document = self.controller.document
-        existing_names = {key.name.casefold() for key in document.keys}
-        number = 1
-        default_name = "New Key"
-        while default_name.casefold() in existing_names:
-            number += 1
-            default_name = f"New Key {number}"
-        name, accepted = QInputDialog.getText(
-            self,
-            title,
-            "Key name",
-            QLineEdit.EchoMode.Normal,
-            default_name,
-        )
-        if not accepted:
-            return
-        command = CreateKeyAndAddHotspotReferenceCommand(
-            card_id=card.id,
-            revision_id=card.active_revision.id,
-            interaction_id=interaction.id,
-            name=name,
-            role=role,
-        )
-        self._execute(
-            command,
-            undo_message="Key and hotspot behavior added",
-        )
+        self._append_key_change(available[-1].id, "grant")
 
     def _append_condition(self, key_id: UUID, role: str) -> None:
         card = self._selected_card()
@@ -2240,23 +2172,8 @@ class Inspector(QWidget):
         interaction_id: UUID,
         destination: object,
     ) -> None:
-        if destination == "create":
-            name, accepted = QInputDialog.getText(
-                self,
-                "Create Destination Card",
-                "Card name",
-            )
-            if not accepted:
-                self.render(self.controller.document, self.selected_card_id)
-                return
-            command: DocumentCommand = CreateCardAndResolveCommand(
-                source_card_id=card_id,
-                revision_id=revision_id,
-                interaction_id=interaction_id,
-                card_name=name,
-            )
-        else:
-            command = ChangeHotspotDestinationCommand(
+        self._execute(
+            ChangeHotspotDestinationCommand(
                 card_id=card_id,
                 revision_id=revision_id,
                 interaction_id=interaction_id,
@@ -2268,7 +2185,28 @@ class Inspector(QWidget):
                     else None
                 ),
             )
-        self._execute(command)
+        )
+
+    def _sound_changed(self, index: int) -> None:
+        if self._rendering or index < 0:
+            return
+        card = self._selected_card()
+        interaction = self._selected_interaction()
+        if card is None or interaction is None:
+            return
+        value = self.hotspot_sound_combo.itemData(index)
+        sound_id = value if isinstance(value, UUID) else None
+        if interaction.sound_id == sound_id:
+            return
+        self._execute(
+            ChangeHotspotSoundCommand(
+                card_id=card.id,
+                revision_id=card.active_revision.id,
+                interaction_id=interaction.id,
+                sound_id=sound_id,
+            ),
+            undo_message="Hotspot Sound changed",
+        )
 
     def _move_hotspot(self, offset: int) -> None:
         card = self._selected_card()

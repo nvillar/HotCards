@@ -11,6 +11,7 @@ import shutil
 import stat
 import sys
 import tempfile
+import wave
 from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -26,7 +27,9 @@ from pydantic import ValidationError
 from hotcards.domain.models import CURRENT_SCHEMA_VERSION, Stack
 
 STACK_FILENAME = "stack.json"
-ASSET_ROOT = PurePosixPath("assets/cards")
+ASSET_ROOT = PurePosixPath("assets")
+IMAGE_ASSET_ROOT = ASSET_ROOT / "cards"
+SOUND_ASSET_ROOT = ASSET_ROOT / "sounds"
 logger = logging.getLogger(__name__)
 _BUNDLE_LOCKS_GUARD = Lock()
 _BUNDLE_LOCKS: dict[str, RLock] = {}
@@ -47,9 +50,9 @@ class StackStoreTransactionError(StackStoreError):
         persisted_stack: Stack | None = None,
         observed_stack: Stack | None = None,
         durability_indeterminate: bool = False,
-        owned_asset: StoredImageAsset | None = None,
+        owned_asset: StoredImageAsset | StoredSoundAsset | None = None,
     ) -> None:
-        message = f"could not commit duplicate asset and stack document: {operation_error}"
+        message = f"could not commit asset and stack document: {operation_error}"
         if rollback_errors:
             details = "; ".join(str(error) for error in rollback_errors)
             message += f"; rollback also failed: {details}"
@@ -67,6 +70,17 @@ class StackStoreTransactionError(StackStoreError):
 @dataclass(frozen=True, slots=True)
 class StoredImageAsset:
     """Filesystem identity of one securely created bundle image."""
+
+    relative_path: str
+    device: int
+    inode: int
+    directory_device: int
+    directory_inode: int
+
+
+@dataclass(frozen=True, slots=True)
+class StoredSoundAsset:
+    """Filesystem identity of one securely created bundle sound."""
 
     relative_path: str
     device: int
@@ -751,7 +765,11 @@ def _relative_asset_path(value: str) -> PurePosixPath:
 
 
 def _image_asset_path(card_id: UUID, asset_id: UUID) -> PurePosixPath:
-    return ASSET_ROOT / str(card_id) / f"image-{asset_id}.png"
+    return IMAGE_ASSET_ROOT / str(card_id) / f"image-{asset_id}.png"
+
+
+def _sound_asset_path(sound_id: UUID, asset_id: UUID) -> PurePosixPath:
+    return SOUND_ASSET_ROOT / str(sound_id) / f"sound-{asset_id}.wav"
 
 
 def _fsync_directory(path: Path) -> None:
@@ -817,6 +835,11 @@ class StackStore:
         """Return the deterministic bundle-relative path for one image asset."""
         return _image_asset_path(card_id, asset_id).as_posix()
 
+    @staticmethod
+    def sound_asset_path(sound_id: UUID, asset_id: UUID) -> str:
+        """Return the deterministic bundle-relative path for one sound asset."""
+        return _sound_asset_path(sound_id, asset_id).as_posix()
+
     def _validate_assets(self, stack: Stack) -> None:
         for card in stack.cards:
             for revision in card.revisions:
@@ -835,6 +858,21 @@ class StackStore:
                     raise StackStoreError(
                         f"stack references a missing image asset: {relative_path}"
                     )
+        for sound in stack.sounds:
+            if sound.generated is None:
+                continue
+            relative_path = _relative_asset_path(sound.generated.audio_path)
+            expected_path = _sound_asset_path(sound.id, sound.generated.id)
+            if relative_path != expected_path:
+                raise StackStoreError(
+                    f"sound asset path {relative_path} does not match its "
+                    f"Sound and asset IDs; expected {expected_path}"
+                )
+            asset_path = self._resolved_asset(relative_path)
+            if not asset_path.is_file():
+                raise StackStoreError(
+                    f"stack references a missing sound asset: {relative_path}"
+                )
 
     def load_document(self) -> StoredStackDocument:
         """Securely load one validated stack document with its exact identity."""
@@ -1259,6 +1297,209 @@ class StackStore:
             if temporary_path is not None:
                 temporary_path.unlink(missing_ok=True)
         return relative_path.as_posix()
+
+    @_serialized_bundle_mutation
+    def store_sound_asset(
+        self,
+        source_path: Path,
+        *,
+        sound_id: UUID,
+        asset_id: UUID,
+        duration_seconds: int,
+    ) -> StoredSoundAsset:
+        """Copy one validated generated WAV into its reserved bundle path."""
+        if not 1 <= duration_seconds <= 30:
+            raise StackStoreError("sound duration must be between 1 and 30 seconds")
+        relative_path = _sound_asset_path(sound_id, asset_id)
+        with ExitStack() as descriptors:
+            try:
+                source_fd = os.open(source_path, _secure_open_flags())
+            except OSError as error:
+                raise StackStoreError(
+                    f"could not securely open generated sound {source_path}: {error}"
+                ) from error
+            descriptors.callback(os.close, source_fd)
+            source_stat = os.fstat(source_fd)
+            if not stat.S_ISREG(source_stat.st_mode):
+                raise StackStoreError(f"generated sound is not a regular file: {source_path}")
+            self._validate_sound_file(
+                source_fd,
+                source_path=os.fspath(source_path),
+                duration_seconds=duration_seconds,
+            )
+            os.lseek(source_fd, 0, os.SEEK_SET)
+
+            try:
+                bundle_fd = os.open(
+                    self.bundle_path,
+                    _secure_open_flags(directory=True),
+                )
+            except OSError as error:
+                raise StackStoreError(
+                    f"could not securely open stack bundle {self.bundle_path}: {error}"
+                ) from error
+            descriptors.callback(os.close, bundle_fd)
+            assets_fd = _open_directory_at(bundle_fd, "assets", create=True)
+            descriptors.callback(os.close, assets_fd)
+            sounds_fd = _open_directory_at(assets_fd, "sounds", create=True)
+            descriptors.callback(os.close, sounds_fd)
+            sound_fd = _open_directory_at(sounds_fd, str(sound_id), create=True)
+            descriptors.callback(os.close, sound_fd)
+            sound_directory_stat = os.fstat(sound_fd)
+            try:
+                destination_fd = os.open(
+                    relative_path.name,
+                    os.O_RDWR | os.O_CREAT | os.O_EXCL | _secure_open_flags(),
+                    0o600,
+                    dir_fd=sound_fd,
+                )
+            except OSError as error:
+                raise StackStoreError(
+                    f"could not create sound asset {relative_path}: {error}"
+                ) from error
+            descriptors.callback(os.close, destination_fd)
+            destination_stat = os.fstat(destination_fd)
+            try:
+                with (
+                    os.fdopen(os.dup(source_fd), "rb") as source,
+                    os.fdopen(os.dup(destination_fd), "wb") as destination,
+                ):
+                    shutil.copyfileobj(source, destination)
+                    destination.flush()
+                    os.fsync(destination.fileno())
+                for directory_fd in (sound_fd, sounds_fd, assets_fd, bundle_fd):
+                    os.fsync(directory_fd)
+            except Exception:
+                _quarantine_owned_file_at(
+                    sound_fd,
+                    relative_path.name,
+                    device=destination_stat.st_dev,
+                    inode=destination_stat.st_ino,
+                )
+                raise
+            return StoredSoundAsset(
+                relative_path=relative_path.as_posix(),
+                device=destination_stat.st_dev,
+                inode=destination_stat.st_ino,
+                directory_device=sound_directory_stat.st_dev,
+                directory_inode=sound_directory_stat.st_ino,
+            )
+
+    def store_sound_asset_and_save(
+        self,
+        source_path: Path,
+        *,
+        sound_id: UUID,
+        asset_id: UUID,
+        duration_seconds: int,
+        previous_stack: Stack,
+        changed_stack: Stack,
+    ) -> StoredSoundAsset:
+        """Atomically own one generated WAV and the manifest that references it."""
+
+        @_serialized_bundle_mutation
+        def commit(store: StackStore) -> StoredSoundAsset:
+            persisted_stack = store.load()
+            if persisted_stack != previous_stack:
+                raise StackStoreError("current stack document changed before sound generation")
+            relative_path = _sound_asset_path(sound_id, asset_id).as_posix()
+            matching = [
+                sound.generated
+                for sound in changed_stack.sounds
+                if sound.id == sound_id and sound.generated is not None
+            ]
+            if (
+                len(matching) != 1
+                or matching[0].id != asset_id
+                or matching[0].audio_path != relative_path
+                or matching[0].provenance.duration_seconds != duration_seconds
+            ):
+                raise StackStoreError(
+                    "changed stack does not reference the reserved generated sound asset"
+                )
+            asset = store.store_sound_asset(
+                source_path,
+                sound_id=sound_id,
+                asset_id=asset_id,
+                duration_seconds=duration_seconds,
+            )
+            try:
+                store.save(changed_stack)
+            except Exception as operation_error:
+                rollback_errors: list[Exception] = []
+                try:
+                    observed_stack = store.load()
+                except Exception as observe_error:
+                    rollback_errors.append(observe_error)
+                    raise StackStoreTransactionError(
+                        operation_error,
+                        tuple(rollback_errors),
+                        persisted_stack=None,
+                        observed_stack=None,
+                        durability_indeterminate=True,
+                        owned_asset=asset,
+                    ) from operation_error
+                if observed_stack == changed_stack:
+                    raise StackStoreTransactionError(
+                        operation_error,
+                        persisted_stack=changed_stack,
+                        observed_stack=changed_stack,
+                        owned_asset=asset,
+                    ) from operation_error
+                if observed_stack != previous_stack:
+                    raise StackStoreTransactionError(
+                        operation_error,
+                        persisted_stack=observed_stack,
+                        observed_stack=observed_stack,
+                        durability_indeterminate=True,
+                        owned_asset=asset,
+                    ) from operation_error
+                try:
+                    store.remove_owned_sound_asset_if_unreferenced(
+                        asset,
+                        sound_id=sound_id,
+                        asset_id=asset_id,
+                        stack=previous_stack,
+                    )
+                except Exception as rollback_error:
+                    rollback_errors.append(rollback_error)
+                raise StackStoreTransactionError(
+                    operation_error,
+                    tuple(rollback_errors),
+                    persisted_stack=previous_stack,
+                    observed_stack=previous_stack,
+                    owned_asset=None if not rollback_errors else asset,
+                ) from operation_error
+            return asset
+
+        return commit(self)
+
+    @staticmethod
+    def _validate_sound_file(
+        descriptor: int,
+        *,
+        source_path: str,
+        duration_seconds: int,
+    ) -> None:
+        try:
+            with os.fdopen(os.dup(descriptor), "rb") as source:
+                with wave.open(source, "rb") as generated:
+                    channels = generated.getnchannels()
+                    sample_width = generated.getsampwidth()
+                    sample_rate = generated.getframerate()
+                    frame_count = generated.getnframes()
+        except (EOFError, OSError, wave.Error) as error:
+            raise StackStoreError(
+                f"could not decode generated sound {source_path}: {error}"
+            ) from error
+        if (channels, sample_width, sample_rate) != (2, 2, 44_100):
+            raise StackStoreError(
+                "generated sound must be 16-bit PCM stereo WAV at 44.1 kHz"
+            )
+        if frame_count != duration_seconds * sample_rate:
+            raise StackStoreError(
+                f"generated sound must contain exactly {duration_seconds} seconds"
+            )
 
     def copy_image_asset_and_save(
         self,
@@ -1856,6 +2097,131 @@ class StackStore:
             ) from error
         return True
 
+    def stored_sound_asset(
+        self,
+        relative_path: str,
+        *,
+        sound_id: UUID,
+        asset_id: UUID,
+    ) -> StoredSoundAsset:
+        """Return the securely opened filesystem identity of one owned sound."""
+        parsed_path = _relative_asset_path(relative_path)
+        expected_path = _sound_asset_path(sound_id, asset_id)
+        if parsed_path != expected_path:
+            raise StackStoreError(
+                f"sound asset path {parsed_path} does not match its Sound and asset IDs"
+            )
+        with ExitStack() as stack:
+            try:
+                bundle_fd = os.open(
+                    self.bundle_path,
+                    _secure_open_flags(directory=True),
+                )
+            except OSError as error:
+                raise StackStoreError(
+                    f"could not securely open stack bundle {self.bundle_path}: {error}"
+                ) from error
+            stack.callback(os.close, bundle_fd)
+            assets_fd = _open_directory_at(bundle_fd, "assets")
+            stack.callback(os.close, assets_fd)
+            sounds_fd = _open_directory_at(assets_fd, "sounds")
+            stack.callback(os.close, sounds_fd)
+            sound_fd = _open_directory_at(sounds_fd, str(sound_id))
+            stack.callback(os.close, sound_fd)
+            try:
+                audio_fd = os.open(
+                    parsed_path.name,
+                    _secure_open_flags(),
+                    dir_fd=sound_fd,
+                )
+            except OSError as error:
+                raise StackStoreError(
+                    f"could not securely open owned sound {parsed_path}: {error}"
+                ) from error
+            stack.callback(os.close, audio_fd)
+            audio_stat = os.fstat(audio_fd)
+            if not stat.S_ISREG(audio_stat.st_mode):
+                raise StackStoreError(f"owned sound is not a regular file: {parsed_path}")
+            sound_stat = os.fstat(sound_fd)
+            return StoredSoundAsset(
+                relative_path=relative_path,
+                device=audio_stat.st_dev,
+                inode=audio_stat.st_ino,
+                directory_device=sound_stat.st_dev,
+                directory_inode=sound_stat.st_ino,
+            )
+
+    @_serialized_bundle_mutation
+    def remove_owned_sound_asset_if_unreferenced(
+        self,
+        asset: StoredSoundAsset,
+        *,
+        sound_id: UUID,
+        asset_id: UUID,
+        stack: Stack,
+    ) -> bool:
+        """Remove one exact owned WAV after all document history releases it."""
+        parsed_path = _relative_asset_path(asset.relative_path)
+        expected_path = _sound_asset_path(sound_id, asset_id)
+        if parsed_path != expected_path:
+            raise StackStoreError(
+                f"sound asset path {parsed_path} does not match its Sound and asset IDs"
+            )
+        documents = [stack]
+        if self.stack_path.is_file():
+            documents.append(self.load())
+        if any(
+            sound.generated is not None
+            and sound.generated.audio_path == asset.relative_path
+            for document in documents
+            for sound in document.sounds
+        ):
+            raise StackStoreError(
+                f"refusing to remove referenced sound asset: {asset.relative_path}"
+            )
+        with ExitStack() as descriptors:
+            try:
+                bundle_fd = os.open(
+                    self.bundle_path,
+                    _secure_open_flags(directory=True),
+                )
+            except OSError as error:
+                raise StackStoreError(
+                    f"could not securely open stack bundle {self.bundle_path}: {error}"
+                ) from error
+            descriptors.callback(os.close, bundle_fd)
+            assets_fd = _open_directory_at(bundle_fd, "assets")
+            descriptors.callback(os.close, assets_fd)
+            sounds_fd = _open_directory_at(assets_fd, "sounds")
+            descriptors.callback(os.close, sounds_fd)
+            sound_fd = _open_matching_directory_at(
+                sounds_fd,
+                str(sound_id),
+                device=asset.directory_device,
+                inode=asset.directory_inode,
+            )
+            if sound_fd is None:
+                raise StackStoreError(
+                    f"refusing to remove sound asset whose directory identity changed: {sound_id}"
+                )
+            descriptors.callback(os.close, sound_fd)
+            removed = _quarantine_owned_file_at(
+                sound_fd,
+                parsed_path.name,
+                device=asset.device,
+                inode=asset.inode,
+            )
+            if removed:
+                _quarantine_owned_directory_if_empty(
+                    sounds_fd,
+                    str(sound_id),
+                    device=asset.directory_device,
+                    inode=asset.directory_inode,
+                )
+                os.fsync(assets_fd)
+                os.fsync(bundle_fd)
+            return removed
+
     def stored_image_asset(
         self,
         relative_path: str,
@@ -2004,6 +2370,17 @@ class StackStore:
                             asset_id=background.id,
                         )
                         copied_paths.add(background.image_path)
+                for sound in stack.sounds:
+                    generated = sound.generated
+                    if generated is None or generated.audio_path in copied_paths:
+                        continue
+                    temporary_store.store_sound_asset(
+                        self.asset_path(generated.audio_path),
+                        sound_id=sound.id,
+                        asset_id=generated.id,
+                        duration_seconds=generated.provenance.duration_seconds,
+                    )
+                    copied_paths.add(generated.audio_path)
                 temporary_store.save(stack)
                 if destination.exists():
                     raise StackStoreError(f"refusing to overwrite existing bundle: {destination}")

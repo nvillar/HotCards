@@ -11,7 +11,9 @@ from PySide6.QtCore import QObject, QTimer, Signal, Slot
 from hotcards.application.commands import DocumentCommand
 from hotcards.application.document_controller import (
     DocumentController,
+    OwnedAsset,
     OwnedImageAsset,
+    OwnedSoundAsset,
 )
 from hotcards.domain.models import (
     DirectGenerateProvenance,
@@ -24,6 +26,7 @@ from hotcards.storage.stack_store import (
     StackStore,
     StackStoreError,
     StoredImageAsset,
+    StoredSoundAsset,
     StoredStackDocument,
 )
 
@@ -51,7 +54,7 @@ class _BindingCandidate:
     store: StackStore
     document: Stack
     stored_document: StoredStackDocument
-    owned_assets: tuple[OwnedImageAsset, ...]
+    owned_assets: tuple[OwnedAsset, ...]
 
 
 class DocumentSession(QObject):
@@ -75,7 +78,7 @@ class DocumentSession(QObject):
         self._pending_snapshot: Stack | None = None
         self._dirty = False
         self._error: str | None = None
-        self._released_assets: dict[tuple[Path, str], OwnedImageAsset] = {}
+        self._released_assets: dict[tuple[Path, str], OwnedAsset] = {}
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.setInterval(debounce_milliseconds)
@@ -156,7 +159,7 @@ class DocumentSession(QObject):
         command: DocumentCommand,
         *,
         persist: Callable[[Stack], None] | None = None,
-        owned_assets: Collection[OwnedImageAsset] = (),
+        owned_assets: Collection[OwnedAsset] = (),
     ) -> Stack:
         """Apply one command only after its complete snapshot is durably saved."""
         if self._store is None:
@@ -339,7 +342,7 @@ class DocumentSession(QObject):
 
     def _queue_owned_asset_cleanup(
         self,
-        assets: tuple[OwnedImageAsset, ...],
+        assets: tuple[OwnedAsset, ...],
     ) -> None:
         for asset in assets:
             self._released_assets[(asset.bundle_path, asset.relative_path)] = asset
@@ -353,18 +356,32 @@ class DocumentSession(QObject):
         for key, asset in tuple(self._released_assets.items()):
             store = StackStore(asset.bundle_path)
             try:
-                store.remove_owned_image_asset_if_unreferenced(
-                    StoredImageAsset(
-                        relative_path=asset.relative_path,
-                        device=asset.device,
-                        inode=asset.inode,
-                        directory_device=asset.directory_device,
-                        directory_inode=asset.directory_inode,
-                    ),
-                    card_id=asset.card_id,
-                    asset_id=asset.asset_id,
-                    stack=Stack(name="Owned asset cleanup"),
-                )
+                if isinstance(asset, OwnedImageAsset):
+                    store.remove_owned_image_asset_if_unreferenced(
+                        StoredImageAsset(
+                            relative_path=asset.relative_path,
+                            device=asset.device,
+                            inode=asset.inode,
+                            directory_device=asset.directory_device,
+                            directory_inode=asset.directory_inode,
+                        ),
+                        card_id=asset.card_id,
+                        asset_id=asset.asset_id,
+                        stack=Stack(name="Owned asset cleanup"),
+                    )
+                else:
+                    store.remove_owned_sound_asset_if_unreferenced(
+                        StoredSoundAsset(
+                            relative_path=asset.relative_path,
+                            device=asset.device,
+                            inode=asset.inode,
+                            directory_device=asset.directory_device,
+                            directory_inode=asset.directory_inode,
+                        ),
+                        sound_id=asset.sound_id,
+                        asset_id=asset.asset_id,
+                        stack=Stack(name="Owned asset cleanup"),
+                    )
             except StackStoreError as error:
                 cleanup_error = str(error)
                 continue
@@ -378,8 +395,8 @@ class DocumentSession(QObject):
     def _app_owned_assets(
         store: StackStore,
         document: Stack,
-    ) -> tuple[OwnedImageAsset, ...]:
-        assets: list[OwnedImageAsset] = []
+    ) -> tuple[OwnedAsset, ...]:
+        assets: list[OwnedAsset] = []
         seen_paths: set[str] = set()
         for card in document.cards:
             for revision in card.revisions:
@@ -414,6 +431,28 @@ class DocumentSession(QObject):
                         directory_inode=stored.directory_inode,
                     )
                 )
+        for sound in document.sounds:
+            generated = sound.generated
+            if generated is None or generated.audio_path in seen_paths:
+                continue
+            stored = store.stored_sound_asset(
+                generated.audio_path,
+                sound_id=sound.id,
+                asset_id=generated.id,
+            )
+            seen_paths.add(generated.audio_path)
+            assets.append(
+                OwnedSoundAsset(
+                    bundle_path=store.bundle_path,
+                    relative_path=stored.relative_path,
+                    sound_id=sound.id,
+                    asset_id=generated.id,
+                    device=stored.device,
+                    inode=stored.inode,
+                    directory_device=stored.directory_device,
+                    directory_inode=stored.directory_inode,
+                )
+            )
         return tuple(assets)
 
 

@@ -15,8 +15,8 @@ from PySide6.QtWidgets import (
     QComboBox,
     QFrame,
     QGroupBox,
-    QInputDialog,
     QLabel,
+    QSizePolicy,
     QStyle,
     QToolButton,
 )
@@ -51,6 +51,7 @@ from hotcards.domain.models import (
     PresetOutputSize,
     RefineTransformation,
     ResolvedCardReference,
+    SoundDefinition,
     Stack,
     StyleDefinition,
     UnresolvedCardReference,
@@ -194,10 +195,19 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     assert inspector.hotspot_then_label.font().pointSizeF() == (
         inspector.edit_section_label.font().pointSizeF()
     )
-    assert inspector.add_condition_button.text() == "+ Add condition"
-    assert inspector.add_condition_button.isFlat()
-    assert inspector.add_key_change_button.text() == "+ Add key change"
-    assert inspector.add_key_change_button.isFlat()
+    assert inspector.add_condition_button.text() == "+"
+    assert inspector.add_condition_button.accessibleName() == "Add condition"
+    assert inspector.add_condition_label.text() == "Key condition"
+    assert inspector.add_key_change_button.text() == "+"
+    assert inspector.add_key_change_button.accessibleName() == "Add key change"
+    assert inspector.add_key_change_label.text() == "Key change"
+    assert inspector.add_condition_button.size() == QSize(20, 20)
+    assert inspector.add_key_change_button.size() == QSize(20, 20)
+    assert inspector.hotspot_destination_combo.findText("Create New Card...") == -1
+    assert all(
+        inspector.hotspot_destination_combo.itemData(index) != "create"
+        for index in range(inspector.hotspot_destination_combo.count())
+    )
     assert not hasattr(inspector, "clear_all_keys_checkbox")
     assert not hasattr(inspector, "hotspot_summary")
     hotspot_layout = inspector.hotspot_list.parentWidget().layout()
@@ -208,15 +218,34 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     )
     then_layout = inspector.hotspot_then_panel.layout()
     assert then_layout is not None
-    assert then_layout.indexOf(inspector.key_change_table) < (
-        then_layout.indexOf(inspector.add_key_change_button)
+    assert inspector.key_change_controls_layout.indexOf(
+        inspector.key_change_rows_widget
+    ) < (
+        inspector.key_change_controls_layout.indexOf(
+            inspector.key_change_add_row
+        )
     )
-    assert then_layout.indexOf(inspector.add_key_change_button) < (
+    assert then_layout.indexOf(inspector.key_change_controls_layout) < (
         then_layout.indexOf(inspector.hotspot_target_label)
     )
     assert then_layout.indexOf(inspector.hotspot_target_label) < (
         then_layout.indexOf(inspector.hotspot_destination_combo)
     )
+    assert inspector.hotspot_sound_label.text() == "Play"
+    assert then_layout.indexOf(inspector.hotspot_destination_combo) < (
+        then_layout.indexOf(inspector.hotspot_sound_label)
+    )
+    assert then_layout.indexOf(inspector.hotspot_sound_label) < (
+        then_layout.indexOf(inspector.hotspot_sound_combo)
+    )
+    assert inspector.condition_rows_layout.contentsMargins().isNull()
+    assert inspector.key_change_rows_layout.contentsMargins().isNull()
+    assert inspector.condition_controls_layout.spacing() == 3
+    assert inspector.key_change_controls_layout.spacing() == 3
+    assert not hasattr(inspector, "condition_table")
+    assert not hasattr(inspector, "key_change_table")
+    assert not hasattr(inspector, "no_conditions_label")
+    assert not hasattr(inspector, "no_key_changes_label")
     assert inspector.hotspot_list.minimumHeight() == 120
     assert inspector.hotspot_list.maximumHeight() == 120
     assert hotspot_layout.stretch(hotspot_layout.indexOf(inspector.hotspot_list)) == 0
@@ -483,21 +512,18 @@ def test_key_manager_manages_global_names_and_lists_hotspot_usages(
     assert manager.name_edit.text() == "Red key"
     assert not manager.delete_button.isEnabled()
     assert manager.usage_list.count() == 1
-    assert manager.usage_list.item(0).text() == (
-        "Castle · Version 1\nLose Red key · Requires, Removes"
-    )
+    assert manager.usage_list.item(0).text() == "Castle V1: Lose Red key"
+    assert not manager.usage_list.styleSheet()
 
     manager.name_edit.setText("Ruby key")
     usage_item = manager.usage_list.item(0)
     manager._editing_finished(
-        manager.show_usage_button,
+        manager.usage_list,
         Qt.FocusReason.MouseFocusReason,
     )
     assert controller.document.keys[0].name == "Ruby key"
     assert manager.usage_list.item(0) is usage_item
-    assert manager.usage_list.item(0).text().splitlines()[1] == (
-        "Lose Ruby key · Requires, Removes"
-    )
+    assert manager.usage_list.item(0).text() == "Castle V1: Lose Ruby key"
     hotspot_set = controller.document.cards[0].active_revision.hotspot_set
     assert hotspot_set is not None
     assert hotspot_set.interactions[0].label == "Lose Ruby key"
@@ -509,8 +535,9 @@ def test_key_manager_manages_global_names_and_lists_hotspot_usages(
         )
     )
     manager.usage_list.setCurrentRow(0)
-    manager.show_usage_button.click()
+    manager.usage_list.itemDoubleClicked.emit(manager.usage_list.item(0))
     assert requested == [(card.id, card.active_revision.id, interaction.id)]
+    assert not hasattr(manager, "show_usage_button")
 
     manager.add_button.click()
     assert [key.name for key in controller.document.keys] == [
@@ -552,49 +579,45 @@ def test_hotspot_pipeline_edits_conditions_changes_and_navigation(
     inspector.render(controller.document, source.id)
 
     assert not hasattr(inspector, "hotspot_name_edit")
-    assert inspector.hotspot_list.currentItem().text() == (
-        "Lose Red key · Gain Door open\n→ Castle"
-    )
-    assert inspector.condition_table.rowCount() == 1
-    assert inspector.condition_table.horizontalHeaderItem(0).text() == "State"
-    assert inspector.condition_table.horizontalHeaderItem(1).text() == "Key"
-    condition_state = inspector.condition_table.cellWidget(0, 0)
-    condition_key = inspector.condition_table.cellWidget(0, 1)
+    assert inspector.hotspot_list.currentItem().text() == "Go to Castle"
+    assert inspector.condition_rows_layout.count() == 1
+    condition_row = inspector.condition_rows_layout.itemAt(0).widget()
+    assert condition_row is not None
+    condition_layout = condition_row.layout()
+    assert condition_layout is not None
+    condition_state = condition_layout.itemAt(0).widget()
+    condition_key = condition_layout.itemAt(1).widget()
     assert isinstance(condition_state, QComboBox)
     assert isinstance(condition_key, QComboBox)
     assert condition_state.currentText() == "Has"
     assert condition_key.currentData() == red_key.id
-    condition_remove_cell = inspector.condition_table.cellWidget(0, 2)
-    condition_remove = condition_remove_cell.findChild(QToolButton)
-    assert condition_remove is not None
-    assert condition_remove_cell.layout().itemAt(0).alignment() == (Qt.AlignmentFlag.AlignCenter)
+    condition_remove = condition_layout.itemAt(2).widget()
+    assert isinstance(condition_remove, QToolButton)
+    assert condition_layout.itemAt(2).alignment() == Qt.AlignmentFlag.AlignVCenter
     assert condition_remove.width() == condition_remove.height()
     assert condition_remove.size() == QSize(20, 20)
-    assert inspector.condition_table.height() == (
-        inspector.condition_table.horizontalHeader().sizeHint().height()
-        + sum(
-            inspector.condition_table.rowHeight(row)
-            for row in range(inspector.condition_table.rowCount())
-        )
-        + 2
-    )
-    assert inspector.no_conditions_label.isHidden()
-    assert inspector.key_change_table.rowCount() == 2
-    remove_change = inspector.key_change_table.cellWidget(0, 0)
-    grant_change = inspector.key_change_table.cellWidget(1, 0)
+    assert inspector.key_change_rows_layout.count() == 2
+    remove_change_row = inspector.key_change_rows_layout.itemAt(0).widget()
+    grant_change_row = inspector.key_change_rows_layout.itemAt(1).widget()
+    assert remove_change_row is not None
+    assert grant_change_row is not None
+    remove_change_layout = remove_change_row.layout()
+    grant_change_layout = grant_change_row.layout()
+    assert remove_change_layout is not None
+    assert grant_change_layout is not None
+    remove_change = remove_change_layout.itemAt(0).widget()
+    grant_change = grant_change_layout.itemAt(0).widget()
     assert isinstance(remove_change, QComboBox)
     assert isinstance(grant_change, QComboBox)
     assert remove_change.currentText() == "Lose"
     assert grant_change.currentText() == "Gain"
-    key_change_remove_cell = inspector.key_change_table.cellWidget(0, 2)
-    key_change_remove = key_change_remove_cell.findChild(QToolButton)
-    assert key_change_remove is not None
-    assert key_change_remove_cell.layout().itemAt(0).alignment() == (Qt.AlignmentFlag.AlignCenter)
+    key_change_remove = remove_change_layout.itemAt(2).widget()
+    assert isinstance(key_change_remove, QToolButton)
+    assert remove_change_layout.itemAt(2).alignment() == Qt.AlignmentFlag.AlignVCenter
     assert key_change_remove.width() == key_change_remove.height()
     assert key_change_remove.size() == QSize(20, 20)
-    assert inspector.no_key_changes_label.isHidden()
     assert inspector.hotspot_target_label.text() == "Go to"
-    grant_key = inspector.key_change_table.cellWidget(1, 1)
+    grant_key = grant_change_layout.itemAt(1).widget()
     assert isinstance(grant_key, QComboBox)
     grant_key.setCurrentIndex(
         next(index for index in range(grant_key.count()) if grant_key.itemData(index) == red_key.id)
@@ -617,7 +640,7 @@ def test_hotspot_pipeline_edits_conditions_changes_and_navigation(
     assert changed.interactions[0].action is None
 
 
-def test_empty_hotspot_rule_sections_use_plain_language_placeholders(
+def test_empty_hotspot_rule_sections_show_only_disabled_add_actions_without_keys(
     application: QApplication,
 ) -> None:
     interaction = Interaction()
@@ -629,39 +652,111 @@ def test_empty_hotspot_rule_sections_use_plain_language_placeholders(
 
     inspector.render(inspector.controller.document, card.id)
 
-    assert inspector.condition_table.isHidden()
-    assert inspector.no_conditions_label.text() == "No conditions (always activates)"
-    assert not inspector.no_conditions_label.isHidden()
-    assert inspector.key_change_table.isHidden()
-    assert inspector.no_key_changes_label.text() == "No key changes"
-    assert not inspector.no_key_changes_label.isHidden()
+    assert inspector.condition_rows_widget.isHidden()
+    assert inspector.key_change_rows_widget.isHidden()
+    assert inspector.add_condition_button.isVisibleTo(inspector.hotspot_when_panel)
+    assert inspector.add_key_change_button.isVisibleTo(inspector.hotspot_then_panel)
+    assert not inspector.add_condition_button.isEnabled()
+    assert not inspector.add_key_change_button.isEnabled()
+    assert "Keys window" in inspector.add_condition_button.toolTip()
+    assert "Keys window" in inspector.add_key_change_button.toolTip()
     assert inspector.hotspot_destination_combo.currentText() == "No destination"
 
 
-def test_contextual_key_creation_label_does_not_reserve_free_form_name(
+def test_hotspot_play_selector_assigns_catalog_sound(
     application: QApplication,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    key = KeyDefinition(name="Create New Key...")
+    sound = SoundDefinition(name="Door knock")
     interaction = Interaction()
     card = Card(
         name="Card",
         revisions=(CardRevision(hotspot_set=HotspotSet(interactions=(interaction,))),),
     )
-    controller = DocumentController(Stack(name="Demo", keys=(key,), cards=(card,)))
+    controller = DocumentController(
+        Stack(name="Demo", sounds=(sound,), cards=(card,))
+    )
     inspector = Inspector(controller)
     inspector.render(controller.document, card.id)
-    monkeypatch.setattr(
-        QInputDialog,
-        "getItem",
-        lambda *_args, **_kwargs: ("Create New Key...", True),
+
+    sound_index = next(
+        index
+        for index in range(inspector.hotspot_sound_combo.count())
+        if inspector.hotspot_sound_combo.itemData(index) == sound.id
     )
+    inspector.hotspot_sound_combo.setCurrentIndex(sound_index)
+
+    hotspot_set = controller.document.cards[0].active_revision.hotspot_set
+    assert hotspot_set is not None
+    assert hotspot_set.interactions[0].sound_id == sound.id
+
+
+def test_hotspot_key_add_actions_use_latest_eligible_catalog_key(
+    application: QApplication,
+) -> None:
+    first_key = KeyDefinition(name="First")
+    latest_key = KeyDefinition(name="Latest")
+    interaction = Interaction()
+    card = Card(
+        name="Card",
+        revisions=(CardRevision(hotspot_set=HotspotSet(interactions=(interaction,))),),
+    )
+    controller = DocumentController(
+        Stack(name="Demo", keys=(first_key, latest_key), cards=(card,))
+    )
+    inspector = Inspector(controller)
+    inspector.render(controller.document, card.id)
 
     inspector.add_condition_button.click()
+    inspector.add_key_change_button.click()
 
     changed = controller.document.cards[0].active_revision.hotspot_set
     assert changed is not None
-    assert changed.interactions[0].conditions.requires == (key.id,)
+    assert changed.interactions[0].conditions.requires == (latest_key.id,)
+    assert changed.interactions[0].key_changes.grant == (latest_key.id,)
+    assert inspector.condition_rows_layout.count() == 1
+    assert inspector.key_change_rows_layout.count() == 1
+
+
+def test_hotspot_key_rows_fit_long_names_with_visible_remove_controls(
+    application: QApplication,
+) -> None:
+    key = KeyDefinition(
+        name="A very long authored Key name that must not widen the inspector panel"
+    )
+    interaction = Interaction(
+        conditions=HotspotConditions(requires=(key.id,)),
+        key_changes=HotspotKeyChanges(grant=(key.id,)),
+    )
+    card = Card(
+        name="Card",
+        revisions=(CardRevision(hotspot_set=HotspotSet(interactions=(interaction,))),),
+    )
+    inspector = Inspector(
+        DocumentController(Stack(name="Demo", keys=(key,), cards=(card,)))
+    )
+    inspector.resize(320, 700)
+    inspector.render(inspector.controller.document, card.id)
+    inspector.show()
+    application.processEvents()
+
+    for rows_layout in (
+        inspector.condition_rows_layout,
+        inspector.key_change_rows_layout,
+    ):
+        row = rows_layout.itemAt(0).widget()
+        assert row is not None
+        row_layout = row.layout()
+        assert row_layout is not None
+        key_combo = row_layout.itemAt(1).widget()
+        remove_button = row_layout.itemAt(2).widget()
+        assert isinstance(key_combo, QComboBox)
+        assert isinstance(remove_button, QToolButton)
+        assert row_layout.spacing() == 3
+        assert key_combo.sizePolicy().horizontalPolicy() == QSizePolicy.Policy.Ignored
+        assert key_combo.toolTip() == key.name
+        assert remove_button.geometry().right() <= row.contentsRect().right()
+
+    inspector.close()
 
 
 def test_description_edits_target_active_revision(
@@ -1426,7 +1521,7 @@ def test_hotspot_properties_reorder_and_delete_use_commands(
     application.processEvents()
     changed = controller.document.cards[0].active_revision.hotspot_set
     assert changed is not None
-    assert changed.interactions[0].label == "Destination"
+    assert changed.interactions[0].label == "Go to Destination"
     assert changed.interactions[0].action.target == ResolvedCardReference(
         target_card_id=destination.id
     )

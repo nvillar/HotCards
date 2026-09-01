@@ -27,7 +27,7 @@ from hotcards.domain.image_dimensions import (
     validate_exact_output_dimensions,
 )
 
-CURRENT_SCHEMA_VERSION = 11
+CURRENT_SCHEMA_VERSION = 12
 
 NonEmptyString = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 NormalizedCoordinate = Annotated[float, Field(ge=0.0, le=1.0)]
@@ -135,6 +135,48 @@ class KeyDefinition(DomainModel):
     name: NonEmptyString
 
 
+class SoundGenerationProvenance(DomainModel):
+    """Exact settings used to generate one persisted sound asset."""
+
+    model: Literal["stabilityai/stable-audio-3-small-sfx"] = (
+        "stabilityai/stable-audio-3-small-sfx"
+    )
+    runtime: Literal["stable-audio-3-optimized-mlx"] = "stable-audio-3-optimized-mlx"
+    prompt: NonEmptyString
+    duration_seconds: int = Field(ge=1, le=30, strict=True)
+    seed: int = Field(ge=0, le=(2**32 - 1), strict=True)
+    steps: Literal[8] = 8
+    cfg: Literal[1.0] = 1.0
+    sampler: Literal["pingpong"] = "pingpong"
+    sample_rate: Literal[44100] = 44100
+    channels: Literal[2] = 2
+    generation_duration_milliseconds: int = Field(ge=0, strict=True)
+
+
+class GeneratedSoundAsset(DomainModel):
+    """One immutable generated WAV and its provenance."""
+
+    id: UUID = Field(default_factory=uuid4)
+    audio_path: NonEmptyString
+    provenance: SoundGenerationProvenance
+    created_at: AwareDatetime
+
+
+class SoundDefinition(DomainModel):
+    """One stack-owned named generated sound effect."""
+
+    id: UUID = Field(default_factory=uuid4)
+    name: NonEmptyString
+    prompt: str = ""
+    duration_seconds: int = Field(default=2, ge=1, le=30, strict=True)
+    generated: GeneratedSoundAsset | None = None
+
+    @field_validator("prompt")
+    @classmethod
+    def trim_prompt(cls, value: str) -> str:
+        return value.strip()
+
+
 class HotspotConditions(DomainModel):
     """The complete all-of condition that gates one hotspot."""
 
@@ -170,13 +212,14 @@ class HotspotKeyChanges(DomainModel):
 
 
 class Interaction(DomainModel):
-    """One conditional interaction with key changes, navigation, and geometry."""
+    """One conditional interaction with key changes, navigation, sound, and geometry."""
 
     id: UUID = Field(default_factory=uuid4)
     label: NonEmptyString = "New Hotspot"
     conditions: HotspotConditions = Field(default_factory=HotspotConditions)
     key_changes: HotspotKeyChanges = Field(default_factory=HotspotKeyChanges)
     action: NavigateAction | None = None
+    sound_id: UUID | None = None
     polygons: tuple[Polygon, ...] = Field(default_factory=tuple)
 
 
@@ -691,21 +734,8 @@ def _automatic_interaction_label(
     *,
     card_names: dict[UUID, str],
     key_names: dict[UUID, str],
+    sound_names: dict[UUID, str],
 ) -> str:
-    changes: list[str] = []
-    if interaction.key_changes.remove:
-        changes.append(
-            f"Lose {key_names[interaction.key_changes.remove[0]]}"
-            if len(interaction.key_changes.remove) == 1
-            else "Lose keys"
-        )
-    if interaction.key_changes.grant:
-        changes.append(
-            f"Gain {key_names[interaction.key_changes.grant[0]]}"
-            if len(interaction.key_changes.grant) == 1
-            else "Gain keys"
-        )
-    destination: str | None = None
     action = interaction.action
     if action is not None:
         target = action.target
@@ -714,12 +744,21 @@ def _automatic_interaction_label(
             if isinstance(target, ResolvedCardReference)
             else target.target_name or "Unresolved destination"
         )
-    if changes and destination is not None:
-        return f"{' · '.join(changes)} → {destination}"
-    if changes:
-        return " · ".join(changes)
-    if destination is not None:
-        return destination
+        return f"Go to {destination}"
+    if interaction.sound_id is not None:
+        return f"Play {sound_names[interaction.sound_id]}"
+    if interaction.key_changes.grant:
+        return (
+            f"Gain {key_names[interaction.key_changes.grant[0]]}"
+            if len(interaction.key_changes.grant) == 1
+            else "Gain keys"
+        )
+    if interaction.key_changes.remove:
+        return (
+            f"Lose {key_names[interaction.key_changes.remove[0]]}"
+            if len(interaction.key_changes.remove) == 1
+            else "Lose keys"
+        )
     return "New Hotspot"
 
 
@@ -735,6 +774,7 @@ class Stack(DomainModel):
     styles: tuple[StyleDefinition, ...] = Field(default_factory=lambda: BUILT_IN_STYLES)
     new_card_style_id: UUID | None = HYPERCARD_STYLE_ID
     keys: tuple[KeyDefinition, ...] = Field(default_factory=tuple)
+    sounds: tuple[SoundDefinition, ...] = Field(default_factory=tuple)
     cards: tuple[Card, ...] = Field(default_factory=tuple)
 
     @field_validator("schema_version")
@@ -785,6 +825,14 @@ class Stack(DomainModel):
         if len(key_names) != len(set(key_names)):
             raise ValueError("Key names must be unique within a stack")
         key_names_by_id = {key.id: key.name for key in self.keys}
+        sound_ids = [sound.id for sound in self.sounds]
+        known_sound_ids = set(sound_ids)
+        if len(sound_ids) != len(known_sound_ids):
+            raise ValueError("Sound IDs must be unique within a stack")
+        sound_names = [sound.name.casefold() for sound in self.sounds]
+        if len(sound_names) != len(set(sound_names)):
+            raise ValueError("Sound names must be unique within a stack")
+        sound_names_by_id = {sound.id: sound.name for sound in self.sounds}
         for card in self.cards:
             for revision in card.revisions:
                 if revision.style_id is not None and revision.style_id not in known_style_ids:
@@ -936,6 +984,13 @@ class Stack(DomainModel):
                     )
                     if any(key_id not in known_key_ids for key_id in referenced_key_ids):
                         raise ValueError("hotspot key references must identify Keys in this stack")
+                    if (
+                        interaction.sound_id is not None
+                        and interaction.sound_id not in known_sound_ids
+                    ):
+                        raise ValueError(
+                            "hotspot sound references must identify Sounds in this stack"
+                        )
                     if interaction.action is not None:
                         target = interaction.action.target
                         if (
@@ -949,6 +1004,7 @@ class Stack(DomainModel):
                         interaction,
                         card_names=card_names,
                         key_names=key_names_by_id,
+                        sound_names=sound_names_by_id,
                     )
                     if interaction.label != derived_label:
                         object.__setattr__(
@@ -992,6 +1048,10 @@ class Stack(DomainModel):
     def key_by_id(self, key_id: UUID) -> KeyDefinition:
         """Return one validated stack-owned Key definition."""
         return next(key for key in self.keys if key.id == key_id)
+
+    def sound_by_id(self, sound_id: UUID) -> SoundDefinition:
+        """Return one validated stack-owned Sound definition."""
+        return next(sound for sound in self.sounds if sound.id == sound_id)
 
     @property
     def canvas(self) -> CanvasSize:

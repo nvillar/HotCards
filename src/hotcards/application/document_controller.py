@@ -13,7 +13,7 @@ from hotcards.domain.models import Stack
 AutosaveHook = Callable[[Stack], None]
 PersistenceHook = Callable[[Stack], None]
 PENDING_DURABILITY_MESSAGE = (
-    "Save the stack to finish the pending image change before making another change."
+    "Save the stack to finish the pending asset change before making another change."
 )
 
 
@@ -42,7 +42,22 @@ class OwnedImageAsset:
     directory_inode: int
 
 
-OwnedAssetReleaseHook = Callable[[tuple[OwnedImageAsset, ...]], None]
+@dataclass(frozen=True, slots=True)
+class OwnedSoundAsset:
+    """One generated sound eligible for history-aware reclamation."""
+
+    bundle_path: Path
+    relative_path: str
+    sound_id: UUID
+    asset_id: UUID
+    device: int
+    inode: int
+    directory_device: int
+    directory_inode: int
+
+
+OwnedAsset = OwnedImageAsset | OwnedSoundAsset
+OwnedAssetReleaseHook = Callable[[tuple[OwnedAsset, ...]], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,7 +87,7 @@ class DocumentController:
         self._owned_asset_release_hook: OwnedAssetReleaseHook | None = None
         self._undo_stack: list[_HistoryEntry] = []
         self._redo_stack: list[_HistoryEntry] = []
-        self._owned_assets: dict[tuple[Path, str], OwnedImageAsset] = {}
+        self._owned_assets: dict[tuple[Path, str], OwnedAsset] = {}
         self._durability_pending_assets: set[tuple[Path, str]] = set()
         self._pending_persisted_change: _PendingPersistedChange | None = None
         self._next_undo_sequence = 1
@@ -149,7 +164,7 @@ class DocumentController:
         command: DocumentCommand,
         persist: PersistenceHook,
         *,
-        owned_assets: Collection[OwnedImageAsset] = (),
+        owned_assets: Collection[OwnedAsset] = (),
     ) -> Stack:
         """Persist a command result before exposing it or recording history."""
         self._require_mutation_allowed()
@@ -266,7 +281,7 @@ class DocumentController:
 
     def register_owned_assets(
         self,
-        assets: tuple[OwnedImageAsset, ...],
+        assets: tuple[OwnedAsset, ...],
     ) -> None:
         """Track persisted duplicate assets loaded into the active document."""
         for asset in assets:
@@ -278,7 +293,7 @@ class DocumentController:
         self._require_mutation_allowed()
         self._undo_stack.clear()
         self._redo_stack.clear()
-        current_paths = self._background_paths(self._document)
+        current_paths = self._asset_paths(self._document)
         released = tuple(
             asset
             for key, asset in self._owned_assets.items()
@@ -301,10 +316,10 @@ class DocumentController:
             self._autosave_hook(self.document)
 
     def _release_unreachable_owned_assets(self) -> None:
-        reachable_paths = set(self._background_paths(self._document))
+        reachable_paths = set(self._asset_paths(self._document))
         for entry in (*self._undo_stack, *self._redo_stack):
-            reachable_paths.update(self._background_paths(entry.before))
-            reachable_paths.update(self._background_paths(entry.after))
+            reachable_paths.update(self._asset_paths(entry.before))
+            reachable_paths.update(self._asset_paths(entry.after))
         released = tuple(
             asset
             for key, asset in self._owned_assets.items()
@@ -317,26 +332,34 @@ class DocumentController:
 
     def _signal_owned_asset_release(
         self,
-        assets: tuple[OwnedImageAsset, ...],
+        assets: tuple[OwnedAsset, ...],
     ) -> None:
         if assets and self._owned_asset_release_hook is not None:
             self._owned_asset_release_hook(assets)
 
     @staticmethod
-    def _background_paths(document: Stack) -> frozenset[str]:
-        return frozenset(
+    def _asset_paths(document: Stack) -> frozenset[str]:
+        image_paths = {
             revision.background.image_path
             for card in document.cards
             for revision in card.revisions
             if revision.background is not None
-        )
+        }
+        sound_paths = {
+            sound.generated.audio_path
+            for sound in document.sounds
+            if sound.generated is not None
+        }
+        return frozenset((*image_paths, *sound_paths))
 
 
 __all__ = [
     "AutosaveHook",
     "DocumentController",
     "DocumentMutationBlockedError",
+    "OwnedAsset",
     "OwnedImageAsset",
+    "OwnedSoundAsset",
     "PENDING_DURABILITY_MESSAGE",
     "UndoToken",
 ]

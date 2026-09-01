@@ -37,6 +37,10 @@ from hotcards.generation.mflux_generator import (
     MfluxGenerator,
     dispose_mflux_result,
 )
+from hotcards.generation.stable_audio import (
+    StableAudioError,
+    StableAudioFailureKind,
+)
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -73,6 +77,40 @@ def test_mflux_success_runs_off_the_main_thread() -> None:
 
     assert operation.status is OperationStatus.SUCCEEDED
     assert operation.result[0] != main_thread
+    workers.shutdown(wait_milliseconds=500)
+
+
+def test_stable_audio_success_runs_off_the_main_thread() -> None:
+    workers = AdapterWorkers(stable_audio_timeout_seconds=0.5)
+    main_thread = get_ident()
+    operation = workers.run_stable_audio(
+        lambda: (get_ident(), "sound"),
+        stage="generating sound",
+    )
+
+    wait_for(operation)
+
+    assert operation.status is OperationStatus.SUCCEEDED
+    assert operation.result[1] == "sound"
+    assert operation.result[0] != main_thread
+    workers.shutdown(wait_milliseconds=500)
+
+
+def test_stable_audio_generation_error_is_typed() -> None:
+    workers = AdapterWorkers(stable_audio_timeout_seconds=0.5)
+
+    def fail() -> None:
+        raise StableAudioError(
+            "decoder failed",
+            kind=StableAudioFailureKind.GENERATION,
+        )
+
+    operation = workers.run_stable_audio(fail, stage="generating sound")
+    wait_for(operation)
+
+    assert operation.status is OperationStatus.FAILED
+    assert operation.failure.kind is WorkerFailureKind.SOUND_GENERATION
+    assert operation.failure.adapter is AdapterKind.STABLE_AUDIO
     workers.shutdown(wait_milliseconds=500)
 
 

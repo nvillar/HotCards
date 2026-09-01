@@ -3,6 +3,7 @@
 import errno
 import json
 import os
+import wave
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -17,6 +18,7 @@ from hotcards.domain.models import (
     CardRevision,
     DirectGenerateProvenance,
     GeneratedBackground,
+    GeneratedSoundAsset,
     GenerateInputs,
     HotspotSet,
     ImageOperationSettings,
@@ -25,6 +27,8 @@ from hotcards.domain.models import (
     Point,
     Polygon,
     ResolvedCardReference,
+    SoundDefinition,
+    SoundGenerationProvenance,
     Stack,
 )
 from hotcards.storage.stack_store import (
@@ -36,6 +40,39 @@ from hotcards.storage.stack_store import (
 
 def _write_png(path: Path) -> None:
     Image.new("RGB", (32, 24), "navy").save(path, format="PNG")
+
+
+def _write_wav(path: Path, *, duration_seconds: int = 2, channels: int = 2) -> None:
+    with wave.open(str(path), "wb") as output:
+        output.setnchannels(channels)
+        output.setsampwidth(2)
+        output.setframerate(44_100)
+        output.writeframes(b"\0" * duration_seconds * 44_100 * channels * 2)
+
+
+def _generated_sound(
+    sound_id: UUID,
+    asset_id: UUID,
+    *,
+    duration_seconds: int = 2,
+) -> SoundDefinition:
+    return SoundDefinition(
+        id=sound_id,
+        name="Knock",
+        prompt="A wooden knock",
+        duration_seconds=duration_seconds,
+        generated=GeneratedSoundAsset(
+            id=asset_id,
+            audio_path=StackStore.sound_asset_path(sound_id, asset_id),
+            provenance=SoundGenerationProvenance(
+                prompt="A wooden knock",
+                duration_seconds=duration_seconds,
+                seed=42,
+                generation_duration_milliseconds=700,
+            ),
+            created_at=datetime.now(UTC),
+        ),
+    )
 
 
 def _generated_background(asset_id: UUID, image_path: str) -> GeneratedBackground:
@@ -123,6 +160,97 @@ def test_bundle_round_trip_preserves_document_and_relative_asset(tmp_path: Path)
     assert (
         payload["cards"][0]["revisions"][0]["background"]["provenance"]["operation"] == "generate"
     )
+
+
+def test_generated_sound_asset_and_manifest_are_committed_together(tmp_path: Path) -> None:
+    source = tmp_path / "sound.wav"
+    _write_wav(source)
+    store = StackStore(tmp_path / "Sounds.hotcards")
+    previous = Stack(name="Sounds")
+    store.save(previous)
+    sound_id = uuid4()
+    asset_id = uuid4()
+    changed = previous.model_copy(
+        update={"sounds": (_generated_sound(sound_id, asset_id),)}
+    )
+
+    owned = store.store_sound_asset_and_save(
+        source,
+        sound_id=sound_id,
+        asset_id=asset_id,
+        duration_seconds=2,
+        previous_stack=previous,
+        changed_stack=changed,
+    )
+
+    assert store.load() == changed
+    assert owned.relative_path == StackStore.sound_asset_path(sound_id, asset_id)
+    assert store.asset_path(owned.relative_path).is_file()
+    with wave.open(str(store.asset_path(owned.relative_path)), "rb") as generated:
+        assert generated.getnchannels() == 2
+        assert generated.getframerate() == 44_100
+        assert generated.getnframes() == 2 * 44_100
+    assert store.stored_sound_asset(
+        owned.relative_path,
+        sound_id=sound_id,
+        asset_id=asset_id,
+    ) == owned
+    clone = store.clone_to(tmp_path / "Sounds Copy.hotcards", changed)
+    assert clone.load() == changed
+    with wave.open(str(clone.asset_path(owned.relative_path)), "rb") as generated:
+        assert generated.getnframes() == 2 * 44_100
+
+
+def test_sound_storage_rejects_wrong_audio_contract(tmp_path: Path) -> None:
+    source = tmp_path / "mono.wav"
+    _write_wav(source, channels=1)
+    store = StackStore(tmp_path / "Sounds.hotcards")
+    store.save(Stack(name="Sounds"))
+
+    with pytest.raises(StackStoreError, match="16-bit PCM stereo"):
+        store.store_sound_asset(
+            source,
+            sound_id=uuid4(),
+            asset_id=uuid4(),
+            duration_seconds=2,
+        )
+
+
+def test_owned_sound_is_removed_only_after_all_references_leave(tmp_path: Path) -> None:
+    source = tmp_path / "sound.wav"
+    _write_wav(source)
+    store = StackStore(tmp_path / "Sounds.hotcards")
+    previous = Stack(name="Sounds")
+    store.save(previous)
+    sound_id = uuid4()
+    asset_id = uuid4()
+    changed = previous.model_copy(
+        update={"sounds": (_generated_sound(sound_id, asset_id),)}
+    )
+    owned = store.store_sound_asset_and_save(
+        source,
+        sound_id=sound_id,
+        asset_id=asset_id,
+        duration_seconds=2,
+        previous_stack=previous,
+        changed_stack=changed,
+    )
+
+    with pytest.raises(StackStoreError, match="referenced sound"):
+        store.remove_owned_sound_asset_if_unreferenced(
+            owned,
+            sound_id=sound_id,
+            asset_id=asset_id,
+            stack=changed,
+        )
+    store.save(previous)
+    assert store.remove_owned_sound_asset_if_unreferenced(
+        owned,
+        sound_id=sound_id,
+        asset_id=asset_id,
+        stack=previous,
+    )
+    assert not store.asset_path(owned.relative_path).exists()
 
 
 def test_failed_replace_preserves_active_stack_and_removes_temporary_file(
@@ -660,8 +788,8 @@ def test_load_rejects_missing_unsupported_and_future_versions(
     for payload, message in [
         ({"name": "Missing"}, "schema_version"),
         ({"schema_version": 3, "name": "Legacy"}, "schema_version"),
-        ({"schema_version": 10, "name": "Previous"}, "schema_version"),
-        ({"schema_version": 12, "name": "Future"}, "schema_version"),
+        ({"schema_version": 11, "name": "Previous"}, "schema_version"),
+        ({"schema_version": 13, "name": "Future"}, "schema_version"),
     ]:
         store.stack_path.write_text(json.dumps(payload))
         with pytest.raises(StackStoreError, match=message):
