@@ -1,0 +1,17 @@
+Stable Audio 3 MLX inference subset
+
+Copyright (c) 2026 Stability AI
+
+Source:
+https://github.com/Stability-AI/stable-audio-3
+
+Vendored from commit:
+b12f9dc9d0ad07d93972de7df73265a1c548e7db
+
+Included files:
+- optimized/mlx/models/defs/dit_mlx.py
+- optimized/mlx/models/defs/sa3_pipeline.py
+- optimized/mlx/models/defs/same_s_decoder.py
+- optimized/mlx/models/defs/t5gemma_mlx.py
+
+The accompanying LICENSE file contains the upstream MIT license.

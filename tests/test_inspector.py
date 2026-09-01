@@ -51,6 +51,7 @@ from hotcards.domain.models import (
     PresetOutputSize,
     RefineTransformation,
     ResolvedCardReference,
+    SoundDefinition,
     Stack,
     StyleDefinition,
     UnresolvedCardReference,
@@ -216,6 +217,13 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     )
     assert then_layout.indexOf(inspector.hotspot_target_label) < (
         then_layout.indexOf(inspector.hotspot_destination_combo)
+    )
+    assert inspector.hotspot_sound_label.text() == "Play"
+    assert then_layout.indexOf(inspector.hotspot_destination_combo) < (
+        then_layout.indexOf(inspector.hotspot_sound_label)
+    )
+    assert then_layout.indexOf(inspector.hotspot_sound_label) < (
+        then_layout.indexOf(inspector.hotspot_sound_combo)
     )
     assert inspector.hotspot_list.minimumHeight() == 120
     assert inspector.hotspot_list.maximumHeight() == 120
@@ -483,21 +491,18 @@ def test_key_manager_manages_global_names_and_lists_hotspot_usages(
     assert manager.name_edit.text() == "Red key"
     assert not manager.delete_button.isEnabled()
     assert manager.usage_list.count() == 1
-    assert manager.usage_list.item(0).text() == (
-        "Castle · Version 1\nLose Red key · Requires, Removes"
-    )
+    assert manager.usage_list.item(0).text() == "Castle V1: Lose Red key"
+    assert not manager.usage_list.styleSheet()
 
     manager.name_edit.setText("Ruby key")
     usage_item = manager.usage_list.item(0)
     manager._editing_finished(
-        manager.show_usage_button,
+        manager.usage_list,
         Qt.FocusReason.MouseFocusReason,
     )
     assert controller.document.keys[0].name == "Ruby key"
     assert manager.usage_list.item(0) is usage_item
-    assert manager.usage_list.item(0).text().splitlines()[1] == (
-        "Lose Ruby key · Requires, Removes"
-    )
+    assert manager.usage_list.item(0).text() == "Castle V1: Lose Ruby key"
     hotspot_set = controller.document.cards[0].active_revision.hotspot_set
     assert hotspot_set is not None
     assert hotspot_set.interactions[0].label == "Lose Ruby key"
@@ -509,8 +514,9 @@ def test_key_manager_manages_global_names_and_lists_hotspot_usages(
         )
     )
     manager.usage_list.setCurrentRow(0)
-    manager.show_usage_button.click()
+    manager.usage_list.itemDoubleClicked.emit(manager.usage_list.item(0))
     assert requested == [(card.id, card.active_revision.id, interaction.id)]
+    assert not hasattr(manager, "show_usage_button")
 
     manager.add_button.click()
     assert [key.name for key in controller.document.keys] == [
@@ -552,9 +558,7 @@ def test_hotspot_pipeline_edits_conditions_changes_and_navigation(
     inspector.render(controller.document, source.id)
 
     assert not hasattr(inspector, "hotspot_name_edit")
-    assert inspector.hotspot_list.currentItem().text() == (
-        "Lose Red key · Gain Door open\n→ Castle"
-    )
+    assert inspector.hotspot_list.currentItem().text() == "Go to Castle"
     assert inspector.condition_table.rowCount() == 1
     assert inspector.condition_table.horizontalHeaderItem(0).text() == "State"
     assert inspector.condition_table.horizontalHeaderItem(1).text() == "Key"
@@ -636,6 +640,33 @@ def test_empty_hotspot_rule_sections_use_plain_language_placeholders(
     assert inspector.no_key_changes_label.text() == "No key changes"
     assert not inspector.no_key_changes_label.isHidden()
     assert inspector.hotspot_destination_combo.currentText() == "No destination"
+
+
+def test_hotspot_play_selector_assigns_catalog_sound(
+    application: QApplication,
+) -> None:
+    sound = SoundDefinition(name="Door knock")
+    interaction = Interaction()
+    card = Card(
+        name="Card",
+        revisions=(CardRevision(hotspot_set=HotspotSet(interactions=(interaction,))),),
+    )
+    controller = DocumentController(
+        Stack(name="Demo", sounds=(sound,), cards=(card,))
+    )
+    inspector = Inspector(controller)
+    inspector.render(controller.document, card.id)
+
+    sound_index = next(
+        index
+        for index in range(inspector.hotspot_sound_combo.count())
+        if inspector.hotspot_sound_combo.itemData(index) == sound.id
+    )
+    inspector.hotspot_sound_combo.setCurrentIndex(sound_index)
+
+    hotspot_set = controller.document.cards[0].active_revision.hotspot_set
+    assert hotspot_set is not None
+    assert hotspot_set.interactions[0].sound_id == sound.id
 
 
 def test_contextual_key_creation_label_does_not_reserve_free_form_name(
@@ -1426,7 +1457,7 @@ def test_hotspot_properties_reorder_and_delete_use_commands(
     application.processEvents()
     changed = controller.document.cards[0].active_revision.hotspot_set
     assert changed is not None
-    assert changed.interactions[0].label == "Destination"
+    assert changed.interactions[0].label == "Go to Destination"
     assert changed.interactions[0].action.target == ResolvedCardReference(
         target_card_id=destination.id
     )

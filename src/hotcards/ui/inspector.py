@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
 from hotcards.application.commands import (
     AddInteractionCommand,
     ChangeHotspotDestinationCommand,
+    ChangeHotspotSoundCommand,
     CommandError,
     CreateCardAndResolveCommand,
     CreateKeyAndAddHotspotReferenceCommand,
@@ -719,6 +720,13 @@ class Inspector(QWidget):
         self.hotspot_destination_combo.setObjectName("hotspotDestinationCombo")
         self.hotspot_destination_combo.setAccessibleName("Hotspot destination")
         then_layout.addWidget(self.hotspot_destination_combo)
+        self.hotspot_sound_label = QLabel("Play")
+        self.hotspot_sound_label.setObjectName("hotspotSoundLabel")
+        then_layout.addWidget(self.hotspot_sound_label)
+        self.hotspot_sound_combo = QComboBox()
+        self.hotspot_sound_combo.setObjectName("hotspotSoundCombo")
+        self.hotspot_sound_combo.setAccessibleName("Hotspot Sound")
+        then_layout.addWidget(self.hotspot_sound_combo)
         layout.addWidget(self.hotspot_then_panel)
 
         self.hotspot_error = QLabel()
@@ -763,6 +771,7 @@ class Inspector(QWidget):
         self.add_condition_button.clicked.connect(self._add_condition)
         self.add_key_change_button.clicked.connect(self._add_key_change)
         self.hotspot_destination_combo.currentIndexChanged.connect(self._destination_changed)
+        self.hotspot_sound_combo.currentIndexChanged.connect(self._sound_changed)
 
     def _render_inputs_changed(self) -> None:
         if not self._rendering:
@@ -1668,6 +1677,7 @@ class Inspector(QWidget):
         self.key_change_table.setEnabled(has_interaction)
         self.add_key_change_button.setEnabled(has_interaction)
         self.hotspot_destination_combo.setEnabled(has_interaction)
+        self.hotspot_sound_combo.setEnabled(has_interaction)
         self.delete_hotspot_button.setEnabled(has_interaction)
         current_row = self.hotspot_list.currentRow()
         self.move_hotspot_up_button.setEnabled(has_interaction and current_row > 0)
@@ -1735,6 +1745,25 @@ class Inspector(QWidget):
                 )
                 if selected_card_id is not None
                 else None
+            )
+        with QSignalBlocker(self.hotspot_sound_combo):
+            self.hotspot_sound_combo.clear()
+            self.hotspot_sound_combo.addItem("No Sound", None)
+            for sound in document.sounds:
+                self.hotspot_sound_combo.addItem(sound.name, sound.id)
+                if sound.generated is None:
+                    self.hotspot_sound_combo.setItemData(
+                        self.hotspot_sound_combo.count() - 1,
+                        "This Sound has not been generated yet.",
+                        Qt.ItemDataRole.ToolTipRole,
+                    )
+            self.hotspot_sound_combo.setCurrentIndex(
+                -1
+                if interaction is None
+                else self._combo_index_for_data(
+                    self.hotspot_sound_combo,
+                    interaction.sound_id,
+                )
             )
 
     def _render_condition_rows(
@@ -2269,6 +2298,27 @@ class Inspector(QWidget):
                 ),
             )
         self._execute(command)
+
+    def _sound_changed(self, index: int) -> None:
+        if self._rendering or index < 0:
+            return
+        card = self._selected_card()
+        interaction = self._selected_interaction()
+        if card is None or interaction is None:
+            return
+        value = self.hotspot_sound_combo.itemData(index)
+        sound_id = value if isinstance(value, UUID) else None
+        if interaction.sound_id == sound_id:
+            return
+        self._execute(
+            ChangeHotspotSoundCommand(
+                card_id=card.id,
+                revision_id=card.active_revision.id,
+                interaction_id=interaction.id,
+                sound_id=sound_id,
+            ),
+            undo_message="Hotspot Sound changed",
+        )
 
     def _move_hotspot(self, offset: int) -> None:
         card = self._selected_card()

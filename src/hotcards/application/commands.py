@@ -14,6 +14,7 @@ from hotcards.domain.models import (
     CardRevision,
     DuplicateProvenance,
     GeneratedBackground,
+    GeneratedSoundAsset,
     GenerateOutputSize,
     HotspotConditions,
     HotspotKeyChanges,
@@ -25,6 +26,7 @@ from hotcards.domain.models import (
     Polygon,
     ResolvedCardReference,
     RunOverlayMode,
+    SoundDefinition,
     Stack,
     StyleDefinition,
     UnresolvedCardReference,
@@ -75,6 +77,13 @@ def _key_index(document: Stack, key_id: UUID) -> int:
         if key.id == key_id:
             return index
     raise CommandError(f"Key {key_id} does not exist")
+
+
+def _sound_index(document: Stack, sound_id: UUID) -> int:
+    for index, sound in enumerate(document.sounds):
+        if sound.id == sound_id:
+            return index
+    raise CommandError(f"Sound {sound_id} does not exist")
 
 
 def _interaction_index(revision: CardRevision, interaction_id: UUID) -> int:
@@ -605,6 +614,87 @@ class DeleteKeyCommand:
         keys = list(document.keys)
         keys.pop(index)
         return validated_copy(document.model_copy(update={"keys": tuple(keys)}))
+
+
+@dataclass(frozen=True, slots=True)
+class AddSoundCommand:
+    """Append one stack-owned Sound definition."""
+
+    name: str
+    prompt: str = ""
+    duration_seconds: int = 2
+    sound_id: UUID = field(default_factory=uuid4)
+
+    def apply(self, document: Stack) -> Stack:
+        if any(sound.id == self.sound_id for sound in document.sounds):
+            raise CommandError(f"Sound {self.sound_id} already exists")
+        sound = SoundDefinition(
+            id=self.sound_id,
+            name=self.name,
+            prompt=self.prompt,
+            duration_seconds=self.duration_seconds,
+        )
+        return validated_copy(document.model_copy(update={"sounds": (*document.sounds, sound)}))
+
+
+@dataclass(frozen=True, slots=True)
+class UpdateSoundCommand:
+    """Update one Sound's editable name, prompt, and duration."""
+
+    sound_id: UUID
+    name: str
+    prompt: str
+    duration_seconds: int
+
+    def apply(self, document: Stack) -> Stack:
+        index = _sound_index(document, self.sound_id)
+        sounds = list(document.sounds)
+        sounds[index] = sounds[index].model_copy(
+            update={
+                "name": self.name,
+                "prompt": self.prompt,
+                "duration_seconds": self.duration_seconds,
+            }
+        )
+        return validated_copy(document.model_copy(update={"sounds": tuple(sounds)}))
+
+
+@dataclass(frozen=True, slots=True)
+class ReplaceGeneratedSoundCommand:
+    """Replace one Sound's generated asset through one undo boundary."""
+
+    sound_id: UUID
+    generated: GeneratedSoundAsset
+
+    def apply(self, document: Stack) -> Stack:
+        index = _sound_index(document, self.sound_id)
+        sounds = list(document.sounds)
+        sounds[index] = sounds[index].model_copy(update={"generated": self.generated})
+        return validated_copy(document.model_copy(update={"sounds": tuple(sounds)}))
+
+
+@dataclass(frozen=True, slots=True)
+class DeleteSoundCommand:
+    """Delete one Sound that is not referenced by any hotspot."""
+
+    sound_id: UUID
+
+    def apply(self, document: Stack) -> Stack:
+        index = _sound_index(document, self.sound_id)
+        for card in document.cards:
+            for revision in card.revisions:
+                if revision.hotspot_set is None:
+                    continue
+                if any(
+                    interaction.sound_id == self.sound_id
+                    for interaction in revision.hotspot_set.interactions
+                ):
+                    raise CommandError(
+                        f'Sound "{document.sounds[index].name}" is still used by hotspots'
+                    )
+        sounds = list(document.sounds)
+        sounds.pop(index)
+        return validated_copy(document.model_copy(update={"sounds": tuple(sounds)}))
 
 
 @dataclass(frozen=True, slots=True)
@@ -1144,6 +1234,35 @@ class SetHotspotKeyChangesCommand:
 
 
 @dataclass(frozen=True, slots=True)
+class ChangeHotspotSoundCommand:
+    """Change or clear one hotspot's Sound action."""
+
+    card_id: UUID
+    revision_id: UUID
+    interaction_id: UUID
+    sound_id: UUID | None
+
+    def apply(self, document: Stack) -> Stack:
+        if self.sound_id is not None:
+            _sound_index(document, self.sound_id)
+        interaction = _interaction(
+            document,
+            card_id=self.card_id,
+            revision_id=self.revision_id,
+            interaction_id=self.interaction_id,
+        ).model_copy(update={"sound_id": self.sound_id})
+        return validated_copy(
+            _replace_interaction(
+                document,
+                card_id=self.card_id,
+                revision_id=self.revision_id,
+                interaction_id=self.interaction_id,
+                replacement=interaction,
+            )
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class ChangeHotspotDestinationCommand:
     """Change or clear one hotspot's navigation destination."""
 
@@ -1252,10 +1371,12 @@ class CreateCardAndResolveCommand:
 __all__ = [
     "ActivateRevisionCommand",
     "AddKeyCommand",
+    "AddSoundCommand",
     "AddStyleCommand",
     "AddInteractionCommand",
     "AddPolygonCommand",
     "ChangeHotspotDestinationCommand",
+    "ChangeHotspotSoundCommand",
     "CommandError",
     "CreateCardAndResolveCommand",
     "CreateCardCommand",
@@ -1265,6 +1386,7 @@ __all__ = [
     "DeleteInteractionCommand",
     "DeleteKeyCommand",
     "DeleteRevisionCommand",
+    "DeleteSoundCommand",
     "DeleteStyleCommand",
     "DeletePolygonCommand",
     "DocumentCommand",
@@ -1280,6 +1402,7 @@ __all__ = [
     "ReplaceInteractionPolygonsCommand",
     "ReplacePolygonCommand",
     "ReplaceRevisionBackgroundCommand",
+    "ReplaceGeneratedSoundCommand",
     "SetRunOverlayModeCommand",
     "SetHotspotConditionsCommand",
     "SetHotspotKeyChangesCommand",
@@ -1287,5 +1410,6 @@ __all__ = [
     "SetRevisionGenerateOutputSizeCommand",
     "SetStartCardCommand",
     "UpdateStyleCommand",
+    "UpdateSoundCommand",
     "next_duplicate_card_name",
 ]

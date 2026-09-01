@@ -66,6 +66,8 @@ from hotcards.application.document_session import (
 )
 from hotcards.application.generated_revision_change import GeneratedRevisionChange
 from hotcards.application.run_session import RunSession, RunSessionState
+from hotcards.application.sound_player import QtSoundPlayer, SoundPlayer
+from hotcards.application.sound_workflow import SoundWorkflow
 from hotcards.application.workers import (
     AdapterKind,
     AdapterWorkers,
@@ -104,7 +106,13 @@ from hotcards.ui.settings_dialog import (
     SettingsStore,
     load_machine_settings,
 )
-from hotcards.ui.utility_windows import KeyManagerWindow, StyleManagerWindow
+from hotcards.ui.utility_windows import (
+    UTILITY_WINDOW_HEIGHT,
+    UTILITY_WINDOW_WIDTH,
+    KeyManagerWindow,
+    SoundManagerWindow,
+    StyleManagerWindow,
+)
 
 AvailabilityChecks = Mapping[AdapterKind, Callable[[], Any]]
 AvailabilityChecksFactory = Callable[[], AvailabilityChecks]
@@ -115,6 +123,7 @@ class MainWindow(QMainWindow):
     """Application shell whose panes render one DocumentController."""
 
     _STYLE_MANAGER_GEOMETRY_KEY = "windows/style_manager_geometry"
+    _SOUND_MANAGER_GEOMETRY_KEY = "windows/sound_manager_geometry"
     _KEY_MANAGER_GEOMETRY_KEY = "windows/key_manager_geometry"
 
     def __init__(
@@ -128,6 +137,8 @@ class MainWindow(QMainWindow):
         settings_dialog_factory: SettingsDialogFactory = SettingsDialog,
         document_session: DocumentSession | None = None,
         background_workflow: BackgroundWorkflow | None = None,
+        sound_workflow: SoundWorkflow | None = None,
+        sound_player: SoundPlayer | None = None,
         card_duplication_workflow: CardDuplicationWorkflow | None = None,
         project_directory: Path | None = None,
         start_diagnostics: bool = True,
@@ -139,6 +150,8 @@ class MainWindow(QMainWindow):
         self.settings = settings if settings is not None else QSettings()
         self.document_session = document_session
         self.background_workflow = background_workflow
+        self.sound_workflow = sound_workflow
+        self.sound_player = sound_player or QtSoundPlayer(parent=self)
         self.card_duplication_workflow = card_duplication_workflow
         self.project_directory = project_directory or default_project_directory()
         self._availability_checks = dict(availability_checks or {})
@@ -170,6 +183,7 @@ class MainWindow(QMainWindow):
         self._last_session_mutation_blocked = False
         self._run_session = RunSession()
         self.style_manager_window: StyleManagerWindow | None = None
+        self.sound_manager_window: SoundManagerWindow | None = None
         self.key_manager_window: KeyManagerWindow | None = None
         if self.background_workflow is None and self.document_session is not None:
             self.background_workflow = BackgroundWorkflow(
@@ -283,6 +297,12 @@ class MainWindow(QMainWindow):
         self.styles_button.setToolTip("Open the stack Styles manager")
         self.styles_button.clicked.connect(self._show_style_manager)
         self.styles_button_action = toolbar.addWidget(self.styles_button)
+        self.sounds_button = QPushButton("Sounds")
+        self.sounds_button.setObjectName("soundsManagerButton")
+        self.sounds_button.setAccessibleName("Open Sounds manager")
+        self.sounds_button.setToolTip("Open the stack Sounds manager")
+        self.sounds_button.clicked.connect(self._show_sound_manager)
+        self.sounds_button_action = toolbar.addWidget(self.sounds_button)
         self.keys_button = QPushButton("Keys")
         self.keys_button.setObjectName("keysManagerButton")
         self.keys_button.setAccessibleName("Open Keys manager")
@@ -327,6 +347,47 @@ class MainWindow(QMainWindow):
         window.raise_()
         window.activateWindow()
 
+    def _show_sound_manager(self) -> None:
+        if self._is_running or self.sound_workflow is None:
+            return
+        window = self.sound_manager_window
+        if window is None:
+            window = SoundManagerWindow(
+                self.controller,
+                self.sound_workflow,
+                self.sound_player,
+                self._resolve_sound_asset_path,
+                self,
+            )
+            self.sound_manager_window = window
+            self._attach_utility_actions(window)
+            window.document_changed.connect(
+                lambda document, source=window: self.render_document(
+                    document,
+                    utility_source=source,
+                )
+            )
+            window.change_applied.connect(self._show_undo_notification)
+            window.hotspot_usage_requested.connect(self._show_hotspot_usage)
+            window.closing.connect(
+                lambda geometry: self.settings.setValue(
+                    self._SOUND_MANAGER_GEOMETRY_KEY,
+                    geometry,
+                )
+            )
+            window.destroyed.connect(
+                lambda _object=None, source=window: self._utility_destroyed(source)
+            )
+            geometry = self.settings.value(self._SOUND_MANAGER_GEOMETRY_KEY)
+            if geometry is not None:
+                window.restoreGeometry(geometry)
+            window.resize(UTILITY_WINDOW_WIDTH, UTILITY_WINDOW_HEIGHT)
+        window.set_mutation_allowed(not self.controller.mutation_blocked)
+        window.render(self.controller.document)
+        window.show()
+        window.raise_()
+        window.activateWindow()
+
     def _show_key_manager(self) -> None:
         if self._is_running:
             return
@@ -364,6 +425,8 @@ class MainWindow(QMainWindow):
     def _utility_destroyed(self, window: QWidget) -> None:
         if self.style_manager_window is window:
             self.style_manager_window = None
+        if self.sound_manager_window is window:
+            self.sound_manager_window = None
         if self.key_manager_window is window:
             self.key_manager_window = None
 
@@ -387,13 +450,18 @@ class MainWindow(QMainWindow):
     ) -> None:
         for window in (
             self.style_manager_window,
+            self.sound_manager_window,
             self.key_manager_window,
         ):
             if window is not None and window is not skip:
                 window.render(self.controller.document)
 
     def _close_utility_windows(self, *, commit_pending: bool = True) -> None:
-        for attribute in ("style_manager_window", "key_manager_window"):
+        for attribute in (
+            "style_manager_window",
+            "sound_manager_window",
+            "key_manager_window",
+        ):
             window = getattr(self, attribute)
             if window is None:
                 continue
@@ -831,6 +899,7 @@ class MainWindow(QMainWindow):
             return False
         for window in (
             self.style_manager_window,
+            self.sound_manager_window,
             self.key_manager_window,
         ):
             if window is not None and not window.commit_pending_edits(render_change=False):
@@ -1296,6 +1365,9 @@ class MainWindow(QMainWindow):
 
     def _document_replaced(self, _document: object) -> None:
         self._cancel_background_generation()
+        if self.sound_workflow is not None:
+            self.sound_workflow.cancel()
+        self.sound_player.stop()
         self._close_utility_windows(commit_pending=False)
         self._clear_undo_notification()
         self._card_selection_history.clear()
@@ -1322,6 +1394,8 @@ class MainWindow(QMainWindow):
             and self.background_workflow.busy
         ):
             self._cancel_background_generation()
+        if state.mutation_blocked and self.sound_workflow is not None:
+            self.sound_workflow.cancel()
         if state.error is None:
             self.notification_bar.clear_notification("document-error")
         bound = state.bundle_path is not None
@@ -1352,6 +1426,9 @@ class MainWindow(QMainWindow):
             self.create_first_card_button.setText("Create Your First Card")
         self._update_document_actions()
         self.styles_button.setEnabled(mutation_allowed and not self._is_running)
+        self.sounds_button.setEnabled(
+            mutation_allowed and not self._is_running and self.sound_workflow is not None
+        )
         self.keys_button.setEnabled(mutation_allowed and not self._is_running)
         self._update_window_title()
         self._update_generation_actions()
@@ -1414,6 +1491,7 @@ class MainWindow(QMainWindow):
         self.card_sidebar.set_document_editable(mutation_allowed and not self._is_running)
         authoring_enabled = mutation_allowed and not self._is_running
         self.styles_button.setEnabled(authoring_enabled)
+        self.sounds_button.setEnabled(authoring_enabled and self.sound_workflow is not None)
         self.keys_button.setEnabled(authoring_enabled)
         self.inspector.setEnabled(authoring_enabled)
         self.canvas_card_name.setReadOnly(not authoring_enabled)
@@ -1458,9 +1536,10 @@ class MainWindow(QMainWindow):
         for adapter, check in checks.items():
             self._availability[adapter] = None
             self._diagnostic_messages.pop(adapter, None)
-            operation = self.workers.check_mflux(
-                check,
-                emit_diagnostic=False,
+            operation = (
+                self.workers.check_mflux(check, emit_diagnostic=False)
+                if adapter is AdapterKind.MFLUX
+                else self.workers.check_stable_audio(check, emit_diagnostic=False)
             )
             self._diagnostic_operations.append(operation)
             operation.succeeded.connect(
@@ -2012,6 +2091,11 @@ class MainWindow(QMainWindow):
         except StackStoreError:
             return None
 
+    def _resolve_sound_asset_path(self, audio_path: str) -> Path:
+        if self.document_session is None or self.document_session.store is None:
+            raise StackStoreError("save the stack before playing a Sound")
+        return self.document_session.store.asset_path(audio_path)
+
     def _reference_image_path(self, image_path: str) -> Path:
         if self.document_session is None or self.document_session.store is None:
             raise BackgroundWorkflowError("save the stack before generating with a Reference image")
@@ -2253,6 +2337,7 @@ class MainWindow(QMainWindow):
             )
             self._selected_card_id = state.current_card_id
         else:
+            self.sound_player.stop()
             self._is_running = False
             self._run_session.clear()
             state = None
@@ -2268,19 +2353,46 @@ class MainWindow(QMainWindow):
     def _run_interaction_activated(self, interaction_id: object) -> None:
         if not self._is_running or not isinstance(interaction_id, UUID):
             return
+        document = self.controller.document
+        sound_id = self._run_session.activation_sound_id(document, interaction_id)
+        if sound_id is not None or self._run_session.activation_has_navigation(
+            document,
+            interaction_id,
+        ):
+            self.sound_player.stop()
         state = self._run_session.activate(
-            self.controller.document,
+            document,
             interaction_id,
         )
         self._apply_run_state(state)
+        if sound_id is not None:
+            self._play_run_sound(sound_id)
 
     def _run_back(self) -> None:
         if self._is_running:
+            self.sound_player.stop()
             self._apply_run_state(self._run_session.back())
 
     def _run_restart(self) -> None:
         if self._is_running:
+            self.sound_player.stop()
             self._apply_run_state(self._run_session.restart())
+
+    def _play_run_sound(self, sound_id: UUID) -> None:
+        try:
+            sound = self.controller.document.sound_by_id(sound_id)
+        except StopIteration:
+            self._set_run_warning("The selected Sound is no longer available.")
+            return
+        if sound.generated is None:
+            self._set_run_warning(f'"{sound.name}" has not been generated yet.')
+            return
+        try:
+            path = self._resolve_sound_asset_path(sound.generated.audio_path)
+        except StackStoreError as error:
+            self._set_run_warning(str(error))
+            return
+        self.sound_player.play(path)
 
     def _apply_run_state(self, state: RunSessionState) -> None:
         self._selected_card_id = state.current_card_id
@@ -2331,14 +2443,19 @@ class MainWindow(QMainWindow):
         self.back_button_action.setVisible(self._is_running)
         self.restart_button_action.setVisible(self._is_running)
         self.styles_button_action.setVisible(authoring)
+        self.sounds_button_action.setVisible(authoring)
         self.keys_button_action.setVisible(authoring)
         self.styles_button.setVisible(authoring)
+        self.sounds_button.setVisible(authoring)
         self.keys_button.setVisible(authoring)
         self.styles_button.setEnabled(authoring_enabled)
+        self.sounds_button.setEnabled(authoring_enabled and self.sound_workflow is not None)
         self.keys_button.setEnabled(authoring_enabled)
         if self._is_running:
             if self.style_manager_window is not None:
                 self.style_manager_window.hide()
+            if self.sound_manager_window is not None:
+                self.sound_manager_window.hide()
             if self.key_manager_window is not None:
                 self.key_manager_window.hide()
 
@@ -2367,6 +2484,9 @@ class MainWindow(QMainWindow):
         self._cancel_diagnostics()
         if self.background_workflow is not None:
             self.background_workflow.cancel()
+        if self.sound_workflow is not None:
+            self.sound_workflow.cancel()
+        self.sound_player.stop()
 
     def _cancel_diagnostics(self) -> None:
         self._diagnostic_generation += 1
@@ -2424,6 +2544,9 @@ class MainWindow(QMainWindow):
             )
         if self.background_workflow is not None:
             self.background_workflow.close()
+        if self.sound_workflow is not None:
+            self.sound_workflow.cancel()
+        self.sound_player.stop()
         self._close_utility_windows()
         if self._owns_workers:
             self.workers.shutdown(wait_milliseconds=100)

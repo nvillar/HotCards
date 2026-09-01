@@ -21,6 +21,7 @@ from hotcards.generation.errors import (
     ModelLoadError,
     ModelUnavailableError,
 )
+from hotcards.generation.stable_audio import StableAudioError, StableAudioFailureKind
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,7 @@ class AdapterKind(StrEnum):
     """Production adapter families supported by the worker boundary."""
 
     MFLUX = "mflux"
+    STABLE_AUDIO = "stable-audio"
 
 
 class WorkerFailureKind(StrEnum):
@@ -38,6 +40,7 @@ class WorkerFailureKind(StrEnum):
     MODEL_UNAVAILABLE = "model_unavailable"
     MODEL_LOAD = "model_load"
     IMAGE_GENERATION = "image_generation"
+    SOUND_GENERATION = "sound_generation"
     ADAPTER_ERROR = "adapter_error"
 
 
@@ -411,7 +414,7 @@ class _BoundedRunnable(QRunnable):
 
 
 class AdapterWorkers(QObject):
-    """Run serialized MFLUX operations away from the UI thread."""
+    """Run serialized Metal model operations away from the UI thread."""
 
     availability_changed = Signal(object)
 
@@ -419,15 +422,18 @@ class AdapterWorkers(QObject):
         self,
         *,
         mflux_timeout_seconds: float = 600.0,
+        stable_audio_timeout_seconds: float = 600.0,
     ) -> None:
         super().__init__()
         self._timeouts = {
             AdapterKind.MFLUX: _validate_timeout(mflux_timeout_seconds),
+            AdapterKind.STABLE_AUDIO: _validate_timeout(stable_audio_timeout_seconds),
         }
         self._mflux_pool = QThreadPool(self)
         self._mflux_pool.setMaxThreadCount(1)
         self._invocation_slots = {
             AdapterKind.MFLUX: _PROCESS_MFLUX_INVOCATION_SLOT,
+            AdapterKind.STABLE_AUDIO: _PROCESS_MFLUX_INVOCATION_SLOT,
         }
         self._invocation_thread = _PROCESS_MFLUX_INVOCATIONS
         self._dispatcher = _CompletionDispatcher(self)
@@ -440,6 +446,7 @@ class AdapterWorkers(QObject):
         self._records: dict[UUID, _OperationRecord] = {}
         self._availability: dict[AdapterKind, bool | None] = {
             AdapterKind.MFLUX: None,
+            AdapterKind.STABLE_AUDIO: None,
         }
 
     def run_mflux(
@@ -478,6 +485,51 @@ class AdapterWorkers(QObject):
         """Run a bounded MFLUX model availability check."""
         return self._submit(
             AdapterKind.MFLUX,
+            check,
+            stage=stage,
+            timeout_seconds=timeout_seconds,
+            availability_check=True,
+            emit_availability=emit_diagnostic,
+            request_cancel=None,
+            dispose_result=None,
+            invocation_started=None,
+            invocation_finished=None,
+        )
+
+    def run_stable_audio(
+        self,
+        operation: Callable[[], Any],
+        *,
+        stage: str,
+        timeout_seconds: float | None = None,
+        request_cancel: Callable[[], None] | None = None,
+        dispose_result: Callable[[Any], None] | None = None,
+    ) -> WorkerOperation:
+        """Submit synchronous Stable Audio work to the serialized Metal queue."""
+        return self._submit(
+            AdapterKind.STABLE_AUDIO,
+            operation,
+            stage=stage,
+            timeout_seconds=timeout_seconds,
+            availability_check=False,
+            emit_availability=True,
+            request_cancel=request_cancel,
+            dispose_result=dispose_result,
+            invocation_started=None,
+            invocation_finished=None,
+        )
+
+    def check_stable_audio(
+        self,
+        check: Callable[[], Any],
+        *,
+        stage: str = "checking Stable Audio model availability",
+        timeout_seconds: float | None = None,
+        emit_diagnostic: bool = True,
+    ) -> WorkerOperation:
+        """Run a bounded Stable Audio model availability check."""
+        return self._submit(
+            AdapterKind.STABLE_AUDIO,
             check,
             stage=stage,
             timeout_seconds=timeout_seconds,
@@ -668,7 +720,9 @@ def _validate_timeout(timeout_seconds: float) -> float:
 
 
 def _adapter_name(adapter: AdapterKind) -> str:
-    return "MFLUX"
+    if adapter is AdapterKind.MFLUX:
+        return "MFLUX"
+    return "Stable Audio"
 
 
 def _failure_for(record: _OperationRecord, outcome: object) -> WorkerFailure:
@@ -689,6 +743,22 @@ def _failure_for(record: _OperationRecord, outcome: object) -> WorkerFailure:
 
     assert isinstance(outcome, _Error)
     error = outcome.error
+    if isinstance(error, StableAudioError):
+        kind = {
+            StableAudioFailureKind.MODEL_UNAVAILABLE: WorkerFailureKind.MODEL_UNAVAILABLE,
+            StableAudioFailureKind.MODEL_LOAD: WorkerFailureKind.MODEL_LOAD,
+            StableAudioFailureKind.GENERATION: WorkerFailureKind.SOUND_GENERATION,
+            StableAudioFailureKind.OUTPUT: WorkerFailureKind.SOUND_GENERATION,
+            StableAudioFailureKind.CANCELLED: WorkerFailureKind.ADAPTER_ERROR,
+        }[error.kind]
+        detail = str(error).strip() or "the adapter returned an unspecified error"
+        return WorkerFailure(
+            adapter=record.adapter,
+            stage=record.stage,
+            kind=kind,
+            message=f"{adapter_name} failed during {record.stage}: {detail}",
+            exception_type=type(error).__name__,
+        )
     kinds = (
         (ModelUnavailableError, WorkerFailureKind.MODEL_UNAVAILABLE),
         (ModelLoadError, WorkerFailureKind.MODEL_LOAD),

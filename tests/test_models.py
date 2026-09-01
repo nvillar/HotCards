@@ -27,6 +27,7 @@ from hotcards.domain.models import (
     EditProvenance,
     ExactOutputSize,
     GeneratedBackground,
+    GeneratedSoundAsset,
     GenerateInputs,
     HotspotConditions,
     HotspotKeyChanges,
@@ -46,11 +47,29 @@ from hotcards.domain.models import (
     RefineTransformation,
     ResolvedCardReference,
     RunOverlayMode,
+    SoundDefinition,
+    SoundGenerationProvenance,
     Stack,
     StyleDefinition,
     StyleSnapshot,
     UnresolvedCardReference,
 )
+
+
+def generated_sound() -> GeneratedSoundAsset:
+    return GeneratedSoundAsset(
+        audio_path=(
+            "assets/sounds/27dd6a14-1a2a-4b13-9705-b56d70474a17/"
+            "sound-47e14ba7-3e57-48e3-9aac-edf495305fb1.wav"
+        ),
+        provenance=SoundGenerationProvenance(
+            prompt="A wooden knock",
+            duration_seconds=2,
+            seed=42,
+            generation_duration_milliseconds=1234,
+        ),
+        created_at=datetime.now(UTC),
+    )
 
 
 def image_settings(
@@ -79,6 +98,45 @@ def image_provenance() -> DirectGenerateProvenance:
         render_prompt="A moonlit courtyard",
         settings=image_settings(),
     )
+
+
+def test_stack_round_trips_sound_catalog_and_hotspot_reference() -> None:
+    sound = SoundDefinition(
+        name="Door knock",
+        prompt="  A wooden knock  ",
+        generated=generated_sound(),
+    )
+    revision = CardRevision(
+        hotspot_set=HotspotSet(interactions=(Interaction(sound_id=sound.id),))
+    )
+    stack = Stack(
+        name="Sound stack",
+        sounds=(sound,),
+        cards=(Card(name="Door", revisions=(revision,)),),
+    )
+
+    loaded = Stack.model_validate_json(stack.model_dump_json())
+
+    assert loaded.sounds[0].prompt == "A wooden knock"
+    assert loaded.cards[0].active_revision.hotspot_set is not None
+    assert loaded.cards[0].active_revision.hotspot_set.interactions[0].sound_id == sound.id
+
+
+def test_stack_rejects_unknown_or_ambiguously_named_sounds() -> None:
+    revision = CardRevision(
+        hotspot_set=HotspotSet(interactions=(Interaction(sound_id=uuid4()),))
+    )
+    with pytest.raises(ValidationError, match="must identify Sounds"):
+        Stack(name="Unknown sound", cards=(Card(name="Card", revisions=(revision,)),))
+
+    with pytest.raises(ValidationError, match="Sound names must be unique"):
+        Stack(
+            name="Duplicate sounds",
+            sounds=(
+                SoundDefinition(name=" Knock "),
+                SoundDefinition(name="knock"),
+            ),
+        )
 
 
 def test_stack_defaults_match_document_contract() -> None:
@@ -304,12 +362,30 @@ def test_hotspot_labels_are_derived_from_actions() -> None:
     destination = Card(name="Castle Gate")
     red_key = KeyDefinition(name="Red key")
     door_open = KeyDefinition(name="Door open")
+    chime = SoundDefinition(name="Chime")
     resolved = Interaction(
         action=NavigateAction(target=ResolvedCardReference(target_card_id=destination.id)),
+        sound_id=chime.id,
         key_changes=HotspotKeyChanges(
             remove=(red_key.id,),
             grant=(door_open.id,),
         ),
+    )
+    sound_only = Interaction(
+        sound_id=chime.id,
+        key_changes=HotspotKeyChanges(
+            remove=(red_key.id,),
+            grant=(door_open.id,),
+        ),
+    )
+    grant_only = Interaction(
+        key_changes=HotspotKeyChanges(
+            remove=(red_key.id,),
+            grant=(door_open.id,),
+        ),
+    )
+    remove_only = Interaction(
+        key_changes=HotspotKeyChanges(remove=(red_key.id,)),
     )
     unresolved = Interaction(
         action=NavigateAction(target=UnresolvedCardReference(target_name="Former room")),
@@ -318,21 +394,36 @@ def test_hotspot_labels_are_derived_from_actions() -> None:
     source = Card(
         name="Source",
         revisions=(
-            CardRevision(hotspot_set=HotspotSet(interactions=(resolved, unresolved, actionless))),
+            CardRevision(
+                hotspot_set=HotspotSet(
+                    interactions=(
+                        resolved,
+                        sound_only,
+                        grant_only,
+                        remove_only,
+                        unresolved,
+                        actionless,
+                    )
+                )
+            ),
         ),
     )
 
     stack = Stack(
         name="Castle",
         keys=(red_key, door_open),
+        sounds=(chime,),
         cards=(source, destination),
     )
 
     interactions = stack.cards[0].active_revision.hotspot_set
     assert interactions is not None
     assert [item.label for item in interactions.interactions] == [
-        "Lose Red key · Gain Door open → Castle Gate",
-        "Former room",
+        "Go to Castle Gate",
+        "Play Chime",
+        "Gain Door open",
+        "Lose Red key",
+        "Go to Former room",
         "New Hotspot",
     ]
 

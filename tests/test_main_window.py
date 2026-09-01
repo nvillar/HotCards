@@ -55,6 +55,7 @@ from hotcards.domain.models import (
     CurrentSourceSize,
     DirectGenerateProvenance,
     GeneratedBackground,
+    GeneratedSoundAsset,
     GenerateInputs,
     HotspotConditions,
     HotspotKeyChanges,
@@ -70,6 +71,8 @@ from hotcards.domain.models import (
     RefineProvenance,
     RefineTransformation,
     ResolvedCardReference,
+    SoundDefinition,
+    SoundGenerationProvenance,
     Stack,
     StyleDefinition,
     UnresolvedCardReference,
@@ -239,6 +242,50 @@ class FakeBackgroundWorkflow(QObject):
         self.closed = True
 
 
+class FakeSoundWorkflow(QObject):
+    generation_started = Signal(object)
+    sampling_progress = Signal(int, int)
+    document_changed = Signal(object)
+    change_applied = Signal(str, object)
+    failed = Signal(str)
+    cancelled = Signal()
+    finished = Signal()
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.generate_calls: list[UUID] = []
+        self.cancel_calls = 0
+        self.active = False
+
+    @property
+    def is_active(self) -> bool:
+        return self.active
+
+    def generate(self, sound_id: UUID) -> None:
+        self.generate_calls.append(sound_id)
+        self.active = True
+        self.generation_started.emit(sound_id)
+
+    def cancel(self) -> None:
+        self.cancel_calls += 1
+        if self.active:
+            self.active = False
+            self.cancelled.emit()
+            self.finished.emit()
+
+
+class FakeSoundPlayer:
+    def __init__(self) -> None:
+        self.played: list[Path] = []
+        self.stop_calls = 0
+
+    def play(self, path: Path) -> None:
+        self.played.append(path)
+
+    def stop(self) -> None:
+        self.stop_calls += 1
+
+
 @pytest.fixture(scope="module")
 def application() -> QApplication:
     return QApplication.instance() or QApplication([])
@@ -291,6 +338,8 @@ def _window(
     controller = DocumentController(stack or _stack())
     workers = FakeWorkers()
     background = FakeBackgroundWorkflow(controller)
+    sound_workflow = FakeSoundWorkflow()
+    sound_player = FakeSoundPlayer()
     window = MainWindow(
         controller,
         workers,  # type: ignore[arg-type]
@@ -299,6 +348,8 @@ def _window(
             AdapterKind.MFLUX: lambda: None,
         },
         background_workflow=background,  # type: ignore[arg-type]
+        sound_workflow=sound_workflow,  # type: ignore[arg-type]
+        sound_player=sound_player,
         start_diagnostics=False,
     )
     return window, controller, workers, background
@@ -355,12 +406,31 @@ def test_author_utility_windows_are_modeless_singletons_and_reopen(
     assert MainWindow._STYLE_MANAGER_GEOMETRY_KEY in window.settings.values
 
     window.styles_button.click()
+    window.sounds_button.click()
     window.keys_button.click()
     application.processEvents()
     assert window.style_manager_window is not None
     assert window.style_manager_window is not first_style_window
+    assert window.sound_manager_window is not None
+    assert window.sound_manager_window.windowModality() == Qt.WindowModality.NonModal
     assert window.key_manager_window is not None
     assert window.key_manager_window.windowModality() == Qt.WindowModality.NonModal
+    managers = (
+        window.style_manager_window,
+        window.sound_manager_window,
+        window.key_manager_window,
+    )
+    assert {manager.size() for manager in managers} == {QSize(420, 560)}
+    assert all(
+        manager.windowFlags() & Qt.WindowType.WindowStaysOnTopHint
+        for manager in managers
+    )
+    assert not hasattr(window.sound_manager_window, "model_label")
+    assert window.sound_manager_window.prompt_edit.minimumHeight() == (
+        window.sound_manager_window.prompt_edit.maximumHeight()
+    )
+    assert window.sound_manager_window.usage_list.height() == 140
+    assert window.key_manager_window.usage_list.height() == 140
     window.close()
     application.processEvents()
 
@@ -413,6 +483,122 @@ def test_pending_durability_disables_utility_manager_mutations(
     assert key_manager.name_edit.text() == "Draft"
     assert key_manager.error_label.isVisible()
     window._close_utility_windows(commit_pending=False)
+    window.close()
+    application.processEvents()
+
+
+def test_sound_manager_edits_catalog_shows_usage_and_starts_generation(
+    application: QApplication,
+) -> None:
+    sound = SoundDefinition(name="Knock", prompt="A wooden knock")
+    revision = CardRevision(
+        hotspot_set=HotspotSet(interactions=(Interaction(sound_id=sound.id),))
+    )
+    window, controller, _workers, _background = _window(
+        Stack(
+            name="Sounds",
+            sounds=(sound,),
+            cards=(Card(name="Door", revisions=(revision,)),),
+        )
+    )
+    window._show_sound_manager()
+    manager = window.sound_manager_window
+    assert manager is not None
+
+    assert manager.sound_list.item(0).text() == "Knock — 1 use"
+    assert manager.usage_list.count() == 1
+    assert manager.usage_list.item(0).text() == "Door V1: Play Knock"
+    assert not manager.usage_list.styleSheet()
+    assert not hasattr(manager, "show_usage_button")
+    assert not manager.delete_button.isEnabled()
+    requested: list[tuple[object, object, object]] = []
+    manager.hotspot_usage_requested.connect(
+        lambda card_id, revision_id, interaction_id: requested.append(
+            (card_id, revision_id, interaction_id)
+        )
+    )
+    manager.usage_list.setCurrentRow(0)
+    manager.usage_list.itemDoubleClicked.emit(manager.usage_list.item(0))
+    card = controller.document.cards[0]
+    assert requested == [
+        (
+            card.id,
+            card.active_revision.id,
+            revision.hotspot_set.interactions[0].id,
+        )
+    ]
+    manager.name_edit.setText("Door knock")
+    manager.prompt_edit.setPlainText("A heavy wooden knock")
+    manager.duration_spin.setValue(3)
+    assert manager.commit_pending_edits(render_change=True)
+
+    updated = controller.document.sound_by_id(sound.id)
+    assert (updated.name, updated.prompt, updated.duration_seconds) == (
+        "Door knock",
+        "A heavy wooden knock",
+        3,
+    )
+    manager.generate_button.click()
+    assert window.sound_workflow is not None
+    assert window.sound_workflow.generate_calls == [sound.id]  # type: ignore[attr-defined]
+    window.close()
+    application.processEvents()
+
+
+def test_run_hotspot_stops_previous_audio_then_plays_after_navigation(
+    application: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    asset_id = uuid4()
+    sound = SoundDefinition(
+        name="Door",
+        generated=GeneratedSoundAsset(
+            id=asset_id,
+            audio_path=f"assets/sounds/{uuid4()}/sound-{asset_id}.wav",
+            provenance=SoundGenerationProvenance(
+                prompt="A door opens",
+                duration_seconds=2,
+                seed=1,
+                generation_duration_milliseconds=100,
+            ),
+            created_at=datetime.now(UTC),
+        ),
+    )
+    destination = Card(name="Destination")
+    hotspot = Interaction(
+        action=NavigateAction(
+            target=ResolvedCardReference(target_card_id=destination.id)
+        ),
+        sound_id=sound.id,
+    )
+    revision = CardRevision(
+        hotspot_set=HotspotSet(interactions=(hotspot,))
+    )
+    source = Card(name="Source", revisions=(revision,))
+    window, _controller, _workers, _background = _window(
+        Stack(
+            name="Run sounds",
+            sounds=(sound,),
+            cards=(source, destination),
+            start_card_id=source.id,
+        )
+    )
+    path = tmp_path / "door.wav"
+    path.touch()
+    monkeypatch.setattr(window, "_resolve_sound_asset_path", lambda _path: path)
+    player = window.sound_player
+    assert isinstance(player, FakeSoundPlayer)
+
+    window._toggle_mode()
+    stops_before = player.stop_calls
+    window._run_interaction_activated(hotspot.id)
+
+    assert window._selected_card_id == destination.id
+    assert player.stop_calls == stops_before + 1
+    assert player.played == [path]
+    window._run_back()
+    assert player.stop_calls == stops_before + 2
     window.close()
     application.processEvents()
 

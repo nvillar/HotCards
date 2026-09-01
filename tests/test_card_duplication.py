@@ -381,7 +381,7 @@ def test_indeterminate_observed_duplicate_becomes_history_only_after_retry(
     for operation in blocked_operations:
         with pytest.raises(
             DocumentMutationBlockedError,
-            match="Save the stack to finish the pending image change",
+            match="Save the stack to finish the pending asset change",
         ):
             operation()
         assert controller.document == pending_document

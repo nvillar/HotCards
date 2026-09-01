@@ -35,6 +35,7 @@ from hotcards.domain.models import (
     Polygon,
     ResolvedCardReference,
     RunOverlayMode,
+    SoundDefinition,
     Stack,
     UnresolvedCardReference,
 )
@@ -138,6 +139,24 @@ def run_stack() -> tuple[Stack, Interaction, Interaction]:
         to_second,
         unresolved,
     )
+
+
+def test_sound_only_hotspot_is_actionable_and_returns_its_sound() -> None:
+    sound = SoundDefinition(name="Knock")
+    hotspot = Interaction(sound_id=sound.id)
+    revision = CardRevision(
+        hotspot_set=HotspotSet(interactions=(hotspot,)),
+    )
+    card = Card(name="Door", revisions=(revision,))
+    document = Stack(name="Sounds", sounds=(sound,), cards=(card,))
+    session = RunSession()
+    session.start(document)
+
+    active = session.active_hotspot_set(document)
+
+    assert active is not None
+    assert active.interactions == (hotspot,)
+    assert session.activation_sound_id(document, hotspot.id) == sound.id
 
 
 def test_run_session_navigates_uuid_links_with_back_and_restart() -> None:

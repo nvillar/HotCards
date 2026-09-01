@@ -11,8 +11,10 @@ from hotcards.application.commands import (
     AddInteractionCommand,
     AddKeyCommand,
     AddPolygonCommand,
+    AddSoundCommand,
     AddStyleCommand,
     ChangeHotspotDestinationCommand,
+    ChangeHotspotSoundCommand,
     CommandError,
     CreateCardCommand,
     CreateGeneratedRevisionCommand,
@@ -23,6 +25,7 @@ from hotcards.application.commands import (
     DeleteKeyCommand,
     DeletePolygonCommand,
     DeleteRevisionCommand,
+    DeleteSoundCommand,
     DeleteStyleCommand,
     DuplicateCardCommand,
     DuplicateRevisionCommand,
@@ -31,6 +34,7 @@ from hotcards.application.commands import (
     RenameKeyCommand,
     ReorderCardCommand,
     ReorderHotspotCommand,
+    ReplaceGeneratedSoundCommand,
     ReplaceHotspotSetCommand,
     ReplaceInteractionPolygonsCommand,
     ReplacePolygonCommand,
@@ -41,6 +45,7 @@ from hotcards.application.commands import (
     SetRevisionReferenceCommand,
     SetRevisionStyleCommand,
     SetStartCardCommand,
+    UpdateSoundCommand,
     UpdateStyleCommand,
     next_duplicate_card_name,
 )
@@ -53,6 +58,7 @@ from hotcards.domain.models import (
     DirectGenerateProvenance,
     DuplicateProvenance,
     GeneratedBackground,
+    GeneratedSoundAsset,
     GenerateInputs,
     HotspotConditions,
     HotspotKeyChanges,
@@ -68,6 +74,7 @@ from hotcards.domain.models import (
     RefineProvenance,
     RefineTransformation,
     ResolvedCardReference,
+    SoundGenerationProvenance,
     Stack,
     StyleDefinition,
     UnresolvedCardReference,
@@ -457,6 +464,64 @@ def test_key_lifecycle_and_hotspot_behavior_are_typed_changes() -> None:
     ).apply(document)
     document = DeleteKeyCommand(key_id=key_id).apply(document)
     assert document.keys == ()
+
+
+def test_sound_lifecycle_and_hotspot_assignment_are_typed_changes() -> None:
+    sound_id = uuid4()
+    interaction = Interaction()
+    source, revision = card_with_revision(interaction)
+    document = Stack(name="Stack", cards=(source,))
+
+    document = AddSoundCommand(
+        name="Door",
+        prompt="Heavy wooden door closes",
+        sound_id=sound_id,
+    ).apply(document)
+    document = UpdateSoundCommand(
+        sound_id=sound_id,
+        name="Door close",
+        prompt="A dry wooden door slam",
+        duration_seconds=3,
+    ).apply(document)
+    document = ChangeHotspotSoundCommand(
+        card_id=source.id,
+        revision_id=revision.id,
+        interaction_id=interaction.id,
+        sound_id=sound_id,
+    ).apply(document)
+    generated = GeneratedSoundAsset(
+        audio_path=f"assets/sounds/{sound_id}/sound-{uuid4()}.wav",
+        provenance=SoundGenerationProvenance(
+            prompt="A dry wooden door slam",
+            duration_seconds=3,
+            seed=42,
+            generation_duration_milliseconds=900,
+        ),
+        created_at=datetime.now(UTC),
+    )
+    document = ReplaceGeneratedSoundCommand(
+        sound_id=sound_id,
+        generated=generated,
+    ).apply(document)
+
+    sound = document.sound_by_id(sound_id)
+    assert sound.name == "Door close"
+    assert sound.duration_seconds == 3
+    assert sound.generated == generated
+    hotspot_set = document.cards[0].active_revision.hotspot_set
+    assert hotspot_set is not None
+    assert hotspot_set.interactions[0].sound_id == sound_id
+    with pytest.raises(CommandError, match="still used"):
+        DeleteSoundCommand(sound_id=sound_id).apply(document)
+
+    document = ChangeHotspotSoundCommand(
+        card_id=source.id,
+        revision_id=revision.id,
+        interaction_id=interaction.id,
+        sound_id=None,
+    ).apply(document)
+    document = DeleteSoundCommand(sound_id=sound_id).apply(document)
+    assert document.sounds == ()
 
 
 def test_create_key_and_hotspot_reference_is_atomic() -> None:
