@@ -195,10 +195,14 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     assert inspector.hotspot_then_label.font().pointSizeF() == (
         inspector.edit_section_label.font().pointSizeF()
     )
-    assert inspector.add_condition_button.text() == "+ Add condition"
-    assert inspector.add_condition_button.isFlat()
-    assert inspector.add_key_change_button.text() == "+ Add key change"
-    assert inspector.add_key_change_button.isFlat()
+    assert inspector.add_condition_button.text() == "+"
+    assert inspector.add_condition_button.accessibleName() == "Add condition"
+    assert inspector.add_condition_label.text() == "Key condition"
+    assert inspector.add_key_change_button.text() == "+"
+    assert inspector.add_key_change_button.accessibleName() == "Add key change"
+    assert inspector.add_key_change_label.text() == "Key change"
+    assert inspector.add_condition_button.size() == QSize(20, 20)
+    assert inspector.add_key_change_button.size() == QSize(20, 20)
     assert inspector.hotspot_destination_combo.findText("Create New Card...") == -1
     assert all(
         inspector.hotspot_destination_combo.itemData(index) != "create"
@@ -214,10 +218,14 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     )
     then_layout = inspector.hotspot_then_panel.layout()
     assert then_layout is not None
-    assert then_layout.indexOf(inspector.key_change_rows_widget) < (
-        then_layout.indexOf(inspector.add_key_change_button)
+    assert inspector.key_change_controls_layout.indexOf(
+        inspector.key_change_rows_widget
+    ) < (
+        inspector.key_change_controls_layout.indexOf(
+            inspector.key_change_add_row
+        )
     )
-    assert then_layout.indexOf(inspector.add_key_change_button) < (
+    assert then_layout.indexOf(inspector.key_change_controls_layout) < (
         then_layout.indexOf(inspector.hotspot_target_label)
     )
     assert then_layout.indexOf(inspector.hotspot_target_label) < (
@@ -232,6 +240,8 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     )
     assert inspector.condition_rows_layout.contentsMargins().isNull()
     assert inspector.key_change_rows_layout.contentsMargins().isNull()
+    assert inspector.condition_controls_layout.spacing() == 3
+    assert inspector.key_change_controls_layout.spacing() == 3
     assert not hasattr(inspector, "condition_table")
     assert not hasattr(inspector, "key_change_table")
     assert not hasattr(inspector, "no_conditions_label")

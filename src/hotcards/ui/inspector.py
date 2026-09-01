@@ -633,38 +633,66 @@ class Inspector(QWidget):
         self.hotspot_when_label.setObjectName("hotspotWhenLabel")
         layout.addWidget(self.hotspot_when_label)
         self.hotspot_when_panel, when_layout = _rule_panel("hotspotWhenPanel")
+        self.condition_controls_layout = QVBoxLayout()
+        self.condition_controls_layout.setContentsMargins(0, 0, 0, 0)
+        self.condition_controls_layout.setSpacing(3)
         self.condition_rows_widget = QWidget()
         self.condition_rows_widget.setObjectName("hotspotConditionRows")
         self.condition_rows_layout = QVBoxLayout(self.condition_rows_widget)
         self.condition_rows_layout.setContentsMargins(0, 0, 0, 0)
-        when_layout.addWidget(self.condition_rows_widget)
-        self.add_condition_button = QPushButton("+ Add condition")
-        self.add_condition_button.setObjectName("addConditionButton")
-        self.add_condition_button.setFlat(True)
-        when_layout.addWidget(
-            self.add_condition_button,
-            0,
-            Qt.AlignmentFlag.AlignLeft,
+        self.condition_controls_layout.addWidget(self.condition_rows_widget)
+        self.add_condition_button = _compact_text_button(
+            "+",
+            object_name="addConditionButton",
+            accessible_name="Add condition",
+            tooltip="Add a condition",
+            prominent=False,
         )
+        self.add_condition_button.setFixedSize(20, 20)
+        self.condition_add_row = QWidget()
+        self.condition_add_row.setObjectName("addConditionRow")
+        condition_add_layout = QHBoxLayout(self.condition_add_row)
+        condition_add_layout.setContentsMargins(0, 0, 0, 0)
+        condition_add_layout.setSpacing(4)
+        condition_add_layout.addWidget(self.add_condition_button)
+        self.add_condition_label = QLabel("Key condition")
+        condition_add_layout.addWidget(self.add_condition_label)
+        condition_add_layout.addStretch(1)
+        self.condition_controls_layout.addWidget(self.condition_add_row)
+        when_layout.addLayout(self.condition_controls_layout)
         layout.addWidget(self.hotspot_when_panel)
 
         self.hotspot_then_label = QLabel("Then")
         self.hotspot_then_label.setObjectName("hotspotThenLabel")
         layout.addWidget(self.hotspot_then_label)
         self.hotspot_then_panel, then_layout = _rule_panel("hotspotThenPanel")
+        self.key_change_controls_layout = QVBoxLayout()
+        self.key_change_controls_layout.setContentsMargins(0, 0, 0, 0)
+        self.key_change_controls_layout.setSpacing(3)
         self.key_change_rows_widget = QWidget()
         self.key_change_rows_widget.setObjectName("hotspotKeyChangeRows")
         self.key_change_rows_layout = QVBoxLayout(self.key_change_rows_widget)
         self.key_change_rows_layout.setContentsMargins(0, 0, 0, 0)
-        then_layout.addWidget(self.key_change_rows_widget)
-        self.add_key_change_button = QPushButton("+ Add key change")
-        self.add_key_change_button.setObjectName("addKeyChangeButton")
-        self.add_key_change_button.setFlat(True)
-        then_layout.addWidget(
-            self.add_key_change_button,
-            0,
-            Qt.AlignmentFlag.AlignLeft,
+        self.key_change_controls_layout.addWidget(self.key_change_rows_widget)
+        self.add_key_change_button = _compact_text_button(
+            "+",
+            object_name="addKeyChangeButton",
+            accessible_name="Add key change",
+            tooltip="Add a key change",
+            prominent=False,
         )
+        self.add_key_change_button.setFixedSize(20, 20)
+        self.key_change_add_row = QWidget()
+        self.key_change_add_row.setObjectName("addKeyChangeRow")
+        key_change_add_layout = QHBoxLayout(self.key_change_add_row)
+        key_change_add_layout.setContentsMargins(0, 0, 0, 0)
+        key_change_add_layout.setSpacing(4)
+        key_change_add_layout.addWidget(self.add_key_change_button)
+        self.add_key_change_label = QLabel("Key change")
+        key_change_add_layout.addWidget(self.add_key_change_label)
+        key_change_add_layout.addStretch(1)
+        self.key_change_controls_layout.addWidget(self.key_change_add_row)
+        then_layout.addLayout(self.key_change_controls_layout)
 
         self.hotspot_target_label = QLabel("Go to")
         self.hotspot_target_label.setObjectName("hotspotTargetLabel")
@@ -1641,6 +1669,8 @@ class Inspector(QWidget):
         has_change_key = any(key.id not in change_key_ids for key in document.keys)
         self.add_condition_button.setEnabled(has_interaction and has_condition_key)
         self.add_key_change_button.setEnabled(has_interaction and has_change_key)
+        self.add_condition_label.setEnabled(has_interaction and has_condition_key)
+        self.add_key_change_label.setEnabled(has_interaction and has_change_key)
         self.add_condition_button.setToolTip(
             "Add a condition"
             if has_condition_key
