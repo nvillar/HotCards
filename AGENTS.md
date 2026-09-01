@@ -235,15 +235,17 @@ for live MFLUX runs.
   set currently contains no interactions.
 - Use discriminated resolved/unresolved types for persisted references, not a
   nullable UUID plus status boolean. Store resolved runtime targets by UUID
-  after selection. If a destination card is deleted, convert inbound references to
-  unresolved while retaining the former target name; do not delete inbound
-  hotspots.
+  after selection. Go to assigns only existing catalog cards; create cards
+  through the Cards sidebar. If a destination card is deleted, convert inbound
+  references to unresolved while retaining the former target name; do not
+  delete inbound hotspots.
 - Keep an ordered, stack-owned catalog of free-form named binary Keys with
   stable UUIDs. Key names are trimmed, nonempty, and case-insensitively unique.
   Renaming preserves references; block deletion while any hotspot in any
-  revision references the Key. Keep Key assignment controls in Hotspots and
-  show every reference grouped by hotspot revision and semantic role in the
-  Keys utility window.
+  revision references the Key. Create Keys only through the Keys utility
+  window. Keep flat, headerless condition and key-change rows in Hotspots;
+  adding a row immediately selects the newest eligible catalog Key for inline
+  editing. Show every reference by hotspot revision in the Keys utility window.
 - Keep an ordered, stack-owned Sound catalog with stable UUIDs, trimmed
   case-insensitively unique names, editable prompts, 1–30 second durations, and
   optional immutable generated WAV assets. Generate only with Stable Audio 3
