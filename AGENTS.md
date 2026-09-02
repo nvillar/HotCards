@@ -119,18 +119,17 @@ for live MFLUX runs.
   and activate one complete copied revision through one Undo boundary; do not
   expose Keep/Create New Version for Reinterpret.
 - Edit only the readable current background through Flux2KleinEdit with one
-  direct authored Edit Instruction. Inject the exact selected Style text behind
-  the UI to maintain visual continuity, unless the authored instruction
-  explicitly changes the visual treatment. Treat the source image as
-  authoritative for everything not explicitly changed: request only the
-  authored change and the minimum accompanying changes needed for visual
-  coherence, preserve unrelated details, and prohibit unrelated additions,
-  removals, or reinterpretations.
+  direct authored Edit Instruction. Send that exact trimmed instruction without
+  adding preservation or editing guidance. If a Style is selected, append only
+  the exact selected Style text behind the UI as a visual-continuity addendum,
+  unless the authored instruction explicitly changes the visual treatment.
   Keep legacy Preserve metadata readable, but do not expose or apply Preserve
   controls to new edits. Validate the deterministic expanded prompt against the
   FLUX Edit tokenizer's hard 512-token budget without rewriting or truncation,
   use a fresh random seed, and never send Description or Generate References.
   Retain the exact effective prompt, including Style text, in provenance.
+  When Undo removes a completed Edit revision, restore that Edit's exact authored
+  instruction to the editor so it can be adjusted and retried.
   Default output to the source image's exact decoded dimensions and additionally
   offer only higher-area presets. Pass
   MFLUX a private immutable no-follow source snapshot and reject replacement

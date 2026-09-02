@@ -104,21 +104,20 @@ rollback-safe transaction, and Undo/Redo retain its owned asset only while
 needed.
 
 Edit is also an automatic-version workflow for the current canvas image. It
-sends that image alone to Flux2KleinEdit with the authored Edit Instruction and
-the selected Style text injected behind the UI to maintain visual continuity.
-The authored instruction takes precedence when it explicitly changes the visual
-treatment. The source image is authoritative: only the requested change and the
-minimum accompanying changes needed for visual coherence should be made, while
-all unrelated details are preserved. Description and Generate References are
-copied into the new revision but are not model inputs. The expanded prompt is
-deterministic, retained in provenance, and must fit the model's 512-token budget
-without truncation.
+sends that image alone to Flux2KleinEdit with the exact authored Edit Instruction.
+When a Style is selected, its exact text is appended behind the UI as a visual
+continuity addendum unless the authored instruction explicitly changes the visual
+treatment. No other preservation or editing instructions are added. Description
+and Generate References are copied into the new revision but are not model inputs.
+The effective prompt is deterministic, retained in provenance, and must fit the
+model's 512-token budget without truncation.
 Output defaults to the current image's exact decoded dimensions, including
 aligned non-preset sizes, and also offers only named tiers with strictly greater
 pixel area. Each Edit
 uses a fresh seed and appends its accepted instruction to ordered provenance
-lineage. Later Reinterpret operations preserve that lineage unless it conflicts with
-the current authoritative Description; Generate ignores it.
+lineage. Undoing an Edit restores its authored instruction to the editor for
+adjustment and another attempt. Later Reinterpret operations preserve that lineage
+unless it conflicts with the current authoritative Description; Generate ignores it.
 
 Generated images are the only supported background source. Generate and image
 removal apply to the active revision through document commands. Completed

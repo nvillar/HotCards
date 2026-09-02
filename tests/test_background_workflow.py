@@ -38,7 +38,10 @@ from hotcards.application.commands import (
 )
 from hotcards.application.document_controller import DocumentController, UndoToken
 from hotcards.application.document_session import DocumentSession
-from hotcards.application.generated_revision_change import GeneratedRevisionChange
+from hotcards.application.generated_revision_change import (
+    EditedRevisionChange,
+    GeneratedRevisionChange,
+)
 from hotcards.domain.image_dimensions import (
     AspectRatio,
     ResolutionTier,
@@ -497,8 +500,10 @@ def test_edit_uses_only_secure_current_image_and_creates_complete_version(
         lambda _limit: 8675309,
     )
     applied: list[tuple[str, UndoToken]] = []
+    edited_changes: list[EditedRevisionChange] = []
     cleared: list[None] = []
     workflow.change_applied.connect(lambda message, token: applied.append((message, token)))
+    workflow.edit_applied.connect(edited_changes.append)
     workflow.edit_instruction_clear_requested.connect(lambda: cleared.append(None))
     options = workflow.available_edit_output_sizes(card.id)
     assert options[0] == CurrentSourceSize(width=512, height=384)
@@ -533,8 +538,12 @@ def test_edit_uses_only_secure_current_image_and_creates_complete_version(
         width=512,
         height=384,
     )
-    assert style.prompt_text in provenance.expanded_prompt
-    assert "visual style" in provenance.expanded_prompt
+    assert provenance.expanded_prompt == (
+        "Open the garden gate.\n\n"
+        "Unless the Edit Instruction explicitly changes the visual treatment, "
+        "keep the result consistent with this selected Style:\n\n"
+        f"{style.prompt_text}"
+    )
     assert provenance.settings.seed == 8675309
     assert provenance.prompt_token_count == 24
     assert model.calls[-1]["image_paths"] == [snapshot_path]
@@ -547,6 +556,14 @@ def test_edit_uses_only_secure_current_image_and_creates_complete_version(
     assert snapshot_path != source_path
     assert not snapshot_path.exists()
     assert applied[-1][0] == "Image edited"
+    assert edited_changes == [
+        EditedRevisionChange(
+            token=applied[-1][1],
+            card_id=card.id,
+            revision_id=edited.id,
+            instruction="Open the garden gate.",
+        )
+    ]
     assert cleared == [None]
 
     token = applied[-1][1]
@@ -1235,9 +1252,11 @@ def test_edit_indeterminate_observed_after_keeps_instruction_and_promotes_histor
     changed_documents: list[Stack] = []
     cleared: list[None] = []
     applied: list[tuple[str, UndoToken]] = []
+    edited_changes: list[EditedRevisionChange] = []
     failures: list[object] = []
     workflow.document_changed.connect(changed_documents.append)
     workflow.change_applied.connect(lambda message, token: applied.append((message, token)))
+    workflow.edit_applied.connect(edited_changes.append)
     workflow.edit_instruction_clear_requested.connect(lambda: cleared.append(None))
     workflow.failed.connect(failures.append)
     assert session.store is not None
@@ -1298,6 +1317,14 @@ def test_edit_indeterminate_observed_after_keeps_instruction_and_promotes_histor
     assert controller.current_undo_token != previous_token
     assert cleared == [None]
     assert applied == [("Image edited", controller.current_undo_token)]
+    assert edited_changes == [
+        EditedRevisionChange(
+            token=controller.current_undo_token,
+            card_id=card.id,
+            revision_id=pending.cards[0].active_revision.id,
+            instruction="Open the gate.",
+        )
+    ]
     assert changed_documents[-1] == pending
     assert controller.undo()
     assert session.flush()

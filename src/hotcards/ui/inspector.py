@@ -515,9 +515,7 @@ class Inspector(QWidget):
         self.edit_instruction_edit = QPlainTextEdit()
         self.edit_instruction_edit.setObjectName("editInstructionEdit")
         self.edit_instruction_edit.setAccessibleName("Edit Instruction")
-        self.edit_instruction_edit.setPlaceholderText(
-            "Describe the change to make, everything else will be preserved"
-        )
+        self.edit_instruction_edit.setPlaceholderText("Describe the change to make")
         self.edit_instruction_edit.setMaximumHeight(110)
         edit_layout.addWidget(self.edit_instruction_edit)
         self.edit_instruction_error = QLabel()
@@ -991,11 +989,14 @@ class Inspector(QWidget):
     def set_edit_error(self, message: str) -> None:
         self._set_error(self.edit_instruction_error, message)
 
-    def clear_edit_instruction(self) -> None:
+    def set_edit_instruction(self, instruction: str) -> None:
         with QSignalBlocker(self.edit_instruction_edit):
-            self.edit_instruction_edit.clear()
+            self.edit_instruction_edit.setPlainText(instruction)
         self._set_error(self.edit_instruction_error, "")
         self._render_edit_tooltip()
+
+    def clear_edit_instruction(self) -> None:
+        self.set_edit_instruction("")
 
     def _refresh_generation_tooltips(self) -> None:
         self.generate_background_button.setToolTip(

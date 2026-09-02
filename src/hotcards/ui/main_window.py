@@ -62,7 +62,10 @@ from hotcards.application.document_session import (
     DocumentSessionError,
     DocumentSessionState,
 )
-from hotcards.application.generated_revision_change import GeneratedRevisionChange
+from hotcards.application.generated_revision_change import (
+    EditedRevisionChange,
+    GeneratedRevisionChange,
+)
 from hotcards.application.run_session import RunSession, RunSessionState
 from hotcards.application.sound_player import QtSoundPlayer, SoundPlayer
 from hotcards.application.sound_workflow import SoundWorkflow
@@ -167,6 +170,7 @@ class MainWindow(QMainWindow):
         self._service_notification_dismissed = False
         self._undo_notification_token: UndoToken | None = None
         self._generated_revision_change: GeneratedRevisionChange | None = None
+        self._edit_undo_instructions: dict[UndoToken, str] = {}
         self._card_selection_history: dict[
             UndoToken,
             tuple[UUID | None, UUID | None],
@@ -590,6 +594,9 @@ class MainWindow(QMainWindow):
             self.background_workflow.generation_applied.connect(
                 self._show_generated_revision_notification
             )
+            edit_applied = getattr(self.background_workflow, "edit_applied", None)
+            if edit_applied is not None:
+                edit_applied.connect(self._remember_edit_undo_instruction)
             edit_instruction_clear_requested = getattr(
                 self.background_workflow,
                 "edit_instruction_clear_requested",
@@ -998,6 +1005,24 @@ class MainWindow(QMainWindow):
             ),
         )
 
+    def _remember_edit_undo_instruction(self, change: object) -> None:
+        if (
+            isinstance(change, EditedRevisionChange)
+            and self.controller.current_undo_token == change.token
+        ):
+            self._edit_undo_instructions[change.token] = change.instruction
+
+    def _restore_edit_instruction_after_undo(self, token: UndoToken | None) -> None:
+        if token is None:
+            return
+        instruction = self._edit_undo_instructions.pop(token, None)
+        if instruction is None:
+            return
+        if self.inspector.edit_instruction_edit.toPlainText():
+            return
+        self.inspector.set_edit_instruction(instruction)
+        self._update_generation_actions()
+
     def _undo_notification(self) -> None:
         if self._is_running:
             return
@@ -1008,6 +1033,7 @@ class MainWindow(QMainWindow):
         if token is not None and self.controller.undo_if_current(token):
             self._restore_card_selection(token, undoing=True)
             self.render_document()
+            self._restore_edit_instruction_after_undo(token)
 
     def _create_generated_revision(self) -> None:
         if self._is_running:
@@ -1216,6 +1242,7 @@ class MainWindow(QMainWindow):
         if changed:
             self._restore_card_selection(token, undoing=True)
             self.render_document()
+            self._restore_edit_instruction_after_undo(token)
 
     def redo(self) -> None:
         self._clear_undo_notification()
@@ -1356,6 +1383,7 @@ class MainWindow(QMainWindow):
         self.sound_player.stop()
         self._close_utility_windows(commit_pending=False)
         self._clear_undo_notification()
+        self._edit_undo_instructions.clear()
         self._card_selection_history.clear()
         self._rendered_card_id = None
         self._card_name_commit_failed = False

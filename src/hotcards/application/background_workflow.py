@@ -36,7 +36,10 @@ from hotcards.application.document_session import (
     DocumentSessionError,
     DocumentSessionState,
 )
-from hotcards.application.generated_revision_change import GeneratedRevisionChange
+from hotcards.application.generated_revision_change import (
+    EditedRevisionChange,
+    GeneratedRevisionChange,
+)
 from hotcards.application.image_files import (
     UnreadableImageError,
     require_readable_image,
@@ -187,6 +190,9 @@ class _EditTarget:
 class _PendingEditCompletion:
     document: Stack
     previous_token: UndoToken | None
+    card_id: UUID
+    revision_id: UUID
+    instruction: str
 
 
 GenerationSettingsProvider = Callable[[], BackgroundGenerationSettings]
@@ -203,6 +209,7 @@ class BackgroundWorkflow(QObject):
     document_changed = Signal(object)
     change_applied = Signal(str, object)
     generation_applied = Signal(object)
+    edit_applied = Signal(object)
     edit_instruction_clear_requested = Signal()
 
     def __init__(
@@ -1151,12 +1158,21 @@ class BackgroundWorkflow(QObject):
                     self._pending_edit_completion = _PendingEditCompletion(
                         document=authoritative,
                         previous_token=previous_token,
+                        card_id=target.card_id,
+                        revision_id=command.new_revision_id,
+                        instruction=target.instruction,
                     )
             self._finish_with_error(error)
             return
         self.progress_changed.emit("Image edited")
         self.document_changed.emit(changed)
         self._emit_change_applied("Image edited", previous_token)
+        self._emit_edit_applied(
+            previous_token=previous_token,
+            card_id=target.card_id,
+            revision_id=command.new_revision_id,
+            instruction=target.instruction,
+        )
         self.edit_instruction_clear_requested.emit()
         self._pending_result = None
         result.dispose_output()
@@ -1182,6 +1198,14 @@ class BackgroundWorkflow(QObject):
         self.progress_changed.emit("Image edited")
         self.document_changed.emit(self.controller.document)
         self.change_applied.emit("Image edited", current_token)
+        self.edit_applied.emit(
+            EditedRevisionChange(
+                token=current_token,
+                card_id=pending.card_id,
+                revision_id=pending.revision_id,
+                instruction=pending.instruction,
+            )
+        )
         self.edit_instruction_clear_requested.emit()
 
     def _apply_background(
@@ -1242,6 +1266,25 @@ class BackgroundWorkflow(QObject):
                 )
             else:
                 self.change_applied.emit(message, token)
+
+    def _emit_edit_applied(
+        self,
+        *,
+        previous_token: UndoToken | None,
+        card_id: UUID,
+        revision_id: UUID,
+        instruction: str,
+    ) -> None:
+        token = self.controller.current_undo_token
+        if token is not None and token != previous_token:
+            self.edit_applied.emit(
+                EditedRevisionChange(
+                    token=token,
+                    card_id=card_id,
+                    revision_id=revision_id,
+                    instruction=instruction,
+                )
+            )
 
     def _operation_failed(self, request_id: UUID, failure: object) -> None:
         if request_id == self._request_id:

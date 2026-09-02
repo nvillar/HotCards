@@ -48,7 +48,10 @@ from hotcards.application.document_session import (
     DocumentSessionError,
     DocumentSessionState,
 )
-from hotcards.application.generated_revision_change import GeneratedRevisionChange
+from hotcards.application.generated_revision_change import (
+    EditedRevisionChange,
+    GeneratedRevisionChange,
+)
 from hotcards.application.workers import (
     AdapterKind,
     AdapterWorkers,
@@ -87,6 +90,7 @@ __all__ = [
     "DuplicateRevisionCommand",
     "DuplicateCardCommand",
     "DuplicatedCardChange",
+    "EditedRevisionChange",
     "EditRevisionDescriptionCommand",
     "GeneratedRevisionChange",
     "OperationStatus",

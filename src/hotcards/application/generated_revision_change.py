@@ -10,6 +10,16 @@ from hotcards.domain.models import CardRevision
 
 
 @dataclass(frozen=True, slots=True)
+class EditedRevisionChange:
+    """Identify one completed Edit while its creation remains undoable."""
+
+    token: UndoToken
+    card_id: UUID
+    revision_id: UUID
+    instruction: str
+
+
+@dataclass(frozen=True, slots=True)
 class GeneratedRevisionChange:
     """Identify one directly applied result while it remains undoable."""
 
@@ -20,4 +30,4 @@ class GeneratedRevisionChange:
     previous_revision: CardRevision
 
 
-__all__ = ["GeneratedRevisionChange"]
+__all__ = ["EditedRevisionChange", "GeneratedRevisionChange"]

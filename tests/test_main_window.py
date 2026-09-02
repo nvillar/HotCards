@@ -41,7 +41,10 @@ from hotcards.application.document_session import (
     DocumentSessionError,
     DocumentSessionState,
 )
-from hotcards.application.generated_revision_change import GeneratedRevisionChange
+from hotcards.application.generated_revision_change import (
+    EditedRevisionChange,
+    GeneratedRevisionChange,
+)
 from hotcards.application.workers import (
     AdapterKind,
     AdapterWorkers,
@@ -163,6 +166,7 @@ class FakeBackgroundWorkflow(QObject):
     document_changed = Signal(object)
     change_applied = Signal(str, object)
     generation_applied = Signal(object)
+    edit_applied = Signal(object)
     edit_instruction_clear_requested = Signal()
 
     def __init__(self, controller: DocumentController) -> None:
@@ -2347,6 +2351,87 @@ def test_edit_tab_wires_current_image_defaults_errors_and_cancellation(
     window._background_failed(RuntimeError("513 model tokens; the limit is 512"))
     assert "513 model tokens" in window.inspector.edit_instruction_error.text()
     assert "513 model tokens" in window.notification_bar.message_label.text()
+
+
+def test_notification_undo_restores_completed_edit_instruction(
+    application: QApplication,
+) -> None:
+    window, controller, _workers, background = _window()
+    card = controller.document.cards[0]
+    original_name = card.name
+    changed = controller.execute(RenameCardCommand(card_id=card.id, name="Edited"))
+    window.render_document(changed)
+    token = controller.current_undo_token
+    assert token is not None
+
+    background.change_applied.emit("Image edited", token)
+    background.edit_applied.emit(
+        EditedRevisionChange(
+            token=token,
+            card_id=card.id,
+            revision_id=changed.cards[0].active_revision.id,
+            instruction="Open the garden gate.",
+        )
+    )
+    background.edit_instruction_clear_requested.emit()
+
+    window.notification_bar.primary_button.click()
+
+    assert controller.document.cards[0].name == original_name
+    assert window.inspector.edit_instruction_edit.toPlainText() == "Open the garden gate."
+
+
+def test_edit_instruction_waits_for_its_exact_undo_token(
+    application: QApplication,
+) -> None:
+    window, controller, _workers, background = _window()
+    card = controller.document.cards[0]
+    changed = controller.execute(RenameCardCommand(card_id=card.id, name="Edited"))
+    window.render_document(changed)
+    edit_token = controller.current_undo_token
+    assert edit_token is not None
+    background.edit_applied.emit(
+        EditedRevisionChange(
+            token=edit_token,
+            card_id=card.id,
+            revision_id=changed.cards[0].active_revision.id,
+            instruction="Open the garden gate.",
+        )
+    )
+    background.edit_instruction_clear_requested.emit()
+    changed = controller.execute(RenameCardCommand(card_id=card.id, name="Unrelated change"))
+    window.render_document(changed)
+
+    window.undo()
+    assert window.inspector.edit_instruction_edit.toPlainText() == ""
+
+    window.undo()
+    assert window.inspector.edit_instruction_edit.toPlainText() == "Open the garden gate."
+
+
+def test_edit_undo_does_not_overwrite_a_new_instruction(
+    application: QApplication,
+) -> None:
+    window, controller, _workers, background = _window()
+    card = controller.document.cards[0]
+    changed = controller.execute(RenameCardCommand(card_id=card.id, name="Edited"))
+    window.render_document(changed)
+    edit_token = controller.current_undo_token
+    assert edit_token is not None
+    background.edit_applied.emit(
+        EditedRevisionChange(
+            token=edit_token,
+            card_id=card.id,
+            revision_id=changed.cards[0].active_revision.id,
+            instruction="Open the garden gate.",
+        )
+    )
+    background.edit_instruction_clear_requested.emit()
+    window.inspector.edit_instruction_edit.setPlainText("Try a blue gate instead.")
+
+    window.undo()
+
+    assert window.inspector.edit_instruction_edit.toPlainText() == "Try a blue gate instead."
 
 
 def test_notification_undo_expires_after_another_command(

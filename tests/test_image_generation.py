@@ -140,16 +140,10 @@ def test_refine_prompt_requires_current_description(value: str) -> None:
         compose_refine_prompt(value, None, ())
 
 
-def test_edit_prompt_trims_instruction_and_preserves_every_unrequested_detail() -> None:
-    assert compose_edit_prompt("  Replace the closed door with an open arch.  ") == (
-        "Edit the provided image according to this instruction:\n\n"
-        "Replace the closed door with an open arch.\n\n"
-        "The source image is authoritative for everything not explicitly changed "
-        "by the instruction. Make only the requested change and the minimum "
-        "accompanying changes necessary for visual coherence. Preserve all other "
-        "subjects, identities, objects, text, composition, framing, background, "
-        "lighting, colors, and visual style. Do not add, remove, or reinterpret "
-        "unrelated details."
+def test_edit_prompt_is_the_trimmed_authored_instruction_without_style() -> None:
+    assert (
+        compose_edit_prompt("  Replace the closed door with an open arch.  ")
+        == "Replace the closed door with an open arch."
     )
 
 
@@ -162,12 +156,12 @@ def test_edit_prompt_injects_selected_style_after_the_authored_instruction() -> 
 
     result = compose_edit_prompt("Open the garden gate.", style)
 
-    assert result.endswith(
+    assert result == (
+        "Open the garden gate.\n\n"
         "Unless the Edit Instruction explicitly changes the visual treatment, "
         "keep the result consistent with this selected Style:\n\n"
         "Rendered with bold black ink contours."
     )
-    assert result.index("Open the garden gate.") < result.index(style.prompt_text)
 
 
 def test_blank_selected_style_does_not_change_edit_prompt() -> None:
