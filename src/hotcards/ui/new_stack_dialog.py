@@ -44,9 +44,7 @@ class NewStackDialog(QDialog):
             ("Widescreen 16:9", AspectRatio.WIDESCREEN),
         ):
             self.format_combo.addItem(label, aspect_ratio)
-        self.format_combo.setCurrentIndex(
-            self.format_combo.findData(AspectRatio.LANDSCAPE)
-        )
+        self.format_combo.setCurrentIndex(self.format_combo.findData(AspectRatio.LANDSCAPE))
         form.addRow("Format", self.format_combo)
 
         buttons = QDialogButtonBox(

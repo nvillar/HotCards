@@ -61,25 +61,15 @@ class RunSession:
             warning = None
         elif document.cards:
             current_card_id = document.cards[0].id
-            warning = (
-                f'No start card is configured; previewing "{document.cards[0].name}".'
-            )
+            warning = f'No start card is configured; previewing "{document.cards[0].name}".'
         else:
             current_card_id = None
             warning = "This stack has no cards to run."
         if document.start_card_id not in card_ids and preferred_card_id in card_ids:
-            card = next(
-                card
-                for card in document.cards
-                if card.id == preferred_card_id
-            )
-            warning = (
-                f'No start card is configured; previewing "{card.name}".'
-            )
+            card = next(card for card in document.cards if card.id == preferred_card_id)
+            warning = f'No start card is configured; previewing "{card.name}".'
         self._entry_card_id = (
-            document.start_card_id
-            if document.start_card_id in card_ids
-            else current_card_id
+            document.start_card_id if document.start_card_id in card_ids else current_card_id
         )
         self._current_card_id = current_card_id
         self._history.clear()
@@ -110,28 +100,16 @@ class RunSession:
         self._warning = None
         self._notice = None
         card = next(
-            (
-                card
-                for card in document.cards
-                if card.id == self._current_card_id
-            ),
+            (card for card in document.cards if card.id == self._current_card_id),
             None,
         )
         if card is None:
             self._warning = "The current card is no longer available."
             return self.state
         revision = card.active_revision
-        interactions = (
-            revision.hotspot_set.interactions
-            if revision.hotspot_set is not None
-            else ()
-        )
+        interactions = revision.hotspot_set.interactions if revision.hotspot_set is not None else ()
         interaction = next(
-            (
-                interaction
-                for interaction in interactions
-                if interaction.id == interaction_id
-            ),
+            (interaction for interaction in interactions if interaction.id == interaction_id),
             None,
         )
         if interaction is None:
@@ -154,11 +132,7 @@ class RunSession:
             )
             return self.state
         destination = next(
-            (
-                candidate
-                for candidate in document.cards
-                if candidate.id == target.target_card_id
-            ),
+            (candidate for candidate in document.cards if candidate.id == target.target_card_id),
             None,
         )
         if destination is None:
@@ -244,9 +218,7 @@ class RunSession:
 
     def _is_active(self, interaction: Interaction) -> bool:
         conditions = interaction.conditions
-        return set(conditions.requires) <= self._keys and not (
-            set(conditions.forbids) & self._keys
-        )
+        return set(conditions.requires) <= self._keys and not (set(conditions.forbids) & self._keys)
 
     @staticmethod
     def _has_effect(interaction: Interaction) -> bool:
@@ -262,14 +234,8 @@ class RunSession:
     def _key_change_notice(document: Stack, interaction: Interaction) -> str:
         changes = interaction.key_changes
         parts = [
-            *(
-                f"Removed {document.key_by_id(key_id).name}"
-                for key_id in changes.remove
-            ),
-            *(
-                f"Granted {document.key_by_id(key_id).name}"
-                for key_id in changes.grant
-            ),
+            *(f"Removed {document.key_by_id(key_id).name}" for key_id in changes.remove),
+            *(f"Granted {document.key_by_id(key_id).name}" for key_id in changes.grant),
         ]
         return " · ".join(parts)
 

@@ -86,9 +86,7 @@ class WelcomeDialog(QDialog):
         self.stacks_label.setStyleSheet("font-weight: 600;")
         self.project_list = QListWidget()
         self.project_list.setObjectName("welcomeProjectList")
-        self.project_list.setSelectionMode(
-            QAbstractItemView.SelectionMode.SingleSelection
-        )
+        self.project_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.project_list.itemSelectionChanged.connect(self._update_open_button)
         self.project_list.itemDoubleClicked.connect(self._open_project)
 
@@ -99,9 +97,7 @@ class WelcomeDialog(QDialog):
 
         location_label = QLabel(str(project_directory))
         location_label.setObjectName("welcomeProjectDirectory")
-        location_label.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse
-        )
+        location_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         location_label.setStyleSheet("color: palette(mid);")
 
         self.error_label = QLabel()
@@ -152,9 +148,7 @@ class WelcomeDialog(QDialog):
             self.project_directory.mkdir(parents=True, exist_ok=True)
             entries = tuple(self.project_directory.iterdir())
         except OSError as error:
-            self.empty_label.setText(
-                f"HotCards could not read the project directory:\n{error}"
-            )
+            self.empty_label.setText(f"HotCards could not read the project directory:\n{error}")
             self.empty_label.setVisible(True)
             self._update_open_button()
             return
@@ -223,9 +217,7 @@ class WelcomeDialog(QDialog):
             return
         path = bundle_path(selected_path)
         if path.exists():
-            self._set_error(
-                f"A stack already exists at:\n{path}"
-            )
+            self._set_error(f"A stack already exists at:\n{path}")
             return
         self.selection = WelcomeSelection(bundle_path=path, stack=stack)
         self.accept()
@@ -269,7 +261,7 @@ class WelcomeDialog(QDialog):
         confirmation = QMessageBox(self)
         confirmation.setIcon(QMessageBox.Icon.Warning)
         confirmation.setWindowTitle("Delete Stack")
-        confirmation.setText(f'Delete “{path.stem}”?')
+        confirmation.setText(f"Delete “{path.stem}”?")
         confirmation.setInformativeText(
             "This permanently deletes the stack and all of its generated images. "
             "This action cannot be undone."

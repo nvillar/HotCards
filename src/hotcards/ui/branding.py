@@ -6,9 +6,7 @@ from pathlib import Path
 from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QIcon, QPainter, QPainterPath, QPixmap
 
-APPLICATION_ARTWORK_PATH = (
-    Path(__file__).resolve().parent.parent / "assets" / "spaceship.png"
-)
+APPLICATION_ARTWORK_PATH = Path(__file__).resolve().parent.parent / "assets" / "spaceship.png"
 APPLICATION_ICON_SIZES = (16, 32, 64, 128, 256, 512, 1024)
 
 
@@ -16,9 +14,7 @@ def application_artwork() -> QPixmap:
     """Load the packaged application artwork or fail startup explicitly."""
     artwork = QPixmap(str(APPLICATION_ARTWORK_PATH))
     if artwork.isNull():
-        raise RuntimeError(
-            f"could not load HotCards artwork: {APPLICATION_ARTWORK_PATH}"
-        )
+        raise RuntimeError(f"could not load HotCards artwork: {APPLICATION_ARTWORK_PATH}")
     return artwork
 
 

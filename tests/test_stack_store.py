@@ -170,9 +170,7 @@ def test_generated_sound_asset_and_manifest_are_committed_together(tmp_path: Pat
     store.save(previous)
     sound_id = uuid4()
     asset_id = uuid4()
-    changed = previous.model_copy(
-        update={"sounds": (_generated_sound(sound_id, asset_id),)}
-    )
+    changed = previous.model_copy(update={"sounds": (_generated_sound(sound_id, asset_id),)})
 
     owned = store.store_sound_asset_and_save(
         source,
@@ -190,11 +188,14 @@ def test_generated_sound_asset_and_manifest_are_committed_together(tmp_path: Pat
         assert generated.getnchannels() == 2
         assert generated.getframerate() == 44_100
         assert generated.getnframes() == 2 * 44_100
-    assert store.stored_sound_asset(
-        owned.relative_path,
-        sound_id=sound_id,
-        asset_id=asset_id,
-    ) == owned
+    assert (
+        store.stored_sound_asset(
+            owned.relative_path,
+            sound_id=sound_id,
+            asset_id=asset_id,
+        )
+        == owned
+    )
     clone = store.clone_to(tmp_path / "Sounds Copy.hotcards", changed)
     assert clone.load() == changed
     with wave.open(str(clone.asset_path(owned.relative_path)), "rb") as generated:
@@ -224,9 +225,7 @@ def test_owned_sound_is_removed_only_after_all_references_leave(tmp_path: Path) 
     store.save(previous)
     sound_id = uuid4()
     asset_id = uuid4()
-    changed = previous.model_copy(
-        update={"sounds": (_generated_sound(sound_id, asset_id),)}
-    )
+    changed = previous.model_copy(update={"sounds": (_generated_sound(sound_id, asset_id),)})
     owned = store.store_sound_asset_and_save(
         source,
         sound_id=sound_id,

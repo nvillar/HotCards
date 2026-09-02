@@ -27,9 +27,7 @@ def application() -> QApplication:
 def test_default_project_directory_is_under_documents(tmp_path: Path) -> None:
     assert default_project_directory(tmp_path) == tmp_path / "HotCards"
     assert bundle_path(tmp_path / "Garden") == tmp_path / "Garden.hotcards"
-    assert bundle_path(tmp_path / "Garden.hotcards") == (
-        tmp_path / "Garden.hotcards"
-    )
+    assert bundle_path(tmp_path / "Garden.hotcards") == (tmp_path / "Garden.hotcards")
 
 
 def test_welcome_lists_only_direct_bundle_directories(
@@ -54,18 +52,16 @@ def test_welcome_lists_only_direct_bundle_directories(
     assert dialog.new_button.text() == "Create New Stack"
     assert dialog.delete_button.text() == "Delete Stack"
     assert dialog.open_button.text() == "Open Stack"
-    assert [
-        dialog.project_list.item(row).text()
-        for row in range(dialog.project_list.count())
-    ] == ["alpha", "Beta"]
+    assert [dialog.project_list.item(row).text() for row in range(dialog.project_list.count())] == [
+        "alpha",
+        "Beta",
+    ]
     assert dialog.open_button.isEnabled()
     assert dialog.delete_button.isEnabled()
     assert dialog.empty_label.isHidden()
     dialog.open_button.click()
     assert dialog.result() == QDialog.DialogCode.Accepted
-    assert dialog.selection == WelcomeSelection(
-        bundle_path=projects / "alpha.HOTCARDS"
-    )
+    assert dialog.selection == WelcomeSelection(bundle_path=projects / "alpha.HOTCARDS")
 
 
 def test_welcome_empty_state_creates_default_directory(
@@ -232,10 +228,9 @@ def test_welcome_deletes_only_the_selected_stack_after_confirmation(
     assert confirmations == [second]
     assert first.is_dir()
     assert not second.exists()
-    assert [
-        dialog.project_list.item(row).text()
-        for row in range(dialog.project_list.count())
-    ] == ["First"]
+    assert [dialog.project_list.item(row).text() for row in range(dialog.project_list.count())] == [
+        "First"
+    ]
 
 
 def test_welcome_preserves_stack_when_deletion_is_cancelled(

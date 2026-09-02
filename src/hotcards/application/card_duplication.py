@@ -58,17 +58,13 @@ class CardDuplicationWorkflow:
             raise CardDuplicationError(f"card {source_card_id} does not exist")
         store = self.session.store
         if store is None:
-            raise CardDuplicationError(
-                "save the stack before duplicating a card"
-            )
+            raise CardDuplicationError("save the stack before duplicating a card")
         if not self.session.flush():
             raise CardDuplicationError(
                 self.session.state.error or "the current stack could not be saved"
             )
         document = self.controller.document
-        source_card = next(
-            card for card in document.cards if card.id == source_card_id
-        )
+        source_card = next(card for card in document.cards if card.id == source_card_id)
 
         source_revision = source_card.active_revision
         source_background = source_revision.background
@@ -129,9 +125,7 @@ class CardDuplicationWorkflow:
                                     asset_id=duplicate_background_id,
                                     device=error.owned_asset.device,
                                     inode=error.owned_asset.inode,
-                                    directory_device=(
-                                        error.owned_asset.directory_device
-                                    ),
+                                    directory_device=(error.owned_asset.directory_device),
                                     directory_inode=error.owned_asset.directory_inode,
                                 )
                             )

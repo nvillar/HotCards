@@ -63,10 +63,7 @@ def test_settings_dialog_contains_only_image_and_sound_models(
     assert not hasattr(dialog, "random_seed_check")
     assert not hasattr(dialog, "fixed_seed_spin")
     assert dialog.findChild(QLabel, "externalAuthenticationNote") is None
-    assert all(
-        "Hugging Face" not in label.text()
-        for label in dialog.findChildren(QLabel)
-    )
+    assert all("Hugging Face" not in label.text() for label in dialog.findChildren(QLabel))
 
 
 def test_settings_dialog_persists_model_selections(
@@ -74,19 +71,14 @@ def test_settings_dialog_persists_model_selections(
 ) -> None:
     settings = FakeSettings()
     dialog = SettingsDialog(settings)
-    dialog.image_model_combo.setCurrentIndex(
-        dialog.image_model_combo.findData("flux2-klein-9b-kv")
-    )
+    dialog.image_model_combo.setCurrentIndex(dialog.image_model_combo.findData("flux2-klein-9b-kv"))
 
     saved = dialog.save()
 
     assert saved.mflux_model == "flux2-klein-9b-kv"
     assert saved.stable_audio_model == "stabilityai/stable-audio-3-small-sfx"
     assert settings.values[MFLUX_MODEL_KEY] == "flux2-klein-9b-kv"
-    assert (
-        settings.values[STABLE_AUDIO_MODEL_KEY]
-        == "stabilityai/stable-audio-3-small-sfx"
-    )
+    assert settings.values[STABLE_AUDIO_MODEL_KEY] == "stabilityai/stable-audio-3-small-sfx"
 
 
 def test_hidden_generation_tuning_settings_use_fixed_defaults() -> None:

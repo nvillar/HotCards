@@ -51,6 +51,7 @@ class NotificationBar(QFrame):
         NotificationKind.WARNING: 2,
         NotificationKind.ERROR: 4,
     }
+
     def __init__(self) -> None:
         super().__init__()
         self.setObjectName("notificationBar")
@@ -77,15 +78,11 @@ class NotificationBar(QFrame):
         layout.addWidget(self.message_label, 1)
         self.primary_button = QPushButton()
         self.primary_button.setObjectName("notificationPrimaryAction")
-        self.primary_button.clicked.connect(
-            lambda: self._request_action(primary=True)
-        )
+        self.primary_button.clicked.connect(lambda: self._request_action(primary=True))
         layout.addWidget(self.primary_button)
         self.secondary_button = QPushButton()
         self.secondary_button.setObjectName("notificationSecondaryAction")
-        self.secondary_button.clicked.connect(
-            lambda: self._request_action(primary=False)
-        )
+        self.secondary_button.clicked.connect(lambda: self._request_action(primary=False))
         layout.addWidget(self.secondary_button)
         self.dismiss_button = QPushButton("Dismiss")
         self.dismiss_button.setObjectName("dismissNotificationButton")
@@ -131,11 +128,7 @@ class NotificationBar(QFrame):
         notification = self.current_notification
         if notification is None:
             return
-        action = (
-            notification.primary_action
-            if primary
-            else notification.secondary_action
-        )
+        action = notification.primary_action if primary else notification.secondary_action
         if action is not None:
             self.action_requested.emit(action.action_id)
 

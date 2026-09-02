@@ -54,9 +54,7 @@ class MachineSettings:
 def load_machine_settings(settings: SettingsStore) -> MachineSettings:
     """Read machine-local settings with safe defaults."""
     defaults = MachineSettings()
-    mflux_model = str(
-        settings.value(MFLUX_MODEL_KEY, defaults.mflux_model)
-    ).strip()
+    mflux_model = str(settings.value(MFLUX_MODEL_KEY, defaults.mflux_model)).strip()
     if mflux_model == "flux2-klein-9b":
         mflux_model = "flux2-klein-9b-kv"
     supported_mflux_models = {value for _label, value in MFLUX_MODEL_OPTIONS}
@@ -68,9 +66,7 @@ def load_machine_settings(settings: SettingsStore) -> MachineSettings:
             defaults.stable_audio_model,
         )
     ).strip()
-    supported_stable_audio_models = {
-        value for _label, value in STABLE_AUDIO_MODEL_OPTIONS
-    }
+    supported_stable_audio_models = {value for _label, value in STABLE_AUDIO_MODEL_OPTIONS}
     if stable_audio_model not in supported_stable_audio_models:
         stable_audio_model = defaults.stable_audio_model
     return MachineSettings(

@@ -870,9 +870,7 @@ class StackStore:
                 )
             asset_path = self._resolved_asset(relative_path)
             if not asset_path.is_file():
-                raise StackStoreError(
-                    f"stack references a missing sound asset: {relative_path}"
-                )
+                raise StackStoreError(f"stack references a missing sound asset: {relative_path}")
 
     def load_document(self) -> StoredStackDocument:
         """Securely load one validated stack document with its exact identity."""
@@ -1493,9 +1491,7 @@ class StackStore:
                 f"could not decode generated sound {source_path}: {error}"
             ) from error
         if (channels, sample_width, sample_rate) != (2, 2, 44_100):
-            raise StackStoreError(
-                "generated sound must be 16-bit PCM stereo WAV at 44.1 kHz"
-            )
+            raise StackStoreError("generated sound must be 16-bit PCM stereo WAV at 44.1 kHz")
         if frame_count != duration_seconds * sample_rate:
             raise StackStoreError(
                 f"generated sound must contain exactly {duration_seconds} seconds"
@@ -2171,8 +2167,7 @@ class StackStore:
         if self.stack_path.is_file():
             documents.append(self.load())
         if any(
-            sound.generated is not None
-            and sound.generated.audio_path == asset.relative_path
+            sound.generated is not None and sound.generated.audio_path == asset.relative_path
             for document in documents
             for sound in document.sounds
         ):

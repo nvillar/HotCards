@@ -176,9 +176,7 @@ class DocumentController:
             persist(validated_copy(after))
         except Exception as error:
             persisted_after = getattr(error, "persisted_stack", None) == after
-            durability_indeterminate = bool(
-                getattr(error, "durability_indeterminate", False)
-            )
+            durability_indeterminate = bool(getattr(error, "durability_indeterminate", False))
             observed_stack = getattr(error, "observed_stack", None)
             retained_owned_asset = getattr(error, "owned_asset", None) is not None
             if persisted_after:
@@ -212,11 +210,7 @@ class DocumentController:
         """Finalize history and asset cleanup after one durable retry save."""
         persisted = validated_copy(document)
         pending = self._pending_persisted_change
-        if (
-            pending is not None
-            and persisted == pending.after
-            and self._document == pending.after
-        ):
+        if pending is not None and persisted == pending.after and self._document == pending.after:
             token = UndoToken(self._next_undo_sequence)
             self._next_undo_sequence += 1
             self._undo_stack.append(
@@ -236,9 +230,7 @@ class DocumentController:
             self._document = after
             token = UndoToken(self._next_undo_sequence)
             self._next_undo_sequence += 1
-            self._undo_stack.append(
-                _HistoryEntry(before=before, after=after, token=token)
-            )
+            self._undo_stack.append(_HistoryEntry(before=before, after=after, token=token))
             self._redo_stack.clear()
 
     def undo(self) -> bool:
@@ -346,9 +338,7 @@ class DocumentController:
             if revision.background is not None
         }
         sound_paths = {
-            sound.generated.audio_path
-            for sound in document.sounds
-            if sound.generated is not None
+            sound.generated.audio_path for sound in document.sounds if sound.generated is not None
         }
         return frozenset((*image_paths, *sound_paths))
 
