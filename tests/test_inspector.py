@@ -4,18 +4,22 @@ from __future__ import annotations
 
 import os
 from datetime import UTC, datetime
+from pathlib import Path
 from uuid import uuid4
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtCore import QSize, Qt
+from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
     QFrame,
     QGroupBox,
     QLabel,
+    QListWidgetItem,
+    QPushButton,
     QSizePolicy,
     QStyle,
     QToolButton,
@@ -109,14 +113,31 @@ def _background() -> GeneratedBackground:
     )
 
 
-def _popup_focused_data(combo: QComboBox, application: QApplication) -> object:
-    combo.showPopup()
+def _picker_item(inspector: Inspector, card_id: object) -> QListWidgetItem:
+    item = next(
+        (
+            inspector.card_picker.card_list.item(index)
+            for index in range(inspector.card_picker.card_list.count())
+            if inspector.card_picker.card_list.item(index).data(Qt.ItemDataRole.UserRole) == card_id
+        ),
+        None,
+    )
+    assert item is not None
+    return item
+
+
+def _choose_card(
+    inspector: Inspector,
+    button: QPushButton,
+    card_id: object,
+    application: QApplication,
+) -> None:
+    button.click()
     application.processEvents()
-    current_index = combo.view().currentIndex()
-    assert combo.view().selectionModel().selectedIndexes() == [current_index]
-    value = combo.itemData(current_index.row())
-    combo.hidePopup()
-    return value
+    item = _picker_item(inspector, card_id)
+    assert item.flags() & Qt.ItemFlag.ItemIsEnabled
+    inspector.card_picker.card_list.itemClicked.emit(item)
+    application.processEvents()
 
 
 def test_inspector_has_minimal_background_and_hotspot_hierarchy(
@@ -216,11 +237,13 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     assert inspector.add_key_change_label.text() == "Key change"
     assert inspector.add_condition_button.size() == QSize(20, 20)
     assert inspector.add_key_change_button.size() == QSize(20, 20)
-    assert inspector.hotspot_destination_combo.findText("Create New Card...") == -1
-    assert all(
-        inspector.hotspot_destination_combo.itemData(index) != "create"
-        for index in range(inspector.hotspot_destination_combo.count())
-    )
+    assert inspector.hotspot_destination_button.text() == "Unresolved card"
+    assert inspector.hotspot_destination_remove_button.text() == "−"
+    assert inspector.reference_remove_button.text() == "−"
+    assert inspector.additional_reference_remove_button.text() == "−"
+    assert inspector.hotspot_destination_remove_button.size() == QSize(20, 20)
+    assert inspector.reference_remove_button.size() == QSize(20, 20)
+    assert inspector.additional_reference_remove_button.size() == QSize(20, 20)
     assert not hasattr(inspector, "clear_all_keys_checkbox")
     assert not hasattr(inspector, "hotspot_summary")
     hotspot_layout = inspector.hotspot_list.parentWidget().layout()
@@ -238,10 +261,10 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
         then_layout.indexOf(inspector.hotspot_target_label)
     )
     assert then_layout.indexOf(inspector.hotspot_target_label) < (
-        then_layout.indexOf(inspector.hotspot_destination_combo)
+        then_layout.indexOf(inspector.hotspot_destination_row)
     )
     assert inspector.hotspot_sound_label.text() == "Play"
-    assert then_layout.indexOf(inspector.hotspot_destination_combo) < (
+    assert then_layout.indexOf(inspector.hotspot_destination_row) < (
         then_layout.indexOf(inspector.hotspot_sound_label)
     )
     assert then_layout.indexOf(inspector.hotspot_sound_label) < (
@@ -639,12 +662,7 @@ def test_hotspot_pipeline_edits_conditions_changes_and_navigation(
     assert changed is not None
     assert changed.interactions[0].key_changes.grant == (door_open.id,)
 
-    no_destination_index = next(
-        index
-        for index in range(inspector.hotspot_destination_combo.count())
-        if inspector.hotspot_destination_combo.itemData(index) is None
-    )
-    inspector.hotspot_destination_combo.setCurrentIndex(no_destination_index)
+    inspector.hotspot_destination_remove_button.click()
     application.processEvents()
     changed = controller.document.cards[0].active_revision.hotspot_set
     assert changed is not None
@@ -671,7 +689,8 @@ def test_empty_hotspot_rule_sections_show_only_disabled_add_actions_without_keys
     assert not inspector.add_key_change_button.isEnabled()
     assert "Keys window" in inspector.add_condition_button.toolTip()
     assert "Keys window" in inspector.add_key_change_button.toolTip()
-    assert inspector.hotspot_destination_combo.currentText() == "No destination"
+    assert inspector.hotspot_destination_button.text() == "Choose Destination…"
+    assert not inspector.hotspot_destination_remove_button.isEnabled()
 
 
 def test_hotspot_play_selector_assigns_catalog_sound(
@@ -1106,29 +1125,26 @@ def test_reference_selector_assigns_one_card_with_undo(
     applied: list[tuple[str, object]] = []
     inspector.change_applied.connect(lambda message, token: applied.append((message, token)))
 
-    assert (
-        inspector._combo_index_for_data(
-            inspector.reference_combo,
-            source.id,
-        )
-        == -1
-    )
-    identity_index = inspector._combo_index_for_data(
-        inspector.reference_combo,
-        portrait.id,
-    )
-    inspector.reference_combo.setCurrentIndex(identity_index)
+    _choose_card(inspector, inspector.reference_button, portrait.id, application)
 
     assert controller.document.cards[0].active_revision.references == (
         ResolvedCardReference(target_card_id=portrait.id),
     )
+    inspector.reference_button.click()
+    application.processEvents()
+    assert inspector.card_picker.windowTitle() == "Select Reference 1"
+    assert (
+        inspector.card_picker.card_list.currentItem().data(Qt.ItemDataRole.UserRole) == portrait.id
+    )
+    assert inspector.card_picker.card_list.currentItem().isSelected()
+    inspector.card_picker.hide()
     assert applied[-1][0] == "Reference changed"
     assert controller.undo_if_current(applied[-1][1])  # type: ignore[arg-type]
     inspector.render(controller.document, source.id)
     assert controller.document.cards[0].active_revision.references == ()
 
 
-def test_unassigned_card_selectors_focus_the_next_available_card(
+def test_card_picker_searches_names_and_disables_ineligible_references(
     application: QApplication,
 ) -> None:
     previous = Card(name="Previous")
@@ -1148,36 +1164,132 @@ def test_unassigned_card_selectors_focus_the_next_available_card(
     inspector.show()
     application.processEvents()
 
-    assert inspector.reference_combo.currentData() is None
-    assert _popup_focused_data(inspector.reference_combo, application) == following.id
-    assert inspector.reference_combo.currentData() is None
-    assert inspector.hotspot_destination_combo.currentData() is None
-    assert _popup_focused_data(inspector.hotspot_destination_combo, application) == following.id
-    assert inspector.hotspot_destination_combo.currentData() is None
+    inspector.reference_button.click()
+    application.processEvents()
+    assert inspector.card_picker.windowModality() == Qt.WindowModality.NonModal
+    assert inspector.card_picker.windowFlags() & Qt.WindowType.Tool
+    assert not inspector.card_picker.windowFlags() & Qt.WindowType.FramelessWindowHint
+    viewport_width = inspector.card_picker.card_list.viewport().width()
+    column_width = inspector.card_picker.card_list.gridSize().width()
+    assert viewport_width >= column_width * 3
+    assert viewport_width < column_width * 4
+    resized = QSize(620, 410)
+    inspector.card_picker.resize(resized)
+    inspector.card_picker.hide()
+    inspector.reference_button.click()
+    application.processEvents()
+    assert inspector.card_picker.size() == resized
+    assert [
+        inspector.card_picker.card_list.item(index).text()
+        for index in range(inspector.card_picker.card_list.count())
+    ] == ["Previous", "Source", "Following"]
+    source_item = _picker_item(inspector, source.id)
+    assert not source_item.flags() & Qt.ItemFlag.ItemIsEnabled
+    assert source_item.toolTip() == ""
+    inspector.card_picker.card_list.itemClicked.emit(source_item)
+    assert controller.document.cards[1].active_revision.references == ()
+    assert _picker_item(inspector, previous.id).flags() & Qt.ItemFlag.ItemIsEnabled
+    assert _picker_item(inspector, following.id).flags() & Qt.ItemFlag.ItemIsEnabled
 
-    inspector.reference_combo.setCurrentIndex(
-        inspector._combo_index_for_data(inspector.reference_combo, previous.id)
-    )
-    assert inspector.additional_reference_combo.isEnabled()
-    assert inspector.additional_reference_combo.currentData() is None
-    assert _popup_focused_data(inspector.additional_reference_combo, application) == following.id
-    assert inspector.additional_reference_combo.currentData() is None
+    inspector.card_picker.search_edit.setText("source")
+    inspector.card_picker.search_edit.returnPressed.emit()
+    assert controller.document.cards[1].active_revision.references == ()
+
+    inspector.card_picker.search_edit.setText("follow")
+    assert _picker_item(inspector, previous.id).isHidden()
+    assert _picker_item(inspector, source.id).isHidden()
+    assert not _picker_item(inspector, following.id).isHidden()
     inspector.close()
 
 
-def test_unassigned_card_selector_focuses_previous_card_at_end(
+def test_hiding_inspector_closes_picker_and_discards_its_context(
     application: QApplication,
 ) -> None:
-    previous = Card(name="Previous")
     source = Card(name="Source")
-    controller = DocumentController(Stack(name="Demo", cards=(previous, source)))
+    reference = Card(name="Reference")
+    controller = DocumentController(Stack(name="Demo", cards=(source, reference)))
+    inspector = Inspector(controller)
+    inspector.render(controller.document, source.id)
+    inspector.show()
+    inspector.reference_button.click()
+    application.processEvents()
+    assert inspector.card_picker.isVisible()
+
+    inspector.hide()
+    application.processEvents()
+    inspector.card_picker.card_selected.emit(reference.id)
+
+    assert not inspector.card_picker.isVisible()
+    assert controller.document.cards[0].active_revision.references == ()
+    inspector.close()
+
+
+def test_card_picker_cancel_closes_without_changing_selection(
+    application: QApplication,
+) -> None:
+    source = Card(name="Source")
+    reference = Card(name="Reference")
+    controller = DocumentController(Stack(name="Demo", cards=(source, reference)))
+    inspector = Inspector(controller)
+    inspector.render(controller.document, source.id)
+    inspector.reference_button.click()
+    application.processEvents()
+
+    assert inspector.card_picker.cancel_button.text() == "Cancel"
+    assert inspector.card_picker.cancel_button.accessibleName() == "Cancel"
+    inspector.card_picker.cancel_button.click()
+
+    assert not inspector.card_picker.isVisible()
+    assert controller.document.cards[0].active_revision.references == ()
+    inspector.close()
+
+
+def test_card_picker_uses_active_revision_thumbnail(
+    application: QApplication,
+    tmp_path: Path,
+) -> None:
+    image_path = tmp_path / "reference.png"
+    image = QPixmap(240, 160)
+    image.fill(QColor("red"))
+    assert image.save(str(image_path))
+    source = Card(name="Source")
+    reference = Card(
+        name="Reference",
+        revisions=(CardRevision(background=_background()),),
+    )
+    controller = DocumentController(Stack(name="Demo", cards=(source, reference)))
+    inspector = Inspector(
+        controller,
+        image_path_resolver=lambda _path: image_path,
+    )
+    inspector.render(controller.document, source.id)
+
+    inspector.reference_button.click()
+    application.processEvents()
+
+    icon = _picker_item(inspector, reference.id).icon().pixmap(QSize(144, 96))
+    assert icon.toImage().pixelColor(10, 10) == QColor("red")
+    inspector.close()
+
+
+def test_hotspot_picker_allows_current_card(
+    application: QApplication,
+) -> None:
+    interaction = Interaction(polygons=(_polygon(),))
+    source = Card(
+        name="Source",
+        revisions=(CardRevision(hotspot_set=HotspotSet(interactions=(interaction,))),),
+    )
+    controller = DocumentController(Stack(name="Demo", cards=(source,)))
     inspector = Inspector(controller)
     inspector.render(controller.document, source.id)
     inspector.show()
     application.processEvents()
 
-    assert _popup_focused_data(inspector.reference_combo, application) == previous.id
-    assert inspector.reference_combo.currentData() is None
+    inspector.hotspot_destination_button.click()
+    application.processEvents()
+
+    assert _picker_item(inspector, source.id).flags() & Qt.ItemFlag.ItemIsEnabled
     inspector.close()
 
 
@@ -1192,36 +1304,42 @@ def test_second_reference_is_ordered_unique_and_promoted_when_first_clears(
     inspector.render(controller.document, source.id)
 
     assert inspector.reference_label.text() == "References"
-    assert not inspector.additional_reference_combo.isEnabled()
-    inspector.reference_combo.setCurrentIndex(
-        inspector._combo_index_for_data(inspector.reference_combo, portrait.id)
+    assert not inspector.additional_reference_button.isEnabled()
+    _choose_card(
+        inspector,
+        inspector.reference_button,
+        portrait.id,
+        application,
     )
-    assert inspector.additional_reference_combo.isEnabled()
-    assert (
-        inspector._combo_index_for_data(
-            inspector.additional_reference_combo,
-            portrait.id,
-        )
-        == -1
-    )
+    assert inspector.additional_reference_button.isEnabled()
 
-    inspector.additional_reference_combo.setCurrentIndex(
-        inspector._combo_index_for_data(
-            inspector.additional_reference_combo,
-            room.id,
-        )
+    inspector.additional_reference_button.click()
+    application.processEvents()
+    assert (
+        not _picker_item(
+            inspector,
+            portrait.id,
+        ).flags()
+        & Qt.ItemFlag.ItemIsEnabled
+    )
+    inspector.card_picker.hide()
+    _choose_card(
+        inspector,
+        inspector.additional_reference_button,
+        room.id,
+        application,
     )
     assert controller.document.cards[0].active_revision.references == (
         ResolvedCardReference(target_card_id=portrait.id),
         ResolvedCardReference(target_card_id=room.id),
     )
 
-    inspector.reference_combo.setCurrentIndex(0)
+    inspector.reference_remove_button.click()
     assert controller.document.cards[0].active_revision.references == (
         ResolvedCardReference(target_card_id=room.id),
     )
-    assert inspector.reference_combo.currentData() == room.id
-    assert inspector.additional_reference_combo.currentData() is None
+    assert inspector.reference_button.text() == "Room"
+    assert inspector.additional_reference_button.text() == "Choose Reference…"
 
 
 def test_style_selector_updates_revision_and_new_card_default_with_undo(
@@ -1402,7 +1520,7 @@ def test_deleted_reference_is_shown_as_unresolved(
     changed = controller.execute(DeleteCardCommand(card_id=destination.id))
     inspector.render(changed, source.id)
 
-    assert inspector.reference_combo.currentText() == ("Missing: Former portrait")
+    assert inspector.reference_button.text() == "Missing: Former portrait"
     assert controller.document.cards[0].active_revision.references == (
         UnresolvedCardReference(target_name="Former portrait"),
     )
@@ -1471,7 +1589,7 @@ def test_using_labels_name_single_reference(
 
     assert inspector.reference_label.text() == "References"
     assert "Using: Description + Reference" in inspector.generate_background_button.toolTip()
-    assert "image 1" in inspector.reference_combo.toolTip()
+    assert "image 1" in inspector.reference_button.toolTip()
 
 
 def test_add_hotspot_requests_drawing_without_mutating_document(
@@ -1517,12 +1635,12 @@ def test_hotspot_properties_reorder_and_delete_use_commands(
         for item in controller.document.cards[0].active_revision.hotspot_set.interactions  # type: ignore[union-attr]
     ] == [second.id, first.id]
 
-    destination_index = next(
-        index
-        for index in range(inspector.hotspot_destination_combo.count())
-        if inspector.hotspot_destination_combo.itemData(index) == destination.id
+    _choose_card(
+        inspector,
+        inspector.hotspot_destination_button,
+        destination.id,
+        application,
     )
-    inspector.hotspot_destination_combo.setCurrentIndex(destination_index)
     application.processEvents()
     changed = controller.document.cards[0].active_revision.hotspot_set
     assert changed is not None

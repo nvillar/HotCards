@@ -80,10 +80,14 @@ for live MFLUX runs.
   each active accepted background for image generation. Require user-facing
   guidance to use positional `image 1` and `image 2` labels; do not translate
   card names or aliases. Send each Reference exactly once to MFLUX in stable
-  order without hidden role instructions or complete source-card prose. Open
-  unassigned Reference 1, Reference 2, and Hotspot destination menus focused on
-  the card immediately after the current card, falling back to the immediately
-  preceding card, without changing the stored value until selection.
+  order without hidden role instructions or complete source-card prose. Use one
+  shared movable, resizable modeless searchable thumbnail-grid picker window for
+  Reference 1, Reference 2, and Hotspot destinations. Preserve its adjusted
+  geometry while the document remains open. Show card names without card
+  numbers. Keep ineligible Reference cards visible but disabled without
+  explanatory labels or tooltips. Provide a bottom-right Cancel button matching
+  the modeless utility windows. Clear selections with the same compact `−`
+  controls used elsewhere, through the existing undoable commands.
 - Keep an ordered, stack-owned library of editable named Styles with stable
   UUIDs. Store the selected Style on each revision and persist the last explicit
   Style or No Style selection as the default for new cards. Deleting a Style

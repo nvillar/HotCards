@@ -1725,12 +1725,14 @@ def test_description_style_and_reference_changes_cancel_in_flight_generation(
         )
     )
     background.busy = True
-    window.inspector.reference_combo.setCurrentIndex(
-        window.inspector._combo_index_for_data(
-            window.inspector.reference_combo,
-            reference.id,
-        )
+    window.inspector.reference_button.click()
+    reference_item = next(
+        window.inspector.card_picker.card_list.item(index)
+        for index in range(window.inspector.card_picker.card_list.count())
+        if window.inspector.card_picker.card_list.item(index).data(Qt.ItemDataRole.UserRole)
+        == reference.id
     )
+    window.inspector.card_picker.card_list.itemClicked.emit(reference_item)
 
     revision = controller.document.cards[0].active_revision
     assert background.cancel_calls == 3

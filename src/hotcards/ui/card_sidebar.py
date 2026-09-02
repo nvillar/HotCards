@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Collection
-from pathlib import Path
+from collections.abc import Collection
 from uuid import UUID
 
 from PySide6.QtCore import QSignalBlocker, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtGui import QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QHBoxLayout,
@@ -29,8 +28,11 @@ from hotcards.application.commands import (
 )
 from hotcards.application.document_controller import DocumentController
 from hotcards.domain.models import Card, Stack
-
-ImagePathResolver = Callable[[str], Path | None]
+from hotcards.ui.card_thumbnails import (
+    ImagePathResolver,
+    card_thumbnail_icon,
+    placeholder_card_icon,
+)
 
 
 class CardSidebar(QWidget):
@@ -320,29 +322,14 @@ class CardSidebar(QWidget):
 
     @staticmethod
     def _placeholder_icon() -> QIcon:
-        pixmap = QPixmap(72, 48)
-        pixmap.fill(QColor("#d7d9dc"))
-        return QIcon(pixmap)
+        return placeholder_card_icon(QSize(72, 48))
 
     def _card_icon(self, card: Card) -> QIcon:
-        background = card.active_revision.background
-        if background is None or self._image_path_resolver is None:
-            return self._placeholder_icon()
-        path = self._image_path_resolver(background.image_path)
-        if path is None:
-            return self._placeholder_icon()
-        source = QPixmap(str(path))
-        if source.isNull():
-            return self._placeholder_icon()
-        scaled = source.scaled(
-            72,
-            48,
-            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-            Qt.TransformationMode.SmoothTransformation,
+        return card_thumbnail_icon(
+            card,
+            size=QSize(72, 48),
+            image_path_resolver=self._image_path_resolver,
         )
-        x = max(0, (scaled.width() - 72) // 2)
-        y = max(0, (scaled.height() - 48) // 2)
-        return QIcon(scaled.copy(x, y, 72, 48))
 
     @staticmethod
     def _star_icon() -> QIcon:

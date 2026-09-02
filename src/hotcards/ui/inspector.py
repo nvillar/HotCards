@@ -5,10 +5,15 @@ from __future__ import annotations
 from uuid import UUID
 
 from pydantic import ValidationError
-from PySide6.QtCore import QItemSelectionModel, QSignalBlocker, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QFocusEvent, QStandardItemModel
+from PySide6.QtCore import QSignalBlocker, QSize, Qt, Signal
+from PySide6.QtGui import (
+    QCloseEvent,
+    QFocusEvent,
+    QHideEvent,
+    QIcon,
+    QStandardItemModel,
+)
 from PySide6.QtWidgets import (
-    QAbstractItemView,
     QApplication,
     QComboBox,
     QFrame,
@@ -72,6 +77,8 @@ from hotcards.domain.models import (
     UnresolvedCardReference,
     selected_output_dimensions,
 )
+from hotcards.ui.card_picker import CardPickerWindow
+from hotcards.ui.card_thumbnails import ImagePathResolver, card_thumbnail_icon
 
 
 class _CommitPlainTextEdit(QPlainTextEdit):
@@ -88,60 +95,6 @@ class _CommitLineEdit(QLineEdit):
     def focusOutEvent(self, event: QFocusEvent) -> None:
         super().focusOutEvent(event)
         self.editing_finished.emit(QApplication.focusWidget(), event.reason())
-
-
-class _AdjacentCardComboBox(QComboBox):
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._popup_anchor_data: object | None = None
-
-    def set_popup_anchor_data(self, value: object | None) -> None:
-        self._popup_anchor_data = value
-
-    def showPopup(self) -> None:
-        super().showPopup()
-        if self.currentData() is not None or self._popup_anchor_data is None:
-            return
-        index = self.findData(self._popup_anchor_data)
-        if index < 0:
-            return
-        model_index = self.model().index(
-            index,
-            self.modelColumn(),
-            self.rootModelIndex(),
-        )
-        self.view().selectionModel().setCurrentIndex(
-            model_index,
-            QItemSelectionModel.SelectionFlag.ClearAndSelect,
-        )
-        self.view().scrollTo(
-            model_index,
-            QAbstractItemView.ScrollHint.PositionAtCenter,
-        )
-
-
-def _adjacent_card_id(
-    document: Stack,
-    current_card_id: UUID,
-    eligible_card_ids: set[UUID],
-) -> UUID | None:
-    current_index = next(
-        (
-            index
-            for index, candidate in enumerate(document.cards)
-            if candidate.id == current_card_id
-        ),
-        -1,
-    )
-    if current_index < 0:
-        return None
-    for adjacent_index in (current_index + 1, current_index - 1):
-        if (
-            0 <= adjacent_index < len(document.cards)
-            and document.cards[adjacent_index].id in eligible_card_ids
-        ):
-            return document.cards[adjacent_index].id
-    return None
 
 
 def _rule_panel(object_name: str) -> tuple[QGroupBox, QVBoxLayout]:
@@ -303,6 +256,8 @@ class Inspector(QWidget):
         self,
         controller: DocumentController,
         parent: QWidget | None = None,
+        *,
+        image_path_resolver: ImagePathResolver | None = None,
     ) -> None:
         super().__init__(parent)
         self.controller = controller
@@ -316,6 +271,8 @@ class Inspector(QWidget):
         self._edit_using_text = ""
         self._edit_reason = ""
         self._edit_source_size: tuple[int, int] | None = None
+        self._image_path_resolver = image_path_resolver
+        self._card_picker_context: tuple[str, UUID, UUID, object] | None = None
         self._rendering = False
         self.setObjectName("inspector")
         self.setMinimumWidth(300)
@@ -342,6 +299,10 @@ class Inspector(QWidget):
         self._build_background_tab()
         self._build_transform_tab()
         self._build_hotspots_tab()
+        self.card_picker = CardPickerWindow(
+            self,
+            image_path_resolver=image_path_resolver,
+        )
         self._connect_signals()
 
     def _build_background_tab(self) -> None:
@@ -399,23 +360,43 @@ class Inspector(QWidget):
         reference_layout.setSpacing(4)
         first_reference_row = QHBoxLayout()
         first_reference_row.addWidget(QLabel("1."))
-        self.reference_combo = _AdjacentCardComboBox()
-        self.reference_combo.setObjectName("referenceCombo")
-        self.reference_combo.setAccessibleName("Reference card 1")
-        self.reference_combo.setToolTip(
+        self.reference_button = QPushButton("Choose Reference…")
+        self.reference_button.setObjectName("referenceCardButton")
+        self.reference_button.setAccessibleName("Choose Reference card 1")
+        self.reference_button.setToolTip(
             "Primary Reference; its image is sent to the model as image 1"
         )
-        first_reference_row.addWidget(self.reference_combo, 1)
+        self.reference_button.setIconSize(QSize(48, 32))
+        first_reference_row.addWidget(self.reference_button, 1)
+        self.reference_remove_button = _compact_text_button(
+            "−",
+            object_name="removeReferenceCardButton",
+            accessible_name="Remove Reference card 1",
+            tooltip="Remove Reference card 1",
+            prominent=False,
+        )
+        self.reference_remove_button.setFixedSize(20, 20)
+        first_reference_row.addWidget(self.reference_remove_button)
         reference_layout.addLayout(first_reference_row)
         second_reference_row = QHBoxLayout()
         second_reference_row.addWidget(QLabel("2."))
-        self.additional_reference_combo = _AdjacentCardComboBox()
-        self.additional_reference_combo.setObjectName("additionalReferenceCombo")
-        self.additional_reference_combo.setAccessibleName("Reference card 2")
-        self.additional_reference_combo.setToolTip(
+        self.additional_reference_button = QPushButton("Choose Reference…")
+        self.additional_reference_button.setObjectName("additionalReferenceCardButton")
+        self.additional_reference_button.setAccessibleName("Choose Reference card 2")
+        self.additional_reference_button.setToolTip(
             "Optional additional Reference; its image is sent to the model as image 2"
         )
-        second_reference_row.addWidget(self.additional_reference_combo, 1)
+        self.additional_reference_button.setIconSize(QSize(48, 32))
+        second_reference_row.addWidget(self.additional_reference_button, 1)
+        self.additional_reference_remove_button = _compact_text_button(
+            "−",
+            object_name="removeAdditionalReferenceCardButton",
+            accessible_name="Remove Reference card 2",
+            tooltip="Remove Reference card 2",
+            prominent=False,
+        )
+        self.additional_reference_remove_button.setFixedSize(20, 20)
+        second_reference_row.addWidget(self.additional_reference_remove_button)
         reference_layout.addLayout(second_reference_row)
         self.reference_error = QLabel()
         self.reference_error.setObjectName("referenceValidationError")
@@ -695,10 +676,26 @@ class Inspector(QWidget):
         self.hotspot_target_label = QLabel("Go to")
         self.hotspot_target_label.setObjectName("hotspotTargetLabel")
         then_layout.addWidget(self.hotspot_target_label)
-        self.hotspot_destination_combo = _AdjacentCardComboBox()
-        self.hotspot_destination_combo.setObjectName("hotspotDestinationCombo")
-        self.hotspot_destination_combo.setAccessibleName("Hotspot destination")
-        then_layout.addWidget(self.hotspot_destination_combo)
+        self.hotspot_destination_row = QWidget()
+        self.hotspot_destination_row.setObjectName("hotspotDestinationRow")
+        hotspot_destination_layout = QHBoxLayout(self.hotspot_destination_row)
+        hotspot_destination_layout.setContentsMargins(0, 0, 0, 0)
+        hotspot_destination_layout.setSpacing(4)
+        self.hotspot_destination_button = QPushButton("Choose Destination…")
+        self.hotspot_destination_button.setObjectName("hotspotDestinationButton")
+        self.hotspot_destination_button.setAccessibleName("Choose hotspot destination")
+        self.hotspot_destination_button.setIconSize(QSize(48, 32))
+        hotspot_destination_layout.addWidget(self.hotspot_destination_button, 1)
+        self.hotspot_destination_remove_button = _compact_text_button(
+            "−",
+            object_name="removeHotspotDestinationButton",
+            accessible_name="Remove hotspot destination",
+            tooltip="Remove hotspot destination",
+            prominent=False,
+        )
+        self.hotspot_destination_remove_button.setFixedSize(20, 20)
+        hotspot_destination_layout.addWidget(self.hotspot_destination_remove_button)
+        then_layout.addWidget(self.hotspot_destination_row)
         self.hotspot_sound_label = QLabel("Play")
         self.hotspot_sound_label.setObjectName("hotspotSoundLabel")
         then_layout.addWidget(self.hotspot_sound_label)
@@ -722,6 +719,16 @@ class Inspector(QWidget):
     def hotspots_active(self) -> bool:
         return self.inspector_tabs.currentIndex() == self._hotspots_tab_index
 
+    def hideEvent(self, event: QHideEvent) -> None:
+        self.card_picker.hide()
+        self._card_picker_context = None
+        super().hideEvent(event)
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        self.card_picker.close()
+        self._card_picker_context = None
+        super().closeEvent(event)
+
     def _connect_signals(self) -> None:
         self.description_edit.editing_finished.connect(self._description_editing_finished)
         self.description_edit.textChanged.connect(self._render_inputs_changed)
@@ -735,11 +742,11 @@ class Inspector(QWidget):
         self.edit_resolution_combo.currentIndexChanged.connect(self._edit_output_changed)
         self.edit_background_button.clicked.connect(self._request_edit_background)
         self.style_combo.currentIndexChanged.connect(self._revision_style_changed)
-        self.reference_combo.currentIndexChanged.connect(
-            lambda index: self._reference_changed(1, index)
-        )
-        self.additional_reference_combo.currentIndexChanged.connect(
-            lambda index: self._reference_changed(2, index)
+        self.reference_button.clicked.connect(lambda: self._open_reference_picker(1))
+        self.additional_reference_button.clicked.connect(lambda: self._open_reference_picker(2))
+        self.reference_remove_button.clicked.connect(lambda: self._set_reference(1, None))
+        self.additional_reference_remove_button.clicked.connect(
+            lambda: self._set_reference(2, None)
         )
         self.resolution_combo.currentIndexChanged.connect(self._revision_resolution_changed)
         self.hotspot_list.currentItemChanged.connect(self._hotspot_selection_changed)
@@ -749,8 +756,13 @@ class Inspector(QWidget):
         self.delete_hotspot_button.clicked.connect(self._delete_hotspot)
         self.add_condition_button.clicked.connect(self._add_condition)
         self.add_key_change_button.clicked.connect(self._add_key_change)
-        self.hotspot_destination_combo.currentIndexChanged.connect(self._destination_changed)
+        self.hotspot_destination_button.clicked.connect(self._open_destination_picker)
+        self.hotspot_destination_remove_button.clicked.connect(
+            lambda: self._change_current_destination(None)
+        )
         self.hotspot_sound_combo.currentIndexChanged.connect(self._sound_changed)
+        self.card_picker.card_selected.connect(self._card_picked)
+        self.card_picker.dismissed.connect(self._discard_card_picker_context)
 
     def _render_inputs_changed(self) -> None:
         if not self._rendering:
@@ -1047,6 +1059,8 @@ class Inspector(QWidget):
         self.hotspot_error.setVisible(bool(message))
 
     def reset_context(self) -> None:
+        self.card_picker.hide()
+        self._card_picker_context = None
         self.selected_card_id = None
         self._rendered_revision_id = None
         self._set_error(self.description_error, "")
@@ -1101,66 +1115,70 @@ class Inspector(QWidget):
         revision: CardRevision,
     ) -> None:
         references = revision.references
-        combos = (self.reference_combo, self.additional_reference_combo)
-        resolved_ids = {
-            reference.target_card_id
-            for reference in references
-            if isinstance(reference, ResolvedCardReference)
-        }
-        for position, combo in enumerate(combos):
+        controls = (
+            (self.reference_button, self.reference_remove_button),
+            (
+                self.additional_reference_button,
+                self.additional_reference_remove_button,
+            ),
+        )
+        for position, (button, remove_button) in enumerate(controls):
             reference = references[position] if position < len(references) else None
-            with QSignalBlocker(combo):
-                combo.clear()
-                combo.addItem("No reference", None)
-                current_id = (
-                    reference.target_card_id
-                    if isinstance(reference, ResolvedCardReference)
-                    else None
-                )
-                for candidate in document.cards:
-                    if candidate.id == card.id:
-                        continue
-                    if candidate.id in resolved_ids and candidate.id != current_id:
-                        continue
-                    combo.addItem(candidate.name, candidate.id)
-                if isinstance(reference, ResolvedCardReference):
-                    combo.setCurrentIndex(
-                        self._combo_index_for_data(combo, reference.target_card_id)
-                    )
-                elif isinstance(reference, UnresolvedCardReference):
-                    name = reference.target_name or "Unknown card"
-                    combo.addItem(f"Missing: {name}", reference)
-                    combo.setCurrentIndex(combo.count() - 1)
-                else:
-                    combo.setCurrentIndex(0)
-                eligible_card_ids = {
-                    value
-                    for index in range(combo.count())
-                    if isinstance((value := combo.itemData(index)), UUID)
-                }
-                combo.set_popup_anchor_data(
-                    _adjacent_card_id(
-                        document,
-                        card.id,
-                        eligible_card_ids,
-                    )
-                )
-        self.additional_reference_combo.setEnabled(bool(references))
+            self._render_card_picker_control(
+                button,
+                remove_button,
+                document,
+                reference,
+                empty_text="Choose Reference…",
+            )
+        self.additional_reference_button.setEnabled(bool(references))
+        self.additional_reference_remove_button.setEnabled(len(references) > 1)
 
-    def _reference_changed(self, position: int, index: int) -> None:
-        if self._rendering or index < 0:
+    def _open_reference_picker(self, position: int) -> None:
+        card = self._selected_card()
+        if card is None:
+            return
+        references = card.active_revision.references
+        reference = references[position - 1] if position <= len(references) else None
+        current_id = (
+            reference.target_card_id if isinstance(reference, ResolvedCardReference) else None
+        )
+        used_ids = {
+            candidate.target_card_id
+            for candidate in references
+            if isinstance(candidate, ResolvedCardReference)
+            and candidate.target_card_id != current_id
+        }
+        enabled_ids = {
+            candidate.id
+            for candidate in self.controller.document.cards
+            if candidate.id != card.id and candidate.id not in used_ids
+        }
+        self._card_picker_context = (
+            "reference",
+            card.id,
+            card.active_revision.id,
+            position,
+        )
+        anchor = self.reference_button if position == 1 else self.additional_reference_button
+        self.card_picker.open_for(
+            anchor,
+            self.controller.document.cards,
+            title=f"Select Reference {position}",
+            enabled_card_ids=enabled_ids,
+            selected_card_id=current_id,
+        )
+
+    def _set_reference(
+        self,
+        position: int,
+        reference: ResolvedCardReference | UnresolvedCardReference | None,
+    ) -> None:
+        if self._rendering:
             return
         card = self._selected_card()
         if card is None:
             return
-        combo = self.reference_combo if position == 1 else self.additional_reference_combo
-        value = combo.itemData(index)
-        if isinstance(value, UUID):
-            reference = ResolvedCardReference(target_card_id=value)
-        elif isinstance(value, UnresolvedCardReference):
-            reference = value
-        else:
-            reference = None
         current = (
             card.active_revision.references[position - 1]
             if position <= len(card.active_revision.references)
@@ -1179,6 +1197,44 @@ class Inspector(QWidget):
             error_label=self.reference_error,
             undo_message="Reference changed",
         )
+
+    def _render_card_picker_control(
+        self,
+        button: QPushButton,
+        remove_button: QToolButton,
+        document: Stack,
+        reference: ResolvedCardReference | UnresolvedCardReference | None,
+        *,
+        empty_text: str,
+    ) -> None:
+        button.setIcon(QIcon())
+        if isinstance(reference, ResolvedCardReference):
+            selected = next(
+                (
+                    candidate
+                    for candidate in document.cards
+                    if candidate.id == reference.target_card_id
+                ),
+                None,
+            )
+            if selected is not None:
+                button.setText(selected.name)
+                button.setIcon(
+                    card_thumbnail_icon(
+                        selected,
+                        size=QSize(48, 32),
+                        image_path_resolver=self._image_path_resolver,
+                    )
+                )
+            else:
+                button.setText("Missing card")
+        elif isinstance(reference, UnresolvedCardReference):
+            button.setText(
+                f"Missing: {reference.target_name}" if reference.target_name else "Unresolved card"
+            )
+        else:
+            button.setText(empty_text)
+        remove_button.setEnabled(reference is not None)
 
     def _render_resolution(
         self,
@@ -1686,7 +1742,7 @@ class Inspector(QWidget):
             if not document.keys
             else "Every Key already has a key change"
         )
-        self.hotspot_destination_combo.setEnabled(has_interaction)
+        self.hotspot_destination_button.setEnabled(has_interaction)
         self.hotspot_sound_combo.setEnabled(has_interaction)
         self.delete_hotspot_button.setEnabled(has_interaction)
         current_row = self.hotspot_list.currentRow()
@@ -1696,65 +1752,21 @@ class Inspector(QWidget):
         )
         self._render_condition_rows(document, interaction)
         self._render_key_change_rows(document, interaction)
-        with QSignalBlocker(self.hotspot_destination_combo):
-            self.hotspot_destination_combo.clear()
-            self.hotspot_destination_combo.addItem("No destination", None)
-            for card in document.cards:
-                self.hotspot_destination_combo.addItem(card.name, card.id)
-            if (
-                interaction is not None
-                and interaction.action is not None
-                and isinstance(interaction.action.target, UnresolvedCardReference)
-            ):
-                target = interaction.action.target
-                self.hotspot_destination_combo.addItem(
-                    (
-                        f"Missing: {target.target_name}"
-                        if target.target_name
-                        else "Unresolved destination"
-                    ),
-                    target,
-                )
-            if interaction is None:
-                self.hotspot_destination_combo.setCurrentIndex(-1)
-            elif interaction.action is not None and isinstance(
-                interaction.action.target, ResolvedCardReference
-            ):
-                self.hotspot_destination_combo.setCurrentIndex(
-                    self._combo_index_for_data(
-                        self.hotspot_destination_combo,
-                        interaction.action.target.target_card_id,
-                    )
-                )
-            elif interaction.action is not None and isinstance(
-                interaction.action.target, UnresolvedCardReference
-            ):
-                self.hotspot_destination_combo.setCurrentIndex(
-                    self._combo_index_for_data(
-                        self.hotspot_destination_combo,
-                        interaction.action.target,
-                    )
-                )
-            else:
-                self.hotspot_destination_combo.setCurrentIndex(0)
-            eligible_card_ids = {
-                value
-                for index in range(self.hotspot_destination_combo.count())
-                if isinstance(
-                    (value := self.hotspot_destination_combo.itemData(index)),
-                    UUID,
-                )
-            }
-            selected_card_id = self.selected_card_id
-            self.hotspot_destination_combo.set_popup_anchor_data(
-                _adjacent_card_id(
-                    document,
-                    selected_card_id,
-                    eligible_card_ids,
-                )
-                if selected_card_id is not None
-                else None
-            )
+        destination = (
+            interaction.action.target
+            if interaction is not None and interaction.action is not None
+            else None
+        )
+        self._render_card_picker_control(
+            self.hotspot_destination_button,
+            self.hotspot_destination_remove_button,
+            document,
+            destination,
+            empty_text="Choose Destination…",
+        )
+        self.hotspot_destination_remove_button.setEnabled(
+            has_interaction and destination is not None
+        )
         with QSignalBlocker(self.hotspot_sound_combo):
             self.hotspot_sound_combo.clear()
             self.hotspot_sound_combo.addItem("No Sound", None)
@@ -2142,23 +2154,75 @@ class Inspector(QWidget):
             undo_message="Hotspot key change removed",
         )
 
-    def _destination_changed(self, index: int) -> None:
-        if self._rendering or index < 0:
+    def _open_destination_picker(self) -> None:
+        card = self._selected_card()
+        interaction = self._selected_interaction()
+        if card is None or interaction is None:
+            return
+        current_id = (
+            interaction.action.target.target_card_id
+            if interaction.action is not None
+            and isinstance(interaction.action.target, ResolvedCardReference)
+            else None
+        )
+        self._card_picker_context = (
+            "destination",
+            card.id,
+            card.active_revision.id,
+            interaction.id,
+        )
+        self.card_picker.open_for(
+            self.hotspot_destination_button,
+            self.controller.document.cards,
+            title="Select Hotspot Destination",
+            enabled_card_ids={candidate.id for candidate in self.controller.document.cards},
+            selected_card_id=current_id,
+        )
+
+    def _change_current_destination(self, destination: object) -> None:
+        if self._rendering:
             return
         card = self._selected_card()
         interaction = self._selected_interaction()
         if card is None or interaction is None:
             return
-        destination = self.hotspot_destination_combo.itemData(index)
-        QTimer.singleShot(
-            0,
-            lambda: self._apply_destination_change(
-                card.id,
-                card.active_revision.id,
-                interaction.id,
-                destination,
-            ),
+        self._apply_destination_change(
+            card.id,
+            card.active_revision.id,
+            interaction.id,
+            destination,
         )
+
+    def _card_picked(self, card_id: object) -> None:
+        context = self._card_picker_context
+        self._card_picker_context = None
+        if not isinstance(card_id, UUID) or context is None:
+            return
+        kind, card_context_id, revision_context_id, target = context
+        card = self._selected_card()
+        if (
+            card is None
+            or card.id != card_context_id
+            or card.active_revision.id != revision_context_id
+        ):
+            return
+        if kind == "reference" and isinstance(target, int):
+            self._set_reference(
+                target,
+                ResolvedCardReference(target_card_id=card_id),
+            )
+        elif kind == "destination" and isinstance(target, UUID):
+            interaction = self._selected_interaction()
+            if interaction is not None and interaction.id == target:
+                self._apply_destination_change(
+                    card.id,
+                    card.active_revision.id,
+                    interaction.id,
+                    card_id,
+                )
+
+    def _discard_card_picker_context(self) -> None:
+        self._card_picker_context = None
 
     def _apply_destination_change(
         self,

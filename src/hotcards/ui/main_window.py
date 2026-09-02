@@ -559,7 +559,10 @@ class MainWindow(QMainWindow):
         self.add_revision_button.clicked.connect(self._duplicate_revision)
         self.delete_revision_button.clicked.connect(self._delete_active_revision)
 
-        self.inspector = Inspector(self.controller)
+        self.inspector = Inspector(
+            self.controller,
+            image_path_resolver=self._resolve_revision_image_path,
+        )
         self.inspector.document_changed.connect(self.render_document)
         self.inspector.render_inputs_changed.connect(self._authoring_inputs_changed)
         self.inspector.inspector_tabs.currentChanged.connect(self._inspector_tab_changed)
