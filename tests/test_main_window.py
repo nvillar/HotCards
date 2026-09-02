@@ -625,6 +625,156 @@ def test_run_hotspot_stops_previous_audio_then_plays_after_navigation(
     application.processEvents()
 
 
+def test_sound_picker_preview_uses_catalog_audio_and_stops_on_cancel(
+    application: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    sound = SoundDefinition(
+        name="Door",
+        generated=GeneratedSoundAsset(
+            audio_path="assets/sounds/door.wav",
+            provenance=SoundGenerationProvenance(
+                prompt="A door opens",
+                duration_seconds=2,
+                seed=1,
+                generation_duration_milliseconds=100,
+            ),
+            created_at=datetime.now(UTC),
+        ),
+    )
+    hotspot = Interaction(sound_id=sound.id, polygons=(_hotspot_polygon(),))
+    source = Card(
+        name="Source",
+        revisions=(CardRevision(hotspot_set=HotspotSet(interactions=(hotspot,))),),
+    )
+    window, _controller, _workers, _background = _window(
+        Stack(name="Sound picker", sounds=(sound,), cards=(source,))
+    )
+    path = tmp_path / "door.wav"
+    path.touch()
+    monkeypatch.setattr(window, "_resolve_sound_asset_path", lambda _path: path)
+    player = window.sound_player
+    assert isinstance(player, FakeSoundPlayer)
+
+    window.inspector.hotspot_sound_button.click()
+    application.processEvents()
+    tile = window.inspector.sound_picker.tile(sound.id)
+    assert tile is not None
+    tile.play_button.click()
+
+    assert player.played == [path]
+    stops_before = player.stop_calls
+    window.inspector.sound_picker.cancel_button.click()
+    application.processEvents()
+    assert player.stop_calls == stops_before + 1
+    window.close()
+    application.processEvents()
+
+
+def test_sound_picker_and_manager_keep_shared_preview_state_coherent(
+    application: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    sound = SoundDefinition(
+        name="Door",
+        generated=GeneratedSoundAsset(
+            audio_path="assets/sounds/door.wav",
+            provenance=SoundGenerationProvenance(
+                prompt="A door opens",
+                duration_seconds=2,
+                seed=1,
+                generation_duration_milliseconds=100,
+            ),
+            created_at=datetime.now(UTC),
+        ),
+    )
+    hotspot = Interaction(sound_id=sound.id, polygons=(_hotspot_polygon(),))
+    source = Card(
+        name="Source",
+        revisions=(CardRevision(hotspot_set=HotspotSet(interactions=(hotspot,))),),
+    )
+    window, _controller, _workers, _background = _window(
+        Stack(name="Sound previews", sounds=(sound,), cards=(source,))
+    )
+    path = tmp_path / "door.wav"
+    path.touch()
+    monkeypatch.setattr(window, "_resolve_sound_asset_path", lambda _path: path)
+    player = window.sound_player
+    assert isinstance(player, FakeSoundPlayer)
+    window._show_sound_manager()
+    manager = window.sound_manager_window
+    assert manager is not None
+    manager.preview_button.click()
+    assert manager.preview_active
+
+    window.inspector.hotspot_sound_button.click()
+    application.processEvents()
+    tile = window.inspector.sound_picker.tile(sound.id)
+    assert tile is not None
+    stops_before_picker = player.stop_calls
+    tile.play_button.click()
+    assert not manager.preview_active
+    assert player.stop_calls == stops_before_picker + 1
+
+    manager.preview_button.click()
+    assert manager.preview_active
+    stops_before_cancel = player.stop_calls
+    window.inspector.sound_picker.cancel_button.click()
+    application.processEvents()
+    assert player.stop_calls == stops_before_cancel
+    assert manager.preview_active
+    window.close()
+    application.processEvents()
+
+
+def test_sound_picker_preview_reports_unreadable_audio(
+    application: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sound = SoundDefinition(
+        name="Door",
+        generated=GeneratedSoundAsset(
+            audio_path="assets/sounds/door.wav",
+            provenance=SoundGenerationProvenance(
+                prompt="A door opens",
+                duration_seconds=2,
+                seed=1,
+                generation_duration_milliseconds=100,
+            ),
+            created_at=datetime.now(UTC),
+        ),
+    )
+    hotspot = Interaction(sound_id=sound.id, polygons=(_hotspot_polygon(),))
+    source = Card(
+        name="Source",
+        revisions=(CardRevision(hotspot_set=HotspotSet(interactions=(hotspot,))),),
+    )
+    window, _controller, _workers, _background = _window(
+        Stack(name="Sound picker", sounds=(sound,), cards=(source,))
+    )
+
+    def fail_to_resolve(_path: str) -> Path:
+        raise StackStoreError("Sound asset is unavailable")
+
+    monkeypatch.setattr(window, "_resolve_sound_asset_path", fail_to_resolve)
+    window.inspector.hotspot_sound_button.click()
+    application.processEvents()
+    tile = window.inspector.sound_picker.tile(sound.id)
+    assert tile is not None
+    tile.play_button.click()
+
+    assert window.notification_bar.current_key == "sound-preview"
+    assert window.notification_bar.message_label.text() == "Could not play Sound"
+    notification = window.notification_bar.current_notification
+    assert notification is not None
+    assert notification.detail == "Sound asset is unavailable"
+    window.inspector.sound_picker.cancel_button.click()
+    window.close()
+    application.processEvents()
+
+
 def test_utility_windows_close_on_project_replacement_without_stale_draft(
     application: QApplication,
 ) -> None:

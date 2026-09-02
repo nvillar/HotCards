@@ -12,6 +12,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QColor, QPixmap
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -44,6 +45,7 @@ from hotcards.domain.models import (
     DirectGenerateProvenance,
     ExactOutputSize,
     GeneratedBackground,
+    GeneratedSoundAsset,
     GenerateInputs,
     HotspotConditions,
     HotspotKeyChanges,
@@ -58,6 +60,7 @@ from hotcards.domain.models import (
     RefineTransformation,
     ResolvedCardReference,
     SoundDefinition,
+    SoundGenerationProvenance,
     Stack,
     StyleDefinition,
     UnresolvedCardReference,
@@ -119,6 +122,20 @@ def _picker_item(inspector: Inspector, card_id: object) -> QListWidgetItem:
             inspector.card_picker.card_list.item(index)
             for index in range(inspector.card_picker.card_list.count())
             if inspector.card_picker.card_list.item(index).data(Qt.ItemDataRole.UserRole) == card_id
+        ),
+        None,
+    )
+    assert item is not None
+    return item
+
+
+def _sound_picker_item(inspector: Inspector, sound_id: object) -> QListWidgetItem:
+    item = next(
+        (
+            inspector.sound_picker.sound_list.item(index)
+            for index in range(inspector.sound_picker.sound_list.count())
+            if inspector.sound_picker.sound_list.item(index).data(Qt.ItemDataRole.UserRole)
+            == sound_id
         ),
         None,
     )
@@ -211,7 +228,7 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     )
     assert inspector.style_combo.currentText() == "No Style"
     assert not hasattr(inspector, "clear_background_button")
-    assert inspector.hotspot_target_label.text() == "Go to"
+    assert inspector.hotspot_target_label.text() == "Go to card"
     assert inspector.hotspot_target_label.font().pointSizeF() == (
         inspector.description_label.font().pointSizeF()
     )
@@ -244,6 +261,17 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     assert inspector.hotspot_destination_remove_button.size() == QSize(20, 20)
     assert inspector.reference_remove_button.size() == QSize(20, 20)
     assert inspector.additional_reference_remove_button.size() == QSize(20, 20)
+    assert inspector.hotspot_destination_remove_button.testAttribute(
+        Qt.WidgetAttribute.WA_LayoutUsesWidgetRect
+    )
+    assert inspector.reference_remove_button.testAttribute(
+        Qt.WidgetAttribute.WA_LayoutUsesWidgetRect
+    )
+    assert inspector.additional_reference_remove_button.testAttribute(
+        Qt.WidgetAttribute.WA_LayoutUsesWidgetRect
+    )
+    assert inspector.reference_remove_container.height() == 22
+    assert inspector.additional_reference_remove_container.height() == 22
     assert not hasattr(inspector, "clear_all_keys_checkbox")
     assert not hasattr(inspector, "hotspot_summary")
     hotspot_layout = inspector.hotspot_list.parentWidget().layout()
@@ -263,13 +291,21 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     assert then_layout.indexOf(inspector.hotspot_target_label) < (
         then_layout.indexOf(inspector.hotspot_destination_row)
     )
-    assert inspector.hotspot_sound_label.text() == "Play"
+    assert inspector.hotspot_sound_label.text() == "Play sound"
     assert then_layout.indexOf(inspector.hotspot_destination_row) < (
         then_layout.indexOf(inspector.hotspot_sound_label)
     )
     assert then_layout.indexOf(inspector.hotspot_sound_label) < (
-        then_layout.indexOf(inspector.hotspot_sound_combo)
+        then_layout.indexOf(inspector.hotspot_sound_row)
     )
+    assert inspector.hotspot_sound_button.text() == "Choose Sound…"
+    assert inspector.hotspot_sound_remove_button.text() == "−"
+    assert inspector.hotspot_sound_remove_button.size() == QSize(20, 20)
+    assert inspector.hotspot_sound_remove_button.testAttribute(
+        Qt.WidgetAttribute.WA_LayoutUsesWidgetRect
+    )
+    assert inspector.hotspot_destination_remove_container.height() == 22
+    assert inspector.hotspot_sound_remove_container.height() == 22
     assert inspector.condition_rows_layout.contentsMargins().isNull()
     assert inspector.key_change_rows_layout.contentsMargins().isNull()
     assert inspector.condition_controls_layout.spacing() == 3
@@ -650,7 +686,7 @@ def test_hotspot_pipeline_edits_conditions_changes_and_navigation(
     assert remove_change_layout.itemAt(2).alignment() == Qt.AlignmentFlag.AlignVCenter
     assert key_change_remove.width() == key_change_remove.height()
     assert key_change_remove.size() == QSize(20, 20)
-    assert inspector.hotspot_target_label.text() == "Go to"
+    assert inspector.hotspot_target_label.text() == "Go to card"
     grant_key = grant_change_layout.itemAt(1).widget()
     assert isinstance(grant_key, QComboBox)
     grant_key.setCurrentIndex(
@@ -693,7 +729,7 @@ def test_empty_hotspot_rule_sections_show_only_disabled_add_actions_without_keys
     assert not inspector.hotspot_destination_remove_button.isEnabled()
 
 
-def test_hotspot_play_selector_assigns_catalog_sound(
+def test_hotspot_sound_picker_assigns_and_removes_catalog_sound(
     application: QApplication,
 ) -> None:
     sound = SoundDefinition(name="Door knock")
@@ -706,16 +742,115 @@ def test_hotspot_play_selector_assigns_catalog_sound(
     inspector = Inspector(controller)
     inspector.render(controller.document, card.id)
 
-    sound_index = next(
-        index
-        for index in range(inspector.hotspot_sound_combo.count())
-        if inspector.hotspot_sound_combo.itemData(index) == sound.id
-    )
-    inspector.hotspot_sound_combo.setCurrentIndex(sound_index)
+    inspector.hotspot_sound_button.click()
+    application.processEvents()
+    tile = inspector.sound_picker.tile(sound.id)
+    assert tile is not None
+    assert not tile.play_button.isEnabled()
+    QTest.mouseClick(tile.name_label, Qt.MouseButton.LeftButton)
+    application.processEvents()
 
     hotspot_set = controller.document.cards[0].active_revision.hotspot_set
     assert hotspot_set is not None
     assert hotspot_set.interactions[0].sound_id == sound.id
+    assert inspector.hotspot_sound_button.text() == sound.name
+    assert inspector.hotspot_sound_remove_button.isEnabled()
+
+    inspector.hotspot_sound_remove_button.click()
+    application.processEvents()
+
+    hotspot_set = controller.document.cards[0].active_revision.hotspot_set
+    assert hotspot_set is not None
+    assert hotspot_set.interactions[0].sound_id is None
+
+
+def test_hotspot_sound_picker_searches_previews_and_stops_on_cancel(
+    application: QApplication,
+) -> None:
+    generated_at = datetime.now(UTC)
+    generated = SoundDefinition(
+        name="Door knock",
+        generated=GeneratedSoundAsset(
+            audio_path="assets/sounds/door.wav",
+            provenance=SoundGenerationProvenance(
+                prompt="A door knock",
+                duration_seconds=2,
+                seed=1,
+                generation_duration_milliseconds=10,
+            ),
+            created_at=generated_at,
+        ),
+    )
+    ungenerated = SoundDefinition(name="Wind")
+    interaction = Interaction(polygons=(_polygon(),))
+    card = Card(
+        name="Card",
+        revisions=(CardRevision(hotspot_set=HotspotSet(interactions=(interaction,))),),
+    )
+    controller = DocumentController(
+        Stack(name="Demo", sounds=(generated, ungenerated), cards=(card,))
+    )
+    inspector = Inspector(controller)
+    inspector.render(controller.document, card.id)
+    inspector.show()
+    previews: list[object] = []
+    stops: list[bool] = []
+    inspector.sound_preview_requested.connect(previews.append)
+    inspector.sound_preview_stop_requested.connect(lambda: stops.append(True))
+
+    inspector.hotspot_sound_button.click()
+    application.processEvents()
+
+    assert inspector.sound_picker.windowTitle() == "Select Sound"
+    assert inspector.sound_picker.windowModality() == Qt.WindowModality.NonModal
+    assert inspector.sound_picker.windowFlags() & Qt.WindowType.Tool
+    assert inspector.sound_picker.cancel_button.text() == "Cancel"
+    viewport_width = inspector.sound_picker.sound_list.viewport().width()
+    column_width = inspector.sound_picker.sound_list.gridSize().width()
+    assert viewport_width >= column_width * 3
+    assert viewport_width < column_width * 4
+    generated_tile = inspector.sound_picker.tile(generated.id)
+    ungenerated_tile = inspector.sound_picker.tile(ungenerated.id)
+    assert generated_tile is not None
+    assert ungenerated_tile is not None
+    assert generated_tile.play_button.isEnabled()
+    assert not ungenerated_tile.play_button.isEnabled()
+
+    inspector.sound_picker.search_edit.setText("missing")
+    inspector.sound_picker.search_edit.returnPressed.emit()
+    hotspot_set = controller.document.cards[0].active_revision.hotspot_set
+    assert hotspot_set is not None
+    assert hotspot_set.interactions[0].sound_id is None
+
+    inspector.sound_picker.search_edit.setText("door")
+    assert not _sound_picker_item(inspector, generated.id).isHidden()
+    assert _sound_picker_item(inspector, ungenerated.id).isHidden()
+    generated_tile.play_button.click()
+    assert previews == [generated.id]
+
+    inspector.sound_picker.cancel_button.click()
+    application.processEvents()
+
+    assert not inspector.sound_picker.isVisible()
+    assert stops == [True]
+    hotspot_set = controller.document.cards[0].active_revision.hotspot_set
+    assert hotspot_set is not None
+    assert hotspot_set.interactions[0].sound_id is None
+
+    resized = QSize(620, 410)
+    inspector.sound_picker.resize(resized)
+    inspector.hotspot_sound_button.click()
+    application.processEvents()
+    assert inspector.sound_picker.size() == resized
+    generated_tile = inspector.sound_picker.tile(generated.id)
+    assert generated_tile is not None
+    generated_tile.play_button.click()
+    inspector.hide()
+    application.processEvents()
+    assert previews == [generated.id, generated.id]
+    assert stops == [True, True]
+    assert not inspector.sound_picker.isVisible()
+    inspector.close()
 
 
 def test_hotspot_key_add_actions_use_latest_eligible_catalog_key(
@@ -1130,6 +1265,7 @@ def test_reference_selector_assigns_one_card_with_undo(
     assert controller.document.cards[0].active_revision.references == (
         ResolvedCardReference(target_card_id=portrait.id),
     )
+    assert inspector.reference_remove_container.height() == 24
     inspector.reference_button.click()
     application.processEvents()
     assert inspector.card_picker.windowTitle() == "Select Reference 1"

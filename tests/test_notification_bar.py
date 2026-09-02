@@ -26,6 +26,10 @@ def test_notifications_are_prioritized_and_restored_after_dismissal(
     application: QApplication,
 ) -> None:
     bar = NotificationBar()
+    layout = bar.layout()
+    assert layout is not None
+    margins = layout.contentsMargins()
+    assert margins.left() == margins.right() == 8
     bar.show_notification(
         "progress",
         Notification("Generating image"),

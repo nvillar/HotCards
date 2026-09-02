@@ -266,11 +266,20 @@ for live MFLUX runs.
   untrusted data, and commit each replacement with the manifest transactionally.
   Retain replaced bytes only while Undo/Redo can restore them.
 - Keep one optional Sound reference per hotspot and place Play after Go to in
-  Then. Block deletion of referenced Sounds and show all usages in the modeless
-  Sounds manager. In Run, stop prior playback before hotspot navigation, then
-  start the clicked Sound so it can continue on the destination. New playback
-  replaces current playback; also stop on Back, Restart, project replacement,
-  and Run exit. Treat sound-only hotspots as actionable.
+  Then. Assign it through one reusable movable, resizable modeless searchable
+  grid picker with a Play control above every Sound name and a bottom-right
+  Cancel button. Keep ungenerated Sounds selectable but disable their Play
+  controls. Use a compact `−` button and the existing undoable command to clear
+  an assignment. Resolve and play generated assets outside the picker, report
+  failures in the global notification bar, and coordinate its preview with the
+  Sounds manager's shared player. Stop picker-owned playback on cancel, close,
+  selection, Run mode, project replacement, and application close without
+  stopping newer playback owned by another surface. Block deletion of
+  referenced Sounds and show all usages in the modeless Sounds manager. In Run,
+  stop prior playback before hotspot navigation, then start the clicked Sound so
+  it can continue on the destination. New playback replaces current playback;
+  also stop on Back, Restart, project replacement, and Run exit. Treat
+  sound-only hotspots as actionable.
 - Keep hotspot state behavior closed and typed: all required Keys must be
   present, all forbidden Keys absent, and explicit Remove and Grant sets must be
   disjoint. Do not add clear-all behavior, values, counters, expressions,

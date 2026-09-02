@@ -71,7 +71,7 @@ class NotificationBar(QFrame):
         self._current_key: str | None = None
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 6, 6, 6)
+        layout.setContentsMargins(8, 6, 8, 6)
         self.message_label = QLabel()
         self.message_label.setObjectName("notificationMessage")
         self.message_label.setWordWrap(True)

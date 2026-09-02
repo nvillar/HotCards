@@ -150,6 +150,12 @@ sampler, and timing provenance. Existing audio remains available while a
 replacement is generated, and replacement is one undoable asset-and-manifest
 transaction. The manager previews audio, lists every hotspot usage, jumps to
 the selected usage, and blocks deletion while the Sound is referenced.
+Hotspot Sound assignment uses a movable, resizable modeless picker with a
+searchable responsive grid. Every tile has a Play control above the Sound name;
+Sounds without generated audio remain assignable but have Play disabled. A
+compact remove button clears the assignment through the existing undoable
+command. Picker previews share playback with the Sounds manager and stop when
+the picker is cancelled, closed, or used to select a Sound.
 
 The Hotspots inspector is the sole source of revision-local interaction
 semantics. Every persisted hotspot has exactly one polygon. Its label is derived

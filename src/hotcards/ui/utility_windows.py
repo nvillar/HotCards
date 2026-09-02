@@ -1218,6 +1218,13 @@ class SoundManagerWindow(_ControllerUtilityWindow):
         if token == self._preview_token:
             self._stop_preview()
 
+    @property
+    def preview_active(self) -> bool:
+        return self._preview_token is not None
+
+    def stop_preview(self) -> None:
+        self._stop_preview()
+
     def _stop_preview(self) -> None:
         if self._preview_token is not None:
             self.player.stop()

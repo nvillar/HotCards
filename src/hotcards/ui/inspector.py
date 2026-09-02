@@ -79,6 +79,7 @@ from hotcards.domain.models import (
 )
 from hotcards.ui.card_picker import CardPickerWindow
 from hotcards.ui.card_thumbnails import ImagePathResolver, card_thumbnail_icon
+from hotcards.ui.sound_picker import SoundPickerWindow
 
 
 class _CommitPlainTextEdit(QPlainTextEdit):
@@ -139,6 +140,27 @@ def _compact_text_button(
     font.setBold(True)
     button.setFont(font)
     return button
+
+
+def _compact_button_offset_container(
+    button: QToolButton,
+    *,
+    top_margin: int,
+) -> QWidget:
+    container = QWidget()
+    layout = QVBoxLayout(container)
+    layout.setContentsMargins(0, top_margin, 0, 0)
+    layout.setSpacing(0)
+    layout.addWidget(button)
+    container.setFixedSize(button.width(), button.height() + top_margin)
+    return container
+
+
+def _set_compact_button_top_margin(container: QWidget, top_margin: int) -> None:
+    layout = container.layout()
+    if layout is not None:
+        layout.setContentsMargins(0, top_margin, 0, 0)
+    container.setFixedHeight(20 + top_margin)
 
 
 _SOURCE_SIMILARITY_TOOLTIPS = {
@@ -249,6 +271,8 @@ class Inspector(QWidget):
     edit_background_requested = Signal(str, object)
     hotspot_selected = Signal(object)
     hotspot_drawing_requested = Signal()
+    sound_preview_requested = Signal(object)
+    sound_preview_stop_requested = Signal()
     change_applied = Signal(str, object)
     render_inputs_changed = Signal()
 
@@ -273,6 +297,8 @@ class Inspector(QWidget):
         self._edit_source_size: tuple[int, int] | None = None
         self._image_path_resolver = image_path_resolver
         self._card_picker_context: tuple[str, UUID, UUID, object] | None = None
+        self._sound_picker_context: tuple[UUID, UUID, UUID] | None = None
+        self._sound_picker_preview_active = False
         self._rendering = False
         self.setObjectName("inspector")
         self.setMinimumWidth(300)
@@ -303,6 +329,7 @@ class Inspector(QWidget):
             self,
             image_path_resolver=image_path_resolver,
         )
+        self.sound_picker = SoundPickerWindow(self)
         self._connect_signals()
 
     def _build_background_tab(self) -> None:
@@ -367,7 +394,11 @@ class Inspector(QWidget):
             "Primary Reference; its image is sent to the model as image 1"
         )
         self.reference_button.setIconSize(QSize(48, 32))
-        first_reference_row.addWidget(self.reference_button, 1)
+        first_reference_row.addWidget(
+            self.reference_button,
+            1,
+            Qt.AlignmentFlag.AlignVCenter,
+        )
         self.reference_remove_button = _compact_text_button(
             "−",
             object_name="removeReferenceCardButton",
@@ -376,7 +407,16 @@ class Inspector(QWidget):
             prominent=False,
         )
         self.reference_remove_button.setFixedSize(20, 20)
-        first_reference_row.addWidget(self.reference_remove_button)
+        self.reference_remove_button.setAttribute(Qt.WidgetAttribute.WA_LayoutUsesWidgetRect)
+        self.reference_remove_container = _compact_button_offset_container(
+            self.reference_remove_button,
+            top_margin=2,
+        )
+        first_reference_row.addWidget(
+            self.reference_remove_container,
+            0,
+            Qt.AlignmentFlag.AlignVCenter,
+        )
         reference_layout.addLayout(first_reference_row)
         second_reference_row = QHBoxLayout()
         second_reference_row.addWidget(QLabel("2."))
@@ -387,7 +427,11 @@ class Inspector(QWidget):
             "Optional additional Reference; its image is sent to the model as image 2"
         )
         self.additional_reference_button.setIconSize(QSize(48, 32))
-        second_reference_row.addWidget(self.additional_reference_button, 1)
+        second_reference_row.addWidget(
+            self.additional_reference_button,
+            1,
+            Qt.AlignmentFlag.AlignVCenter,
+        )
         self.additional_reference_remove_button = _compact_text_button(
             "−",
             object_name="removeAdditionalReferenceCardButton",
@@ -396,7 +440,18 @@ class Inspector(QWidget):
             prominent=False,
         )
         self.additional_reference_remove_button.setFixedSize(20, 20)
-        second_reference_row.addWidget(self.additional_reference_remove_button)
+        self.additional_reference_remove_button.setAttribute(
+            Qt.WidgetAttribute.WA_LayoutUsesWidgetRect
+        )
+        self.additional_reference_remove_container = _compact_button_offset_container(
+            self.additional_reference_remove_button,
+            top_margin=2,
+        )
+        second_reference_row.addWidget(
+            self.additional_reference_remove_container,
+            0,
+            Qt.AlignmentFlag.AlignVCenter,
+        )
         reference_layout.addLayout(second_reference_row)
         self.reference_error = QLabel()
         self.reference_error.setObjectName("referenceValidationError")
@@ -673,7 +728,7 @@ class Inspector(QWidget):
         self.key_change_controls_layout.addWidget(self.key_change_add_row)
         then_layout.addLayout(self.key_change_controls_layout)
 
-        self.hotspot_target_label = QLabel("Go to")
+        self.hotspot_target_label = QLabel("Go to card")
         self.hotspot_target_label.setObjectName("hotspotTargetLabel")
         then_layout.addWidget(self.hotspot_target_label)
         self.hotspot_destination_row = QWidget()
@@ -685,7 +740,11 @@ class Inspector(QWidget):
         self.hotspot_destination_button.setObjectName("hotspotDestinationButton")
         self.hotspot_destination_button.setAccessibleName("Choose hotspot destination")
         self.hotspot_destination_button.setIconSize(QSize(48, 32))
-        hotspot_destination_layout.addWidget(self.hotspot_destination_button, 1)
+        hotspot_destination_layout.addWidget(
+            self.hotspot_destination_button,
+            1,
+            Qt.AlignmentFlag.AlignVCenter,
+        )
         self.hotspot_destination_remove_button = _compact_text_button(
             "−",
             object_name="removeHotspotDestinationButton",
@@ -694,15 +753,54 @@ class Inspector(QWidget):
             prominent=False,
         )
         self.hotspot_destination_remove_button.setFixedSize(20, 20)
-        hotspot_destination_layout.addWidget(self.hotspot_destination_remove_button)
+        self.hotspot_destination_remove_button.setAttribute(
+            Qt.WidgetAttribute.WA_LayoutUsesWidgetRect
+        )
+        self.hotspot_destination_remove_container = _compact_button_offset_container(
+            self.hotspot_destination_remove_button,
+            top_margin=2,
+        )
+        hotspot_destination_layout.addWidget(
+            self.hotspot_destination_remove_container,
+            0,
+            Qt.AlignmentFlag.AlignVCenter,
+        )
         then_layout.addWidget(self.hotspot_destination_row)
-        self.hotspot_sound_label = QLabel("Play")
+        self.hotspot_sound_label = QLabel("Play sound")
         self.hotspot_sound_label.setObjectName("hotspotSoundLabel")
         then_layout.addWidget(self.hotspot_sound_label)
-        self.hotspot_sound_combo = QComboBox()
-        self.hotspot_sound_combo.setObjectName("hotspotSoundCombo")
-        self.hotspot_sound_combo.setAccessibleName("Hotspot Sound")
-        then_layout.addWidget(self.hotspot_sound_combo)
+        self.hotspot_sound_row = QWidget()
+        self.hotspot_sound_row.setObjectName("hotspotSoundRow")
+        hotspot_sound_layout = QHBoxLayout(self.hotspot_sound_row)
+        hotspot_sound_layout.setContentsMargins(0, 0, 0, 0)
+        hotspot_sound_layout.setSpacing(4)
+        self.hotspot_sound_button = QPushButton("Choose Sound…")
+        self.hotspot_sound_button.setObjectName("hotspotSoundButton")
+        self.hotspot_sound_button.setAccessibleName("Choose hotspot Sound")
+        hotspot_sound_layout.addWidget(
+            self.hotspot_sound_button,
+            1,
+            Qt.AlignmentFlag.AlignVCenter,
+        )
+        self.hotspot_sound_remove_button = _compact_text_button(
+            "−",
+            object_name="removeHotspotSoundButton",
+            accessible_name="Remove hotspot Sound",
+            tooltip="Remove hotspot Sound",
+            prominent=False,
+        )
+        self.hotspot_sound_remove_button.setFixedSize(20, 20)
+        self.hotspot_sound_remove_button.setAttribute(Qt.WidgetAttribute.WA_LayoutUsesWidgetRect)
+        self.hotspot_sound_remove_container = _compact_button_offset_container(
+            self.hotspot_sound_remove_button,
+            top_margin=2,
+        )
+        hotspot_sound_layout.addWidget(
+            self.hotspot_sound_remove_container,
+            0,
+            Qt.AlignmentFlag.AlignVCenter,
+        )
+        then_layout.addWidget(self.hotspot_sound_row)
         layout.addWidget(self.hotspot_then_panel)
 
         self.hotspot_error = QLabel()
@@ -721,12 +819,16 @@ class Inspector(QWidget):
 
     def hideEvent(self, event: QHideEvent) -> None:
         self.card_picker.hide()
+        self.sound_picker.hide()
         self._card_picker_context = None
+        self._sound_picker_context = None
         super().hideEvent(event)
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self.card_picker.close()
+        self.sound_picker.close()
         self._card_picker_context = None
+        self._sound_picker_context = None
         super().closeEvent(event)
 
     def _connect_signals(self) -> None:
@@ -760,9 +862,13 @@ class Inspector(QWidget):
         self.hotspot_destination_remove_button.clicked.connect(
             lambda: self._change_current_destination(None)
         )
-        self.hotspot_sound_combo.currentIndexChanged.connect(self._sound_changed)
+        self.hotspot_sound_button.clicked.connect(self._open_sound_picker)
+        self.hotspot_sound_remove_button.clicked.connect(lambda: self._change_current_sound(None))
         self.card_picker.card_selected.connect(self._card_picked)
         self.card_picker.dismissed.connect(self._discard_card_picker_context)
+        self.sound_picker.sound_selected.connect(self._sound_picked)
+        self.sound_picker.preview_requested.connect(self._preview_sound)
+        self.sound_picker.dismissed.connect(self._sound_picker_dismissed)
 
     def _render_inputs_changed(self) -> None:
         if not self._rendering:
@@ -1060,7 +1166,9 @@ class Inspector(QWidget):
 
     def reset_context(self) -> None:
         self.card_picker.hide()
+        self.sound_picker.hide()
         self._card_picker_context = None
+        self._sound_picker_context = None
         self.selected_card_id = None
         self._rendered_revision_id = None
         self._set_error(self.description_error, "")
@@ -1208,6 +1316,7 @@ class Inspector(QWidget):
         empty_text: str,
     ) -> None:
         button.setIcon(QIcon())
+        has_thumbnail = False
         if isinstance(reference, ResolvedCardReference):
             selected = next(
                 (
@@ -1226,6 +1335,7 @@ class Inspector(QWidget):
                         image_path_resolver=self._image_path_resolver,
                     )
                 )
+                has_thumbnail = True
             else:
                 button.setText("Missing card")
         elif isinstance(reference, UnresolvedCardReference):
@@ -1234,6 +1344,12 @@ class Inspector(QWidget):
             )
         else:
             button.setText(empty_text)
+        remove_container = remove_button.parentWidget()
+        if remove_container is not None:
+            _set_compact_button_top_margin(
+                remove_container,
+                4 if has_thumbnail else 2,
+            )
         remove_button.setEnabled(reference is not None)
 
     def _render_resolution(
@@ -1743,7 +1859,7 @@ class Inspector(QWidget):
             else "Every Key already has a key change"
         )
         self.hotspot_destination_button.setEnabled(has_interaction)
-        self.hotspot_sound_combo.setEnabled(has_interaction)
+        self.hotspot_sound_button.setEnabled(has_interaction)
         self.delete_hotspot_button.setEnabled(has_interaction)
         current_row = self.hotspot_list.currentRow()
         self.move_hotspot_up_button.setEnabled(has_interaction and current_row > 0)
@@ -1767,25 +1883,13 @@ class Inspector(QWidget):
         self.hotspot_destination_remove_button.setEnabled(
             has_interaction and destination is not None
         )
-        with QSignalBlocker(self.hotspot_sound_combo):
-            self.hotspot_sound_combo.clear()
-            self.hotspot_sound_combo.addItem("No Sound", None)
-            for sound in document.sounds:
-                self.hotspot_sound_combo.addItem(sound.name, sound.id)
-                if sound.generated is None:
-                    self.hotspot_sound_combo.setItemData(
-                        self.hotspot_sound_combo.count() - 1,
-                        "This Sound has not been generated yet.",
-                        Qt.ItemDataRole.ToolTipRole,
-                    )
-            self.hotspot_sound_combo.setCurrentIndex(
-                -1
-                if interaction is None
-                else self._combo_index_for_data(
-                    self.hotspot_sound_combo,
-                    interaction.sound_id,
-                )
-            )
+        sound = (
+            document.sound_by_id(interaction.sound_id)
+            if interaction is not None and interaction.sound_id is not None
+            else None
+        )
+        self.hotspot_sound_button.setText(sound.name if sound is not None else "Choose Sound…")
+        self.hotspot_sound_remove_button.setEnabled(has_interaction and sound is not None)
 
     def _render_condition_rows(
         self,
@@ -2246,15 +2350,47 @@ class Inspector(QWidget):
             )
         )
 
-    def _sound_changed(self, index: int) -> None:
-        if self._rendering or index < 0:
-            return
+    def _open_sound_picker(self) -> None:
         card = self._selected_card()
         interaction = self._selected_interaction()
         if card is None or interaction is None:
             return
-        value = self.hotspot_sound_combo.itemData(index)
-        sound_id = value if isinstance(value, UUID) else None
+        self._sound_picker_context = (
+            card.id,
+            card.active_revision.id,
+            interaction.id,
+        )
+        self.sound_picker.open_for(
+            self.hotspot_sound_button,
+            list(self.controller.document.sounds),
+            selected_sound_id=interaction.sound_id,
+        )
+
+    def _sound_picked(self, sound_id: object) -> None:
+        context = self._sound_picker_context
+        self._sound_picker_context = None
+        self._stop_sound_picker_preview()
+        if not isinstance(sound_id, UUID) or context is None:
+            return
+        card_id, revision_id, interaction_id = context
+        card = self._selected_card()
+        interaction = self._selected_interaction()
+        if (
+            card is None
+            or interaction is None
+            or card.id != card_id
+            or card.active_revision.id != revision_id
+            or interaction.id != interaction_id
+            or not any(sound.id == sound_id for sound in self.controller.document.sounds)
+        ):
+            return
+        self._change_current_sound(sound_id)
+
+    def _change_current_sound(self, sound_id: UUID | None) -> None:
+        card = self._selected_card()
+        interaction = self._selected_interaction()
+        if card is None or interaction is None:
+            return
         if interaction.sound_id == sound_id:
             return
         self._execute(
@@ -2266,6 +2402,36 @@ class Inspector(QWidget):
             ),
             undo_message="Hotspot Sound changed",
         )
+
+    def _preview_sound(self, sound_id: object) -> None:
+        if not isinstance(sound_id, UUID):
+            return
+        context = self._sound_picker_context
+        card = self._selected_card()
+        interaction = self._selected_interaction()
+        if (
+            context is None
+            or card is None
+            or interaction is None
+            or context != (card.id, card.active_revision.id, interaction.id)
+            or not any(
+                sound.id == sound_id and sound.generated is not None
+                for sound in self.controller.document.sounds
+            )
+        ):
+            return
+        self._sound_picker_preview_active = True
+        self.sound_preview_requested.emit(sound_id)
+
+    def _sound_picker_dismissed(self) -> None:
+        self._sound_picker_context = None
+        self._stop_sound_picker_preview()
+
+    def _stop_sound_picker_preview(self) -> None:
+        if not self._sound_picker_preview_active:
+            return
+        self._sound_picker_preview_active = False
+        self.sound_preview_stop_requested.emit()
 
     def _move_hotspot(self, offset: int) -> None:
         card = self._selected_card()

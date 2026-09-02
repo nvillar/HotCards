@@ -181,6 +181,7 @@ class MainWindow(QMainWindow):
         self._background_step_progress: tuple[int, int] | None = None
         self._background_progress_message = ""
         self._last_session_mutation_blocked = False
+        self._sound_picker_previewing = False
         self._run_session = RunSession()
         self.style_manager_window: StyleManagerWindow | None = None
         self.sound_manager_window: SoundManagerWindow | None = None
@@ -572,6 +573,8 @@ class MainWindow(QMainWindow):
         self.inspector.change_applied.connect(self._show_undo_notification)
         self.inspector.hotspot_selected.connect(self.card_canvas.select_interaction)
         self.inspector.hotspot_drawing_requested.connect(self.card_canvas.begin_polygon)
+        self.inspector.sound_preview_requested.connect(self._play_sound_picker_preview)
+        self.inspector.sound_preview_stop_requested.connect(self._stop_sound_picker_preview)
         self.card_canvas.interaction_selected.connect(self.inspector.select_interaction)
         self.card_canvas.polygon_created.connect(self._create_hotspot_polygon)
         self.card_canvas.polygon_changed.connect(self._replace_hotspot_polygon)
@@ -2116,6 +2119,48 @@ class MainWindow(QMainWindow):
         if self.document_session is None or self.document_session.store is None:
             raise StackStoreError("save the stack before playing a Sound")
         return self.document_session.store.asset_path(audio_path)
+
+    def _play_sound_picker_preview(self, sound_id: object) -> None:
+        if not isinstance(sound_id, UUID) or self._is_running:
+            return
+        try:
+            sound = self.controller.document.sound_by_id(sound_id)
+        except StopIteration:
+            self._show_warning(
+                "sound-preview",
+                "Could not play Sound",
+                detail="The selected Sound is no longer available.",
+            )
+            return
+        if sound.generated is None:
+            self._show_warning(
+                "sound-preview",
+                "Could not play Sound",
+                detail=f'"{sound.name}" has not been generated yet.',
+            )
+            return
+        if self.sound_manager_window is not None:
+            self.sound_manager_window.stop_preview()
+        try:
+            path = self._resolve_sound_asset_path(sound.generated.audio_path)
+        except (OSError, StackStoreError, ValueError) as error:
+            self._show_warning(
+                "sound-preview",
+                "Could not play Sound",
+                detail=str(error),
+            )
+            return
+        self.notification_bar.clear_notification("sound-preview")
+        self._sound_picker_previewing = True
+        self.sound_player.play(path)
+
+    def _stop_sound_picker_preview(self) -> None:
+        if not self._sound_picker_previewing:
+            return
+        self._sound_picker_previewing = False
+        if self.sound_manager_window is not None and self.sound_manager_window.preview_active:
+            return
+        self.sound_player.stop()
 
     def _reference_image_path(self, image_path: str) -> Path:
         if self.document_session is None or self.document_session.store is None:
