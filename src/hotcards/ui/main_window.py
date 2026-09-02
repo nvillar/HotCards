@@ -1320,12 +1320,23 @@ class MainWindow(QMainWindow):
     def _delete_card(self, card_id: object) -> None:
         if not isinstance(card_id, UUID):
             return
-        card = next(
-            (candidate for candidate in self.controller.document.cards if candidate.id == card_id),
+        cards = self.controller.document.cards
+        card_index = next(
+            (index for index, candidate in enumerate(cards) if candidate.id == card_id),
             None,
         )
-        if card is None:
+        if card_index is None:
             return
+        card = cards[card_index]
+        previous_selection = self._selected_card_id
+        next_selection = previous_selection
+        if previous_selection == card.id:
+            if card_index > 0:
+                next_selection = cards[card_index - 1].id
+            elif len(cards) > 1:
+                next_selection = cards[1].id
+            else:
+                next_selection = None
         was_start_card = self.controller.document.start_card_id == card.id
         inbound_link_count = sum(
             1
@@ -1343,9 +1354,11 @@ class MainWindow(QMainWindow):
             and self.background_workflow.is_generating_for(card.id)
         )
         previous_token = self.controller.current_undo_token
+        self._selected_card_id = next_selection
         try:
             self.card_sidebar.delete_card(card.id)
         except (CommandError, DocumentMutationBlockedError) as error:
+            self._selected_card_id = previous_selection
             self._show_error(
                 "card-error",
                 "Could not delete card",
@@ -1366,6 +1379,11 @@ class MainWindow(QMainWindow):
             message += "; " + " and ".join(consequences)
         token = self.controller.current_undo_token
         if token is not None and token != previous_token:
+            if previous_selection != next_selection:
+                self._card_selection_history[token] = (
+                    previous_selection,
+                    next_selection,
+                )
             self._show_undo_notification(message, token)
 
     def _cancel_background_generation(self) -> None:

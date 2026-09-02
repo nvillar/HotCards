@@ -38,7 +38,9 @@ image-generation step label and progress bar in the status bar show actual
 MFLUX inference-step completion.
 
 The Cards sidebar creates a new blank card immediately after the selected card.
-Command-D duplicates the selected card immediately after its source. A card
+Deleting a selected card moves selection to the card immediately before it, or
+to the new first card when there was no preceding card. Command-D duplicates the
+selected card immediately after its source. A card
 duplicate contains exactly the active complete revision
 with new card, revision, background, and hotspot identities. Generated image
 bytes are copied into the duplicate card's own asset namespace, so either card

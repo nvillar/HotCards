@@ -1554,6 +1554,52 @@ def test_card_delete_applies_immediately_and_offers_targeted_undo(
     assert controller.document.start_card_id == controller.document.cards[0].id
 
 
+def test_card_delete_selects_preceding_card_and_restores_it_on_redo(
+    application: QApplication,
+) -> None:
+    first = Card(name="First")
+    preceding = Card(name="Preceding")
+    selected = Card(name="Selected")
+    last = Card(name="Last")
+    window, controller, _workers, _background = _window(
+        Stack(name="Demo", cards=(first, preceding, selected, last))
+    )
+    window.select_card(selected.id)
+
+    window.card_sidebar.delete_button.click()
+
+    assert [card.id for card in controller.document.cards] == [
+        first.id,
+        preceding.id,
+        last.id,
+    ]
+    assert window.card_sidebar.selected_card_id == preceding.id
+    assert window.canvas_card_name.text() == "Preceding"
+
+    window.notification_bar.primary_button.click()
+    assert window.card_sidebar.selected_card_id == selected.id
+
+    window.redo()
+    assert window.card_sidebar.selected_card_id == preceding.id
+
+
+def test_deleting_first_card_selects_following_card(
+    application: QApplication,
+) -> None:
+    first = Card(name="First")
+    following = Card(name="Following")
+    last = Card(name="Last")
+    window, controller, _workers, _background = _window(
+        Stack(name="Demo", cards=(first, following, last))
+    )
+    window.select_card(first.id)
+
+    window.card_sidebar.delete_button.click()
+
+    assert [card.id for card in controller.document.cards] == [following.id, last.id]
+    assert window.card_sidebar.selected_card_id == following.id
+
+
 def test_card_delete_ignores_destinationless_hotspots(
     application: QApplication,
 ) -> None:
