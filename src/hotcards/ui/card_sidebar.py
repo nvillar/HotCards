@@ -207,7 +207,12 @@ class CardSidebar(QWidget):
         """Create and select a uniquely named blank card."""
         document = self.controller.document
         card_name = name or self._next_card_name(document)
-        command = CreateCardCommand(name=card_name)
+        selected_card_id = self.selected_card_id
+        insertion_index = next(
+            (index + 1 for index, card in enumerate(document.cards) if card.id == selected_card_id),
+            None,
+        )
+        command = CreateCardCommand(name=card_name, index=insertion_index)
         changed = self.controller.execute(command)
         self.render(changed, command.card_id)
         self.card_selected.emit(command.card_id)

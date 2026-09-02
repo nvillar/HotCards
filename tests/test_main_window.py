@@ -861,6 +861,27 @@ def test_card_browser_uses_thumbnails_and_compact_action_row(
     assert sidebar.add_button.font().pointSizeF() > (sidebar.move_up_button.font().pointSizeF())
 
 
+def test_new_card_is_inserted_after_selected_card(
+    application: QApplication,
+) -> None:
+    first = Card(name="First")
+    selected = Card(name="Selected")
+    last = Card(name="Last")
+    controller = DocumentController(Stack(name="Demo", cards=(first, selected, last)))
+    sidebar = CardSidebar(controller)
+    sidebar.select_card(selected.id)
+
+    created_id = sidebar.add_card("Created")
+
+    assert [card.name for card in controller.document.cards] == [
+        "First",
+        "Selected",
+        "Created",
+        "Last",
+    ]
+    assert sidebar.selected_card_id == created_id
+
+
 def test_duplicate_card_sidebar_action_commits_cancels_and_restores_selection(
     application: QApplication,
     tmp_path: Path,

@@ -37,8 +37,9 @@ shows navigation and hotspot visibility controls. An
 image-generation step label and progress bar in the status bar show actual
 MFLUX inference-step completion.
 
-The Cards sidebar and Command-D shortcut duplicate the selected card immediately
-after its source. A card duplicate contains exactly the active complete revision
+The Cards sidebar creates a new blank card immediately after the selected card.
+Command-D duplicates the selected card immediately after its source. A card
+duplicate contains exactly the active complete revision
 with new card, revision, background, and hotspot identities. Generated image
 bytes are copied into the duplicate card's own asset namespace, so either card
 can be deleted independently. Self-navigation is remapped to the duplicate;
