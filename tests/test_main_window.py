@@ -56,6 +56,7 @@ from hotcards.domain.models import (
     Card,
     CardRevision,
     CurrentSourceSize,
+    DerivedImageSourceSnapshot,
     DirectGenerateProvenance,
     GeneratedBackground,
     GeneratedSoundAsset,
@@ -64,7 +65,6 @@ from hotcards.domain.models import (
     HotspotKeyChanges,
     HotspotSet,
     ImageOperationSettings,
-    ImageSourceSnapshot,
     Interaction,
     KeyDefinition,
     NavigateAction,
@@ -1327,10 +1327,14 @@ def test_pending_refine_renders_authoritative_revision_and_promotes_undo(
         id=refined_asset_id,
         image_path=refined_image_path,
         provenance=RefineProvenance(
-            source=ImageSourceSnapshot(
+            source=DerivedImageSourceSnapshot(
                 card_id=card.id,
                 revision_id=source_revision.id,
                 background_id=source_asset_id,
+                width=512,
+                height=384,
+                seed=direct.provenance.settings.seed,
+                edit_lineage=(),
             ),
             description=source_revision.description,
             render_prompt=source_revision.description,
@@ -1775,7 +1779,7 @@ def test_card_delete_ignores_destinationless_hotspots(
     assert [card.id for card in controller.document.cards] == [source.id]
 
 
-def test_card_delete_reports_image_source_dependencies(
+def test_card_delete_keeps_independent_derived_backgrounds(
     application: QApplication,
 ) -> None:
     source_background = _generated_background(
@@ -1787,14 +1791,18 @@ def test_card_delete_reports_image_source_dependencies(
     derived_background = GeneratedBackground(
         image_path="assets/cards/derived.png",
         provenance=RefineProvenance(
-            source=ImageSourceSnapshot(
+            source=DerivedImageSourceSnapshot(
                 card_id=source_card.id,
                 revision_id=source_revision.id,
                 background_id=source_background.id,
+                width=512,
+                height=384,
+                seed=source_background.provenance.settings.seed,
+                edit_lineage=(),
             ),
             description="A refined source image",
             render_prompt="A refined source image",
-            output_size=PresetOutputSize(tier=ResolutionTier.MEDIUM),
+            output_size=CurrentSourceSize(width=512, height=384),
             transformation=RefineTransformation.BALANCED,
             strength=0.50,
             settings=source_background.provenance.settings,
@@ -1811,10 +1819,10 @@ def test_card_delete_reports_image_source_dependencies(
 
     window._delete_card(source_card.id)
 
+    assert controller.document.cards == (derived_card,)
+    assert window.notification_bar.current_key != "card-error"
+    controller.undo()
     assert controller.document.cards == (source_card, derived_card)
-    assert window.notification_bar.current_key == "card-error"
-    assert window.notification_bar.message_label.text() == "Could not delete card"
-    assert "Derived" in window.notification_bar.toolTip()
 
 
 def test_context_change_cancels_background_generation_without_prompt(

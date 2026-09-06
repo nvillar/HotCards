@@ -22,11 +22,11 @@ from hotcards.domain.image_dimensions import (
 from hotcards.domain.models import (
     AcceptedEdit,
     CurrentSourceSize,
+    DerivedImageSourceSnapshot,
     EditPreserveOptions,
     ExactOutputSize,
     GenerateInputs,
     ImageReferenceSnapshot,
-    ImageSourceSnapshot,
     PresetOutputSize,
     RefineTransformation,
 )
@@ -252,11 +252,15 @@ def generate_request(
     )
 
 
-def source_snapshot() -> ImageSourceSnapshot:
-    return ImageSourceSnapshot(
+def source_snapshot() -> DerivedImageSourceSnapshot:
+    return DerivedImageSourceSnapshot(
         card_id=uuid4(),
         revision_id=uuid4(),
         background_id=uuid4(),
+        width=32,
+        height=32,
+        seed=73,
+        edit_lineage=(),
     )
 
 
@@ -284,7 +288,6 @@ def refine_request(
         quantization=quantization,
         source=source_snapshot(),
         source_image_path=source_path,
-        source_seed=73,
         description="A refined courtyard",
         render_prompt="A refined courtyard",
         output_size=PresetOutputSize(tier=ResolutionTier.MEDIUM),
@@ -311,7 +314,6 @@ def edit_request(
         preserve=edit.preserve,
         expanded_prompt=edit.expanded_prompt,
         output_size=PresetOutputSize(tier=ResolutionTier.MEDIUM),
-        edit_lineage=(edit,),
         seed=991,
     )
 
@@ -477,8 +479,10 @@ def test_edit_accepts_exact_current_source_dimensions(
     tmp_path: Path,
 ) -> None:
     source_path = write_source(tmp_path / "source.png")
+    Image.new("RGB", (1008, 752), "green").save(source_path)
     request = edit_request(tmp_path / "current.png", source_path).model_copy(
         update={
+            "source": source_snapshot().model_copy(update={"width": 1008, "height": 752}),
             "output_size": CurrentSourceSize(width=1008, height=752),
             "width": 1008,
             "height": 752,
@@ -494,6 +498,99 @@ def test_edit_accepts_exact_current_source_dimensions(
         width=1008,
         height=752,
     )
+
+
+@pytest.mark.parametrize("operation", ("refine", "edit"))
+def test_derived_request_captures_one_inherited_sequence_without_repeating_current_edit(
+    tmp_path: Path, operation: str
+) -> None:
+    source_path = write_source(tmp_path / "source.png")
+    make_request = refine_request if operation == "refine" else edit_request
+    payload = make_request(tmp_path / "result.png", source_path).model_dump(mode="python")
+    inherited = accepted_edit().model_copy(
+        update={"instruction": "Add ivy.", "expanded_prompt": "Add ivy. Preserve the text."}
+    )
+    payload["source"]["edit_lineage"] = (inherited,)
+    request_type = MfluxRefineRequest if operation == "refine" else MfluxEditRequest
+    request = request_type.model_validate(payload)
+    model = FakeMfluxModel()
+    generator = MfluxGenerator(model_factory=lambda *_: model, edit_model_factory=lambda *_: model)
+
+    result = generator.refine(request) if operation == "refine" else generator.edit(request)
+
+    assert result.provenance.source == request.source
+    assert result.provenance.source.edit_lineage == (inherited,)
+    assert result.provenance.edit_lineage == (
+        (inherited,) if operation == "refine" else (inherited, request.accepted_edit)
+    )
+    assert "edit_lineage" not in result.provenance.model_dump()
+    assert "edit_lineage" not in request.model_dump()
+    assert "source_seed" not in request.model_dump()
+    assert model.calls[0]["seed"] == (
+        request.source.seed if operation == "refine" else request.seed
+    )
+
+
+@pytest.mark.parametrize("operation", ("refine", "edit"))
+def test_derived_request_rejects_current_mismatch_and_nonhigher_presets(
+    tmp_path: Path, operation: str
+) -> None:
+    make_request = refine_request if operation == "refine" else edit_request
+    request = make_request(tmp_path / "result.png", tmp_path / "source.png")
+    payload = request.model_dump(mode="python")
+    payload["output_size"] = CurrentSourceSize(width=512, height=384)
+    with pytest.raises(ValueError, match="match its source dimensions"):
+        type(request).model_validate(payload)
+    for width, height in ((512, 384), (768, 576)):
+        payload = request.model_dump(mode="python")
+        payload["source"].update(width=width, height=height)
+        with pytest.raises(ValueError, match="more pixels"):
+            type(request).model_validate(payload)
+
+
+@pytest.mark.parametrize("operation", ("refine", "edit"))
+@pytest.mark.parametrize("unreadable", (False, True))
+def test_derived_request_checks_decoded_source_before_model_loading(
+    tmp_path: Path, operation: str, unreadable: bool
+) -> None:
+    source_path = write_source(tmp_path / "source.png")
+    make_request = refine_request if operation == "refine" else edit_request
+    request = make_request(tmp_path / "result.png", source_path)
+    if unreadable:
+        source_path.write_bytes(b"not an image")
+    else:
+        Image.new("RGB", (33, 31), "green").save(source_path)
+
+    def unexpected_load(*_args: object) -> FakeMfluxModel:
+        pytest.fail("an invalid source must not load a model")
+
+    generator = MfluxGenerator(model_factory=unexpected_load, edit_model_factory=unexpected_load)
+    with pytest.raises(ImageGenerationError, match="unreadable|dimensions do not match"):
+        if operation == "refine":
+            generator.refine(request)
+        else:
+            generator.edit(request)
+    assert not request.output_path.exists()
+
+
+@pytest.mark.parametrize("operation", ("refine", "edit"))
+def test_derived_request_accepts_nonaligned_historical_source_facts(
+    tmp_path: Path, operation: str
+) -> None:
+    source_path = tmp_path / "legacy.png"
+    Image.new("RGB", (33, 31), "green").save(source_path)
+    make_request = refine_request if operation == "refine" else edit_request
+    payload = make_request(tmp_path / "result.png", source_path).model_dump(mode="python")
+    payload["source"].update(width=33, height=31)
+    request_type = MfluxRefineRequest if operation == "refine" else MfluxEditRequest
+    request = request_type.model_validate(payload)
+    model = FakeMfluxModel()
+    generator = MfluxGenerator(model_factory=lambda *_: model, edit_model_factory=lambda *_: model)
+
+    result = generator.refine(request) if operation == "refine" else generator.edit(request)
+
+    assert (result.provenance.source.width, result.provenance.source.height) == (33, 31)
+    assert (result.provenance.settings.width, result.provenance.settings.height) == (512, 384)
 
 
 def test_request_boundary_rejects_aspect_incompatible_exact_sizes(

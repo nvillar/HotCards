@@ -45,7 +45,6 @@ from hotcards.application.image_files import (
     require_readable_image,
 )
 from hotcards.application.workers import AdapterWorkers, WorkerOperation
-from hotcards.domain.image_dependencies import image_source_dependencies
 from hotcards.domain.image_dimensions import (
     AspectRatio,
     higher_output_tiers,
@@ -56,13 +55,13 @@ from hotcards.domain.models import (
     Card,
     CardRevision,
     CurrentSourceSize,
+    DerivedImageSourceSnapshot,
     EditOutputSize,
     EditPreserveOptions,
     GeneratedBackground,
     GenerateInputs,
     GenerateOutputSize,
     ImageReferenceSnapshot,
-    ImageSourceSnapshot,
     PresetOutputSize,
     RefineOutputSize,
     RefineTransformation,
@@ -283,16 +282,6 @@ class BackgroundWorkflow(QObject):
         revision = card.active_revision
         if not revision.description.strip():
             raise BackgroundWorkflowError("enter a Description before generating")
-        if revision.background is not None:
-            dependencies = image_source_dependencies(document, (revision.id,))
-            if dependencies:
-                dependent = dependencies[0]
-                raise BackgroundWorkflowError(
-                    "cannot replace this source background because "
-                    f"{dependent.operation_label} revision "
-                    f"{dependent.dependent_revision_number} on card "
-                    f'"{dependent.dependent_card_name}" derives from it'
-                )
         references = self._resolve_references(document, card)
         reference_snapshots = tuple(
             ImageReferenceSnapshot(
@@ -476,10 +465,14 @@ class BackgroundWorkflow(QObject):
             style,
             edit_lineage,
         )
-        source = ImageSourceSnapshot(
+        source = DerivedImageSourceSnapshot(
             card_id=card.id,
             revision_id=revision.id,
             background_id=background.id,
+            width=source_snapshot.width,
+            height=source_snapshot.height,
+            seed=image_operation_settings(background.provenance).seed,
+            edit_lineage=edit_lineage,
         )
         width, height = selected_output_dimensions(
             output_size,
@@ -505,10 +498,8 @@ class BackgroundWorkflow(QObject):
         request = MfluxRefineRequest(
             source=source,
             source_image_path=source_snapshot.snapshot_path,
-            source_seed=image_operation_settings(background.provenance).seed,
             description=revision.description,
             style=style,
-            edit_lineage=edit_lineage,
             render_prompt=render_prompt,
             output_size=output_size,
             transformation=transformation,
@@ -678,10 +669,14 @@ class BackgroundWorkflow(QObject):
             if isinstance(output_size, CurrentSourceSize)
             else selected_output_dimensions(output_size, document.aspect_ratio)
         )
-        source = ImageSourceSnapshot(
+        source = DerivedImageSourceSnapshot(
             card_id=card.id,
             revision_id=revision.id,
             background_id=background.id,
+            width=source_snapshot.width,
+            height=source_snapshot.height,
+            seed=image_operation_settings(background.provenance).seed,
+            edit_lineage=inherited_lineage,
         )
         request_id = uuid4()
         asset_id = uuid4()
@@ -709,7 +704,6 @@ class BackgroundWorkflow(QObject):
             preserve=preserve,
             expanded_prompt=expanded_prompt,
             output_size=output_size,
-            edit_lineage=edit_lineage,
             seed=secrets.randbelow(2_147_483_648),
             output_path=self._temporary_directory / f"edited-{asset_id}.png",
             model_identifier=settings.mflux_model,

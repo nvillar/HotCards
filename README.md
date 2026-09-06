@@ -17,7 +17,8 @@ Stacks are stored as self-contained `.hotcards` directory bundles and
 autosaved atomically after creation or opening. At startup, HotCards lists
 stacks in `~/Documents/HotCards` and offers Open, Create, and confirmed
 permanent Delete actions.
-Only the current schema is accepted; older and future schemas are rejected.
+Only the current schema (13) is accepted; older and future schemas are rejected.
+There is no runtime migration of older bundles.
 Each stack stores one immutable fixed aspect ratio: Square 1:1, Landscape 4:3,
 Portrait 3:4, or Widescreen 16:9. New Stack offers exactly those four formats
 and defaults to Landscape 4:3; the format cannot be changed after creation.
@@ -82,10 +83,16 @@ or an independent card duplicate. Duplicate provenance records its immediate
 source and a flattened snapshot of the original image operation without
 retaining a live source dependency. Provenance retains exact
 prompts, model execution settings, seed, and actual output width and height;
-derived operations also identify their source revision and background. A source
-revision cannot be deleted or have its background replaced while another
-retained revision derives from it. Deleting an entire card may remove an
-image-evolution chain contained wholly inside that card.
+derived operations capture historical source card/revision/background IDs,
+decoded dimensions, the original operation seed (flattening duplicates), and
+inherited accepted Edit instructions. These nonrecursive snapshots contain no
+source asset paths. Source cards, revisions, and backgrounds can be deleted or
+replaced without invalidating later images. The inherited Edit sequence is stored
+once: Reinterpret exposes it unchanged, and Edit adds its accepted current
+instruction. Captured source dimensions and settings are validated locally;
+live inference still uses a private immutable source image and rejects stale
+results or source replacement races. Assets remain retained while reachable from
+the current document or Undo/Redo history, not by historical source attribution.
 
 The production MFLUX 0.19.1 adapter routes plain Generate and Reinterpret through
 the regular model family, and Reference-backed Generate and Edit through the

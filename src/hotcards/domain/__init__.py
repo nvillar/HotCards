@@ -1,9 +1,5 @@
 """Stack domain models and validation."""
 
-from hotcards.domain.image_dependencies import (
-    ImageSourceDependency,
-    image_source_dependencies,
-)
 from hotcards.domain.image_dimensions import (
     AspectRatio,
     ResolutionTier,
@@ -20,6 +16,7 @@ from hotcards.domain.models import (
     CardReference,
     CardRevision,
     CurrentSourceSize,
+    DerivedImageSourceSnapshot,
     DirectGenerateProvenance,
     DuplicateProvenance,
     EditOutputSize,
@@ -70,6 +67,7 @@ __all__ = [
     "CardRevision",
     "CardReference",
     "CurrentSourceSize",
+    "DerivedImageSourceSnapshot",
     "DirectGenerateProvenance",
     "DuplicateProvenance",
     "EditPreserveOptions",
@@ -86,7 +84,6 @@ __all__ = [
     "ImageOperationSettings",
     "ImageProvenance",
     "ImageReferenceSnapshot",
-    "ImageSourceDependency",
     "ImageSourceSnapshot",
     "Interaction",
     "KeyDefinition",
@@ -107,7 +104,6 @@ __all__ = [
     "Stack",
     "UnresolvedCardReference",
     "image_edit_lineage",
-    "image_source_dependencies",
     "normalize_card_name",
     "output_dimensions",
     "original_image_provenance",

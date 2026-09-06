@@ -23,7 +23,6 @@ from hotcards.application.background_workflow import (
     BackgroundWorkflowError,
 )
 from hotcards.application.commands import (
-    CommandError,
     CreateCardCommand,
     DeleteRevisionCommand,
     DuplicateRevisionCommand,
@@ -52,6 +51,7 @@ from hotcards.domain.models import (
     Card,
     CardRevision,
     CurrentSourceSize,
+    DerivedImageSourceSnapshot,
     DirectGenerateProvenance,
     DuplicateProvenance,
     EditProvenance,
@@ -405,10 +405,14 @@ def test_refine_uses_current_image_seed_and_creates_complete_version(
     assert refined.background is not None
     provenance = refined.background.provenance
     assert isinstance(provenance, RefineProvenance)
-    assert provenance.source == ImageSourceSnapshot(
+    assert provenance.source == DerivedImageSourceSnapshot(
         card_id=card.id,
         revision_id=source_revision.id,
         background_id=source_background.id,
+        width=512,
+        height=384,
+        seed=source_background.provenance.settings.seed,
+        edit_lineage=(),
     )
     assert provenance.description == source_revision.description
     assert provenance.style is not None
@@ -438,13 +442,15 @@ def test_refine_uses_current_image_seed_and_creates_complete_version(
     assert session.flush()
     assert controller.document.cards[0].active_revision == refined
     assert refined_path.is_file()
-    with pytest.raises(CommandError, match="cannot delete this source revision"):
-        controller.execute(
-            DeleteRevisionCommand(
-                card_id=card.id,
-                revision_id=source_revision.id,
-            )
+    controller.execute(
+        DeleteRevisionCommand(
+            card_id=card.id,
+            revision_id=source_revision.id,
         )
+    )
+    assert session.flush()
+    assert controller.document.cards[0].revisions == (refined,)
+    assert controller.undo()
 
     assert controller.undo()
     assert session.flush()
@@ -528,10 +534,14 @@ def test_edit_uses_only_secure_current_image_and_creates_complete_version(
     assert edited.background is not None
     provenance = edited.background.provenance
     assert isinstance(provenance, EditProvenance)
-    assert provenance.source == ImageSourceSnapshot(
+    assert provenance.source == DerivedImageSourceSnapshot(
         card_id=card.id,
         revision_id=source.id,
         background_id=source.background.id,
+        width=512,
+        height=384,
+        seed=source.background.provenance.settings.seed,
+        edit_lineage=(),
     )
     assert provenance.instruction == "Open the garden gate."
     assert provenance.output_size == CurrentSourceSize(
@@ -575,13 +585,15 @@ def test_edit_uses_only_secure_current_image_and_creates_complete_version(
     assert controller.redo()
     assert session.flush()
     assert controller.document.cards[0].active_revision == edited
-    with pytest.raises(CommandError, match="cannot delete this source revision"):
-        controller.execute(
-            DeleteRevisionCommand(
-                card_id=card.id,
-                revision_id=source.id,
-            )
+    controller.execute(
+        DeleteRevisionCommand(
+            card_id=card.id,
+            revision_id=source.id,
         )
+    )
+    assert session.flush()
+    assert controller.document.cards[0].revisions == (edited,)
+    assert controller.undo()
 
     assert controller.undo()
     assert session.flush()
@@ -896,6 +908,49 @@ def test_invalid_current_size_keeps_named_workflow_outputs_available(
     provenance = controller.document.cards[0].active_revision.provenance
     assert isinstance(provenance, RefineProvenance)
     assert provenance.output_size == PresetOutputSize(tier=selected_tier)
+    assert (provenance.source.width, provenance.source.height) == source_size
+    assert provenance.source.seed == revision.background.provenance.settings.seed
+
+
+@pytest.mark.parametrize("operation", ("refine", "edit"))
+def test_derived_image_reopens_after_source_revision_and_unreachable_asset_are_removed(
+    tmp_path: Path, operation: str
+) -> None:
+    workflow, controller, session, workers, _model, card = _bound_workflow(tmp_path)
+    workflow.generate(card.id)
+    _complete_generation(workers)
+    source = controller.document.cards[0].active_revision
+    source_path = session.store.asset_path(source.background.image_path)
+    if operation == "refine":
+        workflow.refine(
+            card.id,
+            transformation=RefineTransformation.BALANCED,
+            output_size=CurrentSourceSize(width=512, height=384),
+        )
+    else:
+        workflow.edit(
+            card.id,
+            instruction="Open the gate.",
+            output_size=CurrentSourceSize(width=512, height=384),
+        )
+    _complete_generation(workers)
+    result = controller.document.cards[0].active_revision
+    result_path = session.store.asset_path(result.background.image_path)
+
+    controller.execute(DeleteRevisionCommand(card_id=card.id, revision_id=source.id))
+    assert session.flush()
+    assert source_path.is_file()
+    assert controller.undo()
+    assert session.flush()
+    assert controller.document.cards[0].revisions == (source, result)
+    assert controller.redo()
+    assert session.flush()
+    controller.clear_history()
+    assert session.flush()
+
+    assert not source_path.exists()
+    assert result_path.is_file()
+    assert session.store.load().cards[0].revisions == (result,)
 
 
 def test_refine_flattens_duplicate_source_settings(tmp_path: Path) -> None:
@@ -1499,7 +1554,7 @@ def test_refine_fifo_replacement_after_manifest_fsync_rolls_back(
     assert "no longer a regular file" in str(failures[-1])
 
 
-def test_rejected_generation_apply_removes_the_new_unreachable_asset(
+def test_generate_can_replace_a_historical_source_with_retained_derived_backgrounds(
     tmp_path: Path,
 ) -> None:
     workflow, controller, session, workers, _model, _card = _bound_workflow(tmp_path)
@@ -1534,14 +1589,18 @@ def test_rejected_generation_apply_removes_the_new_unreachable_asset(
         id=derived_asset_id,
         image_path=derived_path,
         provenance=RefineProvenance(
-            source=ImageSourceSnapshot(
+            source=DerivedImageSourceSnapshot(
                 card_id=source.id,
                 revision_id=source_revision.id,
                 background_id=source_background.id,
+                width=512,
+                height=384,
+                seed=source_background.provenance.settings.seed,
+                edit_lineage=(),
             ),
             description="A refined source",
             render_prompt="A refined source",
-            output_size=PresetOutputSize(tier=ResolutionTier.MEDIUM),
+            output_size=CurrentSourceSize(width=512, height=384),
             transformation=RefineTransformation.BALANCED,
             strength=0.50,
             settings=source_background.provenance.settings,
@@ -1562,26 +1621,22 @@ def test_rejected_generation_apply_removes_the_new_unreachable_asset(
 
     _complete_generation(workers)
 
-    assert failures
-    assert "cannot replace this source background" in str(failures[-1])
-    assert controller.document == document_before_completion
+    assert not failures
+    assert controller.document != document_before_completion
     assert (
         next(
             card for card in controller.document.cards if card.id == source.id
         ).active_revision.background
-        == source_background
+        != source_background
     )
-    assert set((bundle_path / "assets" / "cards").glob("*/image-*.png")) == (
-        assets_before_completion
-    )
+    assert assets_before_completion < set((bundle_path / "assets" / "cards").glob("*/image-*.png"))
+    assert controller.document.cards[-1].active_revision.background == derived_background
     assert not workflow.busy
     worker_call_count = len(workers.calls)
-    with pytest.raises(
-        BackgroundWorkflowError,
-        match="cannot replace this source background",
-    ):
-        workflow.generate(source.id)
-    assert len(workers.calls) == worker_call_count
+    workflow.generate(source.id)
+    _complete_generation(workers)
+    assert len(workers.calls) == worker_call_count + 1
+    assert not failures
 
 
 def test_generate_appends_and_captures_selected_style(tmp_path: Path) -> None:

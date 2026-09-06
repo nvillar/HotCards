@@ -26,6 +26,7 @@ from hotcards.domain.models import (
     AcceptedEdit,
     Card,
     CardRevision,
+    DerivedImageSourceSnapshot,
     DirectGenerateProvenance,
     DuplicateProvenance,
     EditPreserveOptions,
@@ -170,10 +171,14 @@ def _owned_bundle(
                 created_at=generated_at,
             )
         )
-        source = ImageSourceSnapshot(
+        source = DerivedImageSourceSnapshot(
             card_id=card.id,
             revision_id=source_revision.id,
             background_id=source_asset_id,
+            width=19,
+            height=13,
+            seed=7,
+            edit_lineage=(),
         )
     else:
         source = ImageSourceSnapshot(
@@ -210,7 +215,6 @@ def _owned_bundle(
             preserve=accepted.preserve,
             expanded_prompt=accepted.expanded_prompt,
             output_size=PresetOutputSize(tier=ResolutionTier.LARGE),
-            edit_lineage=(accepted,),
             prompt_token_count=20,
             settings=settings,
         )

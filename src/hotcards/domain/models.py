@@ -27,7 +27,7 @@ from hotcards.domain.image_dimensions import (
     validate_exact_output_dimensions,
 )
 
-CURRENT_SCHEMA_VERSION = 12
+CURRENT_SCHEMA_VERSION = 13
 
 NonEmptyString = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 NormalizedCoordinate = Annotated[float, Field(ge=0.0, le=1.0)]
@@ -385,7 +385,7 @@ class ImageOperationSettings(DomainModel):
 
 
 class ImageSourceSnapshot(DomainModel):
-    """Exact source revision and background used by a derived operation."""
+    """Informational source identity for an independent image duplicate."""
 
     card_id: UUID
     revision_id: UUID
@@ -487,6 +487,30 @@ class AcceptedEdit(DomainModel):
     expanded_prompt: NonEmptyString
 
 
+class DerivedImageSourceSnapshot(ImageSourceSnapshot):
+    """Nonrecursive historical source facts, independent of retained assets."""
+
+    width: PositiveInt
+    height: PositiveInt
+    seed: int
+    edit_lineage: tuple[AcceptedEdit, ...]
+
+    def require_output_dimensions(
+        self,
+        output_size: RefineOutputSize | EditOutputSize,
+        width: int,
+        height: int,
+    ) -> None:
+        """Validate derived output against captured, possibly legacy source pixels."""
+        if isinstance(output_size, CurrentSourceSize):
+            if (output_size.width, output_size.height) != (self.width, self.height):
+                raise ValueError("current-size derived output must match its source dimensions")
+            if (width, height) != (output_size.width, output_size.height):
+                raise ValueError("derived dimensions must match the selected output size")
+        elif width * height <= self.width * self.height:
+            raise ValueError("preset derived output must have more pixels than its source")
+
+
 class RefineTransformation(StrEnum):
     """Named Refine transformations with fixed production strengths."""
 
@@ -523,39 +547,47 @@ class LegacyGenerateProvenance(DomainModel):
 
 
 class RefineProvenance(DomainModel):
-    """Provenance for an accepted Refine derived from one source revision."""
+    """Provenance for an accepted Refine with self-contained historical facts."""
 
     operation: Literal["refine"] = "refine"
-    source: ImageSourceSnapshot
+    source: DerivedImageSourceSnapshot
     description: str
     style: StyleSnapshot | None = None
-    edit_lineage: tuple[AcceptedEdit, ...] = Field(default_factory=tuple)
     render_prompt: NonEmptyString
     output_size: RefineOutputSize
     transformation: RefineTransformation
     strength: FiniteFloat = Field(ge=0.0, le=1.0)
     settings: ImageOperationSettings
 
+    @property
+    def edit_lineage(self) -> tuple[AcceptedEdit, ...]:
+        """Inherit the captured source's accepted edits unchanged."""
+        return self.source.edit_lineage
+
     @model_validator(mode="after")
-    def require_transformation_strength(self) -> RefineProvenance:
+    def require_refine_contract(self) -> RefineProvenance:
         if self.strength != self.transformation.strength:
             raise ValueError(
                 f"{self.transformation.value} Refine strength must be "
                 f"{self.transformation.strength:.2f}"
             )
+        if self.settings.seed != self.source.seed:
+            raise ValueError("Refine must reuse its captured source seed")
+        self.source.require_output_dimensions(
+            self.output_size, self.settings.width, self.settings.height
+        )
         return self
 
 
 class EditProvenance(DomainModel):
-    """Provenance for an accepted Edit derived from one source revision."""
+    """Provenance for an accepted Edit with self-contained historical facts."""
 
     operation: Literal["edit"] = "edit"
-    source: ImageSourceSnapshot
+    source: DerivedImageSourceSnapshot
     instruction: NonEmptyString
     preserve: EditPreserveOptions
     expanded_prompt: NonEmptyString
     output_size: EditOutputSize
-    edit_lineage: tuple[AcceptedEdit, ...] = Field(min_length=1)
     prompt_token_count: PositiveInt
     prompt_token_budget: Literal[512] = 512
     settings: ImageOperationSettings
@@ -569,12 +601,18 @@ class EditProvenance(DomainModel):
             expanded_prompt=self.expanded_prompt,
         )
 
+    @property
+    def edit_lineage(self) -> tuple[AcceptedEdit, ...]:
+        """Append this accepted Edit to the one canonical inherited sequence."""
+        return (*self.source.edit_lineage, self.accepted_edit)
+
     @model_validator(mode="after")
-    def require_current_edit_at_lineage_end(self) -> EditProvenance:
-        if self.edit_lineage[-1] != self.accepted_edit:
-            raise ValueError("Edit lineage must end with the accepted current Edit")
+    def require_edit_contract(self) -> EditProvenance:
         if self.prompt_token_count > self.prompt_token_budget:
             raise ValueError("Edit prompt token count exceeds its 512-token budget")
+        self.source.require_output_dimensions(
+            self.output_size, self.settings.width, self.settings.height
+        )
         return self
 
 
@@ -651,6 +689,14 @@ class GeneratedBackground(DomainModel):
     image_path: NonEmptyString
     provenance: ImageProvenance
     created_at: AwareDatetime
+
+    @model_validator(mode="after")
+    def require_independent_source_background(self) -> GeneratedBackground:
+        original = original_image_provenance(self.provenance)
+        if isinstance(original, (RefineProvenance, EditProvenance)):
+            if original.source.background_id == self.id:
+                raise ValueError("derived source background identity must differ from its result")
+        return self
 
 
 Background = GeneratedBackground
@@ -799,13 +845,6 @@ class Stack(DomainModel):
         revision_ids = [revision.id for card in self.cards for revision in card.revisions]
         if len(revision_ids) != len(set(revision_ids)):
             raise ValueError("revision IDs must be unique within a stack")
-        revisions_by_id = {
-            revision.id: revision for card in self.cards for revision in card.revisions
-        }
-        revision_card_ids = {
-            revision.id: card.id for card in self.cards for revision in card.revisions
-        }
-        derived_sources: dict[UUID, UUID] = {}
         style_ids = [style.id for style in self.styles]
         known_style_ids = set(style_ids)
         if len(style_ids) != len(known_style_ids):
@@ -907,57 +946,6 @@ class Stack(DomainModel):
                         original_provenance.settings.height,
                     ) != expected_dimensions:
                         raise ValueError("Edit dimensions must match its selected output size")
-                if isinstance(provenance, (RefineProvenance, EditProvenance)):
-                    source = provenance.source
-                    if source.revision_id not in revision_card_ids:
-                        raise ValueError(
-                            "derived image sources must identify a revision in this stack"
-                        )
-                    if revision_card_ids[source.revision_id] != source.card_id:
-                        raise ValueError("derived image source card must own the source revision")
-                    if source.revision_id == revision.id:
-                        raise ValueError("a revision cannot derive from itself")
-                    source_background = revisions_by_id[source.revision_id].background
-                    if source_background is None or source_background.id != source.background_id:
-                        raise ValueError(
-                            "derived image source background must match the source revision"
-                        )
-                    if isinstance(
-                        provenance,
-                        (RefineProvenance, EditProvenance),
-                    ) and isinstance(
-                        provenance.output_size,
-                        CurrentSourceSize,
-                    ):
-                        source_settings = image_operation_settings(source_background.provenance)
-                        if (
-                            provenance.output_size.width,
-                            provenance.output_size.height,
-                        ) != (
-                            source_settings.width,
-                            source_settings.height,
-                        ):
-                            raise ValueError(
-                                "current-size derived output must match its source "
-                                "background dimensions"
-                            )
-                    if isinstance(
-                        provenance,
-                        EditProvenance,
-                    ) and isinstance(
-                        provenance.output_size,
-                        PresetOutputSize,
-                    ):
-                        source_settings = image_operation_settings(source_background.provenance)
-                        if (
-                            provenance.settings.width * provenance.settings.height
-                            <= source_settings.width * source_settings.height
-                        ):
-                            raise ValueError(
-                                "preset Edit output must have more pixels than "
-                                "its source background"
-                            )
-                    derived_sources[revision.id] = source.revision_id
                 resolved_reference_ids: list[UUID] = []
                 for reference in revision.references:
                     if not isinstance(reference, ResolvedCardReference):
@@ -1010,31 +998,6 @@ class Stack(DomainModel):
                             "label",
                             derived_label,
                         )
-        for revision_id in derived_sources:
-            visited: set[UUID] = set()
-            current_revision_id = revision_id
-            while current_revision_id in derived_sources:
-                if current_revision_id in visited:
-                    raise ValueError("derived image source lineage cannot contain cycles")
-                visited.add(current_revision_id)
-                current_revision_id = derived_sources[current_revision_id]
-        for revision_id, source_revision_id in derived_sources.items():
-            provenance = revisions_by_id[revision_id].provenance
-            source_provenance = revisions_by_id[source_revision_id].provenance
-            assert isinstance(provenance, (RefineProvenance, EditProvenance))
-            assert source_provenance is not None
-            source_lineage = image_edit_lineage(source_provenance)
-            if isinstance(provenance, RefineProvenance):
-                if provenance.edit_lineage != source_lineage:
-                    raise ValueError("Refine lineage must equal its source revision lineage")
-            elif provenance.edit_lineage != (
-                *source_lineage,
-                provenance.accepted_edit,
-            ):
-                raise ValueError(
-                    "Edit lineage must equal its source revision lineage plus "
-                    "the accepted current Edit"
-                )
         return self
 
     def style_by_id(self, style_id: UUID | None) -> StyleDefinition | None:

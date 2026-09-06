@@ -47,11 +47,12 @@ from hotcards.application.commands import (
     next_duplicate_card_name,
 )
 from hotcards.application.document_controller import DocumentController
-from hotcards.domain.image_dependencies import image_source_dependencies
 from hotcards.domain.image_dimensions import AspectRatio, ResolutionTier
 from hotcards.domain.models import (
     Card,
     CardRevision,
+    CurrentSourceSize,
+    DerivedImageSourceSnapshot,
     DirectGenerateProvenance,
     DuplicateProvenance,
     GeneratedBackground,
@@ -75,6 +76,8 @@ from hotcards.domain.models import (
     Stack,
     StyleDefinition,
     UnresolvedCardReference,
+    image_edit_lineage,
+    image_operation_settings,
 )
 
 
@@ -148,14 +151,18 @@ def refined_background(
         id=asset_id,
         image_path=f"assets/cards/card/image-{asset_id}.png",
         provenance=RefineProvenance(
-            source=ImageSourceSnapshot(
+            source=DerivedImageSourceSnapshot(
                 card_id=source_card_id,
                 revision_id=source_revision.id,
                 background_id=source_revision.background.id,
+                width=512,
+                height=384,
+                seed=image_operation_settings(source_revision.background.provenance).seed,
+                edit_lineage=image_edit_lineage(source_revision.background.provenance),
             ),
             description="Refined card",
             render_prompt="Refined card",
-            output_size=PresetOutputSize(tier=ResolutionTier.MEDIUM),
+            output_size=CurrentSourceSize(width=512, height=384),
             transformation=RefineTransformation.BALANCED,
             strength=0.5,
             settings=operation_settings(),
@@ -742,7 +749,7 @@ def test_duplicate_and_delete_revisions_choose_safe_active_revision() -> None:
         ).apply(document)
 
 
-def test_source_revision_deletion_is_blocked_by_derived_revision() -> None:
+def test_source_revision_deletion_and_replacement_leave_derived_revision_independent() -> None:
     source = CardRevision(background=generated_background("Source"))
     card_id = uuid4()
     derived = CardRevision(
@@ -759,28 +766,22 @@ def test_source_revision_deletion_is_blocked_by_derived_revision() -> None:
     )
     document = Stack(name="Stack", cards=(card,))
 
-    dependencies = image_source_dependencies(document, (source.id,))
-    assert [(item.dependent_revision_id, item.operation) for item in dependencies] == [
-        (derived.id, "refine")
-    ]
-    with pytest.raises(CommandError, match='Reinterpret revision 2 on card "Evolution"'):
-        DeleteRevisionCommand(
-            card_id=card.id,
-            revision_id=source.id,
-        ).apply(document)
-    with pytest.raises(
-        CommandError,
-        match="cannot replace this source background.*Reinterpret revision 2",
-    ):
+    controller = DocumentController(document)
+    controller.execute(
         ReplaceRevisionBackgroundCommand(
-            card_id=card.id,
-            revision_id=source.id,
-            background=generated_background("Replacement"),
-        ).apply(document)
-    assert document.cards[0].revisions[0] == source
+            card_id=card.id, revision_id=source.id, background=generated_background("Replacement")
+        )
+    )
+    assert controller.document.cards[0].revisions[1] == derived
+    controller.execute(DeleteRevisionCommand(card_id=card.id, revision_id=source.id))
+    assert controller.document.cards[0].revisions == (derived,)
+    assert Stack.model_validate_json(controller.document.model_dump_json()) == controller.document
+    controller.undo()
+    controller.undo()
+    assert controller.document == document
 
 
-def test_whole_card_deletion_removes_internal_lineage_but_blocks_external_dependents() -> None:
+def test_whole_card_deletion_leaves_external_derived_backgrounds_independent() -> None:
     source = CardRevision(background=generated_background("Source"))
     source_card_id = uuid4()
     internal = CardRevision(
@@ -815,8 +816,33 @@ def test_whole_card_deletion_removes_internal_lineage_but_blocks_external_depend
         cards=(source_card, dependent),
     )
 
-    with pytest.raises(CommandError, match='card "Dependent" derives from it'):
-        DeleteCardCommand(card_id=source_card.id).apply(external_document)
+    deleted = DeleteCardCommand(card_id=source_card.id).apply(external_document)
+    assert deleted.cards == (dependent,)
+    assert Stack.model_validate_json(deleted.model_dump_json()) == deleted
+
+
+def test_derived_background_can_replace_its_own_version_and_undo() -> None:
+    source = CardRevision(background=generated_background("Source"), description="Source")
+    card = Card(name="Card", revisions=(source,))
+    controller = DocumentController(Stack(name="Stack", cards=(card,)))
+    background = refined_background(source_card_id=card.id, source_revision=source)
+
+    controller.execute(
+        ReplaceRevisionBackgroundCommand(
+            card_id=card.id, revision_id=source.id, background=background
+        )
+    )
+
+    changed = controller.document.cards[0].active_revision
+    assert changed.id == source.id
+    assert len(controller.document.cards[0].revisions) == 1
+    assert changed.background == background
+    assert changed.background.id != source.background.id
+    assert Stack.model_validate_json(controller.document.model_dump_json()) == controller.document
+    controller.undo()
+    assert controller.document.cards == (card,)
+    controller.redo()
+    assert controller.document.cards[0].active_revision == changed
 
 
 def test_polygon_destination_and_hotspot_order_changes() -> None:

@@ -145,19 +145,29 @@ for live MFLUX runs.
   for direct Generate, externally patched legacy Generate, Refine, Edit, and
   independent card duplication.
   Keep operation-specific prompts and settings typed rather than accumulating
-  nullable fields. Refine and Edit identify their exact source revision and
-  background. A Refine inherits its source revision's accepted Edit lineage
-  unchanged; an Edit appends exactly its accepted current Edit to that source
-  lineage. Current Generate and Refine dimensions must match their typed
+  nullable fields. Accept schema 13 only, without runtime loading or migration
+  of schema 12. Refine and Edit capture a nonrecursive historical source snapshot:
+  card/revision/background IDs, decoded width/height, flattened source operation
+  seed, and one canonical inherited accepted Edit sequence. Store no source
+  paths or recursively embedded provenance. Refine exposes that sequence unchanged;
+  Edit exposes it plus exactly its accepted current Edit, without persisting a
+  second lineage array. Preserve exact instruction, Preserve, and expanded-prompt
+  facts. Source attribution need not resolve to retained cards or revisions, and
+  may name the result's revision, but source and result background IDs must differ.
+  Current Generate and Refine dimensions must match their typed
   output-size selection. Preset output must match the stack aspect ratio;
   exact Generate output must be positive, 16-aligned, and aspect-compatible;
-  current Refine/Edit output must equal its resolved source dimensions. Edit
-  preset dimensions must match its named tier and stack aspect ratio. Legacy
+  current Refine/Edit output must equal its captured source dimensions. Derived
+  preset dimensions must match their named tier and stack aspect ratio and have
+  strictly greater area than the captured source. Refine must reuse the captured
+  source seed. Historical source dimensions are positive facts, not necessarily
+  modern aligned/aspect-compatible output sizes. Legacy
   Generate preserves its exact historical prompt and dimensions without
-  imposing a modern preset. Block
-  source revision deletion or background replacement while any retained
-  revision derives from it. Whole card deletion may remove dependencies wholly
-  contained in that card, but must reject dependencies from retained cards.
+  imposing a modern preset. Historical provenance never blocks source revision
+  deletion, background replacement, or whole card deletion. Keep asset retention
+  tied to the current document and Undo/Redo history, not source attribution.
+  Preserve live immutable source snapshots, decoded-dimension request checks, and
+  stale-result/race rejection independently of these historical facts.
 - Route all production and evaluation Generate, Reinterpret, and Edit inference
   through one typed MFLUX adapter. Plain Generate and Reinterpret use the regular
   family; Reference-backed Generate and Edit use the Edit family. Serialize

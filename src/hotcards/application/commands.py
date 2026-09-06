@@ -6,7 +6,6 @@ from dataclasses import dataclass, field
 from typing import Literal, Protocol
 from uuid import UUID, uuid4
 
-from hotcards.domain.image_dependencies import image_source_dependencies
 from hotcards.domain.models import (
     Background,
     Card,
@@ -394,20 +393,6 @@ class DeleteCardCommand:
     def apply(self, document: Stack) -> Stack:
         index = _card_index(document, self.card_id)
         deleted_card = document.cards[index]
-        deleted_revision_ids = tuple(revision.id for revision in deleted_card.revisions)
-        dependencies = image_source_dependencies(
-            document,
-            deleted_revision_ids,
-            excluding_revision_ids=deleted_revision_ids,
-        )
-        if dependencies:
-            dependent = dependencies[0]
-            raise CommandError(
-                f'cannot delete card "{deleted_card.name}" because '
-                f"{dependent.operation_label} revision "
-                f"{dependent.dependent_revision_number} on card "
-                f'"{dependent.dependent_card_name}" derives from it'
-            )
         cards = tuple(
             _unresolve_inbound_references(
                 card,
@@ -944,15 +929,6 @@ class DeleteRevisionCommand:
         revision_index = _revision_index(card, self.revision_id)
         if len(card.revisions) == 1:
             raise CommandError("a card must retain at least one revision")
-        dependencies = image_source_dependencies(document, (self.revision_id,))
-        if dependencies:
-            dependent = dependencies[0]
-            raise CommandError(
-                "cannot delete this source revision because "
-                f"{dependent.operation_label} revision "
-                f"{dependent.dependent_revision_number} on card "
-                f'"{dependent.dependent_card_name}" derives from it'
-            )
         revisions = list(card.revisions)
         revisions.pop(revision_index)
         active_revision_id = card.active_revision_id
@@ -981,19 +957,6 @@ class ReplaceRevisionBackgroundCommand:
         card = document.cards[card_index]
         revision_index = _revision_index(card, self.revision_id)
         current_revision = card.revisions[revision_index]
-        if (
-            current_revision.background is not None
-            and self.background != current_revision.background
-        ):
-            dependencies = image_source_dependencies(document, (self.revision_id,))
-            if dependencies:
-                dependent = dependencies[0]
-                raise CommandError(
-                    "cannot replace this source background because "
-                    f"{dependent.operation_label} revision "
-                    f"{dependent.dependent_revision_number} on card "
-                    f'"{dependent.dependent_card_name}" derives from it'
-                )
         revision = current_revision.model_copy(
             update={
                 "background": (

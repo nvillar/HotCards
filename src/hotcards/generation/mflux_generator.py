@@ -27,6 +27,7 @@ from hotcards.domain.image_dimensions import (
 from hotcards.domain.models import (
     AcceptedEdit,
     CurrentSourceSize,
+    DerivedImageSourceSnapshot,
     DirectGenerateProvenance,
     DomainModel,
     EditOutputSize,
@@ -36,7 +37,6 @@ from hotcards.domain.models import (
     GenerateInputs,
     GenerateOutputSize,
     ImageOperationSettings,
-    ImageSourceSnapshot,
     NonEmptyString,
     PositiveInt,
     PresetOutputSize,
@@ -275,20 +275,27 @@ class MfluxRefineRequest(_MfluxRequest):
     """Regular Flux2Klein img2img request for one current source image."""
 
     operation: Literal["refine"] = "refine"
-    source: ImageSourceSnapshot
+    source: DerivedImageSourceSnapshot
     source_image_path: Path
-    source_seed: int
     description: str
     style: StyleSnapshot | None = None
-    edit_lineage: tuple[AcceptedEdit, ...] = Field(default_factory=tuple)
     render_prompt: NonEmptyString
     output_size: RefineOutputSize
     transformation: RefineTransformation
     image_strength: FiniteFloat = Field(ge=0.0, le=1.0)
 
+    @property
+    def source_seed(self) -> int:
+        return self.source.seed
+
+    @property
+    def edit_lineage(self) -> tuple[AcceptedEdit, ...]:
+        return self.source.edit_lineage
+
     @model_validator(mode="after")
     def require_refine_contract(self) -> MfluxRefineRequest:
         self.require_dimensions(self.output_size)
+        self.source.require_output_dimensions(self.output_size, self.width, self.height)
         if self.image_strength != self.transformation.strength:
             raise ValueError(
                 f"{self.transformation.value} Refine image strength must be "
@@ -301,13 +308,12 @@ class MfluxEditRequest(_MfluxRequest):
     """Flux2KleinEdit request for one current source image."""
 
     operation: Literal["edit"] = "edit"
-    source: ImageSourceSnapshot
+    source: DerivedImageSourceSnapshot
     source_image_path: Path
     instruction: NonEmptyString
     preserve: EditPreserveOptions
     expanded_prompt: NonEmptyString
     output_size: EditOutputSize
-    edit_lineage: tuple[AcceptedEdit, ...] = Field(min_length=1)
     seed: int
 
     @property
@@ -318,11 +324,14 @@ class MfluxEditRequest(_MfluxRequest):
             expanded_prompt=self.expanded_prompt,
         )
 
+    @property
+    def edit_lineage(self) -> tuple[AcceptedEdit, ...]:
+        return (*self.source.edit_lineage, self.accepted_edit)
+
     @model_validator(mode="after")
     def require_edit_contract(self) -> MfluxEditRequest:
         self.require_dimensions(self.output_size)
-        if self.edit_lineage[-1] != self.accepted_edit:
-            raise ValueError("Edit request lineage must end with the accepted current Edit")
+        self.source.require_output_dimensions(self.output_size, self.width, self.height)
         return self
 
 
@@ -1020,6 +1029,19 @@ class MfluxGenerator:
                 raise ImageGenerationError(
                     f"MFLUX {request.operation} source image {position} does not exist: {source}"
                 )
+        if isinstance(request, (MfluxRefineRequest, MfluxEditRequest)):
+            try:
+                with Image.open(request.source_image_path) as image:
+                    image.load()
+                    dimensions = image.size
+            except (OSError, UnidentifiedImageError) as error:
+                raise ImageGenerationError(
+                    f"MFLUX {request.operation} source image is unreadable: {error}"
+                ) from error
+            if dimensions != (request.source.width, request.source.height):
+                raise ImageGenerationError(
+                    f"MFLUX {request.operation} source dimensions do not match its snapshot"
+                )
 
     @staticmethod
     def _validate_output(
@@ -1080,7 +1102,6 @@ class MfluxGenerator:
                     source=request.source,
                     description=request.description,
                     style=request.style,
-                    edit_lineage=request.edit_lineage,
                     render_prompt=request.render_prompt,
                     output_size=request.output_size,
                     transformation=request.transformation,
@@ -1101,7 +1122,6 @@ class MfluxGenerator:
                     preserve=request.preserve,
                     expanded_prompt=request.expanded_prompt,
                     output_size=request.output_size,
-                    edit_lineage=request.edit_lineage,
                     prompt_token_count=prompt_token_count,
                     prompt_token_budget=EDIT_PROMPT_TOKEN_BUDGET,
                     settings=settings,

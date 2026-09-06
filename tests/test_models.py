@@ -21,6 +21,7 @@ from hotcards.domain.models import (
     Card,
     CardRevision,
     CurrentSourceSize,
+    DerivedImageSourceSnapshot,
     DirectGenerateProvenance,
     DuplicateProvenance,
     EditPreserveOptions,
@@ -53,6 +54,9 @@ from hotcards.domain.models import (
     StyleDefinition,
     StyleSnapshot,
     UnresolvedCardReference,
+    image_edit_lineage,
+    image_operation_settings,
+    original_image_provenance,
 )
 
 
@@ -107,6 +111,26 @@ def image_provenance() -> DirectGenerateProvenance:
         ),
         render_prompt="A moonlit courtyard",
         settings=image_settings(),
+    )
+
+
+def derived_source_snapshot(
+    *,
+    card_id: UUID | None = None,
+    revision_id: UUID | None = None,
+    background_id: UUID | None = None,
+    width: int = 512,
+    height: int = 384,
+    edit_lineage: tuple[AcceptedEdit, ...] = (),
+) -> DerivedImageSourceSnapshot:
+    return DerivedImageSourceSnapshot(
+        card_id=card_id or uuid4(),
+        revision_id=revision_id or uuid4(),
+        background_id=background_id or uuid4(),
+        width=width,
+        height=height,
+        seed=42,
+        edit_lineage=edit_lineage,
     )
 
 
@@ -682,21 +706,37 @@ def test_stack_requires_generate_dimensions_for_every_schema_combination(
         )
 
 
-def test_legacy_generate_preserves_historic_nonpreset_dimensions() -> None:
+@pytest.mark.parametrize("duplicate", (False, True))
+def test_legacy_generate_preserves_historic_nonpreset_dimensions(duplicate: bool) -> None:
+    legacy = LegacyGenerateProvenance(
+        render_prompt="Historical exact prompt\n\nKeep authored  spacing.",
+        references=(
+            ImageReferenceSnapshot(card_id=uuid4(), revision_id=uuid4(), background_id=uuid4()),
+        ),
+        settings=image_settings(width=1007, height=783),
+    )
     background = GeneratedBackground(
         image_path="assets/cards/card/legacy.png",
-        provenance=LegacyGenerateProvenance(
-            render_prompt="Historical exact prompt",
-            settings=image_settings(width=1008, height=784),
+        provenance=(
+            DuplicateProvenance(
+                source=ImageSourceSnapshot(
+                    card_id=uuid4(), revision_id=uuid4(), background_id=uuid4()
+                ),
+                original_provenance=legacy,
+            )
+            if duplicate
+            else legacy
         ),
         created_at=datetime.now(UTC),
     )
 
-    Stack(
+    stack = Stack(
         name="Historical",
         aspect_ratio=AspectRatio.LANDSCAPE,
         cards=(Card(name="Card", revisions=(CardRevision(background=background),)),),
     )
+    loaded = Stack.model_validate_json(stack.model_dump_json())
+    assert original_image_provenance(loaded.cards[0].active_revision.provenance) == legacy
 
 
 def test_image_provenance_union_is_discriminated_strict_and_round_trips() -> None:
@@ -721,22 +761,20 @@ def test_image_provenance_union_is_discriminated_strict_and_round_trips() -> Non
             settings=image_settings(),
         ),
         RefineProvenance(
-            source=source,
+            source=derived_source_snapshot(edit_lineage=(accepted_edit,)),
             description="A moonlit courtyard",
-            edit_lineage=(accepted_edit,),
             render_prompt="A moonlit courtyard. Open the gate.",
-            output_size=PresetOutputSize(tier=ResolutionTier.MEDIUM),
+            output_size=CurrentSourceSize(width=512, height=384),
             transformation=RefineTransformation.BALANCED,
             strength=0.50,
             settings=image_settings(),
         ),
         EditProvenance(
-            source=source,
+            source=derived_source_snapshot(),
             instruction=accepted_edit.instruction,
             preserve=accepted_edit.preserve,
             expanded_prompt=accepted_edit.expanded_prompt,
             output_size=PresetOutputSize(tier=ResolutionTier.FULL),
-            edit_lineage=(accepted_edit,),
             prompt_token_count=24,
             settings=image_settings(width=1024, height=768),
         ),
@@ -779,12 +817,11 @@ def test_duplicate_provenance_is_flattened_and_inherits_original_edit_lineage() 
         expanded_prompt="Open the gate. Preserve subject identity.",
     )
     original = EditProvenance(
-        source=source,
+        source=derived_source_snapshot(),
         instruction=accepted_edit.instruction,
         preserve=accepted_edit.preserve,
         expanded_prompt=accepted_edit.expanded_prompt,
         output_size=CurrentSourceSize(width=512, height=384),
-        edit_lineage=(accepted_edit,),
         prompt_token_count=24,
         settings=image_settings(),
     )
@@ -794,6 +831,8 @@ def test_duplicate_provenance_is_flattened_and_inherits_original_edit_lineage() 
     )
 
     assert duplicate.settings == original.settings
+    assert original_image_provenance(duplicate) == original
+    assert image_edit_lineage(duplicate) == (accepted_edit,)
     with pytest.raises(ValidationError, match="union_tag_invalid"):
         DuplicateProvenance.model_validate(
             {
@@ -815,12 +854,11 @@ def test_derived_operation_inherits_lineage_from_independent_duplicate() -> None
         expanded_prompt="Open the gate. Preserve subject identity.",
     )
     original = EditProvenance(
-        source=original_source,
+        source=derived_source_snapshot(),
         instruction=accepted_edit.instruction,
         preserve=accepted_edit.preserve,
         expanded_prompt=accepted_edit.expanded_prompt,
         output_size=CurrentSourceSize(width=512, height=384),
-        edit_lineage=(accepted_edit,),
         prompt_token_count=24,
         settings=image_settings(),
     )
@@ -840,15 +878,15 @@ def test_derived_operation_inherits_lineage_from_independent_duplicate() -> None
         background=GeneratedBackground(
             image_path="assets/cards/refined.png",
             provenance=RefineProvenance(
-                source=ImageSourceSnapshot(
+                source=derived_source_snapshot(
                     card_id=duplicate_card_id,
                     revision_id=duplicate_revision.id,
                     background_id=duplicate_revision.background.id,
+                    edit_lineage=image_edit_lineage(duplicate_revision.background.provenance),
                 ),
                 description="Refined duplicate",
-                edit_lineage=(accepted_edit,),
                 render_prompt="Refined duplicate",
-                output_size=PresetOutputSize(tier=ResolutionTier.MEDIUM),
+                output_size=CurrentSourceSize(width=512, height=384),
                 transformation=RefineTransformation.BALANCED,
                 strength=0.50,
                 settings=image_settings(),
@@ -868,29 +906,13 @@ def test_derived_operation_inherits_lineage_from_independent_duplicate() -> None
         ),
     )
 
-    assert refined.background is not None
-    invalid_refined = refined.model_copy(
-        update={
-            "background": refined.background.model_copy(
-                update={
-                    "provenance": refined.background.provenance.model_copy(
-                        update={"edit_lineage": ()}
-                    )
-                }
-            )
-        }
+    assert refined.provenance is not None
+    assert image_edit_lineage(refined.provenance) == (accepted_edit,)
+    independent = Stack(
+        name="Independent",
+        cards=(Card(id=duplicate_card_id, name="Duplicate", revisions=(refined,)),),
     )
-    with pytest.raises(ValidationError, match="Refine lineage"):
-        Stack(
-            name="Invalid",
-            cards=(
-                Card(
-                    id=duplicate_card_id,
-                    name="Duplicate",
-                    revisions=(duplicate_revision, invalid_refined),
-                ),
-            ),
-        )
+    assert Stack.model_validate_json(independent.model_dump_json()) == independent
 
 
 def test_direct_generate_provenance_requires_authored_inputs() -> None:
@@ -928,11 +950,7 @@ def test_edit_preserve_options_use_only_approved_serialized_categories() -> None
 
 
 def test_refine_and_edit_provenance_enforce_operation_invariants() -> None:
-    source = ImageSourceSnapshot(
-        card_id=uuid4(),
-        revision_id=uuid4(),
-        background_id=uuid4(),
-    )
+    source = derived_source_snapshot()
     preserve = EditPreserveOptions(subject_identity=True)
     accepted = AcceptedEdit(
         instruction="Open the gate.",
@@ -968,7 +986,6 @@ def test_refine_and_edit_provenance_enforce_operation_invariants() -> None:
             preserve=accepted.preserve,
             expanded_prompt=accepted.expanded_prompt,
             output_size=PresetOutputSize(tier=ResolutionTier.MEDIUM),
-            edit_lineage=(accepted,),
             prompt_token_count=513,
             settings=image_settings(),
         )
@@ -998,10 +1015,12 @@ def test_edit_current_output_size_matches_exact_source_dimensions() -> None:
             background=GeneratedBackground(
                 image_path="assets/cards/card/edited.png",
                 provenance=EditProvenance(
-                    source=ImageSourceSnapshot(
+                    source=derived_source_snapshot(
                         card_id=card_id,
                         revision_id=source.id,
                         background_id=source.background.id,
+                        width=1008,
+                        height=752,
                     ),
                     instruction=accepted.instruction,
                     preserve=accepted.preserve,
@@ -1010,7 +1029,6 @@ def test_edit_current_output_size_matches_exact_source_dimensions() -> None:
                         width=width,
                         height=height,
                     ),
-                    edit_lineage=(accepted,),
                     prompt_token_count=12,
                     settings=image_settings(width=width, height=height),
                 ),
@@ -1031,19 +1049,8 @@ def test_edit_current_output_size_matches_exact_source_dimensions() -> None:
         ),
     )
 
-    mismatched = edited_revision(992, 752)
     with pytest.raises(ValidationError, match="current-size derived output"):
-        Stack(
-            name="Invalid",
-            cards=(
-                Card(
-                    id=card_id,
-                    name="Card",
-                    revisions=(source, mismatched),
-                    active_revision_id=mismatched.id,
-                ),
-            ),
-        )
+        edited_revision(992, 752)
 
 
 @pytest.mark.parametrize(
@@ -1103,41 +1110,22 @@ def test_edit_preset_output_must_be_strictly_larger_than_source(
         output_tier,
         AspectRatio.LANDSCAPE,
     )
-    edited = CardRevision(
-        background=GeneratedBackground(
-            image_path="assets/cards/card/edited.png",
-            provenance=EditProvenance(
-                source=ImageSourceSnapshot(
-                    card_id=card_id,
-                    revision_id=source.id,
-                    background_id=source.background.id,
-                ),
-                instruction=accepted.instruction,
-                preserve=accepted.preserve,
-                expanded_prompt=accepted.expanded_prompt,
-                output_size=PresetOutputSize(tier=output_tier),
-                edit_lineage=(accepted,),
-                prompt_token_count=12,
-                settings=image_settings(
-                    width=output_width,
-                    height=output_height,
-                ),
-            ),
-            created_at=datetime.now(UTC),
-        )
-    )
-
     with pytest.raises(ValidationError, match="more pixels"):
-        Stack(
-            name="Invalid",
-            cards=(
-                Card(
-                    id=card_id,
-                    name="Card",
-                    revisions=(source, edited),
-                    active_revision_id=edited.id,
-                ),
+        EditProvenance(
+            source=derived_source_snapshot(
+                card_id=card_id,
+                revision_id=source.id,
+                background_id=source.background.id,
+                width=source_width,
+                height=source_height,
+                edit_lineage=image_edit_lineage(source_provenance),
             ),
+            instruction=accepted.instruction,
+            preserve=accepted.preserve,
+            expanded_prompt=accepted.expanded_prompt,
+            output_size=PresetOutputSize(tier=output_tier),
+            prompt_token_count=12,
+            settings=image_settings(width=output_width, height=output_height),
         )
 
 
@@ -1176,7 +1164,7 @@ def test_edit_preset_output_accepts_strictly_larger_source_area(
         background=GeneratedBackground(
             image_path="assets/cards/card/edited.png",
             provenance=EditProvenance(
-                source=ImageSourceSnapshot(
+                source=derived_source_snapshot(
                     card_id=card_id,
                     revision_id=source.id,
                     background_id=source.background.id,
@@ -1185,7 +1173,6 @@ def test_edit_preset_output_accepts_strictly_larger_source_area(
                 preserve=accepted.preserve,
                 expanded_prompt=accepted.expanded_prompt,
                 output_size=PresetOutputSize(tier=ResolutionTier.LARGE),
-                edit_lineage=(accepted,),
                 prompt_token_count=12,
                 settings=image_settings(width=768, height=576),
             ),
@@ -1206,7 +1193,7 @@ def test_edit_preset_output_accepts_strictly_larger_source_area(
     )
 
 
-def test_derived_provenance_requires_a_source_revision_in_the_declared_card() -> None:
+def test_derived_provenance_survives_deleted_source_cards_and_backgrounds() -> None:
     source = CardRevision(
         background=GeneratedBackground(
             image_path="assets/cards/source/image-source.png",
@@ -1219,14 +1206,14 @@ def test_derived_provenance_requires_a_source_revision_in_the_declared_card() ->
         background=GeneratedBackground(
             image_path="assets/cards/derived/image-derived.png",
             provenance=RefineProvenance(
-                source=ImageSourceSnapshot(
+                source=derived_source_snapshot(
                     card_id=source_card.id,
                     revision_id=source.id,
                     background_id=source.background.id,
                 ),
                 description="A refined courtyard",
                 render_prompt="A refined courtyard",
-                output_size=PresetOutputSize(tier=ResolutionTier.MEDIUM),
+                output_size=CurrentSourceSize(width=512, height=384),
                 transformation=RefineTransformation.PRESERVE,
                 strength=0.75,
                 settings=image_settings(),
@@ -1237,43 +1224,13 @@ def test_derived_provenance_requires_a_source_revision_in_the_declared_card() ->
     dependent_card = Card(name="Dependent", revisions=(derived,))
 
     Stack(name="Valid", cards=(source_card, dependent_card))
-    wrong_source = derived.provenance
-    assert isinstance(wrong_source, RefineProvenance)
-    invalid_provenance = wrong_source.model_copy(
-        update={"source": wrong_source.source.model_copy(update={"card_id": dependent_card.id})}
-    )
-    invalid_derived = derived.model_copy(
-        update={
-            "background": derived.background.model_copy(update={"provenance": invalid_provenance})
-        }
-    )
-    with pytest.raises(ValidationError, match="source card"):
-        Stack(
-            name="Invalid",
-            cards=(
-                source_card,
-                dependent_card.model_copy(update={"revisions": (invalid_derived,)}),
-            ),
-        )
-    mismatched_source = wrong_source.model_copy(
-        update={"source": wrong_source.source.model_copy(update={"background_id": uuid4()})}
-    )
-    mismatched_derived = derived.model_copy(
-        update={
-            "background": derived.background.model_copy(update={"provenance": mismatched_source})
-        }
-    )
-    with pytest.raises(ValidationError, match="source background"):
-        Stack(
-            name="Invalid",
-            cards=(
-                source_card,
-                dependent_card.model_copy(update={"revisions": (mismatched_derived,)}),
-            ),
-        )
+    independent = Stack(name="Independent", cards=(dependent_card,))
+    loaded = Stack.model_validate_json(independent.model_dump_json())
+    assert loaded == independent
+    assert loaded.cards[0].active_revision.provenance == derived.provenance
 
 
-def test_multistep_refine_and_edit_lineage_must_match_resolved_sources() -> None:
+def test_multistep_refine_and_edit_lineage_has_one_canonical_stored_sequence() -> None:
     card_id = uuid4()
     edit_one = AcceptedEdit(
         instruction="Open the gate.",
@@ -1302,7 +1259,7 @@ def test_multistep_refine_and_edit_lineage_must_match_resolved_sources() -> None
         background=GeneratedBackground(
             image_path="assets/cards/card/edit-one.png",
             provenance=EditProvenance(
-                source=ImageSourceSnapshot(
+                source=derived_source_snapshot(
                     card_id=card_id,
                     revision_id=direct.id,
                     background_id=direct.background.id,
@@ -1311,7 +1268,6 @@ def test_multistep_refine_and_edit_lineage_must_match_resolved_sources() -> None
                 preserve=edit_one.preserve,
                 expanded_prompt=edit_one.expanded_prompt,
                 output_size=CurrentSourceSize(width=512, height=384),
-                edit_lineage=(edit_one,),
                 prompt_token_count=24,
                 settings=image_settings(),
             ),
@@ -1323,16 +1279,16 @@ def test_multistep_refine_and_edit_lineage_must_match_resolved_sources() -> None
         background=GeneratedBackground(
             image_path="assets/cards/card/edit-two.png",
             provenance=EditProvenance(
-                source=ImageSourceSnapshot(
+                source=derived_source_snapshot(
                     card_id=card_id,
                     revision_id=first_edit.id,
                     background_id=first_edit.background.id,
+                    edit_lineage=image_edit_lineage(first_edit.provenance),
                 ),
                 instruction=edit_two.instruction,
                 preserve=edit_two.preserve,
                 expanded_prompt=edit_two.expanded_prompt,
                 output_size=CurrentSourceSize(width=512, height=384),
-                edit_lineage=(edit_one, edit_two),
                 prompt_token_count=24,
                 settings=image_settings(),
             ),
@@ -1344,15 +1300,15 @@ def test_multistep_refine_and_edit_lineage_must_match_resolved_sources() -> None
         background=GeneratedBackground(
             image_path="assets/cards/card/refined.png",
             provenance=RefineProvenance(
-                source=ImageSourceSnapshot(
+                source=derived_source_snapshot(
                     card_id=card_id,
                     revision_id=second_edit.id,
                     background_id=second_edit.background.id,
+                    edit_lineage=image_edit_lineage(second_edit.provenance),
                 ),
                 description="A refined courtyard",
-                edit_lineage=(edit_one, edit_two),
                 render_prompt="A refined courtyard",
-                output_size=PresetOutputSize(tier=ResolutionTier.MEDIUM),
+                output_size=CurrentSourceSize(width=512, height=384),
                 transformation=RefineTransformation.BALANCED,
                 strength=0.50,
                 settings=image_settings(),
@@ -1365,16 +1321,16 @@ def test_multistep_refine_and_edit_lineage_must_match_resolved_sources() -> None
         background=GeneratedBackground(
             image_path="assets/cards/card/edit-three.png",
             provenance=EditProvenance(
-                source=ImageSourceSnapshot(
+                source=derived_source_snapshot(
                     card_id=card_id,
                     revision_id=refined.id,
                     background_id=refined.background.id,
+                    edit_lineage=image_edit_lineage(refined.provenance),
                 ),
                 instruction=edit_three.instruction,
                 preserve=edit_three.preserve,
                 expanded_prompt=edit_three.expanded_prompt,
                 output_size=CurrentSourceSize(width=512, height=384),
-                edit_lineage=(edit_one, edit_two, edit_three),
                 prompt_token_count=24,
                 settings=image_settings(),
             ),
@@ -1419,75 +1375,28 @@ def test_multistep_refine_and_edit_lineage_must_match_resolved_sources() -> None
                 cards=(valid_card.model_copy(update={"revisions": revisions}),),
             )
 
-    assert isinstance(refined.provenance, RefineProvenance)
-    dropped_refine = refined.model_copy(
-        update={
-            "background": refined.background.model_copy(
-                update={
-                    "provenance": refined.provenance.model_copy(
-                        update={"edit_lineage": (edit_two,)}
-                    )
-                }
-            )
-        }
-    )
-    with pytest.raises(ValidationError, match="Refine lineage"):
-        Stack(
-            name="Invalid",
-            cards=(
-                valid_card.model_copy(
-                    update={
-                        "revisions": (
-                            direct,
-                            first_edit,
-                            second_edit,
-                            dropped_refine,
-                            third_edit,
-                        )
-                    }
-                ),
-            ),
-        )
-
-    assert isinstance(third_edit.provenance, EditProvenance)
-    fabricated_edit = AcceptedEdit(
-        instruction="Invented.",
-        preserve=EditPreserveOptions(),
-        expanded_prompt="Invented.",
-    )
-    for invalid_lineage in (
-        (edit_two, edit_three),
-        (edit_two, edit_one, edit_three),
-        (edit_one, fabricated_edit, edit_two, edit_three),
+    for revision, inherited, resulting in (
+        (first_edit, (), (edit_one,)),
+        (second_edit, (edit_one,), (edit_one, edit_two)),
+        (refined, (edit_one, edit_two), (edit_one, edit_two)),
+        (third_edit, (edit_one, edit_two), (edit_one, edit_two, edit_three)),
     ):
-        invalid_third_edit = third_edit.model_copy(
-            update={
-                "background": third_edit.background.model_copy(
-                    update={
-                        "provenance": third_edit.provenance.model_copy(
-                            update={"edit_lineage": invalid_lineage}
-                        )
-                    }
-                )
-            }
+        provenance = revision.provenance
+        assert isinstance(provenance, (EditProvenance, RefineProvenance))
+        assert provenance.source.edit_lineage == inherited
+        assert image_edit_lineage(provenance) == resulting
+        payload = provenance.model_dump(mode="json")
+        assert "edit_lineage" not in payload
+        assert payload["source"]["edit_lineage"] == [
+            accepted.model_dump(mode="json") for accepted in inherited
+        ]
+        with pytest.raises(ValidationError, match="extra_forbidden"):
+            type(provenance).model_validate_json(json.dumps({**payload, "edit_lineage": []}))
+        independent = Stack(
+            name="Independent",
+            cards=(Card(id=card_id, name="Card", revisions=(revision,)),),
         )
-        with pytest.raises(ValidationError, match="Edit lineage"):
-            Stack(
-                name="Invalid",
-                cards=(
-                    valid_card.model_copy(
-                        update={
-                            "revisions": (
-                                direct,
-                                first_edit,
-                                second_edit,
-                                refined,
-                                invalid_third_edit,
-                            )
-                        }
-                    ),
-                ),
-            )
+        assert Stack.model_validate_json(independent.model_dump_json()) == independent
 
 
 def test_legacy_generate_source_has_an_empty_inherited_edit_lineage() -> None:
@@ -1497,7 +1406,7 @@ def test_legacy_generate_source_has_an_empty_inherited_edit_lineage() -> None:
             image_path="assets/cards/card/legacy.png",
             provenance=LegacyGenerateProvenance(
                 render_prompt="Historical exact prompt",
-                settings=image_settings(width=1008, height=784),
+                settings=image_settings(width=503, height=391),
             ),
             created_at=datetime.now(UTC),
         )
@@ -1507,17 +1416,20 @@ def test_legacy_generate_source_has_an_empty_inherited_edit_lineage() -> None:
         background=GeneratedBackground(
             image_path="assets/cards/card/refined.png",
             provenance=RefineProvenance(
-                source=ImageSourceSnapshot(
+                source=derived_source_snapshot(
                     card_id=card_id,
                     revision_id=legacy.id,
                     background_id=legacy.background.id,
+                    width=503,
+                    height=391,
+                    edit_lineage=image_edit_lineage(legacy.provenance),
                 ),
                 description="Refined",
                 render_prompt="Refined",
-                output_size=PresetOutputSize(tier=ResolutionTier.MEDIUM),
+                output_size=PresetOutputSize(tier=ResolutionTier.FULL),
                 transformation=RefineTransformation.BALANCED,
                 strength=0.50,
-                settings=image_settings(),
+                settings=image_settings(width=1024, height=768),
             ),
             created_at=datetime.now(UTC),
         )
@@ -1527,9 +1439,11 @@ def test_legacy_generate_source_has_an_empty_inherited_edit_lineage() -> None:
         name="Valid",
         cards=(Card(id=card_id, name="Card", revisions=(legacy, refined)),),
     )
+    assert image_edit_lineage(refined.provenance) == ()
+    assert image_operation_settings(legacy.provenance).width == 503
 
 
-def test_derived_image_source_lineage_rejects_cycles() -> None:
+def test_historical_source_ids_do_not_form_a_live_revision_graph() -> None:
     first_card_id, second_card_id = uuid4(), uuid4()
     first_revision_id, second_revision_id = uuid4(), uuid4()
     first_background_id, second_background_id = uuid4(), uuid4()
@@ -1539,14 +1453,14 @@ def test_derived_image_source_lineage_rejects_cycles() -> None:
             id=first_background_id,
             image_path="assets/cards/first.png",
             provenance=RefineProvenance(
-                source=ImageSourceSnapshot(
+                source=derived_source_snapshot(
                     card_id=second_card_id,
                     revision_id=second_revision_id,
                     background_id=second_background_id,
                 ),
                 description="First",
                 render_prompt="First",
-                output_size=PresetOutputSize(tier=ResolutionTier.MEDIUM),
+                output_size=CurrentSourceSize(width=512, height=384),
                 transformation=RefineTransformation.BALANCED,
                 strength=0.50,
                 settings=image_settings(),
@@ -1560,14 +1474,14 @@ def test_derived_image_source_lineage_rejects_cycles() -> None:
             id=second_background_id,
             image_path="assets/cards/second.png",
             provenance=RefineProvenance(
-                source=ImageSourceSnapshot(
+                source=derived_source_snapshot(
                     card_id=first_card_id,
                     revision_id=first_revision_id,
                     background_id=first_background_id,
                 ),
                 description="Second",
                 render_prompt="Second",
-                output_size=PresetOutputSize(tier=ResolutionTier.MEDIUM),
+                output_size=CurrentSourceSize(width=512, height=384),
                 transformation=RefineTransformation.BALANCED,
                 strength=0.50,
                 settings=image_settings(),
@@ -1576,14 +1490,151 @@ def test_derived_image_source_lineage_rejects_cycles() -> None:
         ),
     )
 
-    with pytest.raises(ValidationError, match="lineage cannot contain cycles"):
+    stack = Stack(
+        name="Independent",
+        cards=(
+            Card(id=first_card_id, name="First", revisions=(first_revision,)),
+            Card(id=second_card_id, name="Second", revisions=(second_revision,)),
+        ),
+    )
+    assert Stack.model_validate_json(stack.model_dump_json()) == stack
+
+
+def derived_provenance(
+    operation: str,
+    source: DerivedImageSourceSnapshot,
+) -> RefineProvenance | EditProvenance:
+    output_size = CurrentSourceSize(width=512, height=384)
+    if operation == "refine":
+        return RefineProvenance(
+            source=source,
+            description="Courtyard",
+            render_prompt="Courtyard",
+            output_size=output_size,
+            transformation=RefineTransformation.BALANCED,
+            strength=0.5,
+            settings=image_settings(),
+        )
+    return EditProvenance(
+        source=source,
+        instruction="Open the gate.",
+        preserve=EditPreserveOptions(background=True),
+        expanded_prompt="Open the gate. Preserve the background.",
+        output_size=output_size,
+        prompt_token_count=24,
+        settings=image_settings(),
+    )
+
+
+@pytest.mark.parametrize("operation", ("refine", "edit"))
+def test_same_version_derived_background_is_independent_and_round_trips(operation: str) -> None:
+    card_id, revision_id = uuid4(), uuid4()
+    source = derived_source_snapshot(card_id=card_id, revision_id=revision_id)
+    provenance = derived_provenance(operation, source)
+    background = GeneratedBackground(
+        image_path="assets/cards/result.png",
+        provenance=provenance,
+        created_at=datetime.now(UTC),
+    )
+    stack = Stack(
+        name="Independent",
+        cards=(
+            Card(
+                id=card_id,
+                name="Card",
+                revisions=(CardRevision(id=revision_id, background=background),),
+            ),
+        ),
+    )
+    assert Stack.model_validate_json(stack.model_dump_json()) == stack
+    with pytest.raises(ValidationError, match="identity must differ"):
+        GeneratedBackground.model_validate(
+            {**background.model_dump(mode="python"), "id": source.background_id}
+        )
+
+
+@pytest.mark.parametrize("operation", ("refine", "edit"))
+@pytest.mark.parametrize(
+    ("change", "message"),
+    (
+        ({"source": {"width": 496}}, "match its source dimensions"),
+        ({"settings": {"width": 496}}, "match the selected output size"),
+        ({"output_size": {"mode": "preset", "tier": ResolutionTier.MEDIUM}}, "more pixels"),
+        ({"source": {"height": 0}}, "greater than 0"),
+        ({"source": {"seed": True}}, "valid integer"),
+        ({"source": {"edit_lineage": ({"instruction": "Missing facts"},)}}, "Field required"),
+        ({"source": {"image_path": "old.png"}}, "extra_forbidden"),
+        ({"source": {"original_provenance": {}}}, "extra_forbidden"),
+    ),
+)
+def test_derived_provenance_validates_local_source_and_output_facts(
+    operation: str, change: dict[str, dict[str, object]], message: str
+) -> None:
+    provenance = derived_provenance(operation, derived_source_snapshot())
+    payload = provenance.model_dump(mode="python")
+    for field, values in change.items():
+        if field == "output_size":
+            payload[field] = values
+        else:
+            payload[field].update(values)
+    with pytest.raises(ValidationError, match=message):
+        type(provenance).model_validate(payload)
+
+
+def test_refine_provenance_requires_captured_source_seed() -> None:
+    provenance = derived_provenance("refine", derived_source_snapshot())
+    payload = provenance.model_dump(mode="python")
+    payload["settings"]["seed"] = 43
+    with pytest.raises(ValidationError, match="reuse its captured source seed"):
+        RefineProvenance.model_validate(payload)
+
+
+@pytest.mark.parametrize("operation", ("refine", "edit"))
+@pytest.mark.parametrize("duplicate", (False, True))
+def test_derived_presets_require_correct_dimensions_even_inside_duplicates(
+    operation: str, duplicate: bool
+) -> None:
+    provenance = derived_provenance(operation, derived_source_snapshot())
+    payload = provenance.model_dump(mode="python")
+    payload["output_size"] = {"mode": "preset", "tier": ResolutionTier.LARGE}
+    payload["settings"].update(width=768, height=592)
+    invalid = type(provenance).model_validate(payload)
+    wrapped = (
+        DuplicateProvenance(
+            source=ImageSourceSnapshot(card_id=uuid4(), revision_id=uuid4(), background_id=uuid4()),
+            original_provenance=invalid,
+        )
+        if duplicate
+        else invalid
+    )
+    with pytest.raises(ValidationError, match="dimensions must match"):
         Stack(
             name="Invalid",
             cards=(
-                Card(id=first_card_id, name="First", revisions=(first_revision,)),
-                Card(id=second_card_id, name="Second", revisions=(second_revision,)),
+                Card(
+                    name="Card",
+                    revisions=(
+                        CardRevision(
+                            background=GeneratedBackground(
+                                image_path="assets/cards/invalid.png",
+                                provenance=wrapped,
+                                created_at=datetime.now(UTC),
+                            )
+                        ),
+                    ),
+                ),
             ),
         )
+
+
+@pytest.mark.parametrize("operation", ("refine", "edit"))
+def test_derived_source_requires_all_captured_facts(operation: str) -> None:
+    provenance = derived_provenance(operation, derived_source_snapshot())
+    for field in ("width", "height", "seed", "edit_lineage"):
+        payload = provenance.model_dump(mode="python")
+        del payload["source"][field]
+        with pytest.raises(ValidationError, match=f"source.{field}"):
+            type(provenance).model_validate(payload)
 
 
 def test_hotspots_are_nested_in_their_image_revision() -> None:
