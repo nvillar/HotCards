@@ -1,5 +1,10 @@
 """Document commands, controllers, and workers."""
 
+from hotcards.application.applied_image_change import (
+    AppliedImageChange,
+    EditImageOperation,
+    ImageOperation,
+)
 from hotcards.application.background_workflow import (
     BackgroundGenerationSettings,
     BackgroundWorkflow,
@@ -17,7 +22,7 @@ from hotcards.application.commands import (
     CommandError,
     CreateCardAndResolveCommand,
     CreateCardCommand,
-    CreateGeneratedRevisionCommand,
+    CreateImageRevisionCommand,
     DeleteCardCommand,
     DeleteRevisionCommand,
     DocumentCommand,
@@ -48,10 +53,6 @@ from hotcards.application.document_session import (
     DocumentSessionError,
     DocumentSessionState,
 )
-from hotcards.application.generated_revision_change import (
-    EditedRevisionChange,
-    GeneratedRevisionChange,
-)
 from hotcards.application.workers import (
     AdapterKind,
     AdapterWorkers,
@@ -67,6 +68,7 @@ __all__ = [
     "AddInteractionCommand",
     "AdapterKind",
     "AdapterWorkers",
+    "AppliedImageChange",
     "AutosaveHook",
     "AvailabilityDiagnostic",
     "BackgroundGenerationSettings",
@@ -78,7 +80,7 @@ __all__ = [
     "CommandError",
     "CreateCardAndResolveCommand",
     "CreateCardCommand",
-    "CreateGeneratedRevisionCommand",
+    "CreateImageRevisionCommand",
     "DeleteCardCommand",
     "DeleteRevisionCommand",
     "DocumentCommand",
@@ -90,9 +92,9 @@ __all__ = [
     "DuplicateRevisionCommand",
     "DuplicateCardCommand",
     "DuplicatedCardChange",
-    "EditedRevisionChange",
+    "EditImageOperation",
     "EditRevisionDescriptionCommand",
-    "GeneratedRevisionChange",
+    "ImageOperation",
     "OperationStatus",
     "OwnedImageAsset",
     "PENDING_DURABILITY_MESSAGE",

@@ -32,6 +32,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from hotcards.application.applied_image_change import (
+    AppliedImageChange,
+    EditImageOperation,
+)
 from hotcards.application.background_workflow import (
     BackgroundGenerationSettings,
     BackgroundWorkflow,
@@ -44,7 +48,7 @@ from hotcards.application.card_duplication import (
 from hotcards.application.commands import (
     AddInteractionCommand,
     CommandError,
-    CreateGeneratedRevisionCommand,
+    CreateImageRevisionCommand,
     DeleteInteractionCommand,
     DocumentCommand,
     RenameCardCommand,
@@ -61,10 +65,6 @@ from hotcards.application.document_session import (
     DocumentSession,
     DocumentSessionError,
     DocumentSessionState,
-)
-from hotcards.application.generated_revision_change import (
-    EditedRevisionChange,
-    GeneratedRevisionChange,
 )
 from hotcards.application.run_session import RunSession, RunSessionState
 from hotcards.application.sound_player import QtSoundPlayer, SoundPlayer
@@ -91,7 +91,7 @@ from hotcards.domain.models import (
 from hotcards.storage.stack_store import StackStoreError
 from hotcards.ui.card_canvas import CardCanvas
 from hotcards.ui.card_sidebar import CardSidebar
-from hotcards.ui.inspector import Inspector
+from hotcards.ui.inspector import EditInstructionDraft, Inspector
 from hotcards.ui.new_stack_dialog import NewStackDialog
 from hotcards.ui.notification_bar import (
     Notification,
@@ -169,8 +169,10 @@ class MainWindow(QMainWindow):
         self._diagnostic_generation = 0
         self._service_notification_dismissed = False
         self._undo_notification_token: UndoToken | None = None
-        self._generated_revision_change: GeneratedRevisionChange | None = None
-        self._edit_undo_instructions: dict[UndoToken, str] = {}
+        self._applied_image_change: AppliedImageChange | None = None
+        self._edit_undo_changes: dict[UndoToken, AppliedImageChange] = {}
+        self._submitted_edit_draft: EditInstructionDraft | None = None
+        self._restored_edit_drafts: dict[UndoToken, EditInstructionDraft] = {}
         self._card_selection_history: dict[
             UndoToken,
             tuple[UUID | None, UUID | None],
@@ -597,19 +599,7 @@ class MainWindow(QMainWindow):
             self.background_workflow.failed.connect(self._background_failed)
             self.background_workflow.document_changed.connect(self.render_document)
             self.background_workflow.change_applied.connect(self._show_undo_notification)
-            self.background_workflow.generation_applied.connect(
-                self._show_generated_revision_notification
-            )
-            edit_applied = getattr(self.background_workflow, "edit_applied", None)
-            if edit_applied is not None:
-                edit_applied.connect(self._remember_edit_undo_instruction)
-            edit_instruction_clear_requested = getattr(
-                self.background_workflow,
-                "edit_instruction_clear_requested",
-                None,
-            )
-            if edit_instruction_clear_requested is not None:
-                edit_instruction_clear_requested.connect(self._clear_completed_edit_instruction)
+            self.background_workflow.image_applied.connect(self._image_applied)
         self.pane_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.pane_splitter.setObjectName("threePaneSplitter")
         self.pane_splitter.addWidget(self.card_sidebar)
@@ -719,6 +709,14 @@ class MainWindow(QMainWindow):
     ) -> None:
         """Refresh all panes from the controller's authoritative snapshot."""
         snapshot = self.controller.document
+        retained_tokens = self.controller.retained_history_tokens
+        for metadata in (
+            self._edit_undo_changes,
+            self._restored_edit_drafts,
+            self._card_selection_history,
+        ):
+            for token in metadata.keys() - retained_tokens:
+                del metadata[token]
         previous_card_id = self._rendered_card_id
         preserve_card_name = self.canvas_card_name.hasFocus()
         card_name_draft = self.canvas_card_name.text()
@@ -979,7 +977,7 @@ class MainWindow(QMainWindow):
     def _show_undo_notification(self, message: str, token: object) -> None:
         if self._is_running or not isinstance(token, UndoToken):
             return
-        self._generated_revision_change = None
+        self._applied_image_change = None
         self._undo_notification_token = token
         self.notification_bar.show_notification(
             "undo",
@@ -991,10 +989,20 @@ class MainWindow(QMainWindow):
             ),
         )
 
-    def _show_generated_revision_notification(self, change: object) -> None:
-        if self._is_running or not isinstance(change, GeneratedRevisionChange):
+    def _image_applied(self, change: object) -> None:
+        if (
+            not isinstance(change, AppliedImageChange)
+            or change.token not in self.controller.retained_history_tokens
+        ):
             return
-        self._generated_revision_change = change
+        if isinstance(change.operation, EditImageOperation):
+            first_completion = change.token not in self._edit_undo_changes
+            self._edit_undo_changes.setdefault(change.token, change)
+            if first_completion and not self._is_running:
+                self._clear_submitted_edit_instruction(change)
+        if self._is_running or self.controller.current_undo_token != change.token:
+            return
+        self._applied_image_change = change
         self._undo_notification_token = change.token
         self.notification_bar.show_notification(
             "undo",
@@ -1002,7 +1010,7 @@ class MainWindow(QMainWindow):
                 message=f"{change.message} on the current version",
                 kind=NotificationKind.SUCCESS,
                 primary_action=NotificationAction(
-                    "create-generated-revision",
+                    "create-image-revision",
                     "Create New Version",
                 ),
                 secondary_action=NotificationAction("undo", "Undo"),
@@ -1011,31 +1019,42 @@ class MainWindow(QMainWindow):
             ),
         )
 
-    def _remember_edit_undo_instruction(self, change: object) -> None:
-        if (
-            isinstance(change, EditedRevisionChange)
-            and self.controller.current_undo_token == change.token
-        ):
-            self._edit_undo_instructions[change.token] = change.instruction
-
     def _restore_edit_instruction_after_undo(self, token: UndoToken | None) -> None:
-        if token is None:
+        change = self._edit_undo_changes.get(token) if token is not None else None
+        if change is None or not isinstance(change.operation, EditImageOperation):
             return
-        instruction = self._edit_undo_instructions.pop(token, None)
-        if instruction is None:
+        draft = self.inspector.edit_instruction_draft
+        if (
+            self._is_running
+            or draft.card_id != change.card_id
+            or draft.revision_id != change.revision_id
+            or draft.text
+        ):
             return
-        if self.inspector.edit_instruction_edit.toPlainText():
-            return
-        self.inspector.set_edit_instruction(instruction)
+        self.inspector.set_edit_instruction(change.operation.instruction)
+        self._restored_edit_drafts[change.token] = self.inspector.edit_instruction_draft
         self._update_generation_actions()
 
-    def _clear_completed_edit_instruction(self) -> None:
-        instruction = self._edit_undo_instructions.get(self.controller.current_undo_token)
+    def _clear_restored_edit_instruction_after_redo(self, token: UndoToken | None) -> None:
+        restored = self._restored_edit_drafts.pop(token, None) if token is not None else None
+        if restored is None or self.inspector.edit_instruction_draft != restored:
+            return
+        self.inspector.clear_edit_instruction()
+        self._update_generation_actions()
+
+    def _clear_submitted_edit_instruction(self, change: AppliedImageChange) -> None:
+        submitted = self._submitted_edit_draft
         if (
-            instruction is not None
-            and self.inspector.edit_instruction_edit.toPlainText().strip() == instruction
+            submitted is not None
+            and isinstance(change.operation, EditImageOperation)
+            and submitted.card_id == change.card_id
+            and submitted.revision_id == change.revision_id
+            and submitted.text.strip() == change.operation.instruction
         ):
-            self.inspector.clear_edit_instruction()
+            self._submitted_edit_draft = None
+            if self.inspector.edit_instruction_draft == submitted:
+                self.inspector.clear_edit_instruction()
+                self._update_generation_actions()
 
     def _undo_notification(self) -> None:
         if self._is_running:
@@ -1044,15 +1063,20 @@ class MainWindow(QMainWindow):
         self._clear_undo_notification()
         if self.background_workflow is not None and self.background_workflow.busy:
             self._cancel_background_generation()
-        if token is not None and self.controller.undo_if_current(token):
+        try:
+            changed = token is not None and self.controller.undo_if_current(token)
+        except DocumentMutationBlockedError as error:
+            self._show_pending_durability_error(str(error))
+            return
+        if changed:
             self._restore_card_selection(token, undoing=True)
             self.render_document()
             self._restore_edit_instruction_after_undo(token)
 
-    def _create_generated_revision(self) -> None:
+    def _create_image_revision(self) -> None:
         if self._is_running:
             return
-        change = self._generated_revision_change
+        change = self._applied_image_change
         if change is None or self.controller.current_undo_token != change.token:
             self._clear_undo_notification()
             return
@@ -1078,7 +1102,8 @@ class MainWindow(QMainWindow):
         if self.background_workflow is not None and self.background_workflow.busy:
             self._cancel_background_generation()
         self._clear_undo_notification()
-        command = CreateGeneratedRevisionCommand(
+        previous_selection = self._selected_card_id
+        command = CreateImageRevisionCommand(
             card_id=change.card_id,
             revision_id=change.revision_id,
             previous_revision=change.previous_revision,
@@ -1093,21 +1118,23 @@ class MainWindow(QMainWindow):
             )
             return
         self._selected_card_id = change.card_id
-        self.render_document(changed)
         token = self.controller.current_undo_token
+        if token is not None:
+            self._card_selection_history[token] = (previous_selection, change.card_id)
+        self.render_document(changed)
         if token is not None:
             self._show_undo_notification("New version created", token)
 
     def _clear_undo_notification(self) -> None:
         self._undo_notification_token = None
-        self._generated_revision_change = None
+        self._applied_image_change = None
         self.notification_bar.clear_notification("undo")
 
     def _notification_action_requested(self, action_id: str) -> None:
         if action_id == "undo" and not self._is_running:
             self._undo_notification()
-        elif action_id == "create-generated-revision" and not self._is_running:
-            self._create_generated_revision()
+        elif action_id == "create-image-revision" and not self._is_running:
+            self._create_image_revision()
         elif action_id == "open-settings" and not self._is_running:
             self.open_model_settings()
         elif action_id == "check-services" and not self._is_running:
@@ -1116,7 +1143,7 @@ class MainWindow(QMainWindow):
     def _notification_dismissed(self, key: str) -> None:
         if key == "undo":
             self._undo_notification_token = None
-            self._generated_revision_change = None
+            self._applied_image_change = None
         elif key == "ai-services":
             self._service_notification_dismissed = True
 
@@ -1244,6 +1271,8 @@ class MainWindow(QMainWindow):
         self._update_document_actions()
 
     def undo(self) -> None:
+        if self._is_running:
+            return
         self._clear_undo_notification()
         if self.background_workflow is not None and self.background_workflow.busy:
             self._cancel_background_generation()
@@ -1259,6 +1288,8 @@ class MainWindow(QMainWindow):
             self._restore_edit_instruction_after_undo(token)
 
     def redo(self) -> None:
+        if self._is_running:
+            return
         self._clear_undo_notification()
         if self.background_workflow is not None and self.background_workflow.busy:
             self._cancel_background_generation()
@@ -1271,6 +1302,7 @@ class MainWindow(QMainWindow):
         if changed:
             self._restore_card_selection(token, undoing=False)
             self.render_document()
+            self._clear_restored_edit_instruction_after_redo(token)
 
     def _restore_card_selection(
         self,
@@ -1415,7 +1447,9 @@ class MainWindow(QMainWindow):
         self.sound_player.stop()
         self._close_utility_windows(commit_pending=False)
         self._clear_undo_notification()
-        self._edit_undo_instructions.clear()
+        self._edit_undo_changes.clear()
+        self._restored_edit_drafts.clear()
+        self._submitted_edit_draft = None
         self._card_selection_history.clear()
         self._rendered_card_id = None
         self._card_name_commit_failed = False
@@ -1673,6 +1707,7 @@ class MainWindow(QMainWindow):
         if not self._commit_authoring_metadata():
             return
         try:
+            self._submitted_edit_draft = self.inspector.edit_instruction_draft
             workflow.edit(
                 card_id,
                 instruction=instruction,
@@ -2329,7 +2364,7 @@ class MainWindow(QMainWindow):
                 return
             self.card_canvas.cancel_drawing()
             self._cancel_ai_activity_for_run()
-            self._generated_revision_change = None
+            self._applied_image_change = None
             self._undo_notification_token = None
             self.notification_bar.clear_all()
             self._is_running = True

@@ -16,6 +16,12 @@ from uuid import UUID, uuid4
 from pydantic import ValidationError
 from PySide6.QtCore import QObject, Signal
 
+from hotcards.application.applied_image_change import (
+    AppliedImageChange,
+    EditImageOperation,
+    ImageOperation,
+    image_operation_message,
+)
 from hotcards.application.commands import (
     ActivateRevisionCommand,
     CommandError,
@@ -33,10 +39,6 @@ from hotcards.application.document_session import (
     DocumentSession,
     DocumentSessionError,
     DocumentSessionState,
-)
-from hotcards.application.generated_revision_change import (
-    EditedRevisionChange,
-    GeneratedRevisionChange,
 )
 from hotcards.application.image_files import (
     UnreadableImageError,
@@ -192,8 +194,7 @@ class _PendingImageCompletion:
     previous_token: UndoToken | None
     card_id: UUID
     previous_revision: CardRevision
-    message: str
-    instruction: str | None
+    operation: ImageOperation | EditImageOperation
 
 
 GenerationSettingsProvider = Callable[[], BackgroundGenerationSettings]
@@ -209,9 +210,7 @@ class BackgroundWorkflow(QObject):
     failed = Signal(object)
     document_changed = Signal(object)
     change_applied = Signal(str, object)
-    generation_applied = Signal(object)
-    edit_applied = Signal(object)
-    edit_instruction_clear_requested = Signal()
+    image_applied = Signal(object)
 
     def __init__(
         self,
@@ -897,7 +896,6 @@ class BackgroundWorkflow(QObject):
             target,
             asset_id,
             result,
-            "Image generated",
             is_current=lambda: self._target_is_current(target),
         )
 
@@ -930,7 +928,6 @@ class BackgroundWorkflow(QObject):
             target,
             asset_id,
             result,
-            "Image reinterpreted",
             is_current=lambda: self._refine_target_is_current(target),
         )
 
@@ -963,7 +960,6 @@ class BackgroundWorkflow(QObject):
             target,
             asset_id,
             result,
-            "Image edited",
             is_current=lambda: self._edit_target_is_current(target),
         )
 
@@ -973,7 +969,6 @@ class BackgroundWorkflow(QObject):
         target: _GenerationTarget | _RefineTarget | _EditTarget,
         asset_id: UUID,
         result: MfluxGenerateResult | MfluxRefineResult | MfluxEditResult,
-        message: str,
         *,
         is_current: Callable[[], bool],
     ) -> None:
@@ -1006,8 +1001,13 @@ class BackgroundWorkflow(QObject):
                 previous_token=self.controller.current_undo_token,
                 card_id=target.card_id,
                 previous_revision=previous_revision,
-                message=message,
-                instruction=target.instruction if isinstance(target, _EditTarget) else None,
+                operation=(
+                    EditImageOperation(instruction=target.instruction)
+                    if isinstance(target, _EditTarget)
+                    else ImageOperation(
+                        "refine" if isinstance(target, _RefineTarget) else "generate"
+                    )
+                ),
             )
             owned_assets: list[OwnedImageAsset] = []
             derived = target if isinstance(target, (_RefineTarget, _EditTarget)) else None
@@ -1063,7 +1063,7 @@ class BackgroundWorkflow(QObject):
         self._request_target = None
         self._active_operation = None
         self._cleanup_source_snapshot_if_idle()
-        self._set_busy(False, message)
+        self._set_busy(False, image_operation_message(completion.operation))
 
     def _session_state_changed(self, state: object) -> None:
         pending = self._pending_image_completion
@@ -1083,27 +1083,17 @@ class BackgroundWorkflow(QObject):
         token = self.controller.current_undo_token
         if token is None or token == completion.previous_token:
             return
-        self.progress_changed.emit(completion.message)
+        self.progress_changed.emit(image_operation_message(completion.operation))
         self.document_changed.emit(completion.document)
-        self.generation_applied.emit(
-            GeneratedRevisionChange(
-                message=completion.message,
+        self.image_applied.emit(
+            AppliedImageChange(
                 token=token,
                 card_id=completion.card_id,
                 revision_id=completion.previous_revision.id,
                 previous_revision=completion.previous_revision,
+                operation=completion.operation,
             )
         )
-        if completion.instruction is not None:
-            self.edit_applied.emit(
-                EditedRevisionChange(
-                    token=token,
-                    card_id=completion.card_id,
-                    revision_id=completion.previous_revision.id,
-                    instruction=completion.instruction,
-                )
-            )
-            self.edit_instruction_clear_requested.emit()
 
     def _apply_background(
         self,

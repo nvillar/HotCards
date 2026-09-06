@@ -125,17 +125,26 @@ Output defaults to the current image's exact decoded dimensions, including
 aligned non-preset sizes, and also offers only named tiers with strictly greater
 pixel area. Each Edit
 uses a fresh seed and appends its accepted instruction to ordered provenance
-lineage. Undoing an Edit restores its authored instruction to the editor for
-adjustment and another attempt. Later Reinterpret operations preserve that lineage
+lineage. Undoing an Edit restores its exact authored instruction in the same
+card/version for adjustment and another attempt, without overwriting newer input.
+This also works across repeated Undo/Redo. Redo clears only an untouched,
+automatically restored instruction, never a newer draft or a user recall.
+Later Reinterpret operations preserve that lineage
 unless it conflicts with the current authoritative Description; Generate ignores it.
 
 Generated images are the only supported background source. Generate, Reinterpret,
 and Edit durably replace the active revision's background through one shared
 image-and-manifest transaction and one Undo boundary. Each completed result
-can be kept there, explicitly moved into a new complete revision through a
-separate Undo boundary, or undone. Indeterminate saves show the authoritative
+offers **Create New Version** (primary), **Undo**, and **Keep** (dismiss).
+Keep makes no further document change. Create New Version restores the complete
+previous version and appends and activates the accepted result with a new version
+identity, sharing the immutable image without another model call. It is a
+separate Undo boundary: undoing version creation leaves the result on the original
+version; the next Undo reverses the image operation and, for Edit, restores its
+instruction. Actions expire after another command and are unavailable in Run mode
+or another project. Indeterminate saves show the authoritative
 image but block mutations and defer result actions until a save retry establishes
-durability.
+durability. Delayed completion never clears a newer Edit draft.
 Existing images remain visible until replacement succeeds, and successful
 changes offer a dismissible, history-safe Undo action in the notification bar.
 

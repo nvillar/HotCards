@@ -388,7 +388,7 @@ def test_transform_edit_uses_current_or_higher_size_and_emits_exact_inputs(
     assert output.mode == "current"
     assert (output.width, output.height) == (768, 576)
     assert inspector.edit_background_button.toolTip() == (
-        "Create a new version with only the requested change."
+        "Apply only the requested change to the current image."
     )
 
 
@@ -490,7 +490,7 @@ def test_transform_reinterpret_has_source_similarity_resolution_and_action(
     ]
     assert inspector.refine_background_button.text() == "Reinterpret"
     assert inspector.refine_background_button.toolTip() == (
-        "Create a new version using the current image, Description."
+        "Reinterpret the current image using Description."
     )
 
 

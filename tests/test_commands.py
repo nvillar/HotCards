@@ -16,7 +16,7 @@ from hotcards.application.commands import (
     ChangeHotspotSoundCommand,
     CommandError,
     CreateCardCommand,
-    CreateGeneratedRevisionCommand,
+    CreateImageRevisionCommand,
     CreateKeyAndAddHotspotReferenceCommand,
     DeleteCardCommand,
     DeleteInteractionCommand,
@@ -577,7 +577,7 @@ def test_revision_generate_output_size_is_typed_and_copied_completely() -> None:
     )
 
 
-def test_create_generated_revision_preserves_resolution_on_both_complete_versions() -> None:
+def test_create_image_revision_preserves_resolution_and_uses_stable_command_ids() -> None:
     previous = CardRevision(
         description="Before",
         generate_output_size=PresetOutputSize(tier=ResolutionTier.LARGE),
@@ -595,11 +595,17 @@ def test_create_generated_revision_preserves_resolution_on_both_complete_version
     )
     document = Stack(name="Stack", cards=(card,))
 
-    changed = CreateGeneratedRevisionCommand(
+    command = CreateImageRevisionCommand(
         card_id=card.id,
         revision_id=generated.id,
         previous_revision=previous,
-    ).apply(document)
+    )
+    changed = command.apply(document)
+    assert changed == command.apply(document)
+    assert changed.cards[0].revisions[0] == previous
+    assert changed.cards[0].active_revision == generated.model_copy(
+        update={"id": command.new_revision_id}
+    )
 
     assert tuple(revision.generate_output_size for revision in changed.cards[0].revisions) == (
         PresetOutputSize(tier=ResolutionTier.LARGE),

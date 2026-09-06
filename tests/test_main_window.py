@@ -22,6 +22,11 @@ from PySide6.QtWidgets import QApplication, QDialog, QLabel
 
 import hotcards.generation.mflux_generator as mflux_module
 import hotcards.ui.main_window as main_window_module
+from hotcards.application.applied_image_change import (
+    AppliedImageChange,
+    EditImageOperation,
+    ImageOperation,
+)
 from hotcards.application.background_workflow import (
     BackgroundGenerationSettings,
     BackgroundWorkflow,
@@ -39,10 +44,6 @@ from hotcards.application.document_session import (
     DocumentSession,
     DocumentSessionError,
     DocumentSessionState,
-)
-from hotcards.application.generated_revision_change import (
-    EditedRevisionChange,
-    GeneratedRevisionChange,
 )
 from hotcards.application.workers import (
     AdapterKind,
@@ -164,9 +165,7 @@ class FakeBackgroundWorkflow(QObject):
     failed = Signal(object)
     document_changed = Signal(object)
     change_applied = Signal(str, object)
-    generation_applied = Signal(object)
-    edit_applied = Signal(object)
-    edit_instruction_clear_requested = Signal()
+    image_applied = Signal(object)
 
     def __init__(self, controller: DocumentController) -> None:
         super().__init__()
@@ -2449,7 +2448,7 @@ def test_refine_tab_wires_current_image_options_and_cancels_live_changes(
         width=512, height=384
     )
     assert window.inspector.refine_background_button.toolTip() == (
-        "Create a new version using the current image, Description."
+        "Reinterpret the current image using Description."
     )
     window.inspector.refine_background_button.click()
     assert background.refine_calls == [
@@ -2549,7 +2548,6 @@ def test_edit_tab_wires_current_image_defaults_errors_and_cancellation(
     assert background.cancel_calls == 1
 
     window.inspector.edit_instruction_edit.setPlainText("Keep this draft.")
-    background.edit_instruction_clear_requested.emit()
     assert window.inspector.edit_instruction_edit.toPlainText() == "Keep this draft."
 
     window._background_progress_changed("Image editing failed")
@@ -2571,28 +2569,19 @@ def test_notification_undo_restores_completed_edit_instruction(
     token = controller.current_undo_token
     assert token is not None
 
-    background.generation_applied.emit(
-        GeneratedRevisionChange(
-            message="Image edited",
+    background.image_applied.emit(
+        AppliedImageChange(
+            operation=EditImageOperation(instruction="Open the garden gate."),
             token=token,
             card_id=card.id,
             revision_id=card.active_revision.id,
             previous_revision=card.active_revision,
         )
     )
-    background.edit_applied.emit(
-        EditedRevisionChange(
-            token=token,
-            card_id=card.id,
-            revision_id=changed.cards[0].active_revision.id,
-            instruction="Open the garden gate.",
-        )
-    )
-    background.edit_instruction_clear_requested.emit()
     if cleanup_error:
         background.failed.emit(RuntimeError("committed image cleanup failed"))
-        assert window._generated_revision_change.token == token
-        assert window._edit_undo_instructions[token] == "Open the garden gate."
+        assert window._applied_image_change.token == token
+        assert window._edit_undo_changes[token].operation.instruction == "Open the garden gate."
         window.undo()
     else:
         window.notification_bar.secondary_button.click()
@@ -2610,15 +2599,15 @@ def test_edit_instruction_waits_for_its_exact_undo_token(
     window.render_document(changed)
     edit_token = controller.current_undo_token
     assert edit_token is not None
-    background.edit_applied.emit(
-        EditedRevisionChange(
+    background.image_applied.emit(
+        AppliedImageChange(
             token=edit_token,
             card_id=card.id,
             revision_id=changed.cards[0].active_revision.id,
-            instruction="Open the garden gate.",
+            previous_revision=card.active_revision,
+            operation=EditImageOperation(instruction="Open the garden gate."),
         )
     )
-    background.edit_instruction_clear_requested.emit()
     changed = controller.execute(RenameCardCommand(card_id=card.id, name="Unrelated change"))
     window.render_document(changed)
 
@@ -2638,15 +2627,15 @@ def test_edit_undo_does_not_overwrite_a_new_instruction(
     window.render_document(changed)
     edit_token = controller.current_undo_token
     assert edit_token is not None
-    background.edit_applied.emit(
-        EditedRevisionChange(
+    background.image_applied.emit(
+        AppliedImageChange(
             token=edit_token,
             card_id=card.id,
             revision_id=changed.cards[0].active_revision.id,
-            instruction="Open the garden gate.",
+            previous_revision=card.active_revision,
+            operation=EditImageOperation(instruction="Open the garden gate."),
         )
     )
-    background.edit_instruction_clear_requested.emit()
     window.inspector.edit_instruction_edit.setPlainText("Try a blue gate instead.")
 
     window.undo()
@@ -2654,29 +2643,36 @@ def test_edit_undo_does_not_overwrite_a_new_instruction(
     assert window.inspector.edit_instruction_edit.toPlainText() == "Try a blue gate instead."
 
 
-@pytest.mark.parametrize("newer_draft", (False, True))
+@pytest.mark.parametrize("newer_draft", ("unchanged", "new-text", "recalled", "changed-back"))
 def test_completed_edit_clears_only_its_matching_instruction(
-    application: QApplication, newer_draft: bool
+    application: QApplication, newer_draft: str
 ) -> None:
     window, controller, _workers, background = _window()
     card = controller.document.cards[0]
+    instruction = "Open the garden gate."
+    window.inspector.set_edit_instruction(f"  {instruction}  ")
+    window._edit_background(instruction, CurrentSourceSize(width=512, height=384))
+    if newer_draft == "new-text":
+        window.inspector.edit_instruction_edit.setPlainText("Keep this newer draft.")
+    elif newer_draft == "recalled":
+        window.inspector.set_edit_instruction(f"  {instruction}  ")
+    elif newer_draft == "changed-back":
+        window.inspector.edit_instruction_edit.setPlainText("Something else")
+        window.inspector.edit_instruction_edit.setPlainText(f"  {instruction}  ")
+    draft = window.inspector.edit_instruction_edit.toPlainText()
     controller.execute(RenameCardCommand(card_id=card.id, name="Edited"))
     token = controller.current_undo_token
-    instruction = "Open the garden gate."
-    background.edit_applied.emit(
-        EditedRevisionChange(
+    background.image_applied.emit(
+        AppliedImageChange(
             token=token,
             card_id=card.id,
             revision_id=card.active_revision.id,
-            instruction=instruction,
+            previous_revision=card.active_revision,
+            operation=EditImageOperation(instruction=instruction),
         )
     )
-    window.inspector.edit_instruction_edit.setPlainText(
-        "Keep this newer draft." if newer_draft else f"  {instruction}  "
-    )
-    background.edit_instruction_clear_requested.emit()
     assert window.inspector.edit_instruction_edit.toPlainText() == (
-        "Keep this newer draft." if newer_draft else ""
+        "" if newer_draft == "unchanged" else draft
     )
 
 
@@ -2729,26 +2725,47 @@ def test_mouse_focus_commit_does_not_render_before_button_release(
     window.close()
 
 
-@pytest.mark.parametrize("message", ("Image generated", "Image reinterpreted", "Image edited"))
-def test_generated_result_can_move_to_a_new_complete_version(
+@pytest.mark.parametrize(
+    "operation",
+    (ImageOperation("generate"), ImageOperation("refine"), EditImageOperation("Open it.")),
+)
+@pytest.mark.parametrize("hotspots", ("none", "empty", "populated"))
+def test_applied_image_can_move_to_a_new_complete_version(
     application: QApplication,
-    message: str,
+    operation: ImageOperation | EditImageOperation,
+    hotspots: str,
 ) -> None:
-    hotspot_set = HotspotSet(
-        interactions=(
-            Interaction(
-                label="Door",
-                action=NavigateAction(target=UnresolvedCardReference()),
-                polygons=(_hotspot_polygon(),),
-            ),
+    hotspot_set = (
+        None
+        if hotspots == "none"
+        else HotspotSet()
+        if hotspots == "empty"
+        else HotspotSet(
+            interactions=(
+                Interaction(
+                    label="Door",
+                    action=NavigateAction(target=UnresolvedCardReference()),
+                    polygons=(_hotspot_polygon(),),
+                ),
+            )
         )
     )
+    style = StyleDefinition(name="Ink", prompt_text="Ink on paper")
+    reference = Card(name="Reference")
     original = CardRevision(
         description="A courtyard",
         hotspot_set=hotspot_set,
+        style_id=style.id,
+        references=(
+            ResolvedCardReference(target_card_id=reference.id),
+            UnresolvedCardReference(target_name="Former Reference"),
+        ),
+        generate_output_size=PresetOutputSize(tier=ResolutionTier.LARGE),
     )
     card = Card(name="Card", revisions=(original,))
-    window, controller, _workers, background_workflow = _window(Stack(name="Demo", cards=(card,)))
+    window, controller, _workers, background_workflow = _window(
+        Stack(name="Demo", cards=(card, reference), styles=(style,), new_card_style_id=style.id)
+    )
     background = _generated_background(
         asset_id=uuid4(),
         image_path=f"assets/cards/{card.id}/generated.png",
@@ -2764,17 +2781,18 @@ def test_generated_result_can_move_to_a_new_complete_version(
     window.render_document(changed)
     token = controller.current_undo_token
     assert token is not None
-    background_workflow.generation_applied.emit(
-        GeneratedRevisionChange(
-            message=message,
-            token=token,
-            card_id=card.id,
-            revision_id=original.id,
-            previous_revision=original,
-        )
+    change = AppliedImageChange(
+        operation=operation,
+        token=token,
+        card_id=card.id,
+        revision_id=original.id,
+        previous_revision=original,
     )
+    background_workflow.image_applied.emit(change)
 
-    assert window.notification_bar.message_label.text() == f"{message} on the current version"
+    assert (
+        window.notification_bar.message_label.text() == f"{change.message} on the current version"
+    )
     assert window.notification_bar.primary_button.text() == "Create New Version"
     assert window.notification_bar.secondary_button.text() == "Undo"
     assert window.notification_bar.dismiss_button.text() == "Keep"
@@ -2791,6 +2809,13 @@ def test_generated_result_can_move_to_a_new_complete_version(
     assert changed_card.active_revision.description == original.description
     assert changed_card.active_revision.hotspot_set == original.hotspot_set
     assert changed_card.active_revision.background == background
+    assert changed_card.revisions[0] == original
+    assert changed_card.active_revision.model_copy(update={"id": original.id}) == (
+        changed.cards[0].active_revision
+    )
+    assert not background_workflow.generate_calls
+    assert not background_workflow.refine_calls
+    assert not background_workflow.edit_calls
     assert window.notification_bar.message_label.text() == "New version created"
     assert window.notification_bar.primary_button.text() == "Undo"
     assert window.notification_bar.secondary_button.isHidden()
@@ -2800,10 +2825,236 @@ def test_generated_result_can_move_to_a_new_complete_version(
     assert len(restored_card.revisions) == 1
     assert restored_card.active_revision.id == original.id
     assert restored_card.active_revision.background == background
+    assert window.inspector.edit_instruction_edit.toPlainText() == ""
+    assert controller.current_undo_token == token
+
+    window.undo()
+    assert controller.document.cards[0].active_revision == original
+    assert window.inspector.edit_instruction_edit.toPlainText() == (
+        operation.instruction if isinstance(operation, EditImageOperation) else ""
+    )
 
 
-def test_dismissing_generated_result_keeps_it_on_current_version(
+@pytest.mark.parametrize("undo_action", ("notification", "global"))
+def test_edit_instruction_survives_repeated_undo_redo(
+    application: QApplication, undo_action: str
+) -> None:
+    window, controller, _workers, background = _window()
+    card = controller.document.cards[0]
+    instruction = "Open the gate.\nKeep the tree's shadow exactly as it is."
+    window.inspector.set_edit_instruction(instruction)
+    window._edit_background(instruction, CurrentSourceSize(width=512, height=384))
+    controller.execute(RenameCardCommand(card_id=card.id, name="Edited"))
+    token = controller.current_undo_token
+    change = AppliedImageChange(
+        token=token,
+        card_id=card.id,
+        revision_id=card.active_revision.id,
+        previous_revision=card.active_revision,
+        operation=EditImageOperation(instruction),
+    )
+    background.image_applied.emit(change)
+    assert window.inspector.edit_instruction_edit.toPlainText() == ""
+    if undo_action == "notification":
+        window.notification_bar.secondary_button.click()
+    else:
+        window.undo()
+    for _ in range(3):
+        assert window.inspector.edit_instruction_edit.toPlainText() == instruction
+        assert window._edit_undo_changes[token] is change
+        window.redo()
+        assert window.inspector.edit_instruction_edit.toPlainText() == ""
+        window.undo()
+    assert window.inspector.edit_instruction_edit.toPlainText() == instruction
+
+
+@pytest.mark.parametrize("newer_draft", ("typed", "recalled", "changed-back"))
+def test_redo_preserves_newer_edit_drafts_including_identical_recalls(
+    application: QApplication, newer_draft: str
+) -> None:
+    window, controller, _workers, background = _window()
+    card = controller.document.cards[0]
+    instruction = "Open the gate."
+    controller.execute(RenameCardCommand(card_id=card.id, name="Edited"))
+    background.image_applied.emit(
+        AppliedImageChange(
+            token=controller.current_undo_token,
+            card_id=card.id,
+            revision_id=card.active_revision.id,
+            previous_revision=card.active_revision,
+            operation=EditImageOperation(instruction),
+        )
+    )
+    window.undo()
+    assert window.inspector.edit_instruction_edit.toPlainText() == instruction
+    if newer_draft == "typed":
+        window.inspector.edit_instruction_edit.setPlainText("Repaint the gate blue.")
+    elif newer_draft == "recalled":
+        window.inspector.set_edit_instruction(instruction)
+    else:
+        window.inspector.edit_instruction_edit.setPlainText("Another draft")
+        window.inspector.edit_instruction_edit.setPlainText(instruction)
+    draft = window.inspector.edit_instruction_draft
+    window.redo()
+    assert window.inspector.edit_instruction_draft == draft
+    window.undo()
+    assert window.inspector.edit_instruction_draft == draft
+
+
+@pytest.mark.parametrize("context", ("card", "revision", "away-and-back"))
+def test_edit_completion_and_undo_do_not_touch_unrelated_context(
+    application: QApplication, context: str
+) -> None:
+    other = Card(name="Other")
+    first = _stack().cards[0]
+    window, controller, _workers, background = _window(Stack(name="Stack", cards=(first, other)))
+    instruction = "Open the gate."
+    window.inspector.set_edit_instruction(instruction)
+    window._edit_background(instruction, CurrentSourceSize(width=512, height=384))
+    controller.execute(RenameCardCommand(card_id=first.id, name="Edited"))
+    token = controller.current_undo_token
+    change = AppliedImageChange(
+        token=token,
+        card_id=first.id,
+        revision_id=first.active_revision.id,
+        previous_revision=first.active_revision,
+        operation=EditImageOperation(instruction),
+    )
+    if context == "revision":
+        controller.execute(
+            ActivateRevisionCommand(card_id=first.id, revision_id=first.revisions[1].id)
+        )
+    else:
+        window._selected_card_id = other.id
+    window.render_document()
+    if context == "away-and-back":
+        window._selected_card_id = first.id
+        window.render_document()
+    draft = window.inspector.edit_instruction_draft
+    background.image_applied.emit(change)
+    assert window.inspector.edit_instruction_draft == draft
+    window.inspector.clear_edit_instruction()
+    if context == "revision":
+        # Undo activation outside this window to keep its unrelated rendered context.
+        assert controller.undo()
+        assert controller.undo_if_current(token)
+        window._restore_edit_instruction_after_undo(token)
+        assert window.inspector.edit_instruction_edit.toPlainText() == ""
+    elif context == "card":
+        window.undo()
+        assert window.inspector.edit_instruction_edit.toPlainText() == ""
+    else:
+        window.undo()
+        assert window.inspector.edit_instruction_edit.toPlainText() == instruction
+
+
+@pytest.mark.parametrize("action_id", ("undo", "create-image-revision"))
+@pytest.mark.parametrize("stale_reason", ("command", "replacement", "run"))
+@pytest.mark.parametrize(
+    "operation",
+    (ImageOperation("generate"), ImageOperation("refine"), EditImageOperation("Open it.")),
+)
+def test_image_actions_reject_stale_history_and_run_mode(
     application: QApplication,
+    action_id: str,
+    stale_reason: str,
+    operation: ImageOperation | EditImageOperation,
+) -> None:
+    window, controller, _workers, background = _window()
+    card = controller.document.cards[0]
+    controller.execute(RenameCardCommand(card_id=card.id, name="Applied"))
+    change = AppliedImageChange(
+        token=controller.current_undo_token,
+        card_id=card.id,
+        revision_id=card.active_revision.id,
+        previous_revision=card.active_revision,
+        operation=operation,
+    )
+    background.image_applied.emit(change)
+    if stale_reason == "command":
+        controller.execute(RenameCardCommand(card_id=card.id, name="Newer"))
+    elif stale_reason == "replacement":
+        controller.replace_document(Stack(name="Replacement", cards=(card,)))
+        window._document_replaced(controller.document)
+    else:
+        window.mode_button.click()
+    before = controller.document
+    before_token = controller.current_undo_token
+    window._notification_action_requested(action_id)
+    assert controller.document == before
+    assert controller.current_undo_token == before_token
+    background.image_applied.emit(change)
+    assert window._applied_image_change is None
+    assert window.inspector.edit_instruction_edit.toPlainText() == ""
+
+
+def test_version_checkpoint_preserves_card_selection_history(
+    application: QApplication,
+) -> None:
+    card, other = Card(name="Result"), Card(name="Selected")
+    window, controller, _workers, background = _window(Stack(name="Stack", cards=(card, other)))
+    controller.execute(RenameCardCommand(card_id=card.id, name="Applied"))
+    background.image_applied.emit(
+        AppliedImageChange(
+            token=controller.current_undo_token,
+            card_id=card.id,
+            revision_id=card.active_revision.id,
+            previous_revision=card.active_revision,
+            operation=ImageOperation("generate"),
+        )
+    )
+    window._selected_card_id = other.id
+    window.render_document()
+    window._create_image_revision()
+    created = controller.document.cards[0].active_revision
+    assert window._selected_card_id == card.id
+    window.undo()
+    assert window._selected_card_id == other.id
+    window.redo()
+    assert window._selected_card_id == card.id
+    assert controller.document.cards[0].active_revision.id == created.id
+
+
+@pytest.mark.parametrize("discard", ("branch", "clear", "replace"))
+def test_edit_undo_metadata_lives_only_as_long_as_history(
+    application: QApplication, discard: str
+) -> None:
+    window, controller, _workers, background = _window()
+    card = controller.document.cards[0]
+    controller.execute(RenameCardCommand(card_id=card.id, name="Edited"))
+    token = controller.current_undo_token
+    change = AppliedImageChange(
+        token=token,
+        card_id=card.id,
+        revision_id=card.active_revision.id,
+        previous_revision=card.active_revision,
+        operation=EditImageOperation("Open the gate."),
+    )
+    background.image_applied.emit(change)
+    window.undo()
+    assert token in window._edit_undo_changes
+    assert token in window._restored_edit_drafts
+    if discard == "branch":
+        controller.execute(RenameCardCommand(card_id=card.id, name="Unrelated branch"))
+    elif discard == "clear":
+        controller.clear_history()
+    else:
+        controller.replace_document(controller.document)
+        window._document_replaced(controller.document)
+    window.render_document()
+    assert window._edit_undo_changes == {}
+    assert window._restored_edit_drafts == {}
+    background.image_applied.emit(change)
+    assert window._edit_undo_changes == {}
+
+
+@pytest.mark.parametrize(
+    "operation",
+    (ImageOperation("generate"), ImageOperation("refine"), EditImageOperation("Open it.")),
+)
+def test_dismissing_image_result_keeps_it_on_current_version(
+    application: QApplication,
+    operation: ImageOperation | EditImageOperation,
 ) -> None:
     original = CardRevision(description="A courtyard")
     card = Card(name="Card", revisions=(original,))
@@ -2823,9 +3074,9 @@ def test_dismissing_generated_result_keeps_it_on_current_version(
     window.render_document(changed)
     token = controller.current_undo_token
     assert token is not None
-    window._show_generated_revision_notification(
-        GeneratedRevisionChange(
-            message="Image generated",
+    window._image_applied(
+        AppliedImageChange(
+            operation=operation,
             token=token,
             card_id=card.id,
             revision_id=original.id,
@@ -2839,7 +3090,13 @@ def test_dismissing_generated_result_keeps_it_on_current_version(
     assert revision.id == original.id
     assert revision.background == background
     assert controller.current_undo_token == token
-    assert window._generated_revision_change is None
+    assert controller.document == changed
+    assert window._applied_image_change is None
+    window.undo()
+    assert controller.document.cards[0].active_revision == original
+    assert window.inspector.edit_instruction_edit.toPlainText() == (
+        operation.instruction if isinstance(operation, EditImageOperation) else ""
+    )
 
 
 def test_notification_undo_cannot_mutate_document_in_run_mode(

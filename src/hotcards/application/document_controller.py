@@ -128,6 +128,11 @@ class DocumentController:
         """Identify the next command while it remains directly redoable."""
         return self._redo_stack[-1].token if self._redo_stack else None
 
+    @property
+    def retained_history_tokens(self) -> frozenset[UndoToken]:
+        """Identify session metadata still reachable through Undo or Redo."""
+        return frozenset(entry.token for entry in (*self._undo_stack, *self._redo_stack))
+
     def set_autosave_hook(self, hook: AutosaveHook | None) -> None:
         """Replace the callback signaled after each effective document change."""
         self._autosave_hook = hook

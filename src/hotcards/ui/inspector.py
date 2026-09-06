@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from uuid import UUID
 
 from pydantic import ValidationError
@@ -262,6 +263,16 @@ def _first_selectable_combo_index(combo: QComboBox) -> int:
     return -1
 
 
+@dataclass(frozen=True, slots=True)
+class EditInstructionDraft:
+    """An exact editor state, including user recalls and context transitions."""
+
+    card_id: UUID | None
+    revision_id: UUID | None
+    text: str
+    sequence: int
+
+
 class Inspector(QWidget):
     """Render the selected active revision and issue typed commands."""
 
@@ -287,6 +298,7 @@ class Inspector(QWidget):
         self.controller = controller
         self.selected_card_id: UUID | None = None
         self._rendered_revision_id: UUID | None = None
+        self._edit_instruction_sequence = 0
         self._generate_using_text = ""
         self._generate_reason = ""
         self._refine_using_text = ""
@@ -840,7 +852,7 @@ class Inspector(QWidget):
             self._refine_similarity_changed
         )
         self.refine_resolution_combo.currentIndexChanged.connect(self._refine_output_changed)
-        self.edit_instruction_edit.textChanged.connect(self._edit_inputs_changed)
+        self.edit_instruction_edit.textChanged.connect(self._edit_instruction_changed)
         self.edit_resolution_combo.currentIndexChanged.connect(self._edit_output_changed)
         self.edit_background_button.clicked.connect(self._request_edit_background)
         self.style_combo.currentIndexChanged.connect(self._revision_style_changed)
@@ -873,6 +885,10 @@ class Inspector(QWidget):
     def _render_inputs_changed(self) -> None:
         if not self._rendering:
             self.render_inputs_changed.emit()
+
+    def _edit_instruction_changed(self) -> None:
+        self._edit_instruction_sequence += 1
+        self._edit_inputs_changed()
 
     def _edit_inputs_changed(self) -> None:
         if self._rendering:
@@ -937,6 +953,8 @@ class Inspector(QWidget):
             )
             self.selected_card_id = card.id if card is not None else None
             if card is None:
+                if previous_card_id is not None:
+                    self._edit_instruction_sequence += 1
                 self._rendered_revision_id = None
                 self.pages.setCurrentIndex(0)
                 self._set_error(self.description_error, "")
@@ -956,6 +974,7 @@ class Inspector(QWidget):
             revision = card.active_revision
             same_revision = previous_card_id == card.id and previous_revision_id == revision.id
             if not same_revision:
+                self._edit_instruction_sequence += 1
                 self._set_error(self.description_error, "")
                 self._set_error(self.reference_error, "")
                 self.set_hotspot_error("")
@@ -1107,7 +1126,17 @@ class Inspector(QWidget):
     def set_edit_error(self, message: str) -> None:
         self._set_error(self.edit_instruction_error, message)
 
+    @property
+    def edit_instruction_draft(self) -> EditInstructionDraft:
+        return EditInstructionDraft(
+            card_id=self.selected_card_id,
+            revision_id=self._rendered_revision_id,
+            text=self.edit_instruction_edit.toPlainText(),
+            sequence=self._edit_instruction_sequence,
+        )
+
     def set_edit_instruction(self, instruction: str) -> None:
+        self._edit_instruction_sequence += 1
         with QSignalBlocker(self.edit_instruction_edit):
             self.edit_instruction_edit.setPlainText(instruction)
         self._set_error(self.edit_instruction_error, "")
@@ -1171,6 +1200,7 @@ class Inspector(QWidget):
         self._sound_picker_context = None
         self.selected_card_id = None
         self._rendered_revision_id = None
+        self.clear_edit_instruction()
         self._set_error(self.description_error, "")
         self._set_error(self.reference_error, "")
         self._set_error(self.refine_error, "")
@@ -1607,9 +1637,7 @@ class Inspector(QWidget):
         _sync_combo_tooltip(self.refine_resolution_combo)
         self._set_error(self.refine_error, error)
         style_suffix = ", and Style" if revision.style_id is not None else ""
-        self._refine_using_text = (
-            f"Create a new version using the current image, Description{style_suffix}."
-        )
+        self._refine_using_text = f"Reinterpret the current image using Description{style_suffix}."
         self._refresh_generation_tooltips()
 
     def _request_refine_background(self) -> None:
@@ -1743,7 +1771,7 @@ class Inspector(QWidget):
         return None
 
     def _render_edit_tooltip(self) -> None:
-        self._edit_using_text = "Create a new version with only the requested change."
+        self._edit_using_text = "Apply only the requested change to the current image."
         self._refresh_generation_tooltips()
 
     def _request_edit_background(self) -> None:

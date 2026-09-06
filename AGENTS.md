@@ -133,15 +133,19 @@ for live MFLUX runs.
   use a fresh random seed, and never send Description or Generate References.
   Retain the exact effective prompt, including Style text, in provenance.
   When Undo reverses a completed Edit, restore that Edit's exact authored
-  instruction to the editor so it can be adjusted and retried.
+  instruction only in its card/revision context, without overwriting newer input.
+  Bind restoration to that Edit's exact Undo token, retaining the session-local
+  metadata across Undo/Redo and pruning it when history or the project is discarded.
+  Redo may clear only the exact automatically restored draft; user recalls count
+  as newer drafts even when their text is identical.
   Default output to the source image's exact decoded dimensions and additionally
   offer only higher-area presets. Pass
   MFLUX a private immutable no-follow source snapshot and reject replacement
   races before acceptance. Append the accepted Edit to inherited flattened
   lineage, atomically store the image, and replace the current revision's
   background through one Undo boundary, preserving its other authoring state.
-  Clear only the matching instruction after definitive durable success; never
-  clear a newer draft.
+  Clear only the matching submitted draft and context after definitive durable
+  success, including delayed save retries; never clear a newer draft.
 - Persist generated backgrounds with a strict discriminated provenance union
   for direct Generate, externally patched legacy Generate, Refine, Edit, and
   independent card duplication.
@@ -214,11 +218,18 @@ for live MFLUX runs.
   visible result with indeterminate durability blocks mutations and publishes no
   normal result actions until a definitive save retry creates its single history
   entry. Preserve completion context even when a durable commit reports cleanup
-  errors. After Description or any image operation succeeds,
-  expose Create New Version and Undo bound to the exact current history token;
-  an explicit Keep action retains the result on the current revision. Creating
-  a version must restore the prior complete revision and append one complete
-  generated revision through a separate Undo boundary.
+  errors. Every durable Generate, Reinterpret, or Edit publishes one typed
+  `AppliedImageChange` through `image_applied`, carrying its exact Undo token,
+  card/revision identity, complete previous revision, and operation-specific
+  payload (including Edit's authored instruction). Offer Create New Version as
+  primary, Undo as secondary, and Keep as dismiss, bound to that exact current
+  history token and unavailable in Run or a stale project. Keep changes no
+  document state. `CreateImageRevisionCommand` restores the prior complete revision,
+  appends and activates the accepted complete result with a new revision UUID,
+  and shares immutable image bytes without invoking a model. This is a separate
+  Undo boundary: undoing version creation leaves the applied image on the original
+  revision and does not restore an Edit instruction; the next Undo reverses the
+  actual image operation and restores its instruction when appropriate.
 - Apply reversible deletions and replacements without confirmation. Report
   outcomes, failures, Run warnings, and Undo actions in the global notification
   bar; keep field validation beside its input and the status bar passive. Use a

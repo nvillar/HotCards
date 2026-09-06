@@ -810,7 +810,7 @@ class DuplicateRevisionCommand:
 
 
 @dataclass(frozen=True, slots=True)
-class CreateGeneratedRevisionCommand:
+class CreateImageRevisionCommand:
     """Move a directly applied result into a new complete revision."""
 
     card_id: UUID
@@ -823,20 +823,20 @@ class CreateGeneratedRevisionCommand:
         card = document.cards[card_index]
         source_index = _revision_index(card, self.revision_id)
         if self.previous_revision.id != self.revision_id:
-            raise CommandError("the previous revision does not match the generated result")
+            raise CommandError("the previous revision does not match the applied image result")
         if any(revision.id == self.new_revision_id for revision in card.revisions):
             raise CommandError(f"revision {self.new_revision_id} already exists on card {card.id}")
-        generated_revision = card.revisions[source_index].model_copy(
+        result_revision = card.revisions[source_index].model_copy(
             deep=True,
             update={"id": self.new_revision_id},
         )
         revisions = list(card.revisions)
         revisions[source_index] = self.previous_revision.model_copy(deep=True)
-        revisions.append(generated_revision)
+        revisions.append(result_revision)
         card = card.model_copy(
             update={
                 "revisions": tuple(revisions),
-                "active_revision_id": generated_revision.id,
+                "active_revision_id": result_revision.id,
             }
         )
         return validated_copy(_replace_card(document, card_index, card))
@@ -1192,7 +1192,7 @@ __all__ = [
     "CreateCardAndResolveCommand",
     "CreateCardCommand",
     "CreateKeyAndAddHotspotReferenceCommand",
-    "CreateGeneratedRevisionCommand",
+    "CreateImageRevisionCommand",
     "DeleteCardCommand",
     "DeleteInteractionCommand",
     "DeleteKeyCommand",

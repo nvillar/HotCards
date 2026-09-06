@@ -164,6 +164,29 @@ def test_text_edits_have_sensible_per_commit_undo_boundaries() -> None:
     assert controller.document.cards[0].active_revision.description == ""
 
 
+def test_retained_history_tokens_cover_redo_and_prune_abandoned_history() -> None:
+    card = Card(name="Card")
+    controller = DocumentController(Stack(name="Stack", cards=(card,)))
+    controller.execute(RenameCardCommand(card_id=card.id, name="First"))
+    first = controller.current_undo_token
+    controller.execute(RenameCardCommand(card_id=card.id, name="Second"))
+    second = controller.current_undo_token
+    assert controller.retained_history_tokens == {first, second}
+    assert controller.undo()
+    assert controller.retained_history_tokens == {first, second}
+    controller.execute(RenameCardCommand(card_id=card.id, name="New branch"))
+    assert controller.retained_history_tokens == {first, controller.current_undo_token}
+    controller.clear_history()
+    assert controller.retained_history_tokens == set()
+    controller.execute(RenameCardCommand(card_id=card.id, name="New history"))
+    token = controller.current_undo_token
+    assert controller.retained_history_tokens == {token}
+    controller.replace_document(controller.document)
+    assert controller.retained_history_tokens == set()
+    controller.execute(RenameCardCommand(card_id=card.id, name="Replacement edit"))
+    assert controller.current_undo_token != token
+
+
 def test_complete_hotspot_replacement_is_one_atomic_undo_step() -> None:
     document, source, revision, original = document_with_hotspot()
     controller = DocumentController(document)
