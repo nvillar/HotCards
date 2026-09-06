@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from datetime import UTC, datetime
 from pathlib import Path
@@ -14,6 +15,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 from PIL import Image
 from PySide6.QtCore import QObject, QSettings, Qt, Signal
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 import hotcards.storage.stack_store as stack_store_module
@@ -42,7 +44,7 @@ from hotcards.application.commands import (
 )
 from hotcards.application.document_controller import DocumentController, UndoToken
 from hotcards.application.document_session import DocumentSession
-from hotcards.application.workers import AdapterWorkers
+from hotcards.application.workers import AdapterKind, AdapterWorkers
 from hotcards.domain.image_dimensions import (
     AspectRatio,
     ResolutionTier,
@@ -72,6 +74,7 @@ from hotcards.domain.models import (
     ResolvedCardReference,
     Stack,
     UnresolvedCardReference,
+    image_edit_lineage,
 )
 from hotcards.generation.errors import ImageGenerationCancelled
 from hotcards.generation.mflux_generator import MfluxGenerator
@@ -320,6 +323,557 @@ def _create_generated_source(
     workflow.generate(source.id)
     _complete_generation(workers)
     return next(card for card in controller.document.cards if card.id == source_id)
+
+
+def _assert_current_image_controls(window: MainWindow, tier: ResolutionTier) -> None:
+    width, height = output_dimensions(tier, window.controller.document.aspect_ratio)
+    inspector = window.inspector
+    assert inspector.resolution_combo.currentData() == PresetOutputSize(tier=tier)
+    for combo in (inspector.refine_resolution_combo, inspector.edit_resolution_combo):
+        assert combo.currentData() == CurrentSourceSize(width=width, height=height)
+        assert f"{width} × {height}" in combo.toolTip()
+
+
+def test_explicit_image_journey_reopens_without_sources_and_preserves_run_navigation(
+    application: QApplication,
+    tmp_path: Path,
+) -> None:
+    workflow, controller, session, workers, model, card = _bound_workflow(
+        tmp_path, resolution=ResolutionTier.SMALL
+    )
+    references = tuple(
+        _create_generated_source(workflow, controller, workers, name=name)
+        for name in ("Pattern", "Palette")
+    )
+    for position, reference in enumerate(references, start=1):
+        controller.execute(
+            SetRevisionReferenceCommand(
+                card_id=card.id,
+                revision_id=card.active_revision.id,
+                reference=ResolvedCardReference(target_card_id=reference.id),
+                position=position,
+            )
+        )
+    style = controller.document.styles[0]
+    controller.execute(
+        SetRevisionStyleCommand(
+            card_id=card.id,
+            revision_id=card.active_revision.id,
+            style_id=style.id,
+        )
+    )
+    hotspot = card.active_revision.hotspot_set.interactions[0].model_copy(
+        update={
+            "action": NavigateAction(target=ResolvedCardReference(target_card_id=references[0].id))
+        }
+    )
+    controller.execute(
+        ReplaceHotspotSetCommand(
+            card_id=card.id,
+            revision_id=card.active_revision.id,
+            hotspot_set=HotspotSet(interactions=(hotspot,)),
+        )
+    )
+    assert session.flush()
+    window_workers = AdapterWorkers()
+    window = MainWindow(
+        controller,
+        window_workers,
+        QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat),
+        document_session=session,
+        background_workflow=workflow,
+        project_directory=tmp_path / "projects",
+        start_diagnostics=False,
+    )
+    applied: list[AppliedImageChange] = []
+    workflow.image_applied.connect(applied.append)
+    window._availability[AdapterKind.MFLUX] = True
+    window._update_generation_actions()
+    inspector = window.inspector
+    try:
+        inspector.description_edit.setPlainText(
+            "A garden gate with the pattern from image 1 and the palette from image 2."
+        )
+        inspector.generate_background_button.click()
+        before = controller.document.cards[0].active_revision
+        assert workflow.busy
+        _complete_generation(workers)
+        generated = controller.document.cards[0].active_revision
+        assert generated.model_copy(update={"background": None}) == before
+        assert len(controller.document.cards[0].revisions) == 1
+        assert isinstance(generated.provenance, DirectGenerateProvenance)
+        assert generated.provenance.inputs.description == before.description
+        assert generated.provenance.inputs.style.prompt_text == style.prompt_text
+        assert tuple(
+            snapshot.card_id for snapshot in generated.provenance.inputs.references
+        ) == tuple(reference.id for reference in references)
+        assert model.calls[-1]["image_paths"] == [
+            session.store.asset_path(reference.active_revision.image_path)
+            for reference in references
+        ]
+        assert image_edit_lineage(generated.provenance) == ()
+        _assert_current_image_controls(window, ResolutionTier.SMALL)
+        generated_path = session.store.asset_path(generated.image_path)
+        unrelated_path = generated_path.with_name("unowned.png")
+        unrelated_path.write_bytes(generated_path.read_bytes())
+        token = controller.current_undo_token
+        assert window.notification_bar.dismiss_button.text() == "Keep"
+        window.notification_bar.dismiss_button.click()
+        assert controller.current_undo_token == token
+        assert controller.document.cards[0].active_revision == generated
+        assert window._applied_image_change is None
+
+        instruction = "Open the garden gate.\nKeep the hand-painted stars exactly as they are."
+        inspector.inspector_tabs.setCurrentIndex(1)
+        inspector.edit_instruction_edit.setPlainText(f"  {instruction}  ")
+        inspector.edit_resolution_combo.setCurrentIndex(
+            inspector._combo_index_for_data(
+                inspector.edit_resolution_combo,
+                PresetOutputSize(tier=ResolutionTier.MEDIUM),
+            )
+        )
+        inspector.edit_background_button.click()
+        assert workflow.busy
+        assert controller.document.cards[0].active_revision == generated
+        _complete_generation(workers)
+        edited = controller.document.cards[0].active_revision
+        assert edited.model_copy(update={"background": generated.background}) == generated
+        assert len(controller.document.cards[0].revisions) == 1
+        assert isinstance(edited.provenance, EditProvenance)
+        assert edited.provenance.source == DerivedImageSourceSnapshot(
+            card_id=card.id,
+            revision_id=before.id,
+            background_id=generated.background.id,
+            width=256,
+            height=192,
+            seed=generated.provenance.settings.seed,
+            edit_lineage=(),
+        )
+        assert edited.provenance.instruction == instruction
+        assert edited.provenance.expanded_prompt.endswith(style.prompt_text)
+        assert model.calls[-1]["prompt"] == edited.provenance.expanded_prompt
+        assert len(model.calls[-1]["image_paths"]) == 1
+        assert not model.calls[-1]["image_paths"][0].exists()
+        assert inspector.edit_instruction_edit.toPlainText() == ""
+        assert inspector.edit_history_list.item(0).text() == f"1. {instruction}"
+        _assert_current_image_controls(window, ResolutionTier.MEDIUM)
+        edited_path = session.store.asset_path(edited.image_path)
+        token = controller.current_undo_token
+        window.notification_bar.dismiss_button.click()
+        assert controller.current_undo_token == token
+        assert controller.document.cards[0].active_revision == edited
+
+        inspector.inspector_tabs.setCurrentIndex(0)
+        inspector.refine_resolution_combo.setCurrentIndex(
+            inspector._combo_index_for_data(
+                inspector.refine_resolution_combo,
+                PresetOutputSize(tier=ResolutionTier.LARGE),
+            )
+        )
+        inspector.refine_background_button.click()
+        assert workflow.busy
+        assert controller.document.cards[0].active_revision == edited
+        _complete_generation(workers)
+        evolved = controller.document.cards[0].active_revision
+        assert evolved.model_copy(update={"background": edited.background}) == edited
+        assert len(controller.document.cards[0].revisions) == 1
+        assert isinstance(evolved.provenance, RefineProvenance)
+        assert evolved.provenance.source == DerivedImageSourceSnapshot(
+            card_id=card.id,
+            revision_id=before.id,
+            background_id=edited.background.id,
+            width=512,
+            height=384,
+            seed=edited.provenance.settings.seed,
+            edit_lineage=(edited.provenance.accepted_edit,),
+        )
+        assert image_edit_lineage(evolved.provenance) == image_edit_lineage(edited.provenance)
+        assert f"1. {instruction}" in evolved.provenance.render_prompt
+        assert model.calls[-1]["prompt"] == evolved.provenance.render_prompt
+        assert model.calls[-1]["seed"] == edited.provenance.settings.seed
+        assert "image_paths" not in model.calls[-1]
+        assert not model.calls[-1]["image_path"].exists()
+        _assert_current_image_controls(window, ResolutionTier.LARGE)
+        assert [change.operation.kind for change in applied] == ["generate", "edit", "refine"]
+        assert [change.previous_revision for change in applied] == [before, generated, edited]
+        assert all(change.revision_id == before.id for change in applied)
+        assert session.store.load() == controller.document
+
+        invocation_count = len(model.calls)
+        assert window.notification_bar.primary_button.text() == "Create New Version"
+        window.notification_bar.primary_button.click()
+        checkpoint = controller.document.cards[0].active_revision
+        assert checkpoint.id != before.id
+        assert checkpoint.model_copy(update={"id": before.id}) == evolved
+        assert controller.document.cards[0].revisions == (edited, checkpoint)
+        assert controller.current_undo_token != applied[-1].token
+        assert checkpoint.background == evolved.background
+        assert len(model.calls) == invocation_count
+        window._delete_revision(before.id)
+        assert controller.document.cards[0].revisions == (checkpoint,)
+        assert window.revision_combo.currentText() == "1"
+        assert session.flush()
+        assert session.store.load() == controller.document
+        evolved_path = session.store.asset_path(checkpoint.image_path)
+        assert all(path.is_file() for path in (generated_path, edited_path, evolved_path))
+        assert session.close_history()
+        assert not generated_path.exists()
+        assert not edited_path.exists()
+        assert evolved_path.is_file()
+        assert unrelated_path.is_file()
+        assert all(
+            session.store.asset_path(reference.active_revision.image_path).is_file()
+            for reference in references
+        )
+
+        saved = controller.document
+        manifest = json.loads((session.store.bundle_path / "stack.json").read_text())
+        assert manifest["schema_version"] == 13
+        persisted_provenance = manifest["cards"][0]["revisions"][0]["background"]["provenance"]
+        assert "edit_lineage" not in persisted_provenance
+        assert persisted_provenance["source"] == evolved.provenance.source.model_dump(mode="json")
+        assert session.open(session.store.bundle_path) == saved
+        assert controller.document.cards[0].active_revision == checkpoint
+        assert not controller.can_undo
+        _assert_current_image_controls(window, ResolutionTier.LARGE)
+        assert window._edit_undo_changes == {}
+        inspector.inspector_tabs.setCurrentIndex(1)
+        window.show()
+        application.processEvents()
+        history = inspector.edit_history_list
+        assert history.count() == 1
+        draft = inspector.edit_instruction_draft
+        QTest.mouseClick(
+            history.viewport(),
+            Qt.MouseButton.LeftButton,
+            pos=history.visualItemRect(history.item(0)).center(),
+        )
+        assert inspector.edit_instruction_draft.text == instruction
+        assert inspector.edit_instruction_draft.sequence == draft.sequence + 1
+        assert controller.document == saved
+        assert not controller.can_undo
+        assert len(model.calls) == invocation_count
+
+        window.select_card(references[0].id)
+        assert inspector.edit_history_list.count() == 0
+        window.mode_button.click()
+        assert window._run_session.state.current_card_id == references[0].id
+        assert window.revision_combo.isHidden()
+        assert window._applied_image_change is None
+        window.restart_button.click()
+        assert window._run_session.state.current_card_id == card.id
+        window.card_canvas.interaction_activated.emit(hotspot.id)
+        assert window._run_session.state.current_card_id == references[0].id
+        window.back_button.click()
+        assert window._run_session.state.current_card_id == card.id
+        assert controller.document == saved
+        assert len(model.calls) == invocation_count
+        assert not workflow.busy
+    finally:
+        window.close()
+        window_workers.shutdown()
+
+
+def test_restored_edit_branch_survives_duplication_source_deletion_and_further_edits(
+    application: QApplication,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow, controller, session, workers, model, card = _bound_workflow(tmp_path)
+    seeds = iter((101, 202, 303, 404))
+    monkeypatch.setattr(
+        "hotcards.application.background_workflow.secrets.randbelow",
+        lambda _limit: next(seeds),
+    )
+    window_workers = AdapterWorkers()
+    window = MainWindow(
+        controller,
+        window_workers,
+        QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat),
+        document_session=session,
+        background_workflow=workflow,
+        project_directory=tmp_path / "projects",
+        start_diagnostics=False,
+    )
+    window._availability[AdapterKind.MFLUX] = True
+    window._update_generation_actions()
+    inspector = window.inspector
+    try:
+        inspector.generate_background_button.click()
+        _complete_generation(workers)
+        window.notification_bar.dismiss_button.click()
+        inspector.inspector_tabs.setCurrentIndex(1)
+        instruction = "Paint a small star on the gate.\nKeep its uneven brush strokes."
+        edits: list[CardRevision] = []
+        for tier in (ResolutionTier.LARGE, ResolutionTier.FULL):
+            inspector.edit_instruction_edit.setPlainText(instruction)
+            inspector.edit_resolution_combo.setCurrentIndex(
+                inspector._combo_index_for_data(
+                    inspector.edit_resolution_combo, PresetOutputSize(tier=tier)
+                )
+            )
+            inspector.edit_background_button.click()
+            assert workflow.busy
+            _complete_generation(workers)
+            edits.append(controller.document.cards[0].active_revision)
+            window.notification_bar.dismiss_button.click()
+        first, abandoned = edits
+        assert first.id == abandoned.id == card.active_revision.id
+        assert first.provenance.settings.seed == 101
+        assert abandoned.provenance.settings.seed == 202
+        abandoned_path = session.store.asset_path(abandoned.image_path)
+        abandoned_token = controller.current_undo_token
+        assert inspector.edit_history_list.count() == 2
+
+        window.undo()
+        assert controller.document.cards[0].active_revision == first
+        assert inspector.edit_history_list.count() == 1
+        assert inspector.edit_instruction_edit.toPlainText() == instruction
+        _assert_current_image_controls(window, ResolutionTier.LARGE)
+        window.redo()
+        assert controller.document.cards[0].active_revision == abandoned
+        assert inspector.edit_history_list.count() == 2
+        assert inspector.edit_instruction_edit.toPlainText() == ""
+        _assert_current_image_controls(window, ResolutionTier.FULL)
+        window.undo()
+        assert controller.document.cards[0].active_revision == first
+        assert inspector.edit_instruction_edit.toPlainText() == instruction
+        assert abandoned_path.is_file()
+        assert session.flush()
+
+        history = inspector.edit_history_list
+        history.setCurrentRow(0)
+        previous_draft = inspector.edit_instruction_draft
+        QTest.keyClick(history, Qt.Key.Key_Return)
+        recalled = inspector.edit_instruction_draft
+        assert recalled.text == instruction
+        assert recalled.sequence == previous_draft.sequence + 1
+        window.redo()
+        assert inspector.edit_instruction_draft == recalled
+        window.undo()
+        assert inspector.edit_instruction_draft == recalled
+        assert controller.document.cards[0].active_revision == first
+        _assert_current_image_controls(window, ResolutionTier.LARGE)
+        inspector.edit_background_button.click()
+        assert workflow.busy
+        _complete_generation(workers)
+        branch = controller.document.cards[0].active_revision
+        assert branch.id == first.id
+        assert branch.provenance.source.background_id == first.background.id
+        assert branch.provenance.source.edit_lineage == image_edit_lineage(first.provenance)
+        assert branch.provenance.settings.seed == 303
+        assert tuple(edit.instruction for edit in image_edit_lineage(branch.provenance)) == (
+            instruction,
+            instruction,
+        )
+        assert [history.item(index).text() for index in range(history.count())] == [
+            f"1. {instruction}",
+            f"2. {instruction}",
+        ]
+        assert not controller.can_redo
+        assert abandoned_token not in window._edit_undo_changes
+        assert not abandoned_path.exists()
+        assert inspector.edit_instruction_edit.toPlainText() == ""
+        assert session.store.load() == controller.document
+        window.notification_bar.dismiss_button.click()
+
+        branch_path = session.store.asset_path(branch.image_path)
+        window._duplicate_card()
+        duplicate = controller.document.cards[1]
+        duplicate_revision = duplicate.active_revision
+        duplicate_path = session.store.asset_path(duplicate_revision.image_path)
+        assert window._selected_card_id == duplicate.id
+        assert duplicate.id != card.id
+        assert duplicate_revision.id != branch.id
+        assert len(duplicate.revisions) == 1
+        assert duplicate_revision.background.id != branch.background.id
+        assert duplicate_path != branch_path
+        assert duplicate_path.read_bytes() == branch_path.read_bytes()
+        assert isinstance(duplicate_revision.provenance, DuplicateProvenance)
+        assert duplicate_revision.provenance.original_provenance == branch.provenance
+        assert duplicate_revision.provenance.source == ImageSourceSnapshot(
+            card_id=card.id,
+            revision_id=branch.id,
+            background_id=branch.background.id,
+        )
+        assert (
+            duplicate_revision.model_copy(
+                update={
+                    "id": branch.id,
+                    "background": branch.background,
+                    "hotspot_set": branch.hotspot_set,
+                }
+            )
+            == branch
+        )
+        original_hotspot = branch.hotspot_set.interactions[0]
+        copied_hotspot = duplicate_revision.hotspot_set.interactions[0]
+        assert copied_hotspot.id != original_hotspot.id
+        assert copied_hotspot.model_copy(update={"id": original_hotspot.id}) == original_hotspot
+        assert image_edit_lineage(duplicate_revision.provenance) == image_edit_lineage(
+            branch.provenance
+        )
+        window._delete_card(card.id)
+        assert controller.document.cards == (duplicate,)
+        assert session.flush()
+        assert branch_path.is_file()
+        assert session.close_history()
+        assert not branch_path.exists()
+        assert not tuple((session.store.bundle_path / "assets" / "cards" / str(card.id)).glob("*"))
+        assert duplicate_path.is_file()
+        assert session.open(session.store.bundle_path).cards == (duplicate,)
+        assert inspector.edit_history_list.count() == 2
+        _assert_current_image_controls(window, ResolutionTier.LARGE)
+
+        inspector.inspector_tabs.setCurrentIndex(0)
+        inspector.refine_background_button.click()
+        assert workflow.busy
+        _complete_generation(workers)
+        evolved = controller.document.cards[0].active_revision
+        assert evolved.model_copy(update={"background": duplicate_revision.background}) == (
+            duplicate_revision
+        )
+        assert evolved.provenance.source.card_id == duplicate.id
+        assert evolved.provenance.source.background_id == duplicate_revision.background.id
+        assert evolved.provenance.source.seed == 303
+        assert image_edit_lineage(evolved.provenance) == image_edit_lineage(branch.provenance)
+        assert model.calls[-1]["seed"] == 303
+        assert "image_paths" not in model.calls[-1]
+        window.notification_bar.dismiss_button.click()
+        inspector.inspector_tabs.setCurrentIndex(1)
+        final_instruction = "Add a blue ribbon beside the stars."
+        inspector.edit_instruction_edit.setPlainText(final_instruction)
+        inspector.edit_background_button.click()
+        assert workflow.busy
+        _complete_generation(workers)
+        result = controller.document.cards[0].active_revision
+        assert len(controller.document.cards[0].revisions) == 1
+        assert result.model_copy(update={"background": duplicate_revision.background}) == (
+            duplicate_revision
+        )
+        assert result.provenance.source.background_id == evolved.background.id
+        assert result.provenance.settings.seed == 404
+        lineage = image_edit_lineage(result.provenance)
+        assert lineage == (
+            *image_edit_lineage(branch.provenance),
+            result.provenance.accepted_edit,
+        )
+        assert tuple(edit.instruction for edit in lineage) == (
+            instruction,
+            instruction,
+            final_instruction,
+        )
+        assert [history.item(index).text() for index in range(history.count())] == [
+            f"{number}. {edit.instruction}" for number, edit in enumerate(lineage, start=1)
+        ]
+        assert session.store.load() == controller.document
+        result_path = session.store.asset_path(result.image_path)
+        evolved_path = session.store.asset_path(evolved.image_path)
+        assert session.close_history()
+        assert not duplicate_path.exists()
+        assert not evolved_path.exists()
+        assert result_path.is_file()
+        saved = controller.document
+        assert session.open(session.store.bundle_path) == saved
+        assert (
+            image_edit_lineage(controller.document.cards[0].active_revision.provenance) == lineage
+        )
+        assert inspector.edit_history_list.count() == 3
+    finally:
+        window.close()
+        window_workers.shutdown()
+
+
+@pytest.mark.parametrize("outcome", ("success", "committed-error", "observed-after"))
+def test_edit_completion_retains_its_token_across_reentrant_session_changes(
+    application: QApplication,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: str,
+) -> None:
+    workflow, controller, session, workers, _model, card = _bound_workflow(tmp_path)
+    workflow.generate(card.id)
+    _complete_generation(workers)
+    source = controller.document.cards[0].active_revision
+    renamed = False
+
+    def rename_on_durable_edit(_state: object) -> None:
+        nonlocal renamed
+        if (
+            not renamed
+            and not controller.mutation_blocked
+            and isinstance(controller.document.cards[0].active_revision.provenance, EditProvenance)
+        ):
+            renamed = True
+            controller.execute(RenameCardCommand(card_id=card.id, name="After Edit"))
+
+    session.state_changed.disconnect(workflow._session_state_changed)
+    session.state_changed.connect(rename_on_durable_edit)
+    session.state_changed.connect(workflow._session_state_changed)
+    window_workers = AdapterWorkers()
+    window = MainWindow(
+        controller,
+        window_workers,
+        QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat),
+        document_session=session,
+        background_workflow=workflow,
+        project_directory=tmp_path / "projects",
+        start_diagnostics=False,
+    )
+    window._availability[AdapterKind.MFLUX] = True
+    window._update_generation_actions()
+    applied: list[AppliedImageChange] = []
+    workflow.image_applied.connect(applied.append)
+    real_store = session.store.store_image_asset_and_save
+
+    def persist_with_outcome(path: Path, **kwargs: object) -> object:
+        stored = real_store(path, **kwargs)
+        after = kwargs["changed_stack"]
+        if outcome != "success":
+            raise StackStoreTransactionError(
+                RuntimeError("injected post-write outcome"),
+                persisted_stack=after if outcome == "committed-error" else None,
+                observed_stack=after,
+                durability_indeterminate=outcome == "observed-after",
+                owned_asset=stored,
+            )
+        return stored
+
+    monkeypatch.setattr(session.store, "store_image_asset_and_save", persist_with_outcome)
+    instruction = "Open the gate."
+    try:
+        window.inspector.inspector_tabs.setCurrentIndex(1)
+        window.inspector.set_edit_instruction(instruction)
+        window._update_generation_actions()
+        window.inspector.edit_background_button.click()
+        _complete_generation(workers)
+        if outcome == "observed-after":
+            assert controller.mutation_blocked
+            assert applied == []
+            session.flush()
+        assert renamed
+        assert len(applied) == 1
+        change = applied[0]
+        assert change.token != controller.current_undo_token
+        assert change.token in controller.retained_history_tokens
+        assert change.token in window._edit_undo_changes
+        assert window._applied_image_change is None
+        assert window.inspector.edit_instruction_edit.toPlainText() == ""
+        assert window.canvas_card_name.text() == "After Edit"
+        assert session.flush()
+        assert session.store.load() == controller.document
+        assert len(applied) == 1
+
+        window.undo()
+        assert controller.current_undo_token == change.token
+        assert window.inspector.edit_instruction_edit.toPlainText() == ""
+        window.undo()
+        assert controller.document.cards[0].active_revision == source
+        assert window.inspector.edit_instruction_edit.toPlainText() == instruction
+    finally:
+        window.close()
+        window_workers.shutdown()
+        assert session.close_history()
 
 
 def test_generate_preserves_autosave_scheduled_by_redo_cleanup_notification(

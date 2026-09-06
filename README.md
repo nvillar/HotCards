@@ -134,8 +134,9 @@ lineage. Undoing an Edit restores its exact authored instruction in the same
 card/version for adjustment and another attempt, without overwriting newer input.
 This also works across repeated Undo/Redo. Redo clears only an untouched,
 automatically restored instruction, never a newer draft or a user recall.
-Later Evolve operations preserve that lineage
-unless it conflicts with the current authoritative Description; Generate ignores it.
+Later Evolve operations retain that lineage unchanged. Their prompts ask the model
+to preserve the accepted edits unless they conflict with the current authoritative
+Description; Generate ignores them.
 
 Edit History shows only accepted authored instructions for the active image,
 oldest first and numbered, including repeated instructions and edits inherited

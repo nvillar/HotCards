@@ -11,6 +11,7 @@ from PySide6.QtCore import QObject, QTimer, Signal, Slot
 from hotcards.application.commands import DocumentCommand
 from hotcards.application.document_controller import (
     DocumentController,
+    HistoryRecordedHook,
     OwnedAsset,
     OwnedImageAsset,
     OwnedSoundAsset,
@@ -161,6 +162,7 @@ class DocumentSession(QObject):
         *,
         persist: Callable[[Stack], None] | None = None,
         owned_assets: Collection[OwnedAsset] = (),
+        on_recorded: HistoryRecordedHook | None = None,
     ) -> Stack:
         """Apply one command only after its complete snapshot is durably saved."""
         if self._store is None:
@@ -173,6 +175,7 @@ class DocumentSession(QObject):
                 command,
                 persist or self._store.save,
                 owned_assets=owned_assets,
+                on_recorded=on_recorded,
             )
         except StackStoreError as error:
             persisted_stack = getattr(error, "persisted_stack", None)

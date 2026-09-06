@@ -998,7 +998,11 @@ class MainWindow(QMainWindow):
         if isinstance(change.operation, EditImageOperation):
             first_completion = change.token not in self._edit_undo_changes
             self._edit_undo_changes.setdefault(change.token, change)
-            if first_completion and not self._is_running:
+            if (
+                first_completion
+                and not self._is_running
+                and self.controller.is_history_token_applied(change.token)
+            ):
                 self._clear_submitted_edit_instruction(change)
         if self._is_running or self.controller.current_undo_token != change.token:
             return

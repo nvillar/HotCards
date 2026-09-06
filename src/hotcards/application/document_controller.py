@@ -28,6 +28,9 @@ class UndoToken:
     sequence: int
 
 
+HistoryRecordedHook = Callable[[UndoToken], None]
+
+
 @dataclass(frozen=True, slots=True)
 class OwnedImageAsset:
     """One app-owned image eligible for history-aware reclamation."""
@@ -71,6 +74,7 @@ class _HistoryEntry:
 class _PendingPersistedChange:
     before: Stack
     after: Stack
+    on_recorded: HistoryRecordedHook | None = None
 
 
 class DocumentController:
@@ -133,6 +137,10 @@ class DocumentController:
         """Identify session metadata still reachable through Undo or Redo."""
         return frozenset(entry.token for entry in (*self._undo_stack, *self._redo_stack))
 
+    def is_history_token_applied(self, token: UndoToken) -> bool:
+        """Distinguish an applied change from one retained only for Redo."""
+        return any(entry.token == token for entry in self._undo_stack)
+
     def set_autosave_hook(self, hook: AutosaveHook | None) -> None:
         """Replace the callback signaled after each effective document change."""
         self._autosave_hook = hook
@@ -171,6 +179,7 @@ class DocumentController:
         persist: PersistenceHook,
         *,
         owned_assets: Collection[OwnedAsset] = (),
+        on_recorded: HistoryRecordedHook | None = None,
     ) -> Stack:
         """Persist a command result before exposing it or recording history."""
         self._require_mutation_allowed()
@@ -190,12 +199,12 @@ class DocumentController:
             observed_stack = getattr(error, "observed_stack", None)
             retained_owned_asset = getattr(error, "owned_asset", None) is not None
             if persisted_after:
-                self._record_change(before, after)
+                self._record_change(before, after, on_recorded=on_recorded)
             elif durability_indeterminate:
                 if isinstance(observed_stack, Stack):
                     self._document = validated_copy(observed_stack)
                 self._pending_persisted_change = (
-                    _PendingPersistedChange(before=before, after=after)
+                    _PendingPersistedChange(before=before, after=after, on_recorded=on_recorded)
                     if observed_stack == after
                     else None
                 )
@@ -209,7 +218,7 @@ class DocumentController:
                     self._release_unreachable_owned_assets()
             raise
         self._pending_persisted_change = None
-        self._record_change(before, after)
+        self._record_change(before, after, on_recorded=on_recorded)
         for asset in tuple(owned_assets):
             self._owned_assets[(asset.bundle_path, asset.relative_path)] = asset
         self._durability_pending_assets.clear()
@@ -221,27 +230,30 @@ class DocumentController:
         persisted = validated_copy(document)
         pending = self._pending_persisted_change
         if pending is not None and persisted == pending.after and self._document == pending.after:
-            token = UndoToken(self._next_undo_sequence)
-            self._next_undo_sequence += 1
-            self._undo_stack.append(
-                _HistoryEntry(
-                    before=pending.before,
-                    after=pending.after,
-                    token=token,
-                )
+            self._record_change(
+                pending.before,
+                pending.after,
+                on_recorded=pending.on_recorded,
             )
-            self._redo_stack.clear()
         self._pending_persisted_change = None
         self._durability_pending_assets.clear()
         self._release_unreachable_owned_assets()
 
-    def _record_change(self, before: Stack, after: Stack) -> None:
+    def _record_change(
+        self,
+        before: Stack,
+        after: Stack,
+        *,
+        on_recorded: HistoryRecordedHook | None = None,
+    ) -> None:
         if after != before:
             self._document = after
             token = UndoToken(self._next_undo_sequence)
             self._next_undo_sequence += 1
             self._undo_stack.append(_HistoryEntry(before=before, after=after, token=token))
             self._redo_stack.clear()
+            if on_recorded is not None:
+                on_recorded(token)
 
     def undo(self) -> bool:
         """Undo the latest command in this session."""

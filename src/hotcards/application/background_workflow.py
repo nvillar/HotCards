@@ -187,14 +187,17 @@ class _EditTarget:
     source_background_id: UUID
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class _PendingImageCompletion:
     store: StackStore
     document: Stack
-    previous_token: UndoToken | None
     card_id: UUID
     previous_revision: CardRevision
     operation: ImageOperation | EditImageOperation
+    token: UndoToken | None = None
+
+    def record_history_token(self, token: UndoToken) -> None:
+        self.token = token
 
 
 GenerationSettingsProvider = Callable[[], BackgroundGenerationSettings]
@@ -998,7 +1001,6 @@ class BackgroundWorkflow(QObject):
             completion = _PendingImageCompletion(
                 store=store,
                 document=command.apply(before),
-                previous_token=self.controller.current_undo_token,
                 card_id=target.card_id,
                 previous_revision=previous_revision,
                 operation=(
@@ -1035,7 +1037,12 @@ class BackgroundWorkflow(QObject):
                     raise
                 owned_assets.append(self._owned_asset(store, target.card_id, asset_id, stored))
 
-            self.session.execute_persisted(command, persist=persist, owned_assets=owned_assets)
+            self.session.execute_persisted(
+                command,
+                persist=persist,
+                owned_assets=owned_assets,
+                on_recorded=completion.record_history_token,
+            )
 
         try:
             self._require_store().run_locked(accept)
@@ -1047,12 +1054,15 @@ class BackgroundWorkflow(QObject):
             StackStoreError,
             ValidationError,
         ) as error:
-            if completion is not None and self.controller.document == completion.document:
-                if self.controller.mutation_blocked:
+            if completion is not None:
+                if completion.token is not None:
+                    self._publish_image_completion(completion)
+                elif (
+                    self.controller.mutation_blocked
+                    and self.controller.document == completion.document
+                ):
                     self._pending_image_completion = completion
                     self.document_changed.emit(completion.document)
-                elif isinstance(error, DocumentSessionError) and error.committed:
-                    self._publish_image_completion(completion)
             self._finish_with_error(error)
             return
         assert completion is not None
@@ -1069,22 +1079,24 @@ class BackgroundWorkflow(QObject):
         pending = self._pending_image_completion
         if pending is None or not isinstance(state, DocumentSessionState):
             return
-        if state.mutation_blocked or state.dirty:
+        if self.session.store is not pending.store:
+            self._pending_image_completion = None
+            return
+        if pending.token is None:
             return
         self._pending_image_completion = None
         self._publish_image_completion(pending)
 
     def _publish_image_completion(self, completion: _PendingImageCompletion) -> None:
+        token = completion.token
         if (
             self.session.store is not completion.store
-            or self.controller.document != completion.document
+            or token is None
+            or token not in self.controller.retained_history_tokens
         ):
             return
-        token = self.controller.current_undo_token
-        if token is None or token == completion.previous_token:
-            return
         self.progress_changed.emit(image_operation_message(completion.operation))
-        self.document_changed.emit(completion.document)
+        self.document_changed.emit(self.controller.document)
         self.image_applied.emit(
             AppliedImageChange(
                 token=token,

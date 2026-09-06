@@ -234,7 +234,11 @@ for live MFLUX runs.
   errors. Every durable Generate, Evolve, or Edit publishes one typed
   `AppliedImageChange` through `image_applied`, carrying its exact Undo token,
   card/revision identity, complete previous revision, and operation-specific
-  payload (including Edit's authored instruction). Offer Create New Version as
+  payload (including Edit's authored instruction). Capture the token at durable
+  history insertion before session notifications can issue another command.
+  Retain Edit Undo metadata even when a newer command expires the result actions,
+  and never render an old completion snapshot over the current document.
+  Offer Create New Version as
   primary, Undo as secondary, and Keep as dismiss, bound to that exact current
   history token and unavailable in Run or a stale project. Keep changes no
   document state. `CreateImageRevisionCommand` restores the prior complete revision,
