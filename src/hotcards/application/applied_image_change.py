@@ -43,7 +43,7 @@ class AppliedImageChange:
 def image_operation_message(operation: ImageOperation | EditImageOperation) -> str:
     return {
         "generate": "Image generated",
-        "refine": "Image reinterpreted",
+        "refine": "Image evolved",
         "edit": "Image edited",
     }[operation.kind]
 

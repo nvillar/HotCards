@@ -53,18 +53,23 @@ bundle transaction. Undo/Redo history retains the independent bytes only while
 needed to restore the duplicate, and discarding that history reclaims the
 unreferenced duplicate-owned asset without collecting unrelated bundle files.
 
-The inspector tabs are Generate, Transform, and Hotspots. Transform contains
-compact stacked Reinterpret and Edit sections. Generate follows the authoring
-sequence Description, Style, optional References, Resolution, then Generate
-Image. Resolution selectors show only named tiers, with exact dimensions in
-tooltips, and select the current image size when entering a card or revision. A
+The inspector tabs are Generate, Edit, and Hotspots. Generate has one shared
+Description and Style above two compact sections: **New Image** contains optional
+References, Resolution, and Generate Image; **Evolve** contains Source Similarity,
+Resolution, and Evolve. The Edit tab contains Edit Instruction, Resolution, Edit,
+and the current image's Edit History. Resolution selectors show only named tiers,
+with exact dimensions in tooltips, and select the current image size when entering
+a card, revision, or newly replaced image (including Undo/Redo). Ordinary refreshes
+preserve deliberate resolution choices. A
 compatible aligned nonstandard image uses a selectable Current row. Generate
-offers every named tier. Reinterpret and Edit offer only the current size and higher
-tiers. Generate requires a nonempty Description and an available MFLUX model.
+offers every named tier. Evolve and Edit offer only the current size and higher
+tiers. Generate and Evolve require a nonempty Description; Edit does not.
+All three require an available MFLUX model.
 The exact effective prompt is composed
 deterministically from the Description followed by the selected Style text; no
 language model prepares or rewrites it.
 
+References apply only to New Image, never to Evolve or Edit.
 Reference order is authoritative. The first selected card is `image 1` and the
 optional second card is `image 2`; authors use those positional labels directly
 in the Description. References and Hotspot destinations use a shared movable,
@@ -78,7 +83,7 @@ Description, ordered Reference snapshots, Style ID/name/text, and composed
 render prompt are retained in generated-image provenance.
 
 Image provenance is a strict typed operation record for direct Generate,
-externally patched historical Generate, Reinterpret (stored as `refine`), Edit,
+externally patched historical Generate, Evolve (stored as `refine`), Edit,
 or an independent card duplicate. Duplicate provenance records its immediate
 source and a flattened snapshot of the original image operation without
 retaining a live source dependency. Provenance retains exact
@@ -88,20 +93,20 @@ decoded dimensions, the original operation seed (flattening duplicates), and
 inherited accepted Edit instructions. These nonrecursive snapshots contain no
 source asset paths. Source cards, revisions, and backgrounds can be deleted or
 replaced without invalidating later images. The inherited Edit sequence is stored
-once: Reinterpret exposes it unchanged, and Edit adds its accepted current
+once: Evolve exposes it unchanged, and Edit adds its accepted current
 instruction. Captured source dimensions and settings are validated locally;
 live inference still uses a private immutable source image and rejects stale
 results or source replacement races. Assets remain retained while reachable from
 the current document or Undo/Redo history, not by historical source attribution.
 
-The production MFLUX 0.19.1 adapter routes plain Generate and Reinterpret through
+The production MFLUX 0.19.1 adapter routes plain Generate and Evolve through
 the regular model family, and Reference-backed Generate and Edit through the
 Edit family. Model loading and inference share one process-local serialized
 boundary with at most one compatible cached family/configuration. Cancellation
 discards candidate output, and changing the selected model releases the prior
 configuration.
 
-Reinterpret replaces the current version's background in place.
+Evolve replaces the current version's background in place.
 Its Source Similarity choices are Reimagine, Balanced, and Preserve,
 with per-choice guidance, and it reuses the current image's seed. Output
 defaults to the decoded current size and offers only higher named tiers. The
@@ -129,10 +134,18 @@ lineage. Undoing an Edit restores its exact authored instruction in the same
 card/version for adjustment and another attempt, without overwriting newer input.
 This also works across repeated Undo/Redo. Redo clears only an untouched,
 automatically restored instruction, never a newer draft or a user recall.
-Later Reinterpret operations preserve that lineage
+Later Evolve operations preserve that lineage
 unless it conflicts with the current authoritative Description; Generate ignores it.
 
-Generated images are the only supported background source. Generate, Reinterpret,
+Edit History shows only accepted authored instructions for the active image,
+oldest first and numbered, including repeated instructions and edits inherited
+through Evolve or card duplication. It never displays expanded prompts or Style
+addenda. New Image starts with no accepted edits. Click a history row, or select it
+and press Enter or Space, to recall its exact instruction into the editor without
+changing the document or starting image generation. A recall counts as a new draft,
+even when its text matches a previously restored instruction.
+
+Generated images are the only supported background source. Generate, Evolve,
 and Edit durably replace the active revision's background through one shared
 image-and-manifest transaction and one Undo boundary. Each completed result
 offers **Create New Version** (primary), **Undo**, and **Keep** (dismiss).
@@ -235,7 +248,7 @@ uses Stable Audio 3 Small-SFX.
 Transient outcomes, failures, Run warnings, and Undo actions appear in one
 notification bar beneath the main panes and directly above the status bar.
 Reversible deletions and replacements apply directly and offer Undo. Completed
-Generate, Reinterpret, and Edit operations also offer Create New Version, which restores
+Generate, Evolve, and Edit operations also offer Create New Version, which restores
 the prior current revision and activates a complete new revision containing the
 result, plus an explicit Keep action that retains it on the current revision.
 Field validation remains beside the responsible input.

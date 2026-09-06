@@ -12,6 +12,7 @@ from PySide6.QtGui import (
     QFocusEvent,
     QHideEvent,
     QIcon,
+    QKeyEvent,
     QStandardItemModel,
 )
 from PySide6.QtWidgets import (
@@ -76,6 +77,7 @@ from hotcards.domain.models import (
     ResolvedCardReference,
     Stack,
     UnresolvedCardReference,
+    image_edit_lineage,
     selected_output_dimensions,
 )
 from hotcards.ui.card_picker import CardPickerWindow
@@ -97,6 +99,30 @@ class _CommitLineEdit(QLineEdit):
     def focusOutEvent(self, event: QFocusEvent) -> None:
         super().focusOutEvent(event)
         self.editing_finished.emit(QApplication.focusWidget(), event.reason())
+
+
+class _EditHistoryList(QListWidget):
+    instruction_requested = Signal(str)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.itemClicked.connect(self._recall)
+
+    def _recall(self, item: QListWidgetItem) -> None:
+        instruction = item.data(Qt.ItemDataRole.UserRole)
+        if isinstance(instruction, str):
+            self.instruction_requested.emit(instruction)
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        # Handle keyboard activation separately: itemActivated can also accompany
+        # a mouse click on platforms with single-click activation.
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
+            item = self.currentItem()
+            if item is not None:
+                self._recall(item)
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
 
 def _rule_panel(object_name: str) -> tuple[QGroupBox, QVBoxLayout]:
@@ -298,6 +324,7 @@ class Inspector(QWidget):
         self.controller = controller
         self.selected_card_id: UUID | None = None
         self._rendered_revision_id: UUID | None = None
+        self._rendered_background_id: UUID | None = None
         self._edit_instruction_sequence = 0
         self._generate_using_text = ""
         self._generate_reason = ""
@@ -335,7 +362,7 @@ class Inspector(QWidget):
         root.addWidget(self.pages, 1)
 
         self._build_background_tab()
-        self._build_transform_tab()
+        self._build_edit_tab()
         self._build_hotspots_tab()
         self.card_picker = CardPickerWindow(
             self,
@@ -359,7 +386,12 @@ class Inspector(QWidget):
         self.description_edit = _CommitPlainTextEdit()
         self.description_edit.setObjectName("descriptionEdit")
         self.description_edit.setPlaceholderText(
-            "Describe the image to generate. Refer to selected References as image 1 and image 2."
+            "Describe the image to generate or evolve. "
+            "For New Image only, refer to References as image 1 and image 2."
+        )
+        self.description_edit.setToolTip(
+            "Shared by New Image and Evolve. References apply only to New Image; "
+            "refer to them as image 1 and image 2."
         )
         self.description_edit.setAccessibleName("Description")
         editor_height = round((self.description_edit.fontMetrics().lineSpacing() * 10 + 20) * 1.25)
@@ -379,7 +411,8 @@ class Inspector(QWidget):
         self.style_combo.setObjectName("styleCombo")
         self.style_combo.setAccessibleName("Style")
         self.style_combo.setToolTip(
-            "Rendering treatment appended to the Description during generation"
+            "Rendering treatment shared by New Image and Evolve; "
+            "also used for visual continuity in Edit."
         )
         layout.addWidget(self.style_combo)
         self.style_selection_error = QLabel()
@@ -389,9 +422,16 @@ class Inspector(QWidget):
         layout.addWidget(self.style_selection_error)
 
         layout.addSpacing(8)
+        self.new_image_section_label = QLabel("New Image")
+        self.new_image_section_label.setObjectName("newImageSectionLabel")
+        layout.addWidget(self.new_image_section_label)
+        new_image_group, new_image_layout = _rule_panel("newImageGroup")
         self.reference_label = QLabel("References")
         self.reference_label.setObjectName("referenceLabel")
-        layout.addWidget(self.reference_label)
+        self.reference_label.setToolTip(
+            "New Image only; never sent to Evolve. Use image 1 and image 2 in the Description."
+        )
+        new_image_layout.addWidget(self.reference_label)
         self.reference_panel = QWidget()
         self.reference_panel.setObjectName("referencePanel")
         reference_layout = QVBoxLayout(self.reference_panel)
@@ -403,7 +443,7 @@ class Inspector(QWidget):
         self.reference_button.setObjectName("referenceCardButton")
         self.reference_button.setAccessibleName("Choose Reference card 1")
         self.reference_button.setToolTip(
-            "Primary Reference; its image is sent to the model as image 1"
+            "New Image only: this Reference is sent to the model as image 1"
         )
         self.reference_button.setIconSize(QSize(48, 32))
         first_reference_row.addWidget(
@@ -436,7 +476,7 @@ class Inspector(QWidget):
         self.additional_reference_button.setObjectName("additionalReferenceCardButton")
         self.additional_reference_button.setAccessibleName("Choose Reference card 2")
         self.additional_reference_button.setToolTip(
-            "Optional additional Reference; its image is sent to the model as image 2"
+            "New Image only: this Reference is sent to the model as image 2"
         )
         self.additional_reference_button.setIconSize(QSize(48, 32))
         second_reference_row.addWidget(
@@ -470,41 +510,31 @@ class Inspector(QWidget):
         self.reference_error.setWordWrap(True)
         self.reference_error.setVisible(False)
         reference_layout.addWidget(self.reference_error)
-        layout.addWidget(self.reference_panel)
+        new_image_layout.addWidget(self.reference_panel)
 
-        layout.addSpacing(8)
+        new_image_layout.addSpacing(8)
         self.resolution_label = QLabel("Resolution")
         self.resolution_label.setObjectName("resolutionLabel")
-        layout.addWidget(self.resolution_label)
+        new_image_layout.addWidget(self.resolution_label)
         self.resolution_combo = QComboBox()
         self.resolution_combo.setObjectName("resolutionCombo")
         self.resolution_combo.setAccessibleName("Generate output size")
         self.resolution_combo.setToolTip("Generate output tier or exact current-image size")
-        layout.addWidget(self.resolution_combo)
+        new_image_layout.addWidget(self.resolution_combo)
 
-        layout.addSpacing(8)
+        new_image_layout.addSpacing(8)
         self.generate_background_button = QPushButton("Generate Image")
         self.generate_background_button.setObjectName("generateBackgroundButton")
-        layout.addWidget(self.generate_background_button)
+        new_image_layout.addWidget(self.generate_background_button)
         self._focus_commit_targets = {
             self.generate_background_button,
         }
 
-        scroll.setWidget(page)
-        self.inspector_tabs.addTab(scroll, "Generate")
-
-    def _build_transform_tab(self) -> None:
-        scroll = QScrollArea()
-        scroll.setObjectName("transformInspectorTab")
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        page = QWidget()
-        page.setObjectName("transformInspectorContent")
-        layout = QVBoxLayout(page)
-
-        self.reinterpret_section_label = QLabel("Reinterpret")
-        self.reinterpret_section_label.setObjectName("reinterpretSectionLabel")
-        layout.addWidget(self.reinterpret_section_label)
+        layout.addWidget(new_image_group)
+        layout.addSpacing(8)
+        self.evolve_section_label = QLabel("Evolve")
+        self.evolve_section_label.setObjectName("evolveSectionLabel")
+        layout.addWidget(self.evolve_section_label)
         refine_group = QGroupBox()
         refine_group.setObjectName("refineTransformGroup")
         refine_layout = QVBoxLayout(refine_group)
@@ -513,7 +543,7 @@ class Inspector(QWidget):
         refine_layout.addWidget(self.refine_transformation_label)
         self.refine_transformation_combo = QComboBox()
         self.refine_transformation_combo.setObjectName("refineTransformationCombo")
-        self.refine_transformation_combo.setAccessibleName("Reinterpret source similarity")
+        self.refine_transformation_combo.setAccessibleName("Evolve source similarity")
         for transformation in RefineTransformation:
             self.refine_transformation_combo.addItem(
                 transformation.value.title(),
@@ -537,7 +567,7 @@ class Inspector(QWidget):
         refine_layout.addWidget(self.refine_resolution_label)
         self.refine_resolution_combo = QComboBox()
         self.refine_resolution_combo.setObjectName("refineResolutionCombo")
-        self.refine_resolution_combo.setAccessibleName("Reinterpret resolution")
+        self.refine_resolution_combo.setAccessibleName("Evolve resolution")
         refine_layout.addWidget(self.refine_resolution_combo)
         self.refine_error = QLabel()
         self.refine_error.setObjectName("refineValidationError")
@@ -545,13 +575,24 @@ class Inspector(QWidget):
         self.refine_error.setVisible(False)
         refine_layout.addWidget(self.refine_error)
 
-        self.refine_background_button = QPushButton("Reinterpret")
+        self.refine_background_button = QPushButton("Evolve")
         self.refine_background_button.setObjectName("refineBackgroundButton")
         refine_layout.addWidget(self.refine_background_button)
         self._focus_commit_targets.add(self.refine_background_button)
         layout.addWidget(refine_group)
 
-        layout.addSpacing(8)
+        scroll.setWidget(page)
+        self.inspector_tabs.addTab(scroll, "Generate")
+
+    def _build_edit_tab(self) -> None:
+        scroll = QScrollArea()
+        scroll.setObjectName("editInspectorTab")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        page = QWidget()
+        page.setObjectName("editInspectorContent")
+        layout = QVBoxLayout(page)
+
         self.edit_section_label = QLabel("Edit")
         self.edit_section_label.setObjectName("editSectionLabel")
         layout.addWidget(self.edit_section_label)
@@ -589,10 +630,27 @@ class Inspector(QWidget):
         edit_layout.addWidget(self.edit_background_button)
         self._focus_commit_targets.add(self.edit_background_button)
         layout.addWidget(edit_group)
-        layout.addStretch(1)
+
+        layout.addSpacing(8)
+        self.edit_history_label = QLabel("Edit History")
+        self.edit_history_label.setObjectName("editHistoryLabel")
+        layout.addWidget(self.edit_history_label)
+        self.edit_history_empty_label = QLabel("No accepted edits for this image.")
+        self.edit_history_empty_label.setWordWrap(True)
+        layout.addWidget(self.edit_history_empty_label)
+        self.edit_history_list = _EditHistoryList()
+        self.edit_history_list.setObjectName("editHistoryList")
+        self.edit_history_list.setAccessibleName("Edit History")
+        self.edit_history_list.setToolTip(
+            "Click an accepted Edit, or press Enter or Space, to reuse its instruction."
+        )
+        self.edit_history_list.setWordWrap(True)
+        self.edit_history_list.setTextElideMode(Qt.TextElideMode.ElideNone)
+        self.edit_history_list.setMinimumHeight(160)
+        layout.addWidget(self.edit_history_list, 1)
 
         scroll.setWidget(page)
-        self._transform_tab_index = self.inspector_tabs.addTab(scroll, "Transform")
+        self._edit_tab_index = self.inspector_tabs.addTab(scroll, "Edit")
 
     def _build_hotspots_tab(self) -> None:
         scroll = QScrollArea()
@@ -855,6 +913,7 @@ class Inspector(QWidget):
         self.edit_instruction_edit.textChanged.connect(self._edit_instruction_changed)
         self.edit_resolution_combo.currentIndexChanged.connect(self._edit_output_changed)
         self.edit_background_button.clicked.connect(self._request_edit_background)
+        self.edit_history_list.instruction_requested.connect(self._recall_edit_instruction)
         self.style_combo.currentIndexChanged.connect(self._revision_style_changed)
         self.reference_button.clicked.connect(lambda: self._open_reference_picker(1))
         self.additional_reference_button.clicked.connect(lambda: self._open_reference_picker(2))
@@ -956,6 +1015,8 @@ class Inspector(QWidget):
                 if previous_card_id is not None:
                     self._edit_instruction_sequence += 1
                 self._rendered_revision_id = None
+                self._rendered_background_id = None
+                self._render_edit_history(None)
                 self.pages.setCurrentIndex(0)
                 self._set_error(self.description_error, "")
                 self._set_error(self.reference_error, "")
@@ -973,12 +1034,15 @@ class Inspector(QWidget):
             self.pages.setCurrentIndex(1)
             revision = card.active_revision
             same_revision = previous_card_id == card.id and previous_revision_id == revision.id
+            background_id = revision.background.id if revision.background is not None else None
+            same_image = same_revision and self._rendered_background_id == background_id
             if not same_revision:
                 self._edit_instruction_sequence += 1
                 self._set_error(self.description_error, "")
                 self._set_error(self.reference_error, "")
                 self.set_hotspot_error("")
             self._rendered_revision_id = revision.id
+            self._rendered_background_id = background_id
             self.description_edit.setPlainText(
                 description_draft
                 if preserve_description and same_revision
@@ -990,21 +1054,22 @@ class Inspector(QWidget):
                 document,
                 revision,
                 source_size=refine_source_size,
-                select_current=not same_revision,
+                select_current=not same_image,
             )
             self._render_description_workflow(document, card, revision)
             self._render_refine(
                 document,
                 revision,
                 source_size=refine_source_size,
-                select_current=not same_revision,
+                select_current=not same_image,
             )
             self._render_edit(
                 document,
                 revision,
                 source_size=refine_source_size,
-                select_current=not same_revision,
+                select_current=not same_image,
             )
+            self._render_edit_history(revision)
             self._render_hotspots(document, revision)
         finally:
             self._rendering = False
@@ -1090,11 +1155,7 @@ class Inspector(QWidget):
     ) -> None:
         self._generate_reason = generate_reason
         self.generate_background_button.setEnabled(can_generate and not busy)
-        self.generate_background_button.setText(
-            "Generating…"
-            if generating
-            else ("Re-generate Image" if has_image else "Generate Image")
-        )
+        self.generate_background_button.setText("Generating…" if generating else "Generate Image")
         self._refresh_generation_tooltips()
 
     def set_refine_capabilities(
@@ -1107,7 +1168,7 @@ class Inspector(QWidget):
     ) -> None:
         self._refine_reason = "" if can_refine and not busy else refine_reason
         self.refine_background_button.setEnabled(can_refine and not busy)
-        self.refine_background_button.setText("Reinterpreting…" if refining else "Reinterpret")
+        self.refine_background_button.setText("Evolving…" if refining else "Evolve")
         self._refresh_generation_tooltips()
 
     def set_edit_capabilities(
@@ -1144,6 +1205,28 @@ class Inspector(QWidget):
 
     def clear_edit_instruction(self) -> None:
         self.set_edit_instruction("")
+
+    def _render_edit_history(self, revision: CardRevision | None) -> None:
+        lineage = (
+            image_edit_lineage(revision.background.provenance)
+            if revision is not None and revision.background is not None
+            else ()
+        )
+        with QSignalBlocker(self.edit_history_list):
+            self.edit_history_list.clear()
+            for number, edit in enumerate(lineage, start=1):
+                item = QListWidgetItem(f"{number}. {edit.instruction}")
+                item.setData(Qt.ItemDataRole.UserRole, edit.instruction)
+                item.setToolTip(edit.instruction)
+                self.edit_history_list.addItem(item)
+        self.edit_history_empty_label.setVisible(not lineage)
+        self.edit_history_list.setVisible(bool(lineage))
+
+    def _recall_edit_instruction(self, instruction: str) -> None:
+        if self._rendering:
+            return
+        self.set_edit_instruction(instruction)
+        self._render_inputs_changed()
 
     def _refresh_generation_tooltips(self) -> None:
         self.generate_background_button.setToolTip(
@@ -1200,6 +1283,8 @@ class Inspector(QWidget):
         self._sound_picker_context = None
         self.selected_card_id = None
         self._rendered_revision_id = None
+        self._rendered_background_id = None
+        self._render_edit_history(None)
         self.clear_edit_instruction()
         self._set_error(self.description_error, "")
         self._set_error(self.reference_error, "")
@@ -1504,7 +1589,11 @@ class Inspector(QWidget):
             return
         output_size = self.resolution_combo.itemData(index)
         if not isinstance(output_size, (PresetOutputSize, ExactOutputSize)):
-            self.render(self.controller.document, self.selected_card_id)
+            self.render(
+                self.controller.document,
+                self.selected_card_id,
+                refine_source_size=self._refine_source_size,
+            )
             return
         _sync_combo_tooltip(self.resolution_combo)
         if output_size == card.active_revision.generate_output_size:
@@ -1549,7 +1638,7 @@ class Inspector(QWidget):
         error = ""
         current_error = _exact_size_error(source_size, document.aspect_ratio)
         if revision.background is None:
-            error = "Generate an image before reinterpreting."
+            error = "Generate an image before evolving."
         elif source_size is None:
             error = "The current image is unavailable or unreadable."
         with QSignalBlocker(self.refine_resolution_combo):
@@ -1637,7 +1726,7 @@ class Inspector(QWidget):
         _sync_combo_tooltip(self.refine_resolution_combo)
         self._set_error(self.refine_error, error)
         style_suffix = ", and Style" if revision.style_id is not None else ""
-        self._refine_using_text = f"Reinterpret the current image using Description{style_suffix}."
+        self._refine_using_text = f"Evolve the current image using Description{style_suffix}."
         self._refresh_generation_tooltips()
 
     def _request_refine_background(self) -> None:
@@ -1656,7 +1745,7 @@ class Inspector(QWidget):
             if not self.refine_error.text():
                 self._set_error(
                     self.refine_error,
-                    "Select a Reinterpret resolution.",
+                    "Select an Evolve resolution.",
                 )
             return
         self.refine_background_requested.emit(transformation, output_size)
@@ -2509,11 +2598,19 @@ class Inspector(QWidget):
         except (CommandError, DocumentMutationBlockedError, ValidationError) as error:
             self._set_error(target_error, str(error))
             if render_change:
-                self.render(self.controller.document, self.selected_card_id)
+                self.render(
+                    self.controller.document,
+                    self.selected_card_id,
+                    refine_source_size=self._refine_source_size,
+                )
             return False
         self._set_error(target_error, "")
         if render_change:
-            self.render(changed, self.selected_card_id)
+            self.render(
+                changed,
+                self.selected_card_id,
+                refine_source_size=self._refine_source_size,
+            )
             self.document_changed.emit(changed)
         token = self.controller.current_undo_token
         if undo_message is not None and token is not None and token != previous_token:

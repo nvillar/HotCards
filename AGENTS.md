@@ -99,14 +99,16 @@ for live MFLUX runs.
   background, project, revision, model, or mode changes must suppress an
   in-flight stale image result. Hotspots must not alter image-generation
   prompts.
-- In Generate, Reinterpret, and Edit resolution selectors, show only the named tier
+- In Generate, Evolve, and Edit resolution selectors, show only the named tier
   names and expose exact dimensions in tooltips. Insert one selectable Current
-  row for an aligned nonstandard current image. On card or revision entry,
-  select the current image size in all three controls. Generate offers every
-  named tier; Reinterpret and Edit offer only the current size and higher-area
-  tiers. Treat resolution selection as a passive setting change without a
-  notification.
-- Reinterpret (the persisted `refine` operation) only the readable current
+  row for an aligned nonstandard current image. On card, revision, or background
+  identity entry (including same-revision replacement and Undo/Redo), select the
+  current image size in all three controls. Ordinary rerenders preserve deliberate
+  choices, focused Description drafts, and valid same-revision hotspot selections.
+  Generate offers every named tier; Evolve and Edit offer only the current size
+  and higher-area tiers. Treat resolution selection as a passive setting change
+  without a notification.
+- Evolve (the persisted `refine` operation) only the readable current
   background through regular Flux2Klein
   img2img; never resend its Generate References. Offer Reimagine 0.25,
   Balanced 0.50, and Preserve 0.75 as Source Similarity choices with
@@ -116,7 +118,7 @@ for live MFLUX runs.
   source operation seed after flattening duplicate provenance. Pass MFLUX a
   private immutable snapshot copied from a securely opened source asset, and
   reject the result if that logical asset changes before acceptance. Compose
-  the exact Reinterpret prompt from current Description, selected Style text, then
+  the exact Evolve prompt from current Description, selected Style text, then
   ordered authored accepted Edit instructions. State that the source already
   contains those edits, preserve them unless they conflict, and make current
   Description authoritative. On success atomically store the image and replace
@@ -173,34 +175,45 @@ for live MFLUX runs.
   tied to the current document and Undo/Redo history, not source attribution.
   Preserve live immutable source snapshots, decoded-dimension request checks, and
   stale-result/race rejection independently of these historical facts.
-- Route all production and evaluation Generate, Reinterpret, and Edit inference
-  through one typed MFLUX adapter. Plain Generate and Reinterpret use the regular
+- Route all production and evaluation Generate, Evolve, and Edit inference
+  through one typed MFLUX adapter. Plain Generate and Evolve use the regular
   family; Reference-backed Generate and Edit use the Edit family. Serialize
   model loading and inference through one stable process-local invocation
   thread, cache at most one compatible family/model/quantization configuration,
   and release it when switching configuration. Cancellation while queued or
   running must publish no output; interrupted active models must not be reused.
-- Keep one Description editor in the Generate inspector. Place the Style
-  selector above References, place revision-local Resolution after References
-  and before Generate, expose exact output dimensions and positional Reference
-  guidance in tooltips, and keep generation provenance in the Generate button
-  tooltip. Keep Reinterpret and Edit button tooltips to one concise action
-  sentence plus a disabled-state reason when needed. Keep inspector tabs ordered
-  Generate, Transform, Hotspots. In Transform, stack a compact Reinterpret
-  section above Edit using normal label typography rather than native group-box
-  titles. Reinterpret contains Source Similarity, Resolution, and Reinterpret;
-  Edit contains Edit Instruction, Resolution, and Edit.
+- Keep inspector tabs ordered Generate, Edit, Hotspots. In Generate, keep one
+  shared Description editor and Style selector above New Image and Evolve.
+  New Image contains References, revision-local Resolution, and Generate Image;
+  Evolve contains Source Similarity, Resolution, and Evolve. References belong to
+  New Image only and are never sent to Evolve or Edit. Use normal section labels
+  above untitled native grouped panels, with consistent inset scrollable content.
+  Expose exact output dimensions and positional Reference guidance in tooltips,
+  and keep generation provenance in the Generate button tooltip.
+  Keep Evolve and Edit button tooltips to one concise action
+  sentence plus a disabled-state reason when needed. The Edit tab contains grouped
+  Edit Instruction, Resolution, and Edit controls, followed by Edit History.
   The current canvas/header is the implicit source for both. Open
   Styles, Sounds, and Keys from right-aligned Author-toolbar actions into separate
   modeless singleton utility windows. Keep them as stack-global list managers
   backed by the authoritative controller, with compact remove/add controls and
   vertically stacked full-width fields. Hide the manager actions and windows in
   Run mode, and close or rebind them on project replacement. Require a nonempty
-  Description for image generation.
+  Description for Generate and Evolve, but not Edit.
+- Derive Edit History exclusively from the active background's
+  `image_edit_lineage()`, including duplicate originals. Show chronological,
+  oldest-first numbered, word-wrapped authored instructions, retaining duplicates
+  and exact text without expanded prompts, Style addenda, or timestamps. Use
+  "No accepted edits for this image." when empty. Generate clears lineage,
+  Evolve inherits it, and Edit appends. Mouse and keyboard recall only repopulate
+  Edit Instruction through `Inspector.set_edit_instruction()`, advancing its draft
+  serial once per action without a command, Undo entry, navigation, or model call.
+  Block activation/selection signals while refreshing history on image, card,
+  revision, Undo/Redo, or project changes; never overwrite the instruction draft.
 - In Hotspots, keep When and Then as normal labels outside untitled grouped
-  panels using the same native treatment as the Reinterpret and Edit sections.
+  panels using the same native treatment as the New Image, Evolve, and Edit sections.
   Keep the list, ordering controls, labels, and grouped panels on one inset
-  scrollable content surface matching Transform; do not nest a separate
+  scrollable content surface matching Generate and Edit; do not nest a separate
   zero-margin rule viewport.
 - Create stacks with one native format selector containing exactly Square 1:1,
   Landscape 4:3, Portrait 3:4, and Widescreen 16:9, defaulting to Landscape.
@@ -210,7 +223,7 @@ for live MFLUX runs.
   needed. Use the fitted image bounds for all normalized hotspot rendering,
   gestures, and Run hit testing; bars are noninteractive.
 - Support generated backgrounds only; do not add image import. Apply Generate,
-  Reinterpret, and Edit in place through one shared durable image/manifest
+  Evolve, and Edit in place through one shared durable image/manifest
   transaction and document command. Register accepted app-owned images and reclaim
   only identity-matching files after they leave the current document and all
   Undo/Redo history.
@@ -218,7 +231,7 @@ for live MFLUX runs.
   visible result with indeterminate durability blocks mutations and publishes no
   normal result actions until a definitive save retry creates its single history
   entry. Preserve completion context even when a durable commit reports cleanup
-  errors. Every durable Generate, Reinterpret, or Edit publishes one typed
+  errors. Every durable Generate, Evolve, or Edit publishes one typed
   `AppliedImageChange` through `image_applied`, carrying its exact Undo token,
   card/revision identity, complete previous revision, and operation-specific
   payload (including Edit's authored instruction). Offer Create New Version as

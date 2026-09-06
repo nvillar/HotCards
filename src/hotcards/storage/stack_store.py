@@ -352,7 +352,7 @@ def _require_image_asset_unchanged_at(
     *,
     card_id: UUID,
     asset_id: UUID,
-    operation: str = "Reinterpret",
+    operation: str = "Evolve",
 ) -> None:
     source_path = _relative_asset_path(snapshot.relative_path)
     expected_path = _image_asset_path(card_id, asset_id)
@@ -1170,7 +1170,7 @@ class StackStore:
         card_id: UUID,
         asset_id: UUID,
     ) -> None:
-        """Reject a Reinterpret result when its logical source image changed."""
+        """Reject an Evolve result when its logical source image changed."""
         try:
             with ExitStack() as descriptors:
                 bundle_fd = os.open(
@@ -1188,8 +1188,7 @@ class StackStore:
             raise
         except OSError as error:
             raise StackStoreError(
-                "the current image changed or became unavailable while "
-                f"Reinterpret was running: {error}"
+                f"the current image changed or became unavailable while Evolve was running: {error}"
             ) from error
 
     @_serialized_bundle_mutation
@@ -1531,7 +1530,7 @@ class StackStore:
         expected_source_snapshot: StoredImageSnapshot | None = None,
         expected_source_card_id: UUID | None = None,
         expected_source_asset_id: UUID | None = None,
-        expected_source_operation: str = "Reinterpret",
+        expected_source_operation: str = "Evolve",
     ) -> StoredImageAsset:
         """Atomically import one PNG and commit the manifest that references it."""
         try:
@@ -1569,7 +1568,7 @@ class StackStore:
         expected_source_snapshot: StoredImageSnapshot | None = None,
         expected_source_card_id: UUID | None = None,
         expected_source_asset_id: UUID | None = None,
-        expected_source_operation: str = "Reinterpret",
+        expected_source_operation: str = "Evolve",
     ) -> StoredImageAsset:
         if (source_relative_path is None) == (source_file_path is None):
             raise StackStoreError("exactly one image source must be provided")

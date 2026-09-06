@@ -398,7 +398,7 @@ class BackgroundWorkflow(QObject):
         transformation: RefineTransformation,
         output_size: RefineOutputSize,
     ) -> WorkerOperation:
-        """Durably replace the current revision's image with a Reinterpret result."""
+        """Durably replace the current revision's image with an Evolve result."""
         self._require_ready(card_id)
         if not self.session.flush():
             raise BackgroundWorkflowError(
@@ -408,10 +408,10 @@ class BackgroundWorkflow(QObject):
         card = self._card(document, card_id)
         revision = card.active_revision
         if not revision.description.strip():
-            raise BackgroundWorkflowError("enter a Description before reinterpreting")
+            raise BackgroundWorkflowError("enter a Description before evolving")
         background = revision.background
         if background is None:
-            raise BackgroundWorkflowError("generate an image before reinterpreting")
+            raise BackgroundWorkflowError("generate an image before evolving")
         store = self._require_store()
         try:
             source_snapshot = store.snapshot_image_asset(
@@ -429,7 +429,7 @@ class BackgroundWorkflow(QObject):
         except Exception:
             if not source_snapshot.dispose():
                 logger.warning(
-                    "Reinterpret source snapshot cleanup preserved a changed file: %s",
+                    "Evolve source snapshot cleanup preserved a changed file: %s",
                     source_snapshot.snapshot_path,
                 )
             raise
@@ -452,7 +452,7 @@ class BackgroundWorkflow(QObject):
         if output_size not in available_output_sizes:
             self._cleanup_source_snapshot_if_idle()
             raise BackgroundWorkflowError(
-                "select the current Reinterpret size or a preset with more pixels"
+                "select the current Evolve size or a preset with more pixels"
             )
         try:
             settings = self._settings_provider()
@@ -517,7 +517,7 @@ class BackgroundWorkflow(QObject):
         self._request_id = request_id
         self._request_target = target
         self._active_operation = "refine"
-        self._set_busy(True, "Reinterpreting image...")
+        self._set_busy(True, "Evolving image...")
         try:
             operation = self.workers.run_mflux(
                 lambda: self._mflux_generator.refine(
@@ -528,7 +528,7 @@ class BackgroundWorkflow(QObject):
                     ),
                     cancellation=cancellation,
                 ),
-                stage="reinterpreting background image",
+                stage="evolving background image",
                 request_cancel=cancellation.cancel,
                 dispose_result=dispose_mflux_result,
                 invocation_started=self._invocation_started,
@@ -539,7 +539,7 @@ class BackgroundWorkflow(QObject):
             self._request_target = None
             self._active_operation = None
             self._cleanup_source_snapshot_if_idle()
-            self._set_busy(False, "Image reinterpretation failed")
+            self._set_busy(False, "Image evolution failed")
             raise
         self._operation = operation
         operation.succeeded.connect(partial(self._refine_succeeded, request_id, target, asset_id))
@@ -817,7 +817,7 @@ class BackgroundWorkflow(QObject):
             self._set_busy(
                 False,
                 (
-                    "Reinterpret cancelled"
+                    "Evolve cancelled"
                     if operation == "refine"
                     else ("Edit cancelled" if operation == "edit" else "Generation cancelled")
                 ),
@@ -912,14 +912,14 @@ class BackgroundWorkflow(QObject):
             return
         if not isinstance(result, MfluxRefineResult):
             self._finish_with_error(
-                BackgroundWorkflowError("image reinterpretation returned an unexpected result")
+                BackgroundWorkflowError("image evolution returned an unexpected result")
             )
             return
         self._pending_result = result
         if not self._refine_target_is_current(target):
             self._finish_with_error(
                 BackgroundWorkflowError(
-                    "the stack or source revision changed before Reinterpret completed"
+                    "the stack or source revision changed before Evolve completed"
                 )
             )
             return
@@ -1025,7 +1025,7 @@ class BackgroundWorkflow(QObject):
                         expected_source_asset_id=derived.source_background_id if derived else None,
                         expected_source_operation="Edit"
                         if isinstance(target, _EditTarget)
-                        else "Reinterpret",
+                        else "Evolve",
                     )
                 except StackStoreTransactionError as error:
                     if isinstance(error.owned_asset, StoredImageAsset):
@@ -1140,7 +1140,7 @@ class BackgroundWorkflow(QObject):
         self._set_busy(
             False,
             (
-                "Image reinterpretation failed"
+                "Image evolution failed"
                 if operation == "refine"
                 else ("Image editing failed" if operation == "edit" else "Image generation failed")
             ),
@@ -1159,7 +1159,7 @@ class BackgroundWorkflow(QObject):
     def _track_source_snapshot(self, snapshot: StoredImageSnapshot) -> None:
         with self._source_snapshot_lock:
             if self._source_snapshot is not None:
-                raise BackgroundWorkflowError("a Reinterpret source snapshot is already active")
+                raise BackgroundWorkflowError("an Evolve source snapshot is already active")
             self._source_snapshot = snapshot
 
     def _cleanup_source_snapshot_if_idle(self) -> bool:
@@ -1182,7 +1182,7 @@ class BackgroundWorkflow(QObject):
             with self._source_snapshot_lock:
                 assert self._source_snapshot is snapshot
             logger.warning(
-                "Reinterpret source snapshot cleanup preserved a changed file: %s",
+                "Evolve source snapshot cleanup preserved a changed file: %s",
                 snapshot.snapshot_path,
             )
         return disposed
@@ -1198,7 +1198,7 @@ class BackgroundWorkflow(QObject):
         with self._source_snapshot_lock:
             if self._source_snapshot is not None:
                 raise BackgroundWorkflowError(
-                    "the previous Reinterpret source snapshot could not be cleaned up"
+                    "the previous Evolve source snapshot could not be cleaned up"
                 )
         if self.controller.mutation_blocked:
             raise BackgroundWorkflowError(

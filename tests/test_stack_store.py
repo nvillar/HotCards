@@ -417,7 +417,7 @@ def test_secure_image_snapshot_detects_source_namespace_replacement(
     logical_source.unlink()
     replacement.replace(logical_source)
 
-    with pytest.raises(StackStoreError, match="changed while Reinterpret"):
+    with pytest.raises(StackStoreError, match="changed while Evolve"):
         store.require_image_asset_unchanged(
             snapshot,
             card_id=card_id,
@@ -467,7 +467,7 @@ def test_source_revalidation_reopens_namespace_after_hash(
 
     monkeypatch.setattr(stack_store_module, "_sha256_fd", replace_after_hash)
 
-    with pytest.raises(StackStoreError, match="changed while Reinterpret"):
+    with pytest.raises(StackStoreError, match="changed while Evolve"):
         store.require_image_asset_unchanged(
             snapshot,
             card_id=card_id,

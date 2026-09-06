@@ -131,7 +131,7 @@ class FakeWorkers:
     ) -> FakeOperation:
         assert stage in {
             "generating background image",
-            "reinterpreting background image",
+            "evolving background image",
             "editing background image",
         }
 
@@ -513,7 +513,7 @@ def test_refine_uses_current_image_seed_and_replaces_complete_version(
     assert model.calls[-1]["image_strength"] == 0.50
     assert "image_paths" not in model.calls[-1]
     assert (model.calls[-1]["width"], model.calls[-1]["height"]) == (768, 576)
-    assert applied and applied[-1].message == "Image reinterpreted"
+    assert applied and applied[-1].message == "Image evolved"
     assert applied[-1].previous_revision == source_revision
     token = applied[-1].token
     assert session.store.load() == controller.document
@@ -1136,7 +1136,7 @@ def test_refine_uses_immutable_snapshot_and_rejects_replaced_source(
     assert model.calls[-1]["image_path"] == snapshot_path
     assert not snapshot_path.exists()
     assert controller.document.cards[0].revisions == (source_revision,)
-    assert "changed while Reinterpret was running" in str(failures[-1])
+    assert "changed while Evolve was running" in str(failures[-1])
 
 
 def test_refine_rejects_symlink_source_without_starting_model(
@@ -1984,7 +1984,7 @@ def test_derived_source_replacement_during_commit_rolls_back(
     assert (
         set((session.store.bundle_path / "assets" / "cards").glob("*/image-*.png")) == assets_before
     )
-    operation_label = "Reinterpret" if operation == "refine" else "Edit"
+    operation_label = "Evolve" if operation == "refine" else "Edit"
     assert f"changed while {operation_label} was running" in str(failures[-1])
 
 

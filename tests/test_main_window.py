@@ -58,6 +58,8 @@ from hotcards.domain.models import (
     CurrentSourceSize,
     DerivedImageSourceSnapshot,
     DirectGenerateProvenance,
+    EditPreserveOptions,
+    EditProvenance,
     GeneratedBackground,
     GeneratedSoundAsset,
     GenerateInputs,
@@ -79,6 +81,7 @@ from hotcards.domain.models import (
     Stack,
     StyleDefinition,
     UnresolvedCardReference,
+    image_edit_lineage,
 )
 from hotcards.generation.errors import ImageGenerationCancelled
 from hotcards.generation.mflux_generator import MfluxGenerator
@@ -365,6 +368,36 @@ def _window(
         start_diagnostics=False,
     )
     return window, controller, workers, background
+
+
+def _edited_background(card: Card, instruction: str) -> GeneratedBackground:
+    revision = card.active_revision
+    background = revision.background
+    assert background is not None
+    settings = background.provenance.settings
+    asset_id = uuid4()
+    return GeneratedBackground(
+        id=asset_id,
+        image_path=f"assets/cards/{card.id}/image-{asset_id}.png",
+        created_at=settings.generated_at,
+        provenance=EditProvenance(
+            source=DerivedImageSourceSnapshot(
+                card_id=card.id,
+                revision_id=revision.id,
+                background_id=background.id,
+                width=settings.width,
+                height=settings.height,
+                seed=settings.seed,
+                edit_lineage=image_edit_lineage(background.provenance),
+            ),
+            instruction=instruction,
+            preserve=EditPreserveOptions(),
+            expanded_prompt=f"{instruction}\n\nHidden Style addendum",
+            output_size=CurrentSourceSize(width=settings.width, height=settings.height),
+            prompt_token_count=20,
+            settings=settings.model_copy(update={"seed": settings.seed + 1}),
+        ),
+    )
 
 
 def test_card_header_and_toolbar_match_revision_hierarchy(
@@ -2378,7 +2411,7 @@ def test_generate_replacement_starts_without_a_second_confirmation(
         )
     )
     window.render_document()
-    assert window.inspector.generate_background_button.text() == ("Re-generate Image")
+    assert window.inspector.generate_background_button.text() == "Generate Image"
 
     window._generate_background()
     assert background.generate_calls == [card_id, card_id]
@@ -2396,7 +2429,7 @@ def test_generate_is_disabled_without_description(
     assert not window.inspector.generate_background_button.isEnabled()
 
 
-def test_refine_tab_wires_current_image_options_and_cancels_live_changes(
+def test_generate_tab_wires_evolve_current_image_options_and_cancels_live_changes(
     application: QApplication,
     tmp_path: Path,
 ) -> None:
@@ -2442,15 +2475,22 @@ def test_refine_tab_wires_current_image_options_and_cancels_live_changes(
     window._availability[AdapterKind.MFLUX] = True
     window._update_generation_actions()
 
-    assert window.inspector.inspector_tabs.tabText(1) == "Transform"
+    assert window.inspector.inspector_tabs.tabText(1) == "Edit"
     assert window.inspector.refine_background_button.isEnabled()
     assert window.inspector.refine_resolution_combo.currentData() == CurrentSourceSize(
         width=512, height=384
     )
     assert window.inspector.refine_background_button.toolTip() == (
-        "Reinterpret the current image using Description."
+        "Evolve the current image using Description."
     )
+    window.inspector.description_edit.setPlainText("A courtyard with an open gate.")
     window.inspector.refine_background_button.click()
+    assert controller.document.cards[0].active_revision.description == (
+        "A courtyard with an open gate."
+    )
+    description_token = controller.current_undo_token
+    window.render_document()
+    assert controller.current_undo_token == description_token
     assert background.refine_calls == [
         (
             card.id,
@@ -2462,7 +2502,7 @@ def test_refine_tab_wires_current_image_options_and_cancels_live_changes(
     background.busy = True
     background.active_operation = "refine"
     window._update_generation_actions()
-    assert window.inspector.refine_background_button.text() == "Reinterpreting…"
+    assert window.inspector.refine_background_button.text() == "Evolving…"
     assert not window.inspector.generate_background_button.isEnabled()
     window.inspector.refine_transformation_combo.setCurrentIndex(
         window.inspector._combo_index_for_data(
@@ -2479,9 +2519,11 @@ def test_refine_tab_wires_current_image_options_and_cancels_live_changes(
     assert not window.inspector.isVisible()
 
 
+@pytest.mark.parametrize("description", ("A courtyard", ""))
 def test_edit_tab_wires_current_image_defaults_errors_and_cancellation(
     application: QApplication,
     tmp_path: Path,
+    description: str,
 ) -> None:
     bundle = tmp_path / "Edit.hotcards"
     store = StackStore(bundle)
@@ -2495,7 +2537,7 @@ def test_edit_tab_wires_current_image_defaults_errors_and_cancellation(
         asset_id=asset_id,
     )
     revision = CardRevision(
-        description="A courtyard",
+        description=description,
         background=_generated_background(
             asset_id=asset_id,
             image_path=image_path,
@@ -2525,7 +2567,9 @@ def test_edit_tab_wires_current_image_defaults_errors_and_cancellation(
     window._availability[AdapterKind.MFLUX] = True
     window._update_generation_actions()
 
-    assert window.inspector.inspector_tabs.tabText(1) == "Transform"
+    assert window.inspector.inspector_tabs.tabText(1) == "Edit"
+    assert window.inspector.generate_background_button.isEnabled() == bool(description)
+    assert window.inspector.refine_background_button.isEnabled() == bool(description)
     assert not window.inspector.edit_background_button.isEnabled()
     assert window.inspector.edit_resolution_combo.count() == 1
     assert window.inspector.edit_resolution_combo.itemText(0) == "Full"
@@ -2695,9 +2739,11 @@ def test_notification_undo_expires_after_another_command(
     assert controller.document.cards[0].name == "Second"
 
 
+@pytest.mark.parametrize("target", ("mouse", "evolve"))
 def test_mouse_focus_commit_does_not_render_before_button_release(
     application: QApplication,
     monkeypatch: pytest.MonkeyPatch,
+    target: str,
 ) -> None:
     revision = CardRevision(description="A courtyard")
     card = Card(name="Card", revisions=(revision,))
@@ -2715,8 +2761,8 @@ def test_mouse_focus_commit_does_not_render_before_button_release(
     )
 
     window.inspector.description_edit.editing_finished.emit(
-        None,
-        Qt.FocusReason.MouseFocusReason,
+        window.inspector.refine_background_button if target == "evolve" else None,
+        Qt.FocusReason.OtherFocusReason if target == "evolve" else Qt.FocusReason.MouseFocusReason,
     )
 
     changed_revision = controller.document.cards[0].active_revision
@@ -2899,6 +2945,85 @@ def test_redo_preserves_newer_edit_drafts_including_identical_recalls(
     assert window.inspector.edit_instruction_draft == draft
     window.undo()
     assert window.inspector.edit_instruction_draft == draft
+
+
+@pytest.mark.parametrize("recall_at", ("completion", "redo"))
+@pytest.mark.parametrize("activation", ("click", "keyboard"))
+def test_history_recall_survives_edit_completion_or_redo_on_same_version(
+    application: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+    recall_at: str,
+    activation: str,
+) -> None:
+    instruction = "Open the gate.\nKeep its blue paint."
+    card = Card(
+        name="Card",
+        revisions=(
+            CardRevision(
+                description="A courtyard",
+                background=_generated_background(
+                    asset_id=uuid4(),
+                    image_path="assets/cards/card/generated.png",
+                ),
+            ),
+        ),
+    )
+    previous = card.active_revision.model_copy(
+        update={"background": _edited_background(card, instruction)}
+    )
+    card = card.model_copy(update={"revisions": (previous,)})
+    window, controller, _workers, workflow = _window(Stack(name="Demo", cards=(card,)))
+    monkeypatch.setattr(window, "_refine_source_size", lambda _card: (512, 384))
+    window.render_document()
+    window.inspector.inspector_tabs.setCurrentIndex(1)
+    window.inspector.set_edit_instruction(instruction)
+    window._edit_background(instruction, CurrentSourceSize(width=512, height=384))
+    result = _edited_background(card, instruction)
+    changed = controller.execute(
+        ReplaceRevisionBackgroundCommand(
+            card_id=card.id, revision_id=previous.id, background=result
+        )
+    )
+    window.render_document(changed)
+    change = AppliedImageChange(
+        token=controller.current_undo_token,
+        card_id=card.id,
+        revision_id=previous.id,
+        previous_revision=previous,
+        operation=EditImageOperation(instruction),
+    )
+    assert window.inspector.edit_history_list.count() == 2
+    if recall_at == "redo":
+        workflow.image_applied.emit(change)
+        assert window.inspector.edit_instruction_edit.toPlainText() == ""
+        window.undo()
+        assert window.inspector.edit_history_list.count() == 1
+    before = window.inspector.edit_instruction_draft
+    document = controller.document
+    token = controller.current_undo_token
+    history = window.inspector.edit_history_list
+    if activation == "click":
+        history.itemClicked.emit(history.item(0))
+        history.itemActivated.emit(history.item(0))
+    else:
+        history.setCurrentRow(0)
+        QTest.keyClick(history, Qt.Key.Key_Return)
+    recalled = window.inspector.edit_instruction_draft
+    assert recalled.text == instruction
+    assert recalled.sequence == before.sequence + 1
+    assert controller.document == document
+    assert controller.current_undo_token == token
+    if recall_at == "completion":
+        workflow.image_applied.emit(change)
+    else:
+        window.redo()
+    assert window.inspector.edit_instruction_draft == recalled
+    assert window.inspector.edit_history_list.count() == 2
+    window.undo()
+    assert window.inspector.edit_instruction_draft == recalled
+    assert window.inspector.edit_history_list.count() == 1
+    assert len(workflow.edit_calls) == 1
+    assert workflow.generate_calls == workflow.refine_calls == []
 
 
 @pytest.mark.parametrize("context", ("card", "revision", "away-and-back"))
@@ -3290,9 +3415,11 @@ def test_completed_polygon_creates_and_selects_hotspot(
     assert window.notification_bar.message_label.text() == "Hotspot created"
 
 
+@pytest.mark.parametrize("image_tab", (0, 1))
 def test_hotspot_editing_is_scoped_to_hotspots_tab(
     application: QApplication,
     tmp_path: Path,
+    image_tab: int,
 ) -> None:
     image_path = tmp_path / "background.png"
     image = QPixmap(1024, 768)
@@ -3345,7 +3472,7 @@ def test_hotspot_editing_is_scoped_to_hotspots_tab(
     assert controller.document.cards[0].active_revision.hotspot_set == original_hotspots
     assert window.inspector.selected_interaction_id is None
 
-    window.inspector.inspector_tabs.setCurrentIndex(0)
+    window.inspector.inspector_tabs.setCurrentIndex(image_tab)
     assert not window.card_canvas.drawing
     assert not window.card_canvas._editable
     assert window.card_canvas._overlay_items == []

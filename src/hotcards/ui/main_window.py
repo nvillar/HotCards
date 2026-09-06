@@ -1678,7 +1678,7 @@ class MainWindow(QMainWindow):
         except BackgroundWorkflowError as error:
             self._show_error(
                 "background-error",
-                "Could not reinterpret image",
+                "Could not evolve image",
                 detail=str(error),
             )
         self.render_document()
@@ -1782,7 +1782,7 @@ class MainWindow(QMainWindow):
         self.notification_bar.clear_notification("background-warning")
         if message in {
             "Generation cancelled",
-            "Reinterpret cancelled",
+            "Evolve cancelled",
             "Edit cancelled",
         }:
             self._show_info("background-cancelled", message)
@@ -1827,8 +1827,8 @@ class MainWindow(QMainWindow):
         self.generation_progress_container.show()
 
     def _background_failed(self, failure: object) -> None:
-        if self._background_progress_message == "Image reinterpretation failed":
-            title = "Image reinterpretation failed"
+        if self._background_progress_message == "Image evolution failed":
+            title = "Image evolution failed"
         elif self._background_progress_message == "Image editing failed":
             title = "Image editing failed"
         else:
@@ -1956,14 +1956,14 @@ class MainWindow(QMainWindow):
             refine_output_size,
             (CurrentSourceSize, PresetOutputSize),
         )
-        refine_reason = "Ready to reinterpret"
+        refine_reason = "Ready to evolve"
         if self.controller.mutation_blocked:
             refine_reason = PENDING_DURABILITY_MESSAGE
         elif not has_card:
             refine_reason = "Select a card in a saved stack"
         elif workflow_busy:
             refine_reason = (
-                "Reinterpret is running for this card"
+                "Evolve is running for this card"
                 if self.background_workflow is not None
                 and self._selected_card_id is not None
                 and getattr(
@@ -1974,11 +1974,11 @@ class MainWindow(QMainWindow):
                 else ("An image operation is running; MFLUX runs one job at a time")
             )
         elif not has_description_input:
-            refine_reason = "Enter a Description before reinterpreting"
+            refine_reason = "Enter a Description before evolving"
         elif not has_image:
-            refine_reason = "Generate an image before reinterpreting"
+            refine_reason = "Generate an image before evolving"
         elif not has_refine_output_size:
-            refine_reason = self.inspector.refine_error.text() or "Select a Reinterpret resolution"
+            refine_reason = self.inspector.refine_error.text() or "Select an Evolve resolution"
         elif not mflux_available:
             refine_reason = self._action_diagnostic(AdapterKind.MFLUX)
         self.inspector.set_refine_capabilities(
