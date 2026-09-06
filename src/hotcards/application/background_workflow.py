@@ -19,8 +19,6 @@ from PySide6.QtCore import QObject, Signal
 from hotcards.application.commands import (
     ActivateRevisionCommand,
     CommandError,
-    CreateEditedRevisionCommand,
-    CreateRefinedRevisionCommand,
     DeleteRevisionCommand,
     DuplicateRevisionCommand,
     ReplaceRevisionBackgroundCommand,
@@ -138,6 +136,8 @@ class _GenerationTarget:
     references: tuple[_GenerationReferenceTarget, ...]
     style: StyleSnapshot | None
     generate_output_size: GenerateOutputSize
+    aspect_ratio: AspectRatio
+    settings: BackgroundGenerationSettings
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,12 +186,14 @@ class _EditTarget:
 
 
 @dataclass(frozen=True, slots=True)
-class _PendingEditCompletion:
+class _PendingImageCompletion:
+    store: StackStore
     document: Stack
     previous_token: UndoToken | None
     card_id: UUID
-    revision_id: UUID
-    instruction: str
+    previous_revision: CardRevision
+    message: str
+    instruction: str | None
 
 
 GenerationSettingsProvider = Callable[[], BackgroundGenerationSettings]
@@ -254,7 +256,7 @@ class BackgroundWorkflow(QObject):
         self._temporary_cleanup_blocked = False
         self._busy = False
         self._active_operation: Literal["generate", "refine", "edit"] | None = None
-        self._pending_edit_completion: _PendingEditCompletion | None = None
+        self._pending_image_completion: _PendingImageCompletion | None = None
         self.session.state_changed.connect(self._session_state_changed)
 
     @property
@@ -305,7 +307,7 @@ class BackgroundWorkflow(QObject):
         )
         request_id = uuid4()
         asset_id = uuid4()
-        target = self._target(document, card, references)
+        target = self._target(document, card, references, settings)
         self._request_id = request_id
         self._request_target = target
         output_path = self._temporary_directory / f"generated-{asset_id}.png"
@@ -397,7 +399,7 @@ class BackgroundWorkflow(QObject):
         transformation: RefineTransformation,
         output_size: RefineOutputSize,
     ) -> WorkerOperation:
-        """Reinterpret the current image into one automatic complete revision."""
+        """Durably replace the current revision's image with a Reinterpret result."""
         self._require_ready(card_id)
         if not self.session.flush():
             raise BackgroundWorkflowError(
@@ -589,7 +591,7 @@ class BackgroundWorkflow(QObject):
         instruction: str,
         output_size: EditOutputSize,
     ) -> WorkerOperation:
-        """Edit the current image into one automatic complete revision."""
+        """Durably replace the current revision's image with an Edit result."""
         self._require_ready(card_id)
         if not self.session.flush():
             raise BackgroundWorkflowError(
@@ -890,67 +892,14 @@ class BackgroundWorkflow(QObject):
                 )
             )
             return
-        stored_image_path: str | None = None
-        store = self._require_store()
-        try:
-            stored_image_path = store.store_image_asset(
-                result.output_path,
-                card_id=target.card_id,
-                asset_id=asset_id,
-            )
-            stored_asset = store.stored_image_asset(
-                stored_image_path,
-                card_id=target.card_id,
-                asset_id=asset_id,
-            )
-            background = GeneratedBackground(
-                id=asset_id,
-                image_path=stored_image_path,
-                provenance=result.provenance,
-                created_at=result.provenance.settings.generated_at,
-            )
-            self._apply_background(
-                target.card_id,
-                target.revision_id,
-                background,
-                "Image generated",
-                generated=True,
-                owned_assets=(
-                    self._owned_asset(
-                        store,
-                        target.card_id,
-                        asset_id,
-                        stored_asset,
-                    ),
-                ),
-            )
-        except (
-            CommandError,
-            DocumentMutationBlockedError,
-            StackStoreError,
-            ValidationError,
-        ) as error:
-            if stored_image_path is not None:
-                try:
-                    store.remove_image_asset_if_unreferenced(
-                        stored_image_path,
-                        card_id=target.card_id,
-                        asset_id=asset_id,
-                        stack=self.controller.document,
-                    )
-                except StackStoreError as cleanup_error:
-                    error = BackgroundWorkflowError(
-                        f"{error}; could not roll back generated asset: {cleanup_error}"
-                    )
-            self._finish_with_error(error)
-            return
-        self._pending_result = None
-        result.dispose_output()
-        self._operation = None
-        self._request_id = None
-        self._request_target = None
-        self._active_operation = None
-        self._set_busy(False, "Image generated")
+        self._accept_image(
+            request_id,
+            target,
+            asset_id,
+            result,
+            "Image generated",
+            is_current=lambda: self._target_is_current(target),
+        )
 
     def _refine_succeeded(
         self,
@@ -976,85 +925,14 @@ class BackgroundWorkflow(QObject):
                 )
             )
             return
-        store = self._require_store()
-        image_path = store.image_asset_path(target.card_id, asset_id)
-        background = GeneratedBackground(
-            id=asset_id,
-            image_path=image_path,
-            provenance=result.provenance,
-            created_at=result.provenance.settings.generated_at,
+        self._accept_image(
+            request_id,
+            target,
+            asset_id,
+            result,
+            "Image reinterpreted",
+            is_current=lambda: self._refine_target_is_current(target),
         )
-        command = CreateRefinedRevisionCommand(
-            card_id=target.card_id,
-            source_revision_id=target.revision.id,
-            background=background,
-        )
-        before = self.controller.document
-        owned_assets: list[OwnedImageAsset] = []
-
-        def persist(candidate: Stack) -> None:
-            try:
-                stored = store.store_image_asset_and_save(
-                    result.output_path,
-                    destination_card_id=target.card_id,
-                    destination_asset_id=asset_id,
-                    previous_stack=before,
-                    changed_stack=candidate,
-                    expected_source_snapshot=target.source_snapshot,
-                    expected_source_card_id=target.card_id,
-                    expected_source_asset_id=target.source_background_id,
-                )
-            except StackStoreTransactionError as error:
-                if error.owned_asset is not None:
-                    owned_assets.append(
-                        self._owned_asset(
-                            store,
-                            target.card_id,
-                            asset_id,
-                            error.owned_asset,
-                        )
-                    )
-                raise
-            owned_assets.append(
-                self._owned_asset(
-                    store,
-                    target.card_id,
-                    asset_id,
-                    stored,
-                )
-            )
-
-        previous_token = self.controller.current_undo_token
-        try:
-            changed = store.run_locked(
-                lambda: self.session.execute_persisted(
-                    command,
-                    persist=persist,
-                    owned_assets=owned_assets,
-                )
-            )
-        except (
-            CommandError,
-            DocumentMutationBlockedError,
-            DocumentSessionError,
-            StackStoreError,
-            ValidationError,
-        ) as error:
-            if self.controller.document != before:
-                self.document_changed.emit(self.controller.document)
-            self._finish_with_error(error)
-            return
-        self.progress_changed.emit("Image reinterpreted")
-        self.document_changed.emit(changed)
-        self._emit_change_applied("Image reinterpreted", previous_token)
-        self._pending_result = None
-        result.dispose_output()
-        self._operation = None
-        self._request_id = None
-        self._request_target = None
-        self._active_operation = None
-        self._cleanup_source_snapshot_if_idle()
-        self._set_busy(False, "Image reinterpreted")
 
     def _edit_succeeded(
         self,
@@ -1080,127 +958,152 @@ class BackgroundWorkflow(QObject):
                 )
             )
             return
-        store = self._require_store()
-        image_path = store.image_asset_path(target.card_id, asset_id)
-        background = GeneratedBackground(
-            id=asset_id,
-            image_path=image_path,
-            provenance=result.provenance,
-            created_at=result.provenance.settings.generated_at,
+        self._accept_image(
+            request_id,
+            target,
+            asset_id,
+            result,
+            "Image edited",
+            is_current=lambda: self._edit_target_is_current(target),
         )
-        command = CreateEditedRevisionCommand(
-            card_id=target.card_id,
-            source_revision_id=target.revision.id,
-            background=background,
-        )
-        before = self.controller.document
-        owned_assets: list[OwnedImageAsset] = []
 
-        def persist(candidate: Stack) -> None:
-            try:
-                stored = store.store_image_asset_and_save(
-                    result.output_path,
-                    destination_card_id=target.card_id,
-                    destination_asset_id=asset_id,
-                    previous_stack=before,
-                    changed_stack=candidate,
-                    expected_source_snapshot=target.source_snapshot,
-                    expected_source_card_id=target.card_id,
-                    expected_source_asset_id=target.source_background_id,
-                    expected_source_operation="Edit",
+    def _accept_image(
+        self,
+        request_id: UUID,
+        target: _GenerationTarget | _RefineTarget | _EditTarget,
+        asset_id: UUID,
+        result: MfluxGenerateResult | MfluxRefineResult | MfluxEditResult,
+        message: str,
+        *,
+        is_current: Callable[[], bool],
+    ) -> None:
+        completion: _PendingImageCompletion | None = None
+
+        def accept() -> None:
+            nonlocal completion
+            if not self.session.flush():
+                raise BackgroundWorkflowError(
+                    self.session.state.error or "the current stack could not be saved"
                 )
-            except StackStoreTransactionError as error:
-                if error.owned_asset is not None:
-                    owned_assets.append(
-                        self._owned_asset(
-                            store,
-                            target.card_id,
-                            asset_id,
-                            error.owned_asset,
-                        )
+            if request_id != self._request_id or not is_current():
+                raise BackgroundWorkflowError("the image request changed before acceptance")
+            store = self._require_store()
+            before = self.controller.document
+            previous_revision = self._card(before, target.card_id).active_revision
+            command = ReplaceRevisionBackgroundCommand(
+                card_id=target.card_id,
+                revision_id=previous_revision.id,
+                background=GeneratedBackground(
+                    id=asset_id,
+                    image_path=store.image_asset_path(target.card_id, asset_id),
+                    provenance=result.provenance,
+                    created_at=result.provenance.settings.generated_at,
+                ),
+            )
+            completion = _PendingImageCompletion(
+                store=store,
+                document=command.apply(before),
+                previous_token=self.controller.current_undo_token,
+                card_id=target.card_id,
+                previous_revision=previous_revision,
+                message=message,
+                instruction=target.instruction if isinstance(target, _EditTarget) else None,
+            )
+            owned_assets: list[OwnedImageAsset] = []
+            derived = target if isinstance(target, (_RefineTarget, _EditTarget)) else None
+
+            def persist(candidate: Stack) -> None:
+                try:
+                    stored = store.store_image_asset_and_save(
+                        result.output_path,
+                        destination_card_id=target.card_id,
+                        destination_asset_id=asset_id,
+                        previous_stack=before,
+                        changed_stack=candidate,
+                        expected_source_snapshot=derived.source_snapshot if derived else None,
+                        expected_source_card_id=derived.card_id if derived else None,
+                        expected_source_asset_id=derived.source_background_id if derived else None,
+                        expected_source_operation="Edit"
+                        if isinstance(target, _EditTarget)
+                        else "Reinterpret",
                     )
-                raise
-            owned_assets.append(
-                self._owned_asset(
-                    store,
-                    target.card_id,
-                    asset_id,
-                    stored,
-                )
-            )
+                except StackStoreTransactionError as error:
+                    if isinstance(error.owned_asset, StoredImageAsset):
+                        owned_assets.append(
+                            self._owned_asset(store, target.card_id, asset_id, error.owned_asset)
+                        )
+                    raise
+                owned_assets.append(self._owned_asset(store, target.card_id, asset_id, stored))
 
-        previous_token = self.controller.current_undo_token
+            self.session.execute_persisted(command, persist=persist, owned_assets=owned_assets)
+
         try:
-            changed = store.run_locked(
-                lambda: self.session.execute_persisted(
-                    command,
-                    persist=persist,
-                    owned_assets=owned_assets,
-                )
-            )
+            self._require_store().run_locked(accept)
         except (
+            BackgroundWorkflowError,
             CommandError,
             DocumentMutationBlockedError,
             DocumentSessionError,
             StackStoreError,
             ValidationError,
         ) as error:
-            if self.controller.document != before:
-                authoritative = self.controller.document
-                self.document_changed.emit(authoritative)
+            if completion is not None and self.controller.document == completion.document:
                 if self.controller.mutation_blocked:
-                    self._pending_edit_completion = _PendingEditCompletion(
-                        document=authoritative,
-                        previous_token=previous_token,
-                        card_id=target.card_id,
-                        revision_id=command.new_revision_id,
-                        instruction=target.instruction,
-                    )
+                    self._pending_image_completion = completion
+                    self.document_changed.emit(completion.document)
+                elif isinstance(error, DocumentSessionError) and error.committed:
+                    self._publish_image_completion(completion)
             self._finish_with_error(error)
             return
-        self.progress_changed.emit("Image edited")
-        self.document_changed.emit(changed)
-        self._emit_change_applied("Image edited", previous_token)
-        self._emit_edit_applied(
-            previous_token=previous_token,
-            card_id=target.card_id,
-            revision_id=command.new_revision_id,
-            instruction=target.instruction,
-        )
-        self.edit_instruction_clear_requested.emit()
-        self._pending_result = None
-        result.dispose_output()
+        assert completion is not None
+        self._publish_image_completion(completion)
+        self._discard_pending_image()
         self._operation = None
         self._request_id = None
         self._request_target = None
         self._active_operation = None
         self._cleanup_source_snapshot_if_idle()
-        self._set_busy(False, "Image edited")
+        self._set_busy(False, message)
 
     def _session_state_changed(self, state: object) -> None:
-        pending = self._pending_edit_completion
+        pending = self._pending_image_completion
         if pending is None or not isinstance(state, DocumentSessionState):
             return
-        if state.mutation_blocked or state.dirty or state.error is not None:
+        if state.mutation_blocked or state.dirty:
             return
-        self._pending_edit_completion = None
-        if self.controller.document != pending.document:
+        self._pending_image_completion = None
+        self._publish_image_completion(pending)
+
+    def _publish_image_completion(self, completion: _PendingImageCompletion) -> None:
+        if (
+            self.session.store is not completion.store
+            or self.controller.document != completion.document
+        ):
             return
-        current_token = self.controller.current_undo_token
-        if current_token is None or current_token == pending.previous_token:
+        token = self.controller.current_undo_token
+        if token is None or token == completion.previous_token:
             return
-        self.progress_changed.emit("Image edited")
-        self.document_changed.emit(self.controller.document)
-        self.change_applied.emit("Image edited", current_token)
-        self.edit_applied.emit(
-            EditedRevisionChange(
-                token=current_token,
-                card_id=pending.card_id,
-                revision_id=pending.revision_id,
-                instruction=pending.instruction,
+        self.progress_changed.emit(completion.message)
+        self.document_changed.emit(completion.document)
+        self.generation_applied.emit(
+            GeneratedRevisionChange(
+                message=completion.message,
+                token=token,
+                card_id=completion.card_id,
+                revision_id=completion.previous_revision.id,
+                previous_revision=completion.previous_revision,
             )
         )
-        self.edit_instruction_clear_requested.emit()
+        if completion.instruction is not None:
+            self.edit_applied.emit(
+                EditedRevisionChange(
+                    token=token,
+                    card_id=completion.card_id,
+                    revision_id=completion.previous_revision.id,
+                    instruction=completion.instruction,
+                )
+            )
+            self.edit_instruction_clear_requested.emit()
 
     def _apply_background(
         self,
@@ -1208,16 +1111,8 @@ class BackgroundWorkflow(QObject):
         revision_id: UUID,
         background: GeneratedBackground | None,
         message: str,
-        *,
-        generated: bool = False,
-        owned_assets: tuple[OwnedImageAsset, ...] = (),
     ) -> Stack:
         previous_token = self.controller.current_undo_token
-        previous_revision = next(
-            revision
-            for revision in self._card(self.controller.document, card_id).revisions
-            if revision.id == revision_id
-        )
         changed = self.controller.execute(
             ReplaceRevisionBackgroundCommand(
                 card_id=card_id,
@@ -1225,60 +1120,19 @@ class BackgroundWorkflow(QObject):
                 background=background,
             )
         )
-        self.controller.register_owned_assets(owned_assets)
         self.progress_changed.emit(message)
         self.document_changed.emit(changed)
-        self._emit_change_applied(
-            message,
-            previous_token,
-            card_id=card_id if generated else None,
-            revision_id=revision_id if generated else None,
-            previous_revision=previous_revision if generated else None,
-        )
+        self._emit_change_applied(message, previous_token)
         return changed
 
     def _emit_change_applied(
         self,
         message: str,
         previous_token: object,
-        *,
-        card_id: UUID | None = None,
-        revision_id: UUID | None = None,
-        previous_revision: CardRevision | None = None,
     ) -> None:
         token = self.controller.current_undo_token
         if token is not None and token != previous_token:
-            if card_id is not None and revision_id is not None and previous_revision is not None:
-                self.generation_applied.emit(
-                    GeneratedRevisionChange(
-                        message=message,
-                        token=token,
-                        card_id=card_id,
-                        revision_id=revision_id,
-                        previous_revision=previous_revision,
-                    )
-                )
-            else:
-                self.change_applied.emit(message, token)
-
-    def _emit_edit_applied(
-        self,
-        *,
-        previous_token: UndoToken | None,
-        card_id: UUID,
-        revision_id: UUID,
-        instruction: str,
-    ) -> None:
-        token = self.controller.current_undo_token
-        if token is not None and token != previous_token:
-            self.edit_applied.emit(
-                EditedRevisionChange(
-                    token=token,
-                    card_id=card_id,
-                    revision_id=revision_id,
-                    instruction=instruction,
-                )
-            )
+            self.change_applied.emit(message, token)
 
     def _operation_failed(self, request_id: UUID, failure: object) -> None:
         if request_id == self._request_id:
@@ -1375,6 +1229,7 @@ class BackgroundWorkflow(QObject):
         document: Stack,
         card: Card,
         references: tuple[_GenerationReferenceTarget, ...],
+        settings: BackgroundGenerationSettings,
     ) -> _GenerationTarget:
         bundle_path = self.session.state.bundle_path
         if bundle_path is None:
@@ -1390,6 +1245,8 @@ class BackgroundWorkflow(QObject):
             references=references,
             style=self._style_snapshot(document, revision),
             generate_output_size=revision.generate_output_size,
+            aspect_ratio=document.aspect_ratio,
+            settings=settings,
         )
 
     def _target_is_current(self, target: _GenerationTarget) -> bool:
@@ -1397,7 +1254,11 @@ class BackgroundWorkflow(QObject):
         if bundle_path is None or bundle_path.resolve() != target.bundle_path:
             return False
         document = self.controller.document
-        if document.id != target.stack_id:
+        if (
+            document.id != target.stack_id
+            or document.aspect_ratio != target.aspect_ratio
+            or self._settings_provider() != target.settings
+        ):
             return False
         card = next(
             (card for card in document.cards if card.id == target.card_id),

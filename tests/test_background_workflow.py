@@ -24,6 +24,7 @@ from hotcards.application.background_workflow import (
 )
 from hotcards.application.commands import (
     CreateCardCommand,
+    CreateGeneratedRevisionCommand,
     DeleteRevisionCommand,
     DuplicateRevisionCommand,
     EditRevisionDescriptionCommand,
@@ -280,6 +281,23 @@ def _complete_generation(workers: FakeWorkers) -> None:
     operation.succeeded.emit(work())
 
 
+def _start_image_operation(workflow: BackgroundWorkflow, card: Card, operation: str) -> None:
+    if operation == "generate":
+        workflow.generate(card.id)
+    elif operation == "refine":
+        workflow.refine(
+            card.id,
+            transformation=RefineTransformation.BALANCED,
+            output_size=workflow.available_refine_output_sizes(card.id)[0],
+        )
+    else:
+        workflow.edit(
+            card.id,
+            instruction="Open the gate.",
+            output_size=workflow.available_edit_output_sizes(card.id)[0],
+        )
+
+
 def _create_generated_source(
     workflow: BackgroundWorkflow,
     controller: DocumentController,
@@ -300,6 +318,69 @@ def _create_generated_source(
     workflow.generate(source.id)
     _complete_generation(workers)
     return next(card for card in controller.document.cards if card.id == source_id)
+
+
+def test_generate_preserves_autosave_scheduled_by_redo_cleanup_notification(
+    tmp_path: Path,
+) -> None:
+    workflow, controller, session, workers, _model, card = _bound_workflow(tmp_path)
+    workflow.generate(card.id)
+    _complete_generation(workers)
+    original_background = controller.document.cards[0].active_revision.background
+    assert original_background is not None
+    assert controller.undo()
+    renamed = False
+
+    def rename_on_replacement(_state: object) -> None:
+        nonlocal renamed
+        background = controller.document.cards[0].active_revision.background
+        if not renamed and background is not None and background.id != original_background.id:
+            renamed = True
+            controller.execute(RenameCardCommand(card_id=card.id, name="After generation"))
+
+    session.state_changed.connect(rename_on_replacement)
+    workflow.generate(card.id)
+    _complete_generation(workers)
+
+    assert renamed
+    assert controller.document.cards[0].name == "After generation"
+    assert session.state.dirty
+    assert session.flush()
+    assert session.store.load() == controller.document
+    assert not workflow.busy
+
+
+def test_generate_reports_asset_directory_failure_and_disposes_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow, controller, session, workers, _model, card = _bound_workflow(tmp_path)
+    before = controller.document
+    failures: list[object] = []
+    workflow.failed.connect(failures.append)
+    real_mkdir = os.mkdir
+
+    def deny_card_directory(
+        path: str | os.PathLike[str],
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> None:
+        if str(path) == str(card.id) and dir_fd is not None:
+            raise PermissionError("image directory is not writable")
+        real_mkdir(path, mode, dir_fd=dir_fd)
+
+    workflow.generate(card.id)
+    monkeypatch.setattr(os, "mkdir", deny_card_directory)
+    _complete_generation(workers)
+
+    assert len(failures) == 1
+    assert "image directory is not writable" in str(failures[0])
+    assert not workflow.busy
+    assert workflow._pending_result is None
+    assert not tuple(workflow._temporary_directory.glob("*.png"))
+    assert controller.document == before
+    assert session.store.load() == before
 
 
 def test_generate_uses_description_and_preserves_result_lifecycle(
@@ -328,6 +409,8 @@ def test_generate_uses_description_and_preserves_result_lifecycle(
     assert provenance.render_prompt == "A garden"
     assert (provenance.settings.width, provenance.settings.height) == (512, 384)
     assert model.calls[-1]["prompt"] == "A garden"
+    assert not session.state.dirty
+    assert session.store.load() == controller.document
     assert session.flush()
     assert StackStore(session.state.bundle_path).load() == controller.document
     generated_path = session.store.asset_path(revision.background.image_path)
@@ -349,7 +432,7 @@ def test_generate_uses_description_and_preserves_result_lifecycle(
     assert not generated_path.exists()
 
 
-def test_refine_uses_current_image_seed_and_creates_complete_version(
+def test_refine_uses_current_image_seed_and_replaces_complete_version(
     tmp_path: Path,
 ) -> None:
     workflow, controller, session, workers, model, card = _bound_workflow(tmp_path)
@@ -382,8 +465,8 @@ def test_refine_uses_current_image_seed_and_creates_complete_version(
         )
     )
     source_revision = controller.document.cards[0].active_revision
-    applied: list[tuple[str, UndoToken]] = []
-    workflow.change_applied.connect(lambda message, token: applied.append((message, token)))
+    applied: list[GeneratedRevisionChange] = []
+    workflow.generation_applied.connect(applied.append)
 
     workflow.refine(
         card.id,
@@ -394,9 +477,8 @@ def test_refine_uses_current_image_seed_and_creates_complete_version(
 
     changed_card = controller.document.cards[0]
     refined = changed_card.active_revision
-    assert len(changed_card.revisions) == 2
-    assert changed_card.revisions[0] == source_revision
-    assert refined.id != source_revision.id
+    assert len(changed_card.revisions) == 1
+    assert refined.id == source_revision.id
     assert refined.description == source_revision.description
     assert refined.style_id == source_revision.style_id
     assert refined.references == source_revision.references
@@ -429,8 +511,11 @@ def test_refine_uses_current_image_seed_and_creates_complete_version(
     assert model.calls[-1]["image_strength"] == 0.50
     assert "image_paths" not in model.calls[-1]
     assert (model.calls[-1]["width"], model.calls[-1]["height"]) == (768, 576)
-    assert applied and applied[-1][0] == "Image reinterpreted"
-    token = applied[-1][1]
+    assert applied and applied[-1].message == "Image reinterpreted"
+    assert applied[-1].previous_revision == source_revision
+    token = applied[-1].token
+    assert session.store.load() == controller.document
+    assert not session.state.dirty
     refined_path = session.store.asset_path(refined.background.image_path)
     assert refined_path.is_file()
 
@@ -442,15 +527,7 @@ def test_refine_uses_current_image_seed_and_creates_complete_version(
     assert session.flush()
     assert controller.document.cards[0].active_revision == refined
     assert refined_path.is_file()
-    controller.execute(
-        DeleteRevisionCommand(
-            card_id=card.id,
-            revision_id=source_revision.id,
-        )
-    )
-    assert session.flush()
     assert controller.document.cards[0].revisions == (refined,)
-    assert controller.undo()
 
     assert controller.undo()
     assert session.flush()
@@ -460,7 +537,7 @@ def test_refine_uses_current_image_seed_and_creates_complete_version(
 
 
 @pytest.mark.parametrize("hotspot_set", (None, HotspotSet()))
-def test_edit_uses_only_secure_current_image_and_creates_complete_version(
+def test_edit_uses_only_secure_current_image_and_replaces_complete_version(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     hotspot_set: HotspotSet | None,
@@ -505,10 +582,10 @@ def test_edit_uses_only_secure_current_image_and_creates_complete_version(
         "hotcards.application.background_workflow.secrets.randbelow",
         lambda _limit: 8675309,
     )
-    applied: list[tuple[str, UndoToken]] = []
+    applied: list[GeneratedRevisionChange] = []
     edited_changes: list[EditedRevisionChange] = []
     cleared: list[None] = []
-    workflow.change_applied.connect(lambda message, token: applied.append((message, token)))
+    workflow.generation_applied.connect(applied.append)
     workflow.edit_applied.connect(edited_changes.append)
     workflow.edit_instruction_clear_requested.connect(lambda: cleared.append(None))
     options = workflow.available_edit_output_sizes(card.id)
@@ -524,8 +601,8 @@ def test_edit_uses_only_secure_current_image_and_creates_complete_version(
 
     changed_card = controller.document.cards[0]
     edited = changed_card.active_revision
-    assert changed_card.revisions[0] == source
-    assert edited.id != source.id
+    assert len(changed_card.revisions) == 1
+    assert edited.id == source.id
     assert edited.description == source.description
     assert edited.style_id == source.style_id
     assert edited.references == source.references
@@ -565,10 +642,11 @@ def test_edit_uses_only_secure_current_image_and_creates_complete_version(
     assert "references" not in model.calls[-1]
     assert snapshot_path != source_path
     assert not snapshot_path.exists()
-    assert applied[-1][0] == "Image edited"
+    assert applied[-1].message == "Image edited"
+    assert applied[-1].previous_revision == source
     assert edited_changes == [
         EditedRevisionChange(
-            token=applied[-1][1],
+            token=applied[-1].token,
             card_id=card.id,
             revision_id=edited.id,
             instruction="Open the garden gate.",
@@ -576,7 +654,9 @@ def test_edit_uses_only_secure_current_image_and_creates_complete_version(
     ]
     assert cleared == [None]
 
-    token = applied[-1][1]
+    assert session.store.load() == controller.document
+    assert not session.state.dirty
+    token = applied[-1].token
     edited_path = session.store.asset_path(edited.background.image_path)
     assert controller.undo_if_current(token)
     assert session.flush()
@@ -585,15 +665,7 @@ def test_edit_uses_only_secure_current_image_and_creates_complete_version(
     assert controller.redo()
     assert session.flush()
     assert controller.document.cards[0].active_revision == edited
-    controller.execute(
-        DeleteRevisionCommand(
-            card_id=card.id,
-            revision_id=source.id,
-        )
-    )
-    assert session.flush()
     assert controller.document.cards[0].revisions == (edited,)
-    assert controller.undo()
 
     assert controller.undo()
     assert session.flush()
@@ -615,6 +687,7 @@ def test_sequential_edits_append_lineage_and_use_fresh_seeds(
         lambda _limit: next(seeds),
     )
 
+    accepted_seeds: list[int] = []
     for instruction in ("Open the gate.", "Add ivy."):
         current_size = workflow.available_edit_output_sizes(card.id)[0]
         workflow.edit(
@@ -623,6 +696,9 @@ def test_sequential_edits_append_lineage_and_use_fresh_seeds(
             output_size=current_size,
         )
         _complete_generation(workers)
+        accepted_seeds.append(
+            controller.document.cards[0].active_revision.background.provenance.settings.seed
+        )
 
     provenance = controller.document.cards[0].active_revision.provenance
     assert isinstance(provenance, EditProvenance)
@@ -630,11 +706,8 @@ def test_sequential_edits_append_lineage_and_use_fresh_seeds(
         "Open the gate.",
         "Add ivy.",
     )
-    assert [
-        revision.background.provenance.settings.seed
-        for revision in controller.document.cards[0].revisions[1:]
-        if revision.background is not None
-    ] == [101, 202]
+    assert accepted_seeds == [101, 202]
+    assert len(controller.document.cards[0].revisions) == 1
 
 
 def test_edit_flattens_duplicate_and_refine_preserves_accepted_edit(
@@ -806,7 +879,7 @@ def test_edit_allows_empty_description_but_suppresses_complete_revision_changes(
     _complete_generation(workers)
 
     assert controller.document.cards[0].active_revision == styled
-    assert len(controller.document.cards[0].revisions) == 2
+    assert len(controller.document.cards[0].revisions) == 1
     assert "changed before Edit completed" in str(failures[-1])
     assert empty_description_source.description == ""
 
@@ -835,8 +908,8 @@ def test_refine_preserves_none_vs_empty_hotspot_set(
     _complete_generation(workers)
 
     revisions = controller.document.cards[0].revisions
+    assert len(revisions) == 1
     assert revisions[0].hotspot_set == hotspot_set
-    assert revisions[1].hotspot_set == hotspot_set
 
 
 def test_refine_offers_current_and_only_higher_tiers(
@@ -913,7 +986,7 @@ def test_invalid_current_size_keeps_named_workflow_outputs_available(
 
 
 @pytest.mark.parametrize("operation", ("refine", "edit"))
-def test_derived_image_reopens_after_source_revision_and_unreachable_asset_are_removed(
+def test_derived_image_reopens_after_replaced_source_asset_is_reclaimed(
     tmp_path: Path, operation: str
 ) -> None:
     workflow, controller, session, workers, _model, card = _bound_workflow(tmp_path)
@@ -937,12 +1010,10 @@ def test_derived_image_reopens_after_source_revision_and_unreachable_asset_are_r
     result = controller.document.cards[0].active_revision
     result_path = session.store.asset_path(result.background.image_path)
 
-    controller.execute(DeleteRevisionCommand(card_id=card.id, revision_id=source.id))
-    assert session.flush()
     assert source_path.is_file()
     assert controller.undo()
     assert session.flush()
-    assert controller.document.cards[0].revisions == (source, result)
+    assert controller.document.cards[0].revisions == (source,)
     assert controller.redo()
     assert session.flush()
     controller.clear_history()
@@ -1092,7 +1163,7 @@ def test_refine_rejects_symlink_source_without_starting_model(
 
     with pytest.raises(BackgroundWorkflowError, match="unavailable or unreadable"):
         workflow.available_refine_output_sizes(card.id)
-    with pytest.raises(BackgroundWorkflowError, match="outside the stack bundle"):
+    with pytest.raises(BackgroundWorkflowError, match="unavailable or unreadable"):
         workflow.refine(
             card.id,
             transformation=RefineTransformation.BALANCED,
@@ -1222,10 +1293,10 @@ def test_refine_indeterminate_observed_after_renders_and_promotes_one_history_en
     source_revision = source.cards[0].active_revision
     previous_token = controller.current_undo_token
     changed_documents: list[Stack] = []
-    applied: list[tuple[str, UndoToken]] = []
+    applied: list[GeneratedRevisionChange] = []
     failures: list[object] = []
     workflow.document_changed.connect(changed_documents.append)
-    workflow.change_applied.connect(lambda message, token: applied.append((message, token)))
+    workflow.generation_applied.connect(applied.append)
     workflow.failed.connect(failures.append)
     assert session.store is not None
     real_store = session.store.store_image_asset_and_save
@@ -1269,7 +1340,7 @@ def test_refine_indeterminate_observed_after_renders_and_promotes_one_history_en
     _complete_generation(workers)
 
     pending = controller.document
-    assert len(pending.cards[0].revisions) == 2
+    assert len(pending.cards[0].revisions) == 1
     assert pending.cards[0].active_revision != source_revision
     assert changed_documents[-1] == pending
     assert controller.mutation_blocked
@@ -1285,6 +1356,11 @@ def test_refine_indeterminate_observed_after_renders_and_promotes_one_history_en
     assert session.flush()
     assert not controller.mutation_blocked
     assert controller.current_undo_token != previous_token
+    assert len(applied) == 1
+    assert applied[0].previous_revision == source_revision
+    assert applied[0].token == controller.current_undo_token
+    assert session.flush()
+    assert len(applied) == 1
     controller.execute(RenameCardCommand(card_id=card.id, name="Edited later"))
     assert session.flush()
     assert controller.undo()
@@ -1306,11 +1382,11 @@ def test_edit_indeterminate_observed_after_keeps_instruction_and_promotes_histor
     previous_token = controller.current_undo_token
     changed_documents: list[Stack] = []
     cleared: list[None] = []
-    applied: list[tuple[str, UndoToken]] = []
+    applied: list[GeneratedRevisionChange] = []
     edited_changes: list[EditedRevisionChange] = []
     failures: list[object] = []
     workflow.document_changed.connect(changed_documents.append)
-    workflow.change_applied.connect(lambda message, token: applied.append((message, token)))
+    workflow.generation_applied.connect(applied.append)
     workflow.edit_applied.connect(edited_changes.append)
     workflow.edit_instruction_clear_requested.connect(lambda: cleared.append(None))
     workflow.failed.connect(failures.append)
@@ -1355,7 +1431,7 @@ def test_edit_indeterminate_observed_after_keeps_instruction_and_promotes_histor
     _complete_generation(workers)
 
     pending = controller.document
-    assert len(pending.cards[0].revisions) == 2
+    assert len(pending.cards[0].revisions) == 1
     assert changed_documents[-1] == pending
     assert controller.mutation_blocked
     assert session.state.dirty
@@ -1371,7 +1447,10 @@ def test_edit_indeterminate_observed_after_keeps_instruction_and_promotes_histor
     assert not controller.mutation_blocked
     assert controller.current_undo_token != previous_token
     assert cleared == [None]
-    assert applied == [("Image edited", controller.current_undo_token)]
+    assert len(applied) == 1
+    assert applied[0].message == "Image edited"
+    assert applied[0].token == controller.current_undo_token
+    assert applied[0].previous_revision == source.cards[0].active_revision
     assert edited_changes == [
         EditedRevisionChange(
             token=controller.current_undo_token,
@@ -1422,6 +1501,339 @@ def test_refine_storage_failure_creates_no_revision_or_asset(
     assert not list((tmp_path / "temporary").glob("refined-*.png"))
 
 
+@pytest.mark.parametrize("operation", ("generate", "refine", "edit"))
+@pytest.mark.parametrize(
+    "checkpoint",
+    ("destination-created", "asset-file-fsynced", "manifest-file-fsynced", "manifest-replaced"),
+)
+def test_image_transaction_failure_retains_exact_before_and_no_result_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    checkpoint: str,
+) -> None:
+    workflow, controller, session, workers, _model, card = _bound_workflow(tmp_path)
+    workflow.generate(card.id)
+    _complete_generation(workers)
+    before = controller.document
+    token = controller.current_undo_token
+    paths = set(session.store.bundle_path.rglob("image-*.png"))
+    applied: list[GeneratedRevisionChange] = []
+    cleared: list[None] = []
+    failures: list[object] = []
+    workflow.generation_applied.connect(applied.append)
+    workflow.edit_instruction_clear_requested.connect(lambda: cleared.append(None))
+    workflow.failed.connect(failures.append)
+    _start_image_operation(workflow, card, operation)
+    assert controller.document == before
+
+    def fail_checkpoint(name: str) -> None:
+        if name == checkpoint:
+            raise OSError("injected image transaction failure")
+
+    monkeypatch.setattr(stack_store_module, "_io_checkpoint", fail_checkpoint)
+    _complete_generation(workers)
+
+    assert controller.document == before
+    assert session.store.load() == before
+    assert controller.current_undo_token == token
+    assert set(session.store.bundle_path.rglob("image-*.png")) == paths
+    assert applied == []
+    assert cleared == []
+    assert "injected image transaction failure" in str(failures[-1])
+    assert not workflow.busy
+    assert not list((tmp_path / "temporary").iterdir())
+
+
+@pytest.mark.parametrize("operation", ("generate", "refine", "edit"))
+@pytest.mark.parametrize(
+    "outcome",
+    ("observed-after", "observed-before", "committed-error", "rolled-back-error"),
+)
+def test_image_partial_transaction_ownership_completion_and_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    outcome: str,
+) -> None:
+    workflow, controller, session, workers, _model, card = _bound_workflow(tmp_path)
+    workflow.generate(card.id)
+    _complete_generation(workers)
+    controller.clear_history()
+    before = controller.document
+    applied: list[GeneratedRevisionChange] = []
+    edited: list[EditedRevisionChange] = []
+    cleared: list[None] = []
+    failures: list[object] = []
+    workflow.generation_applied.connect(applied.append)
+    workflow.edit_applied.connect(edited.append)
+    workflow.edit_instruction_clear_requested.connect(lambda: cleared.append(None))
+    workflow.failed.connect(failures.append)
+    store = session.store
+    real_store = store.store_image_asset_and_save
+    real_save = store.save
+    owned_paths: list[Path] = []
+
+    def partial_transaction(path: Path, **kwargs: object) -> object:
+        stored = real_store(path, **kwargs)
+        after = kwargs["changed_stack"]
+        owned_paths.append(store.asset_path(stored.relative_path))
+        if outcome in {"observed-before", "rolled-back-error"}:
+            real_save(before)
+        raise StackStoreTransactionError(
+            RuntimeError("injected transaction cleanup error"),
+            persisted_stack=(
+                after
+                if outcome == "committed-error"
+                else before
+                if outcome == "rolled-back-error"
+                else None
+            ),
+            observed_stack=before if outcome in {"observed-before", "rolled-back-error"} else after,
+            durability_indeterminate=outcome in {"observed-after", "observed-before"},
+            owned_asset=stored,
+        )
+
+    _start_image_operation(workflow, card, operation)
+    monkeypatch.setattr(store, "store_image_asset_and_save", partial_transaction)
+    _complete_generation(workers)
+    assert failures
+    assert owned_paths[0].is_file() == (outcome != "rolled-back-error")
+    assert not list((tmp_path / "temporary").iterdir())
+    if outcome != "committed-error":
+        assert applied == []
+        assert edited == []
+        assert cleared == []
+        assert session.state.dirty == (outcome != "rolled-back-error")
+    if outcome == "observed-after":
+        assert controller.mutation_blocked
+        assert not controller.can_undo
+
+        def fail_save(_snapshot: Stack) -> None:
+            raise StackStoreError("retry save failed")
+
+        monkeypatch.setattr(store, "save", fail_save)
+        assert not session.flush()
+        assert applied == []
+        assert cleared == []
+        assert controller.mutation_blocked
+        monkeypatch.setattr(store, "save", real_save)
+        real_cleanup = session._cleanup_released_assets
+
+        def cleanup_with_error() -> None:
+            real_cleanup()
+            session._error = "injected retry cleanup error"
+
+        monkeypatch.setattr(session, "_cleanup_released_assets", cleanup_with_error)
+    elif outcome in {"observed-before", "rolled-back-error"}:
+        assert controller.document == before
+        assert not controller.mutation_blocked
+        controller.execute(RenameCardCommand(card_id=card.id, name="Newer authoring"))
+
+    assert session.flush()
+    assert session.flush()
+    assert not controller.mutation_blocked
+    if outcome == "observed-after":
+        assert session.state.error == "injected retry cleanup error"
+    if outcome in {"observed-before", "rolled-back-error"}:
+        assert applied == []
+        assert cleared == []
+        assert not owned_paths[0].exists()
+        assert controller.document.cards[0].name == "Newer authoring"
+    else:
+        assert len(applied) == 1
+        assert applied[0].previous_revision == before.cards[0].active_revision
+        assert applied[0].token == controller.current_undo_token
+        assert len(edited) == (1 if operation == "edit" else 0)
+        assert len(cleared) == (1 if operation == "edit" else 0)
+        assert controller.undo_if_current(applied[0].token)
+        assert controller.document == before
+        assert not controller.can_undo
+        assert session.flush()
+        assert owned_paths[0].is_file()
+        controller.clear_history()
+        assert session.flush()
+        assert not owned_paths[0].exists()
+
+
+@pytest.mark.parametrize("operation", ("generate", "refine", "edit"))
+def test_explicit_versions_share_assets_until_their_last_reachable_revision(
+    tmp_path: Path, operation: str
+) -> None:
+    workflow, controller, session, workers, _model, card = _bound_workflow(tmp_path)
+    workflow.generate(card.id)
+    _complete_generation(workers)
+    source = controller.document.cards[0].active_revision
+    source_path = session.store.asset_path(source.background.image_path)
+    controller.execute(DuplicateRevisionCommand(card_id=card.id, source_revision_id=source.id))
+    before = controller.document
+    applied: list[GeneratedRevisionChange] = []
+    workflow.generation_applied.connect(applied.append)
+    _start_image_operation(workflow, card, operation)
+    _complete_generation(workers)
+    after = controller.document
+    assert len(after.cards[0].revisions) == 2
+    assert after.cards[0].revisions[0] == source
+    change = applied[0]
+    assert change.previous_revision == before.cards[0].active_revision
+    result_path = session.store.asset_path(after.cards[0].active_revision.background.image_path)
+    controller.execute(
+        CreateGeneratedRevisionCommand(
+            card_id=card.id,
+            revision_id=change.revision_id,
+            previous_revision=change.previous_revision,
+        )
+    )
+    explicit = controller.document
+    assert len(explicit.cards[0].revisions) == 3
+    assert explicit.cards[0].revisions[:2] == before.cards[0].revisions
+    assert controller.current_undo_token != change.token
+    assert session.flush()
+    assert controller.undo()
+    assert controller.document == after
+    assert controller.undo_if_current(change.token)
+    assert controller.document == before
+    assert controller.redo()
+    assert controller.redo()
+    assert session.flush()
+    controller.clear_history()
+    assert source_path.is_file()
+    assert result_path.is_file()
+    for revision in before.cards[0].revisions:
+        controller.execute(DeleteRevisionCommand(card_id=card.id, revision_id=revision.id))
+    assert session.flush()
+    assert source_path.is_file()
+    assert session.close_history()
+    assert not source_path.exists()
+    assert result_path.is_file()
+    reopened = DocumentSession(DocumentController(Stack(name="Welcome")))
+    assert reopened.open(session.store.bundle_path) == controller.document
+    assert reopened.close_history()
+
+
+@pytest.mark.parametrize("operation", ("generate", "refine", "edit"))
+def test_image_replacement_save_as_and_history_close_keep_only_reachable_owned_bytes(
+    tmp_path: Path, operation: str
+) -> None:
+    workflow, controller, session, workers, _model, card = _bound_workflow(tmp_path)
+    workflow.generate(card.id)
+    _complete_generation(workers)
+    store = session.store
+    source = controller.document.cards[0].active_revision.background
+    source_path = store.asset_path(source.image_path)
+    unknown = source_path.with_name("unknown.png")
+    unknown.write_bytes(source_path.read_bytes())
+    _start_image_operation(workflow, card, operation)
+    _complete_generation(workers)
+    result = controller.document.cards[0].active_revision.background
+    result_path = store.asset_path(result.image_path)
+    assert source_path.is_file()
+    session.save_as(tmp_path / "Copy.hotcards")
+    assert not source_path.exists()
+    assert unknown.is_file()
+    assert result_path.is_file()
+    copied_path = session.store.asset_path(result.image_path)
+    assert copied_path.is_file()
+    assert not controller.can_undo
+    _start_image_operation(workflow, card, operation)
+    _complete_generation(workers)
+    newest = controller.document.cards[0].active_revision.background
+    newest_path = session.store.asset_path(newest.image_path)
+    assert session.close_history()
+    assert not copied_path.exists()
+    assert newest_path.is_file()
+    assert result_path.is_file()
+    assert unknown.is_file()
+
+
+def test_generate_flushes_complete_before_state_without_overwriting_intervening_commands(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workflow, controller, session, workers, _model, card = _bound_workflow(tmp_path)
+    workflow.generate(card.id)
+    controller.execute(RenameCardCommand(card_id=card.id, name="Before flush"))
+    real_save = session.store.save
+    injected = False
+
+    def save_then_edit(snapshot: Stack) -> None:
+        nonlocal injected
+        real_save(snapshot)
+        if not injected:
+            injected = True
+            controller.execute(RenameCardCommand(card_id=card.id, name="During flush"))
+
+    monkeypatch.setattr(session.store, "save", save_then_edit)
+    failures: list[object] = []
+    applied: list[GeneratedRevisionChange] = []
+    workflow.failed.connect(failures.append)
+    workflow.generation_applied.connect(applied.append)
+    _complete_generation(workers)
+    assert controller.document.cards[0].name == "During flush"
+    assert controller.document.cards[0].active_revision.background is None
+    assert session.state.dirty
+    assert failures
+    assert applied == []
+    assert session.flush()
+    assert session.store.load() == controller.document
+    workflow.generate(card.id)
+    _complete_generation(workers)
+    assert len(applied) == 1
+    assert session.store.load() == controller.document
+
+
+def test_generate_rejects_settings_changes_without_model_cancellation(
+    tmp_path: Path,
+) -> None:
+    workflow, controller, _session, workers, _model, card = _bound_workflow(tmp_path)
+    before = controller.document
+    workflow.generate(card.id)
+    workflow._settings_provider = lambda: BackgroundGenerationSettings(
+        mflux_model="flux2-klein-9b-kv",
+        step_count=4,
+        quantization=None,
+        random_seed=False,
+        fixed_seed=42,
+    )
+    failures: list[object] = []
+    workflow.failed.connect(failures.append)
+    _complete_generation(workers)
+    assert controller.document == before
+    assert failures
+    assert not list((tmp_path / "temporary").iterdir())
+
+
+@pytest.mark.parametrize("replacement", ("file", "symlink"))
+def test_discarded_generated_asset_never_reclaims_a_replaced_file_identity(
+    tmp_path: Path, replacement: str
+) -> None:
+    workflow, controller, session, workers, _model, card = _bound_workflow(tmp_path)
+    workflow.generate(card.id)
+    _complete_generation(workers)
+    background = controller.document.cards[0].active_revision.background
+    path = session.store.asset_path(background.image_path)
+    assert controller.undo()
+    assert session.flush()
+    held = path.with_name("held-owned.png")
+    path.rename(held)
+    foreign = tmp_path / "foreign.png"
+    foreign.write_bytes(b"foreign bytes")
+    if replacement == "symlink":
+        path.symlink_to(foreign)
+    else:
+        path.write_bytes(foreign.read_bytes())
+    controller.execute(RenameCardCommand(card_id=card.id, name="Truncate redo"))
+    assert session.flush()
+    assert path.read_bytes() == b"foreign bytes"
+    assert foreign.read_bytes() == b"foreign bytes"
+    assert held.is_file()
+    assert not session.close_history()
+    expected_error = (
+        "could not securely open owned image" if replacement == "symlink" else "identity changed"
+    )
+    assert expected_error in session.state.error
+    assert path.read_bytes() == b"foreign bytes"
+
+
 def test_refine_cancel_or_model_failure_creates_no_version(
     tmp_path: Path,
 ) -> None:
@@ -1460,14 +1872,16 @@ def test_refine_cancel_or_model_failure_creates_no_version(
     assert not list((tmp_path / "temporary").glob("refined-*.png"))
 
 
+@pytest.mark.parametrize("operation", ("refine", "edit"))
 @pytest.mark.parametrize(
     "replacement_checkpoint",
     ("manifest-file-fsynced", "manifest-directory-fsynced"),
 )
-def test_refine_source_replacement_during_commit_rolls_back(
+def test_derived_source_replacement_during_commit_rolls_back(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     replacement_checkpoint: str,
+    operation: str,
 ) -> None:
     workflow, controller, session, workers, _model, card = _bound_workflow(tmp_path)
     workflow.generate(card.id)
@@ -1494,11 +1908,7 @@ def test_refine_source_replacement_during_commit_rolls_back(
         replace_source_at_commit,
     )
     assets_before = set((session.store.bundle_path / "assets" / "cards").glob("*/image-*.png"))
-    workflow.refine(
-        card.id,
-        transformation=RefineTransformation.BALANCED,
-        output_size=PresetOutputSize(tier=ResolutionTier.LARGE),
-    )
+    _start_image_operation(workflow, card, operation)
     _complete_generation(workers)
 
     assert replaced
@@ -1507,7 +1917,8 @@ def test_refine_source_replacement_during_commit_rolls_back(
     assert (
         set((session.store.bundle_path / "assets" / "cards").glob("*/image-*.png")) == assets_before
     )
-    assert "changed while Reinterpret was running" in str(failures[-1])
+    operation_label = "Reinterpret" if operation == "refine" else "Edit"
+    assert f"changed while {operation_label} was running" in str(failures[-1])
 
 
 def test_refine_fifo_replacement_after_manifest_fsync_rolls_back(

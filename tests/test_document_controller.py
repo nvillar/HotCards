@@ -409,6 +409,25 @@ def test_observed_before_indeterminate_failure_does_not_block_mutations() -> Non
     assert changed.cards[0].name == "Allowed"
 
 
+def test_persisted_change_blocks_reentrant_commands_without_losing_history() -> None:
+    card = Card(name="Original")
+    before = Stack(name="Stack", cards=(card,))
+    controller = DocumentController(before)
+
+    def mutate_during_persistence(_candidate: Stack) -> None:
+        controller.execute(RenameCardCommand(card_id=card.id, name="Intervening"))
+
+    with pytest.raises(DocumentMutationBlockedError, match="current document change"):
+        controller.execute_persisted(
+            RenameCardCommand(card_id=card.id, name="Candidate"),
+            mutate_during_persistence,
+        )
+    assert controller.document == before
+    assert not controller.can_undo
+    changed = controller.execute(RenameCardCommand(card_id=card.id, name="Later"))
+    assert changed.cards[0].name == "Later"
+
+
 def test_replace_document_clears_session_history_without_autosave() -> None:
     signals: list[Stack] = []
     controller = DocumentController(Stack(name="First"), autosave_hook=signals.append)

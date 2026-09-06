@@ -79,6 +79,7 @@ class DocumentSession(QObject):
         self._dirty = False
         self._error: str | None = None
         self._released_assets: dict[tuple[Path, str], OwnedAsset] = {}
+        self._executing_persisted_change = False
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.setInterval(debounce_milliseconds)
@@ -166,6 +167,7 @@ class DocumentSession(QObject):
             raise DocumentSessionError("Document is not bound to a .hotcards bundle")
         self._timer.stop()
         before = self.controller.document
+        self._executing_persisted_change = True
         try:
             document = self.controller.execute_persisted(
                 command,
@@ -182,12 +184,16 @@ class DocumentSession(QObject):
                 self._pending_snapshot = None
             elif durability_indeterminate:
                 self._pending_snapshot = self.controller.document
-            self._error = str(error)
             self._dirty = durability_indeterminate or (
                 not committed and self._pending_snapshot is not None
             )
+            if not self._dirty:
+                self._cleanup_released_assets()
+            self._error = str(error)
             self._emit_state()
             raise DocumentSessionError(str(error), committed=committed) from error
+        finally:
+            self._executing_persisted_change = False
         self._pending_snapshot = None
         self._dirty = False
         self._error = None
@@ -230,12 +236,13 @@ class DocumentSession(QObject):
             self._emit_state()
             return False
         self.controller.confirm_persisted_document(persisted_snapshot)
-        self._pending_snapshot = None
-        self._dirty = False
+        current = self.controller.document
+        self._pending_snapshot = current if current != persisted_snapshot else None
+        self._dirty = self._pending_snapshot is not None
         self._error = None
         self._cleanup_released_assets()
         self._emit_state()
-        return True
+        return not self._dirty
 
     def close_history(self) -> bool:
         """Discard session history and reclaim any now-unreachable owned assets."""
@@ -346,7 +353,7 @@ class DocumentSession(QObject):
     ) -> None:
         for asset in assets:
             self._released_assets[(asset.bundle_path, asset.relative_path)] = asset
-        if self._pending_snapshot is None:
+        if self._pending_snapshot is None and not self._executing_persisted_change:
             self._cleanup_released_assets()
             self._emit_state()
 

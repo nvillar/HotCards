@@ -101,25 +101,24 @@ boundary with at most one compatible cached family/configuration. Cancellation
 discards candidate output, and changing the selected model releases the prior
 configuration.
 
-Reinterpret is exposed as an automatic-version workflow for the current canvas
-image. Its Source Similarity choices are Reimagine, Balanced, and Preserve,
+Reinterpret replaces the current version's background in place.
+Its Source Similarity choices are Reimagine, Balanced, and Preserve,
 with per-choice guidance, and it reuses the current image's seed. Output
 defaults to the decoded current size and offers only higher named tiers. The
 current background is the sole image input; Generate
 References are never resent. Its deterministic prompt contains the current
 Description, selected Style, and any ordered accepted Edit instructions already
 present in the source, with the current Description explicitly authoritative.
-Success preserves the source and automatically appends and activates one
-complete derived revision. The new image and manifest commit as one
-rollback-safe transaction, and Undo/Redo retain its owned asset only while
-needed.
+Success preserves the version's other authoring state. The new image and
+manifest commit as one rollback-safe transaction, and Undo/Redo retain
+replaced and new app-owned assets only while needed.
 
-Edit is also an automatic-version workflow for the current canvas image. It
+Edit also replaces the current version's background in place. It
 sends that image alone to Flux2KleinEdit with the exact authored Edit Instruction.
 When a Style is selected, its exact text is appended behind the UI as a visual
 continuity addendum unless the authored instruction explicitly changes the visual
 treatment. No other preservation or editing instructions are added. Description
-and Generate References are copied into the new revision but are not model inputs.
+and Generate References remain unchanged on the revision but are not model inputs.
 The effective prompt is deterministic, retained in provenance, and must fit the
 model's 512-token budget without truncation.
 Output defaults to the current image's exact decoded dimensions, including
@@ -130,9 +129,13 @@ lineage. Undoing an Edit restores its authored instruction to the editor for
 adjustment and another attempt. Later Reinterpret operations preserve that lineage
 unless it conflicts with the current authoritative Description; Generate ignores it.
 
-Generated images are the only supported background source. Generate and image
-removal apply to the active revision through document commands. Completed
-generation can be kept there, moved into a new complete revision, or undone.
+Generated images are the only supported background source. Generate, Reinterpret,
+and Edit durably replace the active revision's background through one shared
+image-and-manifest transaction and one Undo boundary. Each completed result
+can be kept there, explicitly moved into a new complete revision through a
+separate Undo boundary, or undone. Indeterminate saves show the authoritative
+image but block mutations and defer result actions until a save retry establishes
+durability.
 Existing images remain visible until replacement succeeds, and successful
 changes offer a dismissible, history-safe Undo action in the notification bar.
 
@@ -223,7 +226,7 @@ uses Stable Audio 3 Small-SFX.
 Transient outcomes, failures, Run warnings, and Undo actions appear in one
 notification bar beneath the main panes and directly above the status bar.
 Reversible deletions and replacements apply directly and offer Undo. Completed
-image generation also offers Create New Version, which restores
+Generate, Reinterpret, and Edit operations also offer Create New Version, which restores
 the prior current revision and activates a complete new revision containing the
 result, plus an explicit Keep action that retains it on the current revision.
 Field validation remains beside the responsible input.

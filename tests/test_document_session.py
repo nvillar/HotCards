@@ -471,7 +471,7 @@ def test_open_registers_all_current_app_owned_backgrounds(
     assert asset_path.is_file()
 
 
-@pytest.mark.parametrize("operation", ("generate", "refine"))
+@pytest.mark.parametrize("operation", ("generate", "refine", "edit"))
 def test_reopened_owned_background_is_removed_only_after_history_discards_it(
     tmp_path: Path,
     operation: str,

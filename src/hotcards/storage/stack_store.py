@@ -1534,20 +1534,25 @@ class StackStore:
         expected_source_operation: str = "Reinterpret",
     ) -> StoredImageAsset:
         """Atomically import one PNG and commit the manifest that references it."""
-        return self._store_image_asset_and_save(
-            source_relative_path=None,
-            source_file_path=source_file_path,
-            source_card_id=None,
-            source_asset_id=None,
-            destination_card_id=destination_card_id,
-            destination_asset_id=destination_asset_id,
-            previous_stack=previous_stack,
-            changed_stack=changed_stack,
-            expected_source_snapshot=expected_source_snapshot,
-            expected_source_card_id=expected_source_card_id,
-            expected_source_asset_id=expected_source_asset_id,
-            expected_source_operation=expected_source_operation,
-        )
+        try:
+            return self._store_image_asset_and_save(
+                source_relative_path=None,
+                source_file_path=source_file_path,
+                source_card_id=None,
+                source_asset_id=None,
+                destination_card_id=destination_card_id,
+                destination_asset_id=destination_asset_id,
+                previous_stack=previous_stack,
+                changed_stack=changed_stack,
+                expected_source_snapshot=expected_source_snapshot,
+                expected_source_card_id=expected_source_card_id,
+                expected_source_asset_id=expected_source_asset_id,
+                expected_source_operation=expected_source_operation,
+            )
+        except OSError as error:
+            raise StackStoreError(
+                f"could not prepare the image asset transaction: {error}"
+            ) from error
 
     @_serialized_bundle_mutation
     def _store_image_asset_and_save(

@@ -18,7 +18,6 @@ from hotcards.application.commands import (
     CreateCardCommand,
     CreateGeneratedRevisionCommand,
     CreateKeyAndAddHotspotReferenceCommand,
-    CreateRefinedRevisionCommand,
     DeleteCardCommand,
     DeleteInteractionCommand,
     DeleteKeyCommand,
@@ -609,7 +608,7 @@ def test_create_generated_revision_preserves_resolution_on_both_complete_version
 
 
 @pytest.mark.parametrize("hotspot_set", (None, HotspotSet()))
-def test_create_refined_revision_copies_complete_source_automatically(
+def test_replace_refined_background_preserves_complete_revision(
     hotspot_set: HotspotSet | None,
 ) -> None:
     style = StyleDefinition(name="Ink", prompt_text="Rendered in ink")
@@ -633,17 +632,17 @@ def test_create_refined_revision_copies_complete_source_automatically(
         source_card_id=card.id,
         source_revision=source,
     )
-    command = CreateRefinedRevisionCommand(
+    command = ReplaceRevisionBackgroundCommand(
         card_id=card.id,
-        source_revision_id=source.id,
+        revision_id=source.id,
         background=new_background,
     )
 
     changed = command.apply(document)
 
     changed_card = changed.cards[0]
-    assert changed_card.revisions[0] == source
-    assert changed_card.active_revision.id == command.new_revision_id
+    assert len(changed_card.revisions) == 1
+    assert changed_card.active_revision.id == source.id
     assert changed_card.active_revision.description == source.description
     assert changed_card.active_revision.style_id == source.style_id
     assert changed_card.active_revision.references == source.references

@@ -29,7 +29,6 @@ from hotcards.application.background_workflow import (
 from hotcards.application.commands import (
     ActivateRevisionCommand,
     CreateCardCommand,
-    CreateRefinedRevisionCommand,
     DeleteRevisionCommand,
     DuplicateRevisionCommand,
     RenameCardCommand,
@@ -1355,9 +1354,9 @@ def test_pending_refine_renders_authoritative_revision_and_promotes_undo(
 
     with pytest.raises(DocumentSessionError, match="durability remains indeterminate"):
         session.execute_persisted(
-            CreateRefinedRevisionCommand(
+            ReplaceRevisionBackgroundCommand(
                 card_id=card.id,
-                source_revision_id=source_revision.id,
+                revision_id=source_revision.id,
                 background=refined_background,
             ),
             persist=fail_indeterminate,
@@ -1365,14 +1364,14 @@ def test_pending_refine_renders_authoritative_revision_and_promotes_undo(
     background.document_changed.emit(controller.document)
 
     assert controller.mutation_blocked
-    assert window.revision_combo.currentText() == "2"
+    assert window.revision_combo.currentText() == "1"
     assert window.inspector.description_edit.toPlainText() == source_revision.description
     assert window.card_canvas._current_image == store.asset_path(refined_image_path).resolve()
     assert not window.undo_action.isEnabled()
 
     assert window.save_document()
     assert not controller.mutation_blocked
-    assert window.revision_combo.currentText() == "2"
+    assert window.revision_combo.currentText() == "1"
     assert window.undo_action.isEnabled()
     window.undo()
     assert controller.document.cards[0].active_revision == source_revision
@@ -2551,7 +2550,7 @@ def test_edit_tab_wires_current_image_defaults_errors_and_cancellation(
 
     window.inspector.edit_instruction_edit.setPlainText("Keep this draft.")
     background.edit_instruction_clear_requested.emit()
-    assert window.inspector.edit_instruction_edit.toPlainText() == ""
+    assert window.inspector.edit_instruction_edit.toPlainText() == "Keep this draft."
 
     window._background_progress_changed("Image editing failed")
     window._background_failed(RuntimeError("513 model tokens; the limit is 512"))
@@ -2559,8 +2558,10 @@ def test_edit_tab_wires_current_image_defaults_errors_and_cancellation(
     assert "513 model tokens" in window.notification_bar.message_label.text()
 
 
+@pytest.mark.parametrize("cleanup_error", (False, True))
 def test_notification_undo_restores_completed_edit_instruction(
     application: QApplication,
+    cleanup_error: bool,
 ) -> None:
     window, controller, _workers, background = _window()
     card = controller.document.cards[0]
@@ -2570,7 +2571,15 @@ def test_notification_undo_restores_completed_edit_instruction(
     token = controller.current_undo_token
     assert token is not None
 
-    background.change_applied.emit("Image edited", token)
+    background.generation_applied.emit(
+        GeneratedRevisionChange(
+            message="Image edited",
+            token=token,
+            card_id=card.id,
+            revision_id=card.active_revision.id,
+            previous_revision=card.active_revision,
+        )
+    )
     background.edit_applied.emit(
         EditedRevisionChange(
             token=token,
@@ -2580,8 +2589,13 @@ def test_notification_undo_restores_completed_edit_instruction(
         )
     )
     background.edit_instruction_clear_requested.emit()
-
-    window.notification_bar.primary_button.click()
+    if cleanup_error:
+        background.failed.emit(RuntimeError("committed image cleanup failed"))
+        assert window._generated_revision_change.token == token
+        assert window._edit_undo_instructions[token] == "Open the garden gate."
+        window.undo()
+    else:
+        window.notification_bar.secondary_button.click()
 
     assert controller.document.cards[0].name == original_name
     assert window.inspector.edit_instruction_edit.toPlainText() == "Open the garden gate."
@@ -2640,6 +2654,32 @@ def test_edit_undo_does_not_overwrite_a_new_instruction(
     assert window.inspector.edit_instruction_edit.toPlainText() == "Try a blue gate instead."
 
 
+@pytest.mark.parametrize("newer_draft", (False, True))
+def test_completed_edit_clears_only_its_matching_instruction(
+    application: QApplication, newer_draft: bool
+) -> None:
+    window, controller, _workers, background = _window()
+    card = controller.document.cards[0]
+    controller.execute(RenameCardCommand(card_id=card.id, name="Edited"))
+    token = controller.current_undo_token
+    instruction = "Open the garden gate."
+    background.edit_applied.emit(
+        EditedRevisionChange(
+            token=token,
+            card_id=card.id,
+            revision_id=card.active_revision.id,
+            instruction=instruction,
+        )
+    )
+    window.inspector.edit_instruction_edit.setPlainText(
+        "Keep this newer draft." if newer_draft else f"  {instruction}  "
+    )
+    background.edit_instruction_clear_requested.emit()
+    assert window.inspector.edit_instruction_edit.toPlainText() == (
+        "Keep this newer draft." if newer_draft else ""
+    )
+
+
 def test_notification_undo_expires_after_another_command(
     application: QApplication,
 ) -> None:
@@ -2689,8 +2729,10 @@ def test_mouse_focus_commit_does_not_render_before_button_release(
     window.close()
 
 
+@pytest.mark.parametrize("message", ("Image generated", "Image reinterpreted", "Image edited"))
 def test_generated_result_can_move_to_a_new_complete_version(
     application: QApplication,
+    message: str,
 ) -> None:
     hotspot_set = HotspotSet(
         interactions=(
@@ -2722,9 +2764,9 @@ def test_generated_result_can_move_to_a_new_complete_version(
     window.render_document(changed)
     token = controller.current_undo_token
     assert token is not None
-    window._show_generated_revision_notification(
+    background_workflow.generation_applied.emit(
         GeneratedRevisionChange(
-            message="Image generated",
+            message=message,
             token=token,
             card_id=card.id,
             revision_id=original.id,
@@ -2732,9 +2774,7 @@ def test_generated_result_can_move_to_a_new_complete_version(
         )
     )
 
-    assert window.notification_bar.message_label.text() == (
-        "Image generated on the current version"
-    )
+    assert window.notification_bar.message_label.text() == f"{message} on the current version"
     assert window.notification_bar.primary_button.text() == "Create New Version"
     assert window.notification_bar.secondary_button.text() == "Undo"
     assert window.notification_bar.dismiss_button.text() == "Keep"

@@ -30,7 +30,7 @@ class UndoToken:
 
 @dataclass(frozen=True, slots=True)
 class OwnedImageAsset:
-    """One duplicate-owned image eligible for history-aware reclamation."""
+    """One app-owned image eligible for history-aware reclamation."""
 
     bundle_path: Path
     relative_path: str
@@ -90,6 +90,7 @@ class DocumentController:
         self._owned_assets: dict[tuple[Path, str], OwnedAsset] = {}
         self._durability_pending_assets: set[tuple[Path, str]] = set()
         self._pending_persisted_change: _PendingPersistedChange | None = None
+        self._persistence_in_progress = False
         self._next_undo_sequence = 1
 
     @property
@@ -173,7 +174,11 @@ class DocumentController:
         if after == before:
             return self.document
         try:
-            persist(validated_copy(after))
+            self._persistence_in_progress = True
+            try:
+                persist(validated_copy(after))
+            finally:
+                self._persistence_in_progress = False
         except Exception as error:
             persisted_after = getattr(error, "persisted_stack", None) == after
             durability_indeterminate = bool(getattr(error, "durability_indeterminate", False))
@@ -300,6 +305,8 @@ class DocumentController:
         self._signal_owned_asset_release(released)
 
     def _require_mutation_allowed(self) -> None:
+        if self._persistence_in_progress:
+            raise DocumentMutationBlockedError("Wait for the current document change to finish.")
         if self.mutation_blocked:
             raise DocumentMutationBlockedError(PENDING_DURABILITY_MESSAGE)
 

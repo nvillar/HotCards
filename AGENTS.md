@@ -119,9 +119,9 @@ for live MFLUX runs.
   the exact Reinterpret prompt from current Description, selected Style text, then
   ordered authored accepted Edit instructions. State that the source already
   contains those edits, preserve them unless they conflict, and make current
-  Description authoritative. On success atomically store the image and append
-  and activate one complete copied revision through one Undo boundary; do not
-  expose Keep/Create New Version for Reinterpret.
+  Description authoritative. On success atomically store the image and replace
+  the current revision's background, preserving its other complete authoring
+  state through one Undo boundary.
 - Edit only the readable current background through Flux2KleinEdit with one
   direct authored Edit Instruction. Send that exact trimmed instruction without
   adding preservation or editing guidance. If a Style is selected, append only
@@ -132,15 +132,16 @@ for live MFLUX runs.
   FLUX Edit tokenizer's hard 512-token budget without rewriting or truncation,
   use a fresh random seed, and never send Description or Generate References.
   Retain the exact effective prompt, including Style text, in provenance.
-  When Undo removes a completed Edit revision, restore that Edit's exact authored
+  When Undo reverses a completed Edit, restore that Edit's exact authored
   instruction to the editor so it can be adjusted and retried.
   Default output to the source image's exact decoded dimensions and additionally
   offer only higher-area presets. Pass
   MFLUX a private immutable no-follow source snapshot and reject replacement
   races before acceptance. Append the accepted Edit to inherited flattened
-  lineage, atomically store the image, and append and activate one complete
-  copied revision through one Undo boundary. Clear the instruction only after
-  definitive durable success; do not expose Keep/Create New Version for Edit.
+  lineage, atomically store the image, and replace the current revision's
+  background through one Undo boundary, preserving its other authoring state.
+  Clear only the matching instruction after definitive durable success; never
+  clear a newer draft.
 - Persist generated backgrounds with a strict discriminated provenance union
   for direct Generate, externally patched legacy Generate, Refine, Edit, and
   independent card duplication.
@@ -204,13 +205,20 @@ for live MFLUX runs.
   geometry with aspect-preserving scaling and letterboxing or pillarboxing as
   needed. Use the fitted image bounds for all normalized hotspot rendering,
   gestures, and Run hit testing; bars are noninteractive.
-- Support generated backgrounds only; do not add image import. Apply Generate
-  directly through document commands. Keep an existing image visible
-  until replacement succeeds. After Description or image generation succeeds,
+- Support generated backgrounds only; do not add image import. Apply Generate,
+  Reinterpret, and Edit in place through one shared durable image/manifest
+  transaction and document command. Register accepted app-owned images and reclaim
+  only identity-matching files after they leave the current document and all
+  Undo/Redo history.
+  Keep an existing image visible until replacement succeeds. An authoritative
+  visible result with indeterminate durability blocks mutations and publishes no
+  normal result actions until a definitive save retry creates its single history
+  entry. Preserve completion context even when a durable commit reports cleanup
+  errors. After Description or any image operation succeeds,
   expose Create New Version and Undo bound to the exact current history token;
   an explicit Keep action retains the result on the current revision. Creating
-  a version must restore the prior revision and append one complete generated
-  revision.
+  a version must restore the prior complete revision and append one complete
+  generated revision through a separate Undo boundary.
 - Apply reversible deletions and replacements without confirmation. Report
   outcomes, failures, Run warnings, and Undo actions in the global notification
   bar; keep field validation beside its input and the status bar passive. Use a

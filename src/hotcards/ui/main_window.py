@@ -609,7 +609,7 @@ class MainWindow(QMainWindow):
                 None,
             )
             if edit_instruction_clear_requested is not None:
-                edit_instruction_clear_requested.connect(self.inspector.clear_edit_instruction)
+                edit_instruction_clear_requested.connect(self._clear_completed_edit_instruction)
         self.pane_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.pane_splitter.setObjectName("threePaneSplitter")
         self.pane_splitter.addWidget(self.card_sidebar)
@@ -1028,6 +1028,14 @@ class MainWindow(QMainWindow):
             return
         self.inspector.set_edit_instruction(instruction)
         self._update_generation_actions()
+
+    def _clear_completed_edit_instruction(self) -> None:
+        instruction = self._edit_undo_instructions.get(self.controller.current_undo_token)
+        if (
+            instruction is not None
+            and self.inspector.edit_instruction_edit.toPlainText().strip() == instruction
+        ):
+            self.inspector.clear_edit_instruction()
 
     def _undo_notification(self) -> None:
         if self._is_running:
