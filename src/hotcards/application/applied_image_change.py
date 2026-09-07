@@ -14,7 +14,7 @@ from hotcards.domain.models import CardRevision
 class ImageOperation:
     """Identify an image operation without an authored Edit instruction."""
 
-    kind: Literal["generate", "refine"]
+    kind: Literal["generate"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,7 +43,6 @@ class AppliedImageChange:
 def image_operation_message(operation: ImageOperation | EditImageOperation) -> str:
     return {
         "generate": "Image generated",
-        "refine": "Image evolved",
         "edit": "Image edited",
     }[operation.kind]
 

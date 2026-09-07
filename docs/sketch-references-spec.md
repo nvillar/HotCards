@@ -2,12 +2,20 @@
 
 **Repository:** `nvillar/HotCards`  
 **Specification date:** September 7, 2026  
-**Status:** Ready for implementation, subject to the model-input validation described below  
+**Status:** Sketch-reference work parked; reduced non-sketch scope adopted
+
 **Intended file:** `docs/sketch-references-spec.md`
 
-> This specification consolidates the feature discussion. Explicit product decisions are binding. Low-level choices that were not individually discussed are identified as implementation defaults.
->
-> This is the specification text only; posting it here does not update the repository file.
+> **Implementation scope:** Do not implement the sketch editor, sketch catalog,
+> sketch-backed Generate references, or Edit sketch attachments from this
+> document. The adopted work is limited to removing executable Evolve while
+> retaining historical Refine provenance, and making text-only Edit drafts
+> revision-local with the lifecycle and durability semantics specified here.
+> Evolve removal is the current implementation phase; text-only revision-local
+> drafts follow in later phases. Except for those two areas and the one-off
+> stack conversion they require, the sections below describe the parked,
+> non-normative sketch proposal.
+> The sketch feasibility findings are retained below for future reconsideration.
 
 ---
 
@@ -39,9 +47,13 @@ The feature must preserve Escape To Earth's existing content and accepted image 
 
 ---
 
-## 2. Scope
+## 2. Original Sketch Scope (Parked)
 
-### 2.1 Included
+### 2.1 Originally included
+
+Everything in this subsection is parked except Evolve removal, historical
+Refine preservation, text-only revision-local Edit drafts, their non-sketch
+lifecycle/Undo/durability behavior, and the final stack conversion.
 
 - Removal of Evolve UI and executable workflow.
 - Historical Refine/Evolve provenance within the new schema.
@@ -1452,9 +1464,10 @@ Each phase should preserve a usable application and focused review boundaries.
 
 ---
 
-## 21. Definition of Done
+## 21. Original Full-Feature Definition of Done (Parked)
 
-The feature is complete when:
+This section records the completion criteria for the parked sketch proposal; it
+is not the completion criterion for the adopted reduced work.
 
 - Generate and Edit are the only executable image-authoring operations.
 - Historical Evolve images remain valid and usable.

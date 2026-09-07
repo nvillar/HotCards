@@ -28,7 +28,6 @@ from hotcards.domain.models import (
     GenerateInputs,
     ImageReferenceSnapshot,
     PresetOutputSize,
-    RefineTransformation,
 )
 from hotcards.generation.errors import (
     ImageGenerationCancelled,
@@ -42,8 +41,6 @@ from hotcards.generation.mflux_generator import (
     MfluxGenerateRequest,
     MfluxGenerateResult,
     MfluxGenerator,
-    MfluxRefineRequest,
-    MfluxRefineResult,
 )
 
 
@@ -275,27 +272,6 @@ def accepted_edit() -> AcceptedEdit:
     )
 
 
-def refine_request(
-    output_path: Path,
-    source_path: Path,
-    *,
-    model_identifier: str = "flux2-klein-4b",
-    quantization: int | None = None,
-) -> MfluxRefineRequest:
-    return MfluxRefineRequest(
-        output_path=output_path,
-        model_identifier=model_identifier,
-        quantization=quantization,
-        source=source_snapshot(),
-        source_image_path=source_path,
-        description="A refined courtyard",
-        render_prompt="A refined courtyard",
-        output_size=PresetOutputSize(tier=ResolutionTier.MEDIUM),
-        transformation=RefineTransformation.BALANCED,
-        image_strength=0.50,
-    )
-
-
 def edit_request(
     output_path: Path,
     source_path: Path,
@@ -413,33 +389,6 @@ def test_reference_generate_routes_ordered_images_once_to_edit_model(
     assert result.provenance.settings.use_kv_cache
 
 
-def test_refine_routes_true_img2img_with_source_seed_and_strength(
-    tmp_path: Path,
-) -> None:
-    source_path = write_source(tmp_path / "source.png")
-    regular = FakeMfluxModel()
-    edit = FakeMfluxModel()
-    generator = MfluxGenerator(
-        model_factory=lambda *_: regular,
-        edit_model_factory=lambda *_: edit,
-    )
-    request = refine_request(tmp_path / "refined.png", source_path)
-
-    result = generator.refine(request)
-
-    assert isinstance(result, MfluxRefineResult)
-    assert edit.calls == []
-    assert regular.calls[0]["seed"] == 73
-    assert regular.calls[0]["image_path"] == source_path
-    assert regular.calls[0]["image_strength"] == 0.50
-    assert "image_paths" not in regular.calls[0]
-    assert result.provenance.source == request.source
-    assert result.provenance.transformation is RefineTransformation.BALANCED
-    assert result.provenance.strength == 0.50
-    assert result.provenance.settings.seed == 73
-    assert source_path.is_file()
-
-
 def test_edit_routes_one_source_and_expanded_prompt_with_fresh_seed(
     tmp_path: Path,
 ) -> None:
@@ -500,43 +449,34 @@ def test_edit_accepts_exact_current_source_dimensions(
     )
 
 
-@pytest.mark.parametrize("operation", ("refine", "edit"))
 def test_derived_request_captures_one_inherited_sequence_without_repeating_current_edit(
-    tmp_path: Path, operation: str
+    tmp_path: Path,
 ) -> None:
     source_path = write_source(tmp_path / "source.png")
-    make_request = refine_request if operation == "refine" else edit_request
-    payload = make_request(tmp_path / "result.png", source_path).model_dump(mode="python")
+    payload = edit_request(tmp_path / "result.png", source_path).model_dump(mode="python")
     inherited = accepted_edit().model_copy(
         update={"instruction": "Add ivy.", "expanded_prompt": "Add ivy. Preserve the text."}
     )
     payload["source"]["edit_lineage"] = (inherited,)
-    request_type = MfluxRefineRequest if operation == "refine" else MfluxEditRequest
-    request = request_type.model_validate(payload)
+    request = MfluxEditRequest.model_validate(payload)
     model = FakeMfluxModel()
     generator = MfluxGenerator(model_factory=lambda *_: model, edit_model_factory=lambda *_: model)
 
-    result = generator.refine(request) if operation == "refine" else generator.edit(request)
+    result = generator.edit(request)
 
     assert result.provenance.source == request.source
     assert result.provenance.source.edit_lineage == (inherited,)
-    assert result.provenance.edit_lineage == (
-        (inherited,) if operation == "refine" else (inherited, request.accepted_edit)
-    )
+    assert result.provenance.edit_lineage == (inherited, request.accepted_edit)
     assert "edit_lineage" not in result.provenance.model_dump()
     assert "edit_lineage" not in request.model_dump()
     assert "source_seed" not in request.model_dump()
-    assert model.calls[0]["seed"] == (
-        request.source.seed if operation == "refine" else request.seed
-    )
+    assert model.calls[0]["seed"] == request.seed
 
 
-@pytest.mark.parametrize("operation", ("refine", "edit"))
 def test_derived_request_rejects_current_mismatch_and_nonhigher_presets(
-    tmp_path: Path, operation: str
+    tmp_path: Path,
 ) -> None:
-    make_request = refine_request if operation == "refine" else edit_request
-    request = make_request(tmp_path / "result.png", tmp_path / "source.png")
+    request = edit_request(tmp_path / "result.png", tmp_path / "source.png")
     payload = request.model_dump(mode="python")
     payload["output_size"] = CurrentSourceSize(width=512, height=384)
     with pytest.raises(ValueError, match="match its source dimensions"):
@@ -548,14 +488,12 @@ def test_derived_request_rejects_current_mismatch_and_nonhigher_presets(
             type(request).model_validate(payload)
 
 
-@pytest.mark.parametrize("operation", ("refine", "edit"))
 @pytest.mark.parametrize("unreadable", (False, True))
 def test_derived_request_checks_decoded_source_before_model_loading(
-    tmp_path: Path, operation: str, unreadable: bool
+    tmp_path: Path, unreadable: bool
 ) -> None:
     source_path = write_source(tmp_path / "source.png")
-    make_request = refine_request if operation == "refine" else edit_request
-    request = make_request(tmp_path / "result.png", source_path)
+    request = edit_request(tmp_path / "result.png", source_path)
     if unreadable:
         source_path.write_bytes(b"not an image")
     else:
@@ -566,28 +504,22 @@ def test_derived_request_checks_decoded_source_before_model_loading(
 
     generator = MfluxGenerator(model_factory=unexpected_load, edit_model_factory=unexpected_load)
     with pytest.raises(ImageGenerationError, match="unreadable|dimensions do not match"):
-        if operation == "refine":
-            generator.refine(request)
-        else:
-            generator.edit(request)
+        generator.edit(request)
     assert not request.output_path.exists()
 
 
-@pytest.mark.parametrize("operation", ("refine", "edit"))
 def test_derived_request_accepts_nonaligned_historical_source_facts(
-    tmp_path: Path, operation: str
+    tmp_path: Path,
 ) -> None:
     source_path = tmp_path / "legacy.png"
     Image.new("RGB", (33, 31), "green").save(source_path)
-    make_request = refine_request if operation == "refine" else edit_request
-    payload = make_request(tmp_path / "result.png", source_path).model_dump(mode="python")
+    payload = edit_request(tmp_path / "result.png", source_path).model_dump(mode="python")
     payload["source"].update(width=33, height=31)
-    request_type = MfluxRefineRequest if operation == "refine" else MfluxEditRequest
-    request = request_type.model_validate(payload)
+    request = MfluxEditRequest.model_validate(payload)
     model = FakeMfluxModel()
     generator = MfluxGenerator(model_factory=lambda *_: model, edit_model_factory=lambda *_: model)
 
-    result = generator.refine(request) if operation == "refine" else generator.edit(request)
+    result = generator.edit(request)
 
     assert (result.provenance.source.width, result.provenance.source.height) == (33, 31)
     assert (result.provenance.settings.width, result.provenance.settings.height) == (512, 384)
@@ -678,10 +610,9 @@ def test_generate_request_accepts_every_supported_dimension_combination(
     assert (request.width, request.height) == (width, height)
 
 
-def test_requests_reject_mismatched_dimensions_strength_and_lineage(
+def test_requests_reject_mismatched_dimensions_and_lineage(
     tmp_path: Path,
 ) -> None:
-    source_path = write_source(tmp_path / "source.png")
     with pytest.raises(ValueError, match="selected output size"):
         generate_request(tmp_path / "invalid.png").model_copy(
             update={"width": 608}
@@ -691,16 +622,7 @@ def test_requests_reject_mismatched_dimensions_strength_and_lineage(
                 "width": 608,
             }
         )
-    with pytest.raises(ValueError, match="image strength"):
-        MfluxRefineRequest.model_validate(
-            {
-                **refine_request(
-                    tmp_path / "invalid-refine.png",
-                    source_path,
-                ).model_dump(),
-                "image_strength": 0.25,
-            }
-        )
+    source_path = write_source(tmp_path / "source.png")
     request = edit_request(tmp_path / "invalid-edit.png", source_path)
     with pytest.raises(ValueError, match="lineage"):
         MfluxEditRequest.model_validate(
@@ -735,41 +657,6 @@ def test_requests_require_exact_existing_source_paths(tmp_path: Path) -> None:
                 reference_paths=(tmp_path / "missing-reference.png",),
             )
         )
-    with pytest.raises(ImageGenerationError, match="source image 1"):
-        generator.refine(
-            refine_request(
-                tmp_path / "missing-refine-output.png",
-                tmp_path / "missing-source.png",
-            )
-        )
-
-
-def test_regular_family_reuses_plain_generate_and_refine_model(
-    tmp_path: Path,
-) -> None:
-    source_path = write_source(tmp_path / "source.png")
-    regular = FakeMfluxModel()
-    regular_loads: list[tuple[str, int | None]] = []
-    generator = MfluxGenerator(
-        model_factory=lambda model, quantization: (
-            regular_loads.append((model, quantization)) or regular
-        ),
-    )
-
-    generator.generate(
-        generate_request(tmp_path / "plain.png"),
-        progress=lambda *_: None,
-    )
-    generator.refine(
-        refine_request(tmp_path / "refined.png", source_path),
-        progress=lambda *_: None,
-    )
-
-    assert regular_loads == [("flux2-klein-4b", None)]
-    assert len(regular.calls) == 2
-    assert len(regular.callbacks.registered) == 1
-
-
 def test_edit_family_reuses_reference_generate_and_edit_model(
     tmp_path: Path,
 ) -> None:
@@ -1184,34 +1071,6 @@ def test_cancellation_while_waiting_for_process_boundary_loads_no_model(
     assert isinstance(second_outcomes[0], ImageGenerationCancelled)
     assert second_loads == []
     assert not (tmp_path / "cancelled.png").exists()
-
-
-def test_cancellation_during_generation_publishes_no_output_or_source_cleanup(
-    tmp_path: Path,
-) -> None:
-    source_path = write_source(tmp_path / "source.png")
-    entered = Event()
-    release = Event()
-    model = BlockingMfluxModel(entered=entered, release=release)
-    generator = MfluxGenerator(model_factory=lambda *_: model)
-    cancellation = MfluxCancellationToken()
-    output_path = tmp_path / "cancelled-refine.png"
-    thread, outcomes = run_in_thread(
-        lambda: generator.refine(
-            refine_request(output_path, source_path),
-            cancellation=cancellation,
-        )
-    )
-    assert entered.wait(1)
-
-    cancellation.cancel()
-    release.set()
-    thread.join(2)
-
-    assert isinstance(outcomes[0], ImageGenerationCancelled)
-    assert not output_path.exists()
-    assert source_path.is_file()
-    assert mflux_module._CACHED_MODEL is None
 
 
 def test_cancellation_destroys_active_model_before_clearing_mlx_cache(

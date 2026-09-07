@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-
 from hotcards.domain.models import (
-    AcceptedEdit,
     GenerateInputs,
     StyleSnapshot,
 )
@@ -39,32 +36,6 @@ def compose_generation_prompt(inputs: GenerateInputs) -> str:
     )
 
 
-def compose_refine_prompt(
-    description: str,
-    style: StyleSnapshot | None,
-    edit_lineage: Sequence[AcceptedEdit],
-) -> str:
-    """Compose Refine from current authored intent and accepted Edit lineage."""
-    authored_description = description.strip()
-    if not authored_description:
-        raise ValueError("enter a Description before refining")
-    parts = [authored_description]
-    if style is not None and style.prompt_text.strip():
-        parts[0] = _with_sentence_boundary(parts[0])
-        parts.append(style.prompt_text.strip())
-    if edit_lineage:
-        instructions = "\n".join(
-            f"{index}. {edit.instruction.strip()}"
-            for index, edit in enumerate(edit_lineage, start=1)
-        )
-        parts.append(
-            "The current Description is authoritative. The source image already "
-            "includes these accepted edits; preserve them unless they conflict "
-            f"with the current Description:\n{instructions}"
-        )
-    return "\n\n".join(parts)
-
-
 def compose_edit_prompt(
     instruction: str,
     style: StyleSnapshot | None = None,
@@ -88,5 +59,4 @@ __all__ = [
     "EDIT_PROMPT_TOKEN_BUDGET",
     "compose_edit_prompt",
     "compose_generation_prompt",
-    "compose_refine_prompt",
 ]

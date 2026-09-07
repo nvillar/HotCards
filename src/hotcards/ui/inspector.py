@@ -78,7 +78,6 @@ from hotcards.domain.models import (
     HotspotKeyChanges,
     Interaction,
     PresetOutputSize,
-    RefineTransformation,
     ResolvedCardReference,
     Stack,
     UnresolvedCardReference,
@@ -160,47 +159,36 @@ class _ImageAuthoringFields:
     style_error: QLabel
 
 
-def _image_authoring_fields(layout: QVBoxLayout, *, evolve: bool = False) -> _ImageAuthoringFields:
-    def object_name(name: str) -> str:
-        return f"evolve{name[0].upper()}{name[1:]}" if evolve else name
-
+def _image_authoring_fields(layout: QVBoxLayout) -> _ImageAuthoringFields:
     description_label = QLabel("Description")
-    description_label.setObjectName(object_name("descriptionLabel"))
+    description_label.setObjectName("descriptionLabel")
     layout.addWidget(description_label)
     description_edit = _CommitPlainTextEdit()
-    description_edit.setObjectName(object_name("descriptionEdit"))
+    description_edit.setObjectName("descriptionEdit")
     description_edit.setPlaceholderText(
-        "Describe how the current image should evolve."
-        if evolve
-        else "Describe the image to generate. Refer to References as image 1 and image 2."
+        "Describe the image to generate. Refer to References as image 1 and image 2."
     )
-    description_edit.setToolTip(
-        "Shared by Generate and Evolve. References apply only to Generate; "
-        "Evolve uses only the current image."
-    )
-    description_edit.setAccessibleName("Evolve Description" if evolve else "Description")
+    description_edit.setToolTip("Used to generate an image.")
+    description_edit.setAccessibleName("Description")
     editor_height = round((description_edit.fontMetrics().lineSpacing() * 10 + 20) * 1.25)
     description_edit.setMinimumHeight(editor_height)
     layout.addWidget(description_edit, 1)
     description_error = QLabel()
-    description_error.setObjectName(object_name("descriptionValidationError"))
+    description_error.setObjectName("descriptionValidationError")
     description_error.setWordWrap(True)
     description_error.hide()
     layout.addWidget(description_error)
     layout.addSpacing(8)
     style_label = QLabel("Style")
-    style_label.setObjectName(object_name("styleLabel"))
+    style_label.setObjectName("styleLabel")
     layout.addWidget(style_label)
     style_combo = QComboBox()
-    style_combo.setObjectName(object_name("styleCombo"))
-    style_combo.setAccessibleName("Evolve Style" if evolve else "Style")
-    style_combo.setToolTip(
-        "Rendering treatment shared by Generate and Evolve; "
-        "also used for visual continuity in Edit."
-    )
+    style_combo.setObjectName("styleCombo")
+    style_combo.setAccessibleName("Style")
+    style_combo.setToolTip("Rendering treatment for Generate and visual continuity in Edit.")
     layout.addWidget(style_combo)
     style_error = QLabel()
-    style_error.setObjectName(object_name("styleSelectionValidationError"))
+    style_error.setObjectName("styleSelectionValidationError")
     style_error.setWordWrap(True)
     style_error.hide()
     layout.addWidget(style_error)
@@ -277,19 +265,6 @@ def _set_compact_button_top_margin(container: QWidget, top_margin: int) -> None:
     if layout is not None:
         layout.setContentsMargins(0, top_margin, 0, 0)
     container.setFixedHeight(20 + top_margin)
-
-
-_SOURCE_SIMILARITY_TOOLTIPS = {
-    RefineTransformation.REIMAGINE: (
-        "Give the Description the most freedom to change the current image's "
-        "content and composition."
-    ),
-    RefineTransformation.BALANCED: ("Balance the Description with the current image."),
-    RefineTransformation.PRESERVE: (
-        "Keep the current image's content and composition as close as possible "
-        "while applying the Description."
-    ),
-}
 
 
 def _tier_label(tier: ResolutionTier) -> str:
@@ -393,7 +368,6 @@ class Inspector(QWidget):
 
     document_changed = Signal(object)
     generate_background_requested = Signal()
-    refine_background_requested = Signal(object, object)
     edit_background_requested = Signal(str, object)
     hotspot_selected = Signal(object)
     hotspot_drawing_requested = Signal()
@@ -417,12 +391,9 @@ class Inspector(QWidget):
         self._edit_instruction_sequence = 0
         self._generate_using_text = ""
         self._generate_reason = ""
-        self._refine_using_text = ""
-        self._refine_reason = ""
-        self._refine_source_size: tuple[int, int] | None = None
+        self._image_source_size: tuple[int, int] | None = None
         self._edit_using_text = ""
         self._edit_reason = ""
-        self._edit_source_size: tuple[int, int] | None = None
         self._image_path_resolver = image_path_resolver
         self._card_picker_context: tuple[str, UUID, UUID, object] | None = None
         self._sound_picker_context: tuple[UUID, UUID, UUID] | None = None
@@ -451,12 +422,11 @@ class Inspector(QWidget):
         root.addWidget(self.pages, 1)
 
         self._build_background_tab()
-        self._build_evolve_tab()
         self._build_edit_tab()
         self._build_hotspots_tab()
-        self._authoring_fields = (self._generate_fields, self._evolve_fields)
-        self._description_errors = (self.description_error, self.evolve_description_error)
-        self._style_errors = (self.style_selection_error, self.evolve_style_selection_error)
+        self._authoring_fields = (self._generate_fields,)
+        self._description_errors = (self.description_error,)
+        self._style_errors = (self.style_selection_error,)
         self.card_picker = CardPickerWindow(
             self,
             image_path_resolver=image_path_resolver,
@@ -485,7 +455,7 @@ class Inspector(QWidget):
         self.reference_label = QLabel("References")
         self.reference_label.setObjectName("referenceLabel")
         self.reference_label.setToolTip(
-            "Generate only; never sent to Evolve. Use image 1 and image 2 in the Description."
+            "Use image 1 and image 2 in the Description."
         )
         layout.addWidget(self.reference_label)
         self.reference_panel = QWidget()
@@ -588,68 +558,6 @@ class Inspector(QWidget):
 
         scroll.setWidget(page)
         self._generate_tab_index = self.inspector_tabs.addTab(scroll, "Generate")
-
-    def _build_evolve_tab(self) -> None:
-        scroll = QScrollArea()
-        scroll.setObjectName("evolveInspectorTab")
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        page = QWidget()
-        page.setObjectName("evolveInspectorContent")
-        layout = QVBoxLayout(page)
-        self._evolve_fields = _image_authoring_fields(layout, evolve=True)
-        self.evolve_description_label = self._evolve_fields.description_label
-        self.evolve_description_edit = self._evolve_fields.description_edit
-        self.evolve_description_error = self._evolve_fields.description_error
-        self.evolve_style_label = self._evolve_fields.style_label
-        self.evolve_style_combo = self._evolve_fields.style_combo
-        self.evolve_style_selection_error = self._evolve_fields.style_error
-        self.evolve_description_edit.setDocument(self.description_edit.document())
-
-        layout.addSpacing(8)
-        self.refine_transformation_label = QLabel("Source Similarity")
-        layout.addWidget(self.refine_transformation_label)
-        self.refine_transformation_combo = QComboBox()
-        self.refine_transformation_combo.setObjectName("refineTransformationCombo")
-        self.refine_transformation_combo.setAccessibleName("Evolve source similarity")
-        for transformation in RefineTransformation:
-            self.refine_transformation_combo.addItem(
-                transformation.value.title(),
-                transformation,
-            )
-            self.refine_transformation_combo.setItemData(
-                self.refine_transformation_combo.count() - 1,
-                _SOURCE_SIMILARITY_TOOLTIPS[transformation],
-                Qt.ItemDataRole.ToolTipRole,
-            )
-        self.refine_transformation_combo.setCurrentIndex(
-            self._combo_index_for_data(
-                self.refine_transformation_combo,
-                RefineTransformation.BALANCED,
-            )
-        )
-        _sync_combo_tooltip(self.refine_transformation_combo)
-        layout.addWidget(self.refine_transformation_combo)
-
-        self.refine_resolution_label = QLabel("Resolution")
-        layout.addWidget(self.refine_resolution_label)
-        self.refine_resolution_combo = QComboBox()
-        self.refine_resolution_combo.setObjectName("refineResolutionCombo")
-        self.refine_resolution_combo.setAccessibleName("Evolve resolution")
-        layout.addWidget(self.refine_resolution_combo)
-        self.refine_error = QLabel()
-        self.refine_error.setObjectName("refineValidationError")
-        self.refine_error.setWordWrap(True)
-        self.refine_error.setVisible(False)
-        layout.addWidget(self.refine_error)
-
-        self.refine_background_button = QPushButton("Evolve")
-        self.refine_background_button.setObjectName("refineBackgroundButton")
-        layout.addWidget(self.refine_background_button)
-        self._focus_commit_targets.add(self.refine_background_button)
-
-        scroll.setWidget(page)
-        self._evolve_tab_index = self.inspector_tabs.addTab(scroll, "Evolve")
 
     def _build_edit_tab(self) -> None:
         scroll = QScrollArea()
@@ -966,11 +874,6 @@ class Inspector(QWidget):
             )
         self.description_edit.document().contentsChanged.connect(self._render_inputs_changed)
         self.generate_background_button.clicked.connect(self._request_generate_background)
-        self.refine_background_button.clicked.connect(self._request_refine_background)
-        self.refine_transformation_combo.currentIndexChanged.connect(
-            self._refine_similarity_changed
-        )
-        self.refine_resolution_combo.currentIndexChanged.connect(self._refine_output_changed)
         self.edit_instruction_edit.textChanged.connect(self._edit_instruction_changed)
         self.edit_resolution_combo.currentIndexChanged.connect(self._edit_output_changed)
         self.edit_background_button.clicked.connect(self._request_edit_background)
@@ -1017,21 +920,6 @@ class Inspector(QWidget):
         self._render_edit_tooltip()
         self.render_inputs_changed.emit()
 
-    def _refine_similarity_changed(self, _index: int) -> None:
-        _sync_combo_tooltip(self.refine_transformation_combo)
-        self._render_inputs_changed()
-
-    def _refine_output_changed(self, _index: int) -> None:
-        if self._rendering:
-            return
-        if self.refine_resolution_combo.currentData() is None:
-            fallback = _first_selectable_combo_index(self.refine_resolution_combo)
-            if fallback >= 0:
-                with QSignalBlocker(self.refine_resolution_combo):
-                    self.refine_resolution_combo.setCurrentIndex(fallback)
-        _sync_combo_tooltip(self.refine_resolution_combo)
-        self._render_inputs_changed()
-
     def _edit_output_changed(self, _index: int) -> None:
         if self._rendering:
             return
@@ -1058,7 +946,7 @@ class Inspector(QWidget):
         document: Stack,
         selected_card_id: UUID | None,
         *,
-        refine_source_size: tuple[int, int] | None = None,
+        image_source_size: tuple[int, int] | None = None,
     ) -> None:
         previous_card_id = self.selected_card_id
         previous_revision_id = self._rendered_revision_id
@@ -1082,7 +970,6 @@ class Inspector(QWidget):
                 self.pages.setCurrentIndex(0)
                 self._set_error(self._description_errors, "")
                 self._set_error(self.reference_error, "")
-                self._set_error(self.refine_error, "")
                 self._set_error(self.edit_instruction_error, "")
                 self._set_error(self.edit_output_error, "")
                 self._set_error(self.edit_instruction_error, "")
@@ -1117,20 +1004,14 @@ class Inspector(QWidget):
             self._render_resolution(
                 document,
                 revision,
-                source_size=refine_source_size,
+                source_size=image_source_size,
                 select_current=not same_image,
             )
             self._render_description_workflow(document, card, revision)
-            self._render_refine(
-                document,
-                revision,
-                source_size=refine_source_size,
-                select_current=not same_image,
-            )
             self._render_edit(
                 document,
                 revision,
-                source_size=refine_source_size,
+                source_size=image_source_size,
                 select_current=not same_image,
             )
             self._render_edit_history(revision)
@@ -1222,19 +1103,6 @@ class Inspector(QWidget):
         self.generate_background_button.setText("Generating…" if generating else "Generate Image")
         self._refresh_generation_tooltips()
 
-    def set_refine_capabilities(
-        self,
-        *,
-        can_refine: bool,
-        refine_reason: str,
-        busy: bool,
-        refining: bool,
-    ) -> None:
-        self._refine_reason = "" if can_refine and not busy else refine_reason
-        self.refine_background_button.setEnabled(can_refine and not busy)
-        self.refine_background_button.setText("Evolving…" if refining else "Evolve")
-        self._refresh_generation_tooltips()
-
     def set_edit_capabilities(
         self,
         *,
@@ -1298,12 +1166,6 @@ class Inspector(QWidget):
                 self._generate_using_text,
             )
         )
-        self.refine_background_button.setToolTip(
-            self._tooltip_with_using(
-                self._refine_reason,
-                self._refine_using_text,
-            )
-        )
         self.edit_background_button.setToolTip(
             self._tooltip_with_using(
                 self._edit_reason,
@@ -1351,7 +1213,6 @@ class Inspector(QWidget):
         self.clear_edit_instruction()
         self._set_error(self._description_errors, "")
         self._set_error(self.reference_error, "")
-        self._set_error(self.refine_error, "")
         self._set_error(self._style_errors, "")
         self.set_hotspot_error("")
 
@@ -1657,7 +1518,7 @@ class Inspector(QWidget):
             self.render(
                 self.controller.document,
                 self.selected_card_id,
-                refine_source_size=self._refine_source_size,
+                image_source_size=self._image_source_size,
             )
             return
         _sync_combo_tooltip(self.resolution_combo)
@@ -1690,131 +1551,6 @@ class Inspector(QWidget):
             return
         self.generate_background_requested.emit()
 
-    def _render_refine(
-        self,
-        document: Stack,
-        revision: CardRevision,
-        *,
-        source_size: tuple[int, int] | None,
-        select_current: bool,
-    ) -> None:
-        previous_selection = self.refine_resolution_combo.currentData()
-        self._refine_source_size = source_size
-        error = ""
-        current_error = _exact_size_error(source_size, document.aspect_ratio)
-        if revision.background is None:
-            error = "Generate an image before evolving."
-        elif source_size is None:
-            error = "The current image is unavailable or unreadable."
-        with QSignalBlocker(self.refine_resolution_combo):
-            self.refine_resolution_combo.clear()
-            current_output_size = None
-            current_tier = _current_tier(source_size, document.aspect_ratio)
-            if source_size is not None:
-                if current_error is None:
-                    current_output_size = CurrentSourceSize(
-                        width=source_size[0],
-                        height=source_size[1],
-                    )
-                rows: list[tuple[str, object, tuple[int, int]]] = []
-                if current_output_size is not None:
-                    rows.append(
-                        (
-                            _tier_label(current_tier) if current_tier is not None else "Current",
-                            current_output_size,
-                            source_size,
-                        )
-                    )
-                elif current_tier is None:
-                    rows.append(
-                        (
-                            "Current",
-                            None,
-                            source_size,
-                        )
-                    )
-                rows.extend(
-                    (
-                        _tier_label(tier),
-                        PresetOutputSize(tier=tier),
-                        output_dimensions(tier, document.aspect_ratio),
-                    )
-                    for tier in higher_output_tiers(
-                        source_size[0],
-                        source_size[1],
-                        document.aspect_ratio,
-                    )
-                )
-                for label, data, dimensions in _sort_size_rows(rows):
-                    _add_resolution_item(
-                        self.refine_resolution_combo,
-                        label=label,
-                        value=data,
-                        dimensions=dimensions,
-                        unavailable_reason=(
-                            f"{current_error}. Choose a higher named tier."
-                            if data is None and current_error is not None
-                            else None
-                        ),
-                    )
-            use_current = current_output_size is not None and (
-                select_current
-                or not isinstance(
-                    previous_selection,
-                    (PresetOutputSize, CurrentSourceSize),
-                )
-                or isinstance(previous_selection, CurrentSourceSize)
-            )
-            selection = (
-                current_output_size
-                if use_current
-                else (
-                    previous_selection if isinstance(previous_selection, PresetOutputSize) else None
-                )
-            )
-            selected_index = (
-                self._combo_index_for_data(
-                    self.refine_resolution_combo,
-                    selection,
-                )
-                if selection is not None
-                else -1
-            )
-            self.refine_resolution_combo.setCurrentIndex(
-                selected_index
-                if selected_index >= 0
-                else _first_selectable_combo_index(self.refine_resolution_combo)
-            )
-        self.refine_resolution_combo.setEnabled(
-            _first_selectable_combo_index(self.refine_resolution_combo) >= 0
-        )
-        _sync_combo_tooltip(self.refine_resolution_combo)
-        self._set_error(self.refine_error, error)
-        style_suffix = ", and Style" if revision.style_id is not None else ""
-        self._refine_using_text = f"Evolve the current image using Description{style_suffix}."
-        self._refresh_generation_tooltips()
-
-    def _request_refine_background(self) -> None:
-        try:
-            transformation = RefineTransformation(self.refine_transformation_combo.currentData())
-        except (TypeError, ValueError):
-            transformation = None
-        output_size = self.refine_resolution_combo.currentData()
-        if not isinstance(transformation, RefineTransformation):
-            self._set_error(
-                self.refine_error,
-                "Select a supported Source Similarity.",
-            )
-            return
-        if not isinstance(output_size, (PresetOutputSize, CurrentSourceSize)):
-            if not self.refine_error.text():
-                self._set_error(
-                    self.refine_error,
-                    "Select an Evolve resolution.",
-                )
-            return
-        self.refine_background_requested.emit(transformation, output_size)
-
     def _render_edit(
         self,
         document: Stack,
@@ -1824,7 +1560,7 @@ class Inspector(QWidget):
         select_current: bool,
     ) -> None:
         previous_selection = self.edit_resolution_combo.currentData()
-        self._edit_source_size = source_size
+        self._image_source_size = source_size
         error = ""
         current_error = _exact_size_error(source_size, document.aspect_ratio)
         if revision.background is None:
@@ -2666,7 +2402,7 @@ class Inspector(QWidget):
                 self.render(
                     self.controller.document,
                     self.selected_card_id,
-                    refine_source_size=self._refine_source_size,
+                    image_source_size=self._image_source_size,
                 )
             return False
         self._set_error(target_error, "")
@@ -2674,7 +2410,7 @@ class Inspector(QWidget):
             self.render(
                 changed,
                 self.selected_card_id,
-                refine_source_size=self._refine_source_size,
+                image_source_size=self._image_source_size,
             )
             self.document_changed.emit(changed)
         token = self.controller.current_undo_token

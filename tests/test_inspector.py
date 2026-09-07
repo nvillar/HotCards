@@ -26,7 +26,6 @@ from PySide6.QtWidgets import (
     QStyledItemDelegate,
     QStyleOptionViewItem,
     QToolButton,
-    QWidget,
 )
 
 from hotcards.application.commands import (
@@ -259,11 +258,10 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     inspector = Inspector(controller)
     inspector.render(controller.document, card.id)
 
-    assert inspector.inspector_tabs.count() == 4
+    assert inspector.inspector_tabs.count() == 3
     assert inspector.inspector_tabs.tabText(0) == "Generate"
-    assert inspector.inspector_tabs.tabText(1) == "Evolve"
-    assert inspector.inspector_tabs.tabText(2) == "Edit"
-    assert inspector.inspector_tabs.tabText(3) == "Hotspots"
+    assert inspector.inspector_tabs.tabText(1) == "Edit"
+    assert inspector.inspector_tabs.tabText(2) == "Hotspots"
     assert not hasattr(inspector, "style_list")
     assert not hasattr(inspector, "key_list")
     assert not hasattr(inspector, "edit_preserve_checkboxes")
@@ -290,7 +288,6 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     assert inspector.reference_panel.layout().contentsMargins().isNull()
     for index in (
         inspector._generate_tab_index,
-        inspector._evolve_tab_index,
         inspector._edit_tab_index,
     ):
         tab = inspector.inspector_tabs.widget(index)
@@ -315,13 +312,6 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     assert content_layout.indexOf(inspector.style_combo) < (
         content_layout.indexOf(inspector.reference_label)
     )
-    evolve_layout = inspector.evolve_description_edit.parentWidget().layout()
-    assert evolve_layout.indexOf(inspector.evolve_description_edit) < (
-        evolve_layout.indexOf(inspector.evolve_style_combo)
-    )
-    assert evolve_layout.indexOf(inspector.evolve_style_combo) < (
-        evolve_layout.indexOf(inspector.refine_transformation_label)
-    )
     assert content_layout.indexOf(inspector.reference_label) < (
         content_layout.indexOf(inspector.reference_panel)
     )
@@ -335,11 +325,8 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     assert content_layout.indexOf(inspector.resolution_combo) < (
         content_layout.indexOf(inspector.generate_background_button)
     )
-    assert "Generate only" in inspector.reference_label.toolTip()
-    assert "never sent to Evolve" in inspector.reference_label.toolTip()
-    assert "Shared by Generate and Evolve" in inspector.description_edit.toolTip()
     assert content_layout.contentsMargins() == (
-        inspector.refine_background_button.parentWidget().layout().contentsMargins()
+        inspector.edit_background_button.parentWidget().layout().contentsMargins()
     )
     for widget in (
         inspector.description_edit,
@@ -349,15 +336,7 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     ):
         assert inspector.inspector_tabs.widget(0).isAncestorOf(widget)
         assert not inspector.inspector_tabs.widget(1).isAncestorOf(widget)
-    for widget in (
-        inspector.evolve_description_edit,
-        inspector.evolve_style_combo,
-        inspector.refine_background_button,
-    ):
-        assert inspector.inspector_tabs.widget(1).isAncestorOf(widget)
-        assert not inspector.inspector_tabs.widget(0).isAncestorOf(widget)
-    assert inspector.inspector_tabs.widget(2).isAncestorOf(inspector.edit_instruction_edit)
-    assert inspector.evolve_description_edit.document() is inspector.description_edit.document()
+    assert inspector.inspector_tabs.widget(1).isAncestorOf(inspector.edit_instruction_edit)
     assert inspector.style_combo.currentText() == "No Style"
     assert not hasattr(inspector, "clear_background_button")
     assert inspector.hotspot_target_label.text() == "Go to card"
@@ -373,7 +352,7 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     assert not inspector.hotspot_when_panel.styleSheet()
     assert not inspector.hotspot_then_panel.styleSheet()
     assert inspector.hotspot_when_label.font().pointSizeF() == (
-        inspector.refine_transformation_label.font().pointSizeF()
+        inspector.edit_instruction_label.font().pointSizeF()
     )
     assert inspector.hotspot_then_label.font().pointSizeF() == (
         inspector.edit_instruction_label.font().pointSizeF()
@@ -409,9 +388,6 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     hotspot_layout = inspector.hotspot_list.parentWidget().layout()
     assert hotspot_layout is not None
     assert inspector.hotspot_list.parentWidget().objectName() == "hotspotsInspectorContent"
-    assert hotspot_layout.contentsMargins() == (
-        inspector.refine_background_button.parentWidget().layout().contentsMargins()
-    )
     assert hotspot_layout.contentsMargins() == (
         inspector.edit_instruction_edit.parentWidget().layout().contentsMargins()
     )
@@ -503,7 +479,7 @@ def test_edit_uses_current_or_higher_size_and_emits_exact_inputs(
     inspector.render(
         controller.document,
         card.id,
-        refine_source_size=(768, 576),
+        image_source_size=(768, 576),
     )
 
     assert inspector.edit_resolution_combo.count() == 2
@@ -527,186 +503,7 @@ def test_edit_uses_current_or_higher_size_and_emits_exact_inputs(
     )
 
 
-def test_generate_evolve_has_source_similarity_resolution_and_action(
-    application: QApplication,
-) -> None:
-    revision = CardRevision(
-        description="A moonlit courtyard",
-        background=_background(),
-    )
-    card = Card(name="Courtyard", revisions=(revision,))
-    controller = DocumentController(Stack(name="Demo", cards=(card,)))
-    inspector = Inspector(controller)
-    inspector.render(
-        controller.document,
-        card.id,
-        refine_source_size=(512, 384),
-    )
-
-    assert inspector.inspector_tabs.tabText(inspector._edit_tab_index) == "Edit"
-    assert inspector.refine_background_button.parentWidget() is (
-        inspector.evolve_description_edit.parentWidget()
-    )
-    assert inspector.edit_background_button.parentWidget() is (
-        inspector.edit_history_list.parentWidget()
-    )
-    edit_layout = inspector.edit_history_list.parentWidget().layout()
-    edit_controls = (
-        inspector.edit_instruction_label,
-        inspector.edit_instruction_edit,
-        inspector.edit_resolution_label,
-        inspector.edit_resolution_combo,
-        inspector.edit_background_button,
-        inspector.edit_history_label,
-        inspector.edit_history_list,
-    )
-    edit_positions = [edit_layout.indexOf(widget) for widget in edit_controls]
-    assert all(position >= 0 for position in edit_positions)
-    assert edit_positions == sorted(edit_positions)
-    assert not hasattr(inspector, "refine_description_label")
-    assert not hasattr(inspector, "edit_description_label")
-    assert (
-        RefineTransformation(inspector.refine_transformation_combo.currentData())
-        is RefineTransformation.BALANCED
-    )
-    assert [
-        inspector.refine_transformation_combo.itemText(index)
-        for index in range(inspector.refine_transformation_combo.count())
-    ] == [
-        "Reimagine",
-        "Balanced",
-        "Preserve",
-    ]
-    assert inspector.refine_transformation_label.text() == "Source Similarity"
-    assert "Balance the Description" in inspector.refine_transformation_combo.toolTip()
-    for index in range(inspector.refine_transformation_combo.count()):
-        tooltip = inspector.refine_transformation_combo.itemData(index, Qt.ItemDataRole.ToolTipRole)
-        assert tooltip and not any(char.isdigit() for char in tooltip)
-    assert [
-        inspector.refine_resolution_combo.itemText(index)
-        for index in range(inspector.refine_resolution_combo.count())
-    ] == [
-        "Medium",
-        "Large",
-        "Full",
-    ]
-    assert inspector.refine_resolution_label.text() == "Resolution"
-    assert inspector.edit_resolution_label.text() == "Resolution"
-    assert inspector.refine_resolution_combo.currentData() == CurrentSourceSize(
-        width=512,
-        height=384,
-    )
-    refine_layout = inspector.refine_background_button.parentWidget().layout()
-    assert refine_layout is not None
-    assert refine_layout.indexOf(inspector.refine_transformation_label) < refine_layout.indexOf(
-        inspector.refine_transformation_combo
-    )
-    assert refine_layout.indexOf(inspector.refine_transformation_combo) < refine_layout.indexOf(
-        inspector.refine_resolution_label
-    )
-    assert refine_layout.indexOf(inspector.refine_resolution_label) < refine_layout.indexOf(
-        inspector.refine_resolution_combo
-    )
-    assert refine_layout.indexOf(inspector.refine_resolution_combo) < refine_layout.indexOf(
-        inspector.refine_background_button
-    )
-    assert not hasattr(inspector, "refine_source_card_combo")
-    assert not hasattr(inspector, "refine_source_revision_combo")
-
-    requested: list[tuple[object, object]] = []
-    inspector.refine_background_requested.connect(
-        lambda transformation, output_size: requested.append((transformation, output_size))
-    )
-    inspector.set_refine_capabilities(
-        can_refine=True,
-        refine_reason="Ready to evolve",
-        busy=False,
-        refining=False,
-    )
-    inspector.refine_background_button.click()
-
-    assert requested == [
-        (
-            RefineTransformation.BALANCED,
-            CurrentSourceSize(width=512, height=384),
-        )
-    ]
-    assert inspector.refine_background_button.text() == "Evolve"
-    assert inspector.refine_background_button.toolTip() == (
-        "Evolve the current image using Description."
-    )
-    for widget in inspector.findChildren(QWidget):
-        assert "reinterpret" not in widget.toolTip().casefold()
-        assert "reinterpret" not in widget.accessibleName().casefold()
-
-
-def test_refine_resolution_inserts_nonstandard_current_size_by_area(
-    application: QApplication,
-) -> None:
-    revision = CardRevision(
-        description="A moonlit courtyard",
-        background=_background(),
-    )
-    card = Card(name="Courtyard", revisions=(revision,))
-    controller = DocumentController(Stack(name="Demo", cards=(card,)))
-    inspector = Inspector(controller)
-
-    inspector.render(
-        controller.document,
-        card.id,
-        refine_source_size=(640, 480),
-    )
-    assert [
-        inspector.refine_resolution_combo.itemText(index)
-        for index in range(inspector.refine_resolution_combo.count())
-    ] == [
-        "Current",
-        "Large",
-        "Full",
-    ]
-    assert inspector.refine_resolution_combo.currentData() == CurrentSourceSize(
-        width=640,
-        height=480,
-    )
-    assert not inspector.refine_error.isVisible()
-
-
-def test_refine_selection_becomes_current_when_new_image_matches_preset(
-    application: QApplication,
-) -> None:
-    revision = CardRevision(
-        description="A moonlit courtyard",
-        background=_background(),
-    )
-    card = Card(name="Courtyard", revisions=(revision,))
-    controller = DocumentController(Stack(name="Demo", cards=(card,)))
-    inspector = Inspector(controller)
-    inspector.render(
-        controller.document,
-        card.id,
-        refine_source_size=(640, 480),
-    )
-    inspector.refine_resolution_combo.setCurrentIndex(
-        inspector._combo_index_for_data(
-            inspector.refine_resolution_combo,
-            PresetOutputSize(tier=ResolutionTier.MEDIUM),
-        )
-    )
-
-    inspector.render(
-        controller.document,
-        card.id,
-        refine_source_size=(512, 384),
-    )
-
-    assert inspector.refine_resolution_combo.currentData() == CurrentSourceSize(
-        width=512,
-        height=384,
-    )
-    assert inspector.refine_resolution_combo.currentIndex() == 0
-
-
-@pytest.mark.parametrize("operation", ("generate", "refine", "edit"))
+@pytest.mark.parametrize("operation", ("generate", "edit"))
 @pytest.mark.parametrize("source_size", ((512, 384), (592, 448)))
 @pytest.mark.parametrize("enlarge", (False, True))
 def test_same_version_image_replacement_refreshes_sizes_history_not_drafts_or_hotspots(
@@ -720,7 +517,7 @@ def test_same_version_image_replacement_refreshes_sizes_history_not_drafts_or_ho
     controller = DocumentController(Stack(name="Demo", cards=(card,)))
     inspector = Inspector(controller)
     inspector.show()
-    inspector.render(controller.document, card.id, refine_source_size=source_size)
+    inspector.render(controller.document, card.id, image_source_size=source_size)
     inspector.select_interaction(card.active_revision.hotspot_set.interactions[0].id)
     selected = inspector.selected_interaction_id
     inspector.description_edit.setFocus()
@@ -730,15 +527,14 @@ def test_same_version_image_replacement_refreshes_sizes_history_not_drafts_or_ho
     draft = inspector.edit_instruction_draft
     controls = (
         inspector.resolution_combo,
-        inspector.refine_resolution_combo,
         inspector.edit_resolution_combo,
     )
     full = PresetOutputSize(tier=ResolutionTier.FULL)
     for combo in controls:
         combo.setCurrentIndex(inspector._combo_index_for_data(combo, full))
     choice_token = controller.current_undo_token
-    inspector.render(controller.document, card.id, refine_source_size=source_size)
-    assert [combo.currentData() for combo in controls] == [full] * 3
+    inspector.render(controller.document, card.id, image_source_size=source_size)
+    assert [combo.currentData() for combo in controls] == [full] * 2
     assert controller.current_undo_token == choice_token
 
     size = (768, 576) if enlarge else source_size
@@ -769,13 +565,12 @@ def test_same_version_image_replacement_refreshes_sizes_history_not_drafts_or_ho
             assert controller.redo()
         expected_token = choice_token if transition == "undo" else token
         assert controller.current_undo_token == expected_token
-        inspector.render(controller.document, card.id, refine_source_size=current_size)
+        inspector.render(controller.document, card.id, image_source_size=current_size)
         assert controller.document.cards[0].active_revision.id == card.active_revision.id
         assert inspector.resolution_combo.toolTip() == (f"{current_size[0]} × {current_size[1]}")
-        for combo in controls[1:]:
-            assert combo.currentData() == CurrentSourceSize(
-                width=current_size[0], height=current_size[1]
-            )
+        assert inspector.edit_resolution_combo.currentData() == CurrentSourceSize(
+            width=current_size[0], height=current_size[1]
+        )
         assert [
             inspector.edit_history_list.item(index).data(Qt.ItemDataRole.UserRole)
             for index in range(inspector.edit_history_list.count())
@@ -783,12 +578,12 @@ def test_same_version_image_replacement_refreshes_sizes_history_not_drafts_or_ho
         assert inspector.description_edit.toPlainText() == "A focused Description draft"
         assert inspector.edit_instruction_draft == draft
         assert inspector.selected_interaction_id == selected
-        inspector.render(controller.document, card.id, refine_source_size=current_size)
+        inspector.render(controller.document, card.id, image_source_size=current_size)
         assert controller.current_undo_token == expected_token
     inspector.close()
 
 
-@pytest.mark.parametrize("operation", ("generate", "refine", "edit"))
+@pytest.mark.parametrize("operation", ("generate", "edit"))
 @pytest.mark.parametrize("duplicate", (False, True))
 def test_edit_history_uses_only_active_image_authored_lineage(
     application: QApplication, operation: str, duplicate: bool
@@ -872,7 +667,6 @@ def test_edit_history_recall_is_exact_accessible_and_has_no_document_side_effect
     history = inspector.edit_history_list
     requests: list[object] = []
     inspector.generate_background_requested.connect(lambda: requests.append("generate"))
-    inspector.refine_background_requested.connect(lambda *_args: requests.append("refine"))
     inspector.edit_background_requested.connect(lambda *_args: requests.append("edit"))
     inspector.document_changed.connect(lambda *_args: requests.append("document"))
     inspector.hotspot_selected.connect(lambda *_args: requests.append("hotspot"))
@@ -953,7 +747,7 @@ def test_empty_history_keeps_edit_controls_at_the_same_top_positions(
     inspector = Inspector(controller)
     inspector.resize(380, 900)
     inspector.inspector_tabs.setCurrentIndex(inspector._edit_tab_index)
-    inspector.render(controller.document, blank.id, refine_source_size=(512, 384))
+    inspector.render(controller.document, blank.id, image_source_size=(512, 384))
     inspector.show()
     application.processEvents()
     controls = (
@@ -971,11 +765,11 @@ def test_empty_history_keeps_edit_controls_at_the_same_top_positions(
     assert inspector.edit_instruction_label.y() < 30
     assert not hasattr(inspector, "edit_history_empty_label")
 
-    inspector.render(controller.document, edited.id, refine_source_size=(512, 384))
+    inspector.render(controller.document, edited.id, image_source_size=(512, 384))
     application.processEvents()
     assert inspector.edit_history_list.count() == 1
     assert [widget.geometry() for widget in controls] == empty_positions
-    inspector.render(controller.document, blank.id, refine_source_size=(512, 384))
+    inspector.render(controller.document, blank.id, image_source_size=(512, 384))
     application.processEvents()
     assert [widget.geometry() for widget in controls] == empty_positions
     assert inspector.edit_history_list.isVisible()
@@ -1418,10 +1212,8 @@ def test_hotspot_key_rows_fit_long_names_with_visible_remove_controls(
     inspector.close()
 
 
-@pytest.mark.parametrize("evolve", (False, True))
 def test_description_edits_target_active_revision(
     application: QApplication,
-    evolve: bool,
 ) -> None:
     card = Card(
         name="Card",
@@ -1431,10 +1223,8 @@ def test_description_edits_target_active_revision(
     inspector = Inspector(controller)
     inspector.render(controller.document, card.id)
 
-    editor = inspector.evolve_description_edit if evolve else inspector.description_edit
-    editor.setPlainText("New description")
+    inspector.description_edit.setPlainText("New description")
     assert inspector.description_edit.toPlainText() == "New description"
-    assert inspector.evolve_description_edit.toPlainText() == "New description"
     assert controller.document.cards[0].active_revision.description == "Old"
     assert inspector.commit_revision_metadata()
     token = controller.current_undo_token
@@ -1447,14 +1237,12 @@ def test_description_edits_target_active_revision(
     assert controller.document.cards[0].active_revision.description == "Old"
     inspector.render(controller.document, card.id)
     assert inspector.description_edit.toPlainText() == "Old"
-    assert inspector.evolve_description_edit.toPlainText() == "Old"
     assert controller.redo()
     inspector.render(controller.document, card.id)
     assert inspector.description_edit.toPlainText() == "New description"
-    assert inspector.evolve_description_edit.toPlainText() == "New description"
 
 
-def test_generate_and_evolve_styles_share_one_undoable_selection(
+def test_generate_style_selection_is_undoable(
     application: QApplication,
 ) -> None:
     style = StyleDefinition(name="Ink", prompt_text="Black ink")
@@ -1466,26 +1254,22 @@ def test_generate_and_evolve_styles_share_one_undoable_selection(
     inspector.render(controller.document, card.id)
     changes: list[object] = []
     inspector.document_changed.connect(changes.append)
-    inspector.evolve_style_combo.setCurrentIndex(inspector.evolve_style_combo.findData(style.id))
+    inspector.style_combo.setCurrentIndex(inspector.style_combo.findData(style.id))
     assert len(changes) == 1
     assert controller.document.cards[0].active_revision.style_id == style.id
     assert controller.document.new_card_style_id == style.id
     assert inspector.style_combo.currentData() == style.id
-    assert inspector.evolve_style_combo.currentData() == style.id
     assert controller.undo()
     inspector.render(controller.document, card.id)
     assert inspector.style_combo.currentData() is None
-    assert inspector.evolve_style_combo.currentData() is None
     assert not controller.can_undo
     assert controller.redo()
     inspector.render(controller.document, card.id)
     assert inspector.style_combo.currentData() == style.id
-    assert inspector.evolve_style_combo.currentData() == style.id
     inspector.style_combo.setCurrentIndex(inspector.style_combo.findData(None))
     assert len(changes) == 2
     assert controller.document.cards[0].active_revision.style_id is None
     assert controller.document.new_card_style_id is None
-    assert inspector.evolve_style_combo.currentData() is None
 
 
 @pytest.mark.parametrize("aspect_ratio", tuple(AspectRatio))
@@ -1577,7 +1361,7 @@ def test_generate_selects_current_size_on_navigation_and_syncs_it_on_request(
     inspector.render(
         controller.document,
         card.id,
-        refine_source_size=(1024, 768),
+        image_source_size=(1024, 768),
     )
 
     assert inspector.resolution_combo.itemText(3) == "Full"
@@ -1590,7 +1374,7 @@ def test_generate_selects_current_size_on_navigation_and_syncs_it_on_request(
     inspector.render(
         controller.document,
         card.id,
-        refine_source_size=(1024, 768),
+        image_source_size=(1024, 768),
     )
     assert inspector.resolution_combo.currentData() == PresetOutputSize(tier=ResolutionTier.FULL)
 
@@ -1614,7 +1398,7 @@ def test_generate_output_size_inserts_selectable_exact_current_size(
     inspector.render(
         controller.document,
         card.id,
-        refine_source_size=(592, 448),
+        image_source_size=(592, 448),
     )
 
     labels = [
@@ -1647,7 +1431,7 @@ def test_card_navigation_selects_each_current_resolution(
     inspector.render(
         controller.document,
         first.id,
-        refine_source_size=(512, 384),
+        image_source_size=(512, 384),
     )
     inspector.resolution_combo.setCurrentIndex(
         inspector._combo_index_for_data(
@@ -1655,22 +1439,14 @@ def test_card_navigation_selects_each_current_resolution(
             PresetOutputSize(tier=ResolutionTier.FULL),
         )
     )
-    inspector.refine_resolution_combo.setCurrentIndex(
-        inspector._combo_index_for_data(
-            inspector.refine_resolution_combo,
-            PresetOutputSize(tier=ResolutionTier.LARGE),
-        )
-    )
-
     inspector.render(
         controller.document,
         second.id,
-        refine_source_size=(768, 576),
+        image_source_size=(768, 576),
     )
 
     current = CurrentSourceSize(width=768, height=576)
     assert inspector.resolution_combo.currentData() == PresetOutputSize(tier=ResolutionTier.LARGE)
-    assert inspector.refine_resolution_combo.currentData() == current
     assert inspector.edit_resolution_combo.currentData() == current
 
 
@@ -1686,7 +1462,7 @@ def test_generate_shows_invalid_current_size_without_selecting_or_persisting_it(
     inspector.render(
         controller.document,
         card.id,
-        refine_source_size=source_size,
+        image_source_size=source_size,
     )
 
     labels = [
@@ -1720,7 +1496,7 @@ def test_edit_resolution_inserts_nonstandard_current_and_only_higher_tiers(
     inspector.render(
         controller.document,
         card.id,
-        refine_source_size=(640, 480),
+        image_source_size=(640, 480),
     )
 
     assert [
@@ -1734,7 +1510,7 @@ def test_edit_resolution_inserts_nonstandard_current_and_only_higher_tiers(
 
 
 @pytest.mark.parametrize("source_size", ((641, 480), (1008, 784)))
-def test_refine_and_edit_show_invalid_current_size_as_unavailable(
+def test_edit_shows_invalid_current_size_as_unavailable(
     application: QApplication,
     source_size: tuple[int, int],
 ) -> None:
@@ -1748,33 +1524,13 @@ def test_refine_and_edit_show_invalid_current_size_as_unavailable(
     inspector.render(
         controller.document,
         card.id,
-        refine_source_size=source_size,
+        image_source_size=source_size,
     )
-    refine_labels = [
-        inspector.refine_resolution_combo.itemText(index)
-        for index in range(inspector.refine_resolution_combo.count())
-    ]
-    refine_unavailable = refine_labels.index("Current")
-    refine_item = inspector.refine_resolution_combo.model().item(refine_unavailable)
-    assert refine_item is not None
-    assert not refine_item.isEnabled()
     higher_tiers = higher_output_tiers(
         source_size[0],
         source_size[1],
         AspectRatio.LANDSCAPE,
     )
-    if higher_tiers:
-        assert inspector.refine_resolution_combo.currentData() == PresetOutputSize(
-            tier=higher_tiers[0]
-        )
-        inspector.refine_resolution_combo.setCurrentIndex(refine_unavailable)
-        assert inspector.refine_resolution_combo.currentData() == PresetOutputSize(
-            tier=higher_tiers[0]
-        )
-        assert inspector.refine_resolution_combo.isEnabled()
-    else:
-        assert inspector.refine_resolution_combo.currentData() is None
-        assert not inspector.refine_resolution_combo.isEnabled()
 
     edit_labels = [
         inspector.edit_resolution_combo.itemText(index)
@@ -2211,10 +1967,8 @@ def test_deleted_reference_is_shown_as_unresolved(
     )
 
 
-@pytest.mark.parametrize("evolve", (False, True))
 def test_render_preserves_focused_description_draft(
     application: QApplication,
-    evolve: bool,
 ) -> None:
     interaction = _interaction()
     revision = CardRevision(
@@ -2226,9 +1980,7 @@ def test_render_preserves_focused_description_draft(
     inspector = Inspector(controller)
     inspector.show()
     inspector.render(controller.document, card.id)
-    if evolve:
-        inspector.inspector_tabs.setCurrentIndex(inspector._evolve_tab_index)
-    editor = inspector.evolve_description_edit if evolve else inspector.description_edit
+    editor = inspector.description_edit
     editor.setFocus()
     editor.setPlainText("Uncommitted description")
     cursor = editor.textCursor()
@@ -2239,7 +1991,6 @@ def test_render_preserves_focused_description_draft(
     changed = controller.execute(RenameCardCommand(card_id=card.id, name="Renamed"))
     inspector.render(changed, card.id)
     assert inspector.description_edit.toPlainText() == "Uncommitted description"
-    assert inspector.evolve_description_edit.toPlainText() == "Uncommitted description"
     assert editor.textCursor().position() == 4
 
     assert not hasattr(inspector, "hotspot_label_edit")
@@ -2261,9 +2012,8 @@ def test_switching_cards_shows_each_description(
     inspector = Inspector(controller)
     inspector.render(controller.document, first.id)
     inspector.render(controller.document, second.id)
-
     assert inspector.description_edit.toPlainText() == "Second description"
-    assert inspector.evolve_description_edit.toPlainText() == "Second description"
+    assert inspector.description_edit.toPlainText() == "Second description"
 
 
 def test_using_labels_name_single_reference(

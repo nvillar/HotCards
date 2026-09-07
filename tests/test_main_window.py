@@ -177,7 +177,6 @@ class FakeBackgroundWorkflow(QObject):
         self.invocation_active = False
         self.active_operation: str | None = None
         self.generate_calls: list[object] = []
-        self.refine_calls: list[tuple[object, object, object]] = []
         self.edit_calls: list[tuple[object, object, object]] = []
         self.clear_calls: list[object] = []
         self.cancel_calls = 0
@@ -185,15 +184,6 @@ class FakeBackgroundWorkflow(QObject):
 
     def generate(self, card_id: object) -> None:
         self.generate_calls.append(card_id)
-
-    def refine(
-        self,
-        card_id: object,
-        *,
-        transformation: object,
-        output_size: object,
-    ) -> None:
-        self.refine_calls.append((card_id, transformation, output_size))
 
     def edit(
         self,
@@ -241,9 +231,6 @@ class FakeBackgroundWorkflow(QObject):
 
     def is_generating_for(self, _card_id: object) -> bool:
         return self.busy and self.active_operation in {None, "generate"}
-
-    def is_refining_for(self, _card_id: object) -> bool:
-        return self.busy and self.active_operation == "refine"
 
     def is_editing_for(self, _card_id: object) -> bool:
         return self.busy and self.active_operation == "edit"
@@ -1374,115 +1361,6 @@ def test_save_resolves_pending_then_persists_utility_draft(
     window.close()
 
 
-def test_pending_refine_renders_authoritative_revision_and_promotes_undo(
-    application: QApplication,
-    tmp_path: Path,
-) -> None:
-    store = StackStore(tmp_path / "Refine.hotcards")
-    card = Card(name="Source")
-    source_asset_id = uuid4()
-    source_png = tmp_path / "source.png"
-    Image.new("RGB", (512, 384), "navy").save(source_png, format="PNG")
-    source_image_path = store.store_image_asset(
-        source_png,
-        card_id=card.id,
-        asset_id=source_asset_id,
-    )
-    source_revision = CardRevision(
-        description="Source description",
-        background=_generated_background(
-            asset_id=source_asset_id,
-            image_path=source_image_path,
-        ),
-    )
-    card = card.model_copy(
-        update={
-            "revisions": (source_revision,),
-            "active_revision_id": source_revision.id,
-        }
-    )
-    stack = Stack(name="Demo", cards=(card,), start_card_id=card.id)
-    store.create(stack)
-    controller = DocumentController(Stack(name="Welcome"))
-    session = DocumentSession(controller)
-    session.open(store.bundle_path)
-    background = FakeBackgroundWorkflow(controller)
-    window = MainWindow(
-        controller,
-        FakeWorkers(),  # type: ignore[arg-type]
-        FakeSettings(),
-        availability_checks={AdapterKind.MFLUX: lambda: None},
-        document_session=session,
-        background_workflow=background,  # type: ignore[arg-type]
-        start_diagnostics=False,
-    )
-    refined_asset_id = uuid4()
-    refined_png = tmp_path / "refined.png"
-    Image.new("RGB", (768, 576), "teal").save(refined_png, format="PNG")
-    refined_image_path = store.store_image_asset(
-        refined_png,
-        card_id=card.id,
-        asset_id=refined_asset_id,
-    )
-    direct = source_revision.background
-    assert direct is not None
-    refined_background = GeneratedBackground(
-        id=refined_asset_id,
-        image_path=refined_image_path,
-        provenance=RefineProvenance(
-            source=DerivedImageSourceSnapshot(
-                card_id=card.id,
-                revision_id=source_revision.id,
-                background_id=source_asset_id,
-                width=512,
-                height=384,
-                seed=direct.provenance.settings.seed,
-                edit_lineage=(),
-            ),
-            description=source_revision.description,
-            render_prompt=source_revision.description,
-            output_size=PresetOutputSize(tier=ResolutionTier.LARGE),
-            transformation=RefineTransformation.BALANCED,
-            strength=0.5,
-            settings=direct.provenance.settings.model_copy(update={"width": 768, "height": 576}),
-        ),
-        created_at=direct.created_at,
-    )
-
-    def fail_indeterminate(candidate: Stack) -> None:
-        raise StackStoreTransactionError(
-            RuntimeError("manifest directory fsync failed"),
-            observed_stack=candidate,
-            durability_indeterminate=True,
-        )
-
-    with pytest.raises(DocumentSessionError, match="durability remains indeterminate"):
-        session.execute_persisted(
-            ReplaceRevisionBackgroundCommand(
-                card_id=card.id,
-                revision_id=source_revision.id,
-                background=refined_background,
-            ),
-            persist=fail_indeterminate,
-        )
-    background.document_changed.emit(controller.document)
-
-    assert controller.mutation_blocked
-    assert window.revision_combo.currentText() == "1"
-    assert window.inspector.description_edit.toPlainText() == source_revision.description
-    assert window.card_canvas._current_image == store.asset_path(refined_image_path).resolve()
-    assert not window.undo_action.isEnabled()
-
-    assert window.save_document()
-    assert not controller.mutation_blocked
-    assert window.revision_combo.currentText() == "1"
-    assert window.undo_action.isEnabled()
-    window.undo()
-    assert controller.document.cards[0].active_revision == source_revision
-    assert window.revision_combo.currentText() == "1"
-    window.close()
-
-
 def test_open_candidate_validation_failure_preserves_active_ui_session(
     application: QApplication,
     tmp_path: Path,
@@ -1961,10 +1839,8 @@ def test_resolution_change_cancels_in_flight_generation(
     assert all("resolution" not in key for key in window.settings.values)
 
 
-@pytest.mark.parametrize("evolve", (False, True))
 def test_description_style_and_reference_changes_cancel_in_flight_generation(
     application: QApplication,
-    evolve: bool,
 ) -> None:
     style = StyleDefinition(name="Ink", prompt_text="Rendered in ink.")
     source = Card(name="Source")
@@ -1978,10 +1854,8 @@ def test_description_style_and_reference_changes_cancel_in_flight_generation(
         )
     )
 
-    editor = (
-        window.inspector.evolve_description_edit if evolve else window.inspector.description_edit
-    )
-    combo = window.inspector.evolve_style_combo if evolve else window.inspector.style_combo
+    editor = window.inspector.description_edit
+    combo = window.inspector.style_combo
     background.busy = True
     editor.setPlainText("Changed")
     background.busy = True
@@ -2502,98 +2376,6 @@ def test_generate_is_disabled_without_description(
     assert not window.inspector.generate_background_button.isEnabled()
 
 
-def test_generate_tab_wires_evolve_current_image_options_and_cancels_live_changes(
-    application: QApplication,
-    tmp_path: Path,
-) -> None:
-    bundle = tmp_path / "Refine.hotcards"
-    store = StackStore(bundle)
-    card = Card(name="Card")
-    asset_id = uuid4()
-    source = tmp_path / "source.png"
-    Image.new("RGB", (512, 384), "navy").save(source)
-    image_path = store.store_image_asset(
-        source,
-        card_id=card.id,
-        asset_id=asset_id,
-    )
-    revision = CardRevision(
-        description="A courtyard",
-        background=_generated_background(
-            asset_id=asset_id,
-            image_path=image_path,
-            description="A courtyard",
-        ),
-    )
-    card = card.model_copy(
-        update={
-            "revisions": (revision,),
-            "active_revision_id": revision.id,
-        }
-    )
-    stack = Stack(name="Demo", cards=(card,), start_card_id=card.id)
-    store.save(stack)
-    controller = DocumentController(Stack(name="Welcome"))
-    session = DocumentSession(controller)
-    session.open(bundle)
-    background = FakeBackgroundWorkflow(controller)
-    window = MainWindow(
-        controller,
-        FakeWorkers(),  # type: ignore[arg-type]
-        FakeSettings(),
-        document_session=session,
-        background_workflow=background,  # type: ignore[arg-type]
-        start_diagnostics=False,
-    )
-    window._availability[AdapterKind.MFLUX] = True
-    window._update_generation_actions()
-
-    assert window.inspector.inspector_tabs.tabText(1) == "Evolve"
-    window.inspector.inspector_tabs.setCurrentIndex(window.inspector._evolve_tab_index)
-    assert window.inspector.refine_background_button.isEnabled()
-    assert window.inspector.refine_resolution_combo.currentData() == CurrentSourceSize(
-        width=512, height=384
-    )
-    assert window.inspector.refine_background_button.toolTip() == (
-        "Evolve the current image using Description."
-    )
-    window.inspector.evolve_description_edit.setPlainText("A courtyard with an open gate.")
-    assert window.inspector.description_edit.toPlainText() == "A courtyard with an open gate."
-    window.inspector.refine_background_button.click()
-    assert controller.document.cards[0].active_revision.description == (
-        "A courtyard with an open gate."
-    )
-    description_token = controller.current_undo_token
-    window.render_document()
-    assert controller.current_undo_token == description_token
-    assert background.refine_calls == [
-        (
-            card.id,
-            RefineTransformation.BALANCED,
-            CurrentSourceSize(width=512, height=384),
-        )
-    ]
-
-    background.busy = True
-    background.active_operation = "refine"
-    window._update_generation_actions()
-    assert window.inspector.refine_background_button.text() == "Evolving…"
-    assert not window.inspector.generate_background_button.isEnabled()
-    window.inspector.refine_transformation_combo.setCurrentIndex(
-        window.inspector._combo_index_for_data(
-            window.inspector.refine_transformation_combo,
-            RefineTransformation.PRESERVE,
-        )
-    )
-    assert background.cancel_calls == 1
-
-    background.busy = True
-    background.active_operation = "refine"
-    window.mode_button.click()
-    assert background.cancel_calls == 2
-    assert not window.inspector.isVisible()
-
-
 @pytest.mark.parametrize("description", ("A courtyard", ""))
 def test_edit_tab_wires_current_image_defaults_errors_and_cancellation(
     application: QApplication,
@@ -2642,9 +2424,8 @@ def test_edit_tab_wires_current_image_defaults_errors_and_cancellation(
     window._availability[AdapterKind.MFLUX] = True
     window._update_generation_actions()
 
-    assert window.inspector.inspector_tabs.tabText(2) == "Edit"
+    assert window.inspector.inspector_tabs.tabText(1) == "Edit"
     assert window.inspector.generate_background_button.isEnabled() == bool(description)
-    assert window.inspector.refine_background_button.isEnabled() == bool(description)
     assert not window.inspector.edit_background_button.isEnabled()
     assert window.inspector.edit_resolution_combo.count() == 1
     assert window.inspector.edit_resolution_combo.itemText(0) == "Full"
@@ -2814,66 +2595,16 @@ def test_notification_undo_expires_after_another_command(
     assert controller.document.cards[0].name == "Second"
 
 
-@pytest.mark.parametrize("source_tab", (0, 1))
-def test_generate_evolve_tab_switch_commits_shared_description_once(
-    application: QApplication,
-    source_tab: int,
-) -> None:
-    card = Card(name="Card", revisions=(CardRevision(description="Saved description"),))
-    window, controller, _workers, _background = _window(Stack(name="Demo", cards=(card,)))
-    window.resize(1100, 800)
-    window.show()
-    tabs = window.inspector.inspector_tabs
-    tabs.setCurrentIndex(source_tab)
-    editor = (
-        window.inspector.evolve_description_edit
-        if source_tab == 1
-        else window.inspector.description_edit
-    )
-    editor.setFocus()
-    editor.setPlainText("A description authored in either tab")
-    application.processEvents()
-    assert editor.hasFocus()
-    assert controller.current_undo_token is None
-    target_tab = 1 - source_tab
-    bar = tabs.tabBar()
-    QTest.mouseClick(bar, Qt.MouseButton.LeftButton, pos=bar.tabRect(target_tab).center())
-    application.processEvents()
-
-    assert tabs.currentIndex() == target_tab
-    assert controller.document.cards[0].active_revision.description == (
-        "A description authored in either tab"
-    )
-    assert window.inspector.description_edit.toPlainText() == (
-        window.inspector.evolve_description_edit.toPlainText()
-    )
-    token = controller.current_undo_token
-    assert token is not None
-    assert controller.retained_history_tokens == frozenset((token,))
-    QTest.mouseClick(bar, Qt.MouseButton.LeftButton, pos=bar.tabRect(source_tab).center())
-    application.processEvents()
-    assert controller.current_undo_token == token
-    window.close()
-
-
-@pytest.mark.parametrize("target", ("mouse", "evolve"))
 def test_mouse_focus_commit_does_not_render_before_button_release(
     application: QApplication,
     monkeypatch: pytest.MonkeyPatch,
-    target: str,
 ) -> None:
     revision = CardRevision(description="A courtyard")
     card = Card(name="Card", revisions=(revision,))
     window, controller, _workers, _background = _window(Stack(name="Demo", cards=(card,)))
     window.show()
     draft = "A changed courtyard"
-    editor = (
-        window.inspector.evolve_description_edit
-        if target == "evolve"
-        else window.inspector.description_edit
-    )
-    if target == "evolve":
-        window.inspector.inspector_tabs.setCurrentIndex(window.inspector._evolve_tab_index)
+    editor = window.inspector.description_edit
     editor.setPlainText(draft)
     editor.setFocus()
     application.processEvents()
@@ -2885,8 +2616,8 @@ def test_mouse_focus_commit_does_not_render_before_button_release(
     )
 
     editor.editing_finished.emit(
-        window.inspector.refine_background_button if target == "evolve" else None,
-        Qt.FocusReason.OtherFocusReason if target == "evolve" else Qt.FocusReason.MouseFocusReason,
+        None,
+        Qt.FocusReason.MouseFocusReason,
     )
 
     changed_revision = controller.document.cards[0].active_revision
@@ -2897,7 +2628,7 @@ def test_mouse_focus_commit_does_not_render_before_button_release(
 
 @pytest.mark.parametrize(
     "operation",
-    (ImageOperation("generate"), ImageOperation("refine"), EditImageOperation("Open it.")),
+    (ImageOperation("generate"), EditImageOperation("Open it.")),
 )
 @pytest.mark.parametrize("hotspots", ("none", "empty", "populated"))
 def test_applied_image_can_move_to_a_new_complete_version(
@@ -2984,7 +2715,6 @@ def test_applied_image_can_move_to_a_new_complete_version(
         changed.cards[0].active_revision
     )
     assert not background_workflow.generate_calls
-    assert not background_workflow.refine_calls
     assert not background_workflow.edit_calls
     assert window.notification_bar.message_label.text() == "New version created"
     assert window.notification_bar.primary_button.text() == "Undo"
@@ -3097,7 +2827,7 @@ def test_history_recall_survives_edit_completion_or_redo_on_same_version(
     )
     card = card.model_copy(update={"revisions": (previous,)})
     window, controller, _workers, workflow = _window(Stack(name="Demo", cards=(card,)))
-    monkeypatch.setattr(window, "_refine_source_size", lambda _card: (512, 384))
+    monkeypatch.setattr(window, "_image_source_size", lambda _card: (512, 384))
     window.render_document()
     window.inspector.inspector_tabs.setCurrentIndex(window.inspector._edit_tab_index)
     window.inspector.set_edit_instruction(instruction)
@@ -3147,7 +2877,7 @@ def test_history_recall_survives_edit_completion_or_redo_on_same_version(
     assert window.inspector.edit_instruction_draft == recalled
     assert window.inspector.edit_history_list.count() == 1
     assert len(workflow.edit_calls) == 1
-    assert workflow.generate_calls == workflow.refine_calls == []
+    assert workflow.generate_calls == []
 
 
 @pytest.mark.parametrize("context", ("card", "revision", "away-and-back"))
@@ -3201,7 +2931,7 @@ def test_edit_completion_and_undo_do_not_touch_unrelated_context(
 @pytest.mark.parametrize("stale_reason", ("command", "replacement", "run"))
 @pytest.mark.parametrize(
     "operation",
-    (ImageOperation("generate"), ImageOperation("refine"), EditImageOperation("Open it.")),
+    (ImageOperation("generate"), EditImageOperation("Open it.")),
 )
 def test_image_actions_reject_stale_history_and_run_mode(
     application: QApplication,
@@ -3299,7 +3029,7 @@ def test_edit_undo_metadata_lives_only_as_long_as_history(
 
 @pytest.mark.parametrize(
     "operation",
-    (ImageOperation("generate"), ImageOperation("refine"), EditImageOperation("Open it.")),
+    (ImageOperation("generate"), EditImageOperation("Open it.")),
 )
 def test_dismissing_image_result_keeps_it_on_current_version(
     application: QApplication,
@@ -3649,13 +3379,13 @@ def test_image_operation_explicitly_cancels_and_blocks_hotspot_draft(
             message="MFLUX is available",
         )
     )
-    assert window.inspector.refine_background_button.isEnabled()
+    assert window.inspector.generate_background_button.isEnabled()
     window.inspector.inspector_tabs.setCurrentIndex(window.inspector._hotspots_tab_index)
     window.card_canvas.begin_polygon(initial_point=Point(x=0.3, y=0.3))
     assert window.card_canvas.drawing
 
     background.busy = True
-    background.active_operation = "refine"
+    background.active_operation = "edit"
     background.busy_changed.emit(True)
 
     assert not window.card_canvas.drawing
@@ -3672,7 +3402,7 @@ def test_image_operation_explicitly_cancels_and_blocks_hotspot_draft(
     background.busy_changed.emit(False)
     background.invocation_active_changed.emit(True)
     assert not window.card_canvas._editable
-    assert not window.inspector.refine_background_button.isEnabled()
+    assert not window.inspector.generate_background_button.isEnabled()
 
     background.invocation_active = False
     background.invocation_active_changed.emit(False)

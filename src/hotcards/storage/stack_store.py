@@ -290,7 +290,7 @@ def _dispose_owned_private_file(
                 inode,
             ):
                 return False
-            quarantine_name = f".refine-cleanup-{uuid4()}"
+            quarantine_name = f".image-cleanup-{uuid4()}"
             os.rename(
                 path.name,
                 quarantine_name,
@@ -352,7 +352,7 @@ def _require_image_asset_unchanged_at(
     *,
     card_id: UUID,
     asset_id: UUID,
-    operation: str = "Evolve",
+    operation: str = "Edit",
 ) -> None:
     source_path = _relative_asset_path(snapshot.relative_path)
     expected_path = _image_asset_path(card_id, asset_id)
@@ -1038,7 +1038,7 @@ class StackStore:
                 f"asset IDs; expected {expected_path}"
             )
 
-        snapshot_name = f".refine-source-{uuid4()}.png"
+        snapshot_name = f".image-source-{uuid4()}.png"
         snapshot_path = destination_directory / snapshot_name
         snapshot_fd: int | None = None
         snapshot_directory_fd: int | None = None
@@ -1170,7 +1170,7 @@ class StackStore:
         card_id: UUID,
         asset_id: UUID,
     ) -> None:
-        """Reject an Evolve result when its logical source image changed."""
+        """Reject an Edit result when its logical source image changed."""
         try:
             with ExitStack() as descriptors:
                 bundle_fd = os.open(
@@ -1188,7 +1188,7 @@ class StackStore:
             raise
         except OSError as error:
             raise StackStoreError(
-                f"the current image changed or became unavailable while Evolve was running: {error}"
+                f"the current image changed or became unavailable while Edit was running: {error}"
             ) from error
 
     @_serialized_bundle_mutation
@@ -1530,7 +1530,7 @@ class StackStore:
         expected_source_snapshot: StoredImageSnapshot | None = None,
         expected_source_card_id: UUID | None = None,
         expected_source_asset_id: UUID | None = None,
-        expected_source_operation: str = "Evolve",
+        expected_source_operation: str = "Edit",
     ) -> StoredImageAsset:
         """Atomically import one PNG and commit the manifest that references it."""
         try:
@@ -1568,7 +1568,7 @@ class StackStore:
         expected_source_snapshot: StoredImageSnapshot | None = None,
         expected_source_card_id: UUID | None = None,
         expected_source_asset_id: UUID | None = None,
-        expected_source_operation: str = "Evolve",
+        expected_source_operation: str = "Edit",
     ) -> StoredImageAsset:
         if (source_relative_path is None) == (source_file_path is None):
             raise StackStoreError("exactly one image source must be provided")

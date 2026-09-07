@@ -63,8 +63,6 @@ from hotcards.domain.models import (
     GenerateOutputSize,
     ImageReferenceSnapshot,
     PresetOutputSize,
-    RefineOutputSize,
-    RefineTransformation,
     ResolvedCardReference,
     Stack,
     StyleSnapshot,
@@ -76,7 +74,6 @@ from hotcards.domain.models import (
 from hotcards.generation.image_generation import (
     compose_edit_prompt,
     compose_generation_prompt,
-    compose_refine_prompt,
 )
 from hotcards.generation.mflux_generator import (
     MfluxCancellationToken,
@@ -85,8 +82,6 @@ from hotcards.generation.mflux_generator import (
     MfluxGenerateRequest,
     MfluxGenerateResult,
     MfluxGenerator,
-    MfluxRefineRequest,
-    MfluxRefineResult,
     dispose_mflux_result,
 )
 from hotcards.storage.stack_store import (
@@ -149,23 +144,6 @@ class _GenerationReferenceTarget:
     revision_id: UUID
     background_id: UUID
     image_path: str
-
-
-@dataclass(frozen=True, slots=True)
-class _RefineTarget:
-    stack_id: UUID
-    card_id: UUID
-    revision: CardRevision
-    bundle_path: Path
-    style: StyleSnapshot | None
-    edit_lineage: tuple[AcceptedEdit, ...]
-    aspect_ratio: AspectRatio
-    output_size: RefineOutputSize
-    transformation: RefineTransformation
-    settings: BackgroundGenerationSettings
-    history_token: UndoToken | None
-    source_snapshot: StoredImageSnapshot
-    source_background_id: UUID
 
 
 @dataclass(frozen=True, slots=True)
@@ -246,10 +224,8 @@ class BackgroundWorkflow(QObject):
         self._temporary_directory.mkdir(parents=True, exist_ok=True)
         self._operation: WorkerOperation | None = None
         self._request_id: UUID | None = None
-        self._request_target: _GenerationTarget | _RefineTarget | _EditTarget | None = None
-        self._pending_result: MfluxGenerateResult | MfluxRefineResult | MfluxEditResult | None = (
-            None
-        )
+        self._request_target: _GenerationTarget | _EditTarget | None = None
+        self._pending_result: MfluxGenerateResult | MfluxEditResult | None = None
         self._close_requested = Event()
         self._invocation_active = Event()
         self._source_snapshot_lock = Lock()
@@ -257,7 +233,7 @@ class BackgroundWorkflow(QObject):
         self._snapshot_cleanup_in_progress = False
         self._temporary_cleanup_blocked = False
         self._busy = False
-        self._active_operation: Literal["generate", "refine", "edit"] | None = None
+        self._active_operation: Literal["generate", "edit"] | None = None
         self._pending_image_completion: _PendingImageCompletion | None = None
         self.session.state_changed.connect(self._session_state_changed)
 
@@ -266,7 +242,7 @@ class BackgroundWorkflow(QObject):
         return self._busy
 
     @property
-    def active_operation(self) -> Literal["generate", "refine", "edit"] | None:
+    def active_operation(self) -> Literal["generate", "edit"] | None:
         return self._active_operation
 
     @property
@@ -354,198 +330,6 @@ class BackgroundWorkflow(QObject):
         operation.succeeded.connect(
             partial(self._generation_succeeded, request_id, target, asset_id)
         )
-        operation.failed.connect(partial(self._operation_failed, request_id))
-        return operation
-
-    def available_refine_output_sizes(
-        self,
-        card_id: UUID,
-    ) -> tuple[RefineOutputSize, ...]:
-        """Return exact current size followed by strictly larger presets."""
-        card = self._card(self.controller.document, card_id)
-        revision = card.active_revision
-        background = revision.background
-        if background is None:
-            return ()
-        try:
-            width, height = self._require_store().image_asset_dimensions(
-                background.image_path,
-                card_id=card.id,
-                asset_id=background.id,
-            )
-        except StackStoreError as error:
-            raise BackgroundWorkflowError(
-                "the current image is unavailable or unreadable"
-            ) from error
-        current_output_size = _current_source_size(
-            width,
-            height,
-            self.controller.document.aspect_ratio,
-        )
-        return (
-            *((current_output_size,) if current_output_size is not None else ()),
-            *(
-                PresetOutputSize(tier=tier)
-                for tier in higher_output_tiers(
-                    width,
-                    height,
-                    self.controller.document.aspect_ratio,
-                )
-            ),
-        )
-
-    def refine(
-        self,
-        card_id: UUID,
-        *,
-        transformation: RefineTransformation,
-        output_size: RefineOutputSize,
-    ) -> WorkerOperation:
-        """Durably replace the current revision's image with an Evolve result."""
-        self._require_ready(card_id)
-        if not self.session.flush():
-            raise BackgroundWorkflowError(
-                self.session.state.error or "the current stack could not be saved"
-            )
-        document = self.controller.document
-        card = self._card(document, card_id)
-        revision = card.active_revision
-        if not revision.description.strip():
-            raise BackgroundWorkflowError("enter a Description before evolving")
-        background = revision.background
-        if background is None:
-            raise BackgroundWorkflowError("generate an image before evolving")
-        store = self._require_store()
-        try:
-            source_snapshot = store.snapshot_image_asset(
-                background.image_path,
-                card_id=card.id,
-                asset_id=background.id,
-                destination_directory=self._temporary_directory,
-            )
-        except StackStoreError as error:
-            raise BackgroundWorkflowError(
-                "the current image is unavailable or unreadable"
-            ) from error
-        try:
-            self._track_source_snapshot(source_snapshot)
-        except Exception:
-            if not source_snapshot.dispose():
-                logger.warning(
-                    "Evolve source snapshot cleanup preserved a changed file: %s",
-                    source_snapshot.snapshot_path,
-                )
-            raise
-        current_output_size = _current_source_size(
-            source_snapshot.width,
-            source_snapshot.height,
-            document.aspect_ratio,
-        )
-        available_output_sizes: tuple[RefineOutputSize, ...] = (
-            *((current_output_size,) if current_output_size is not None else ()),
-            *(
-                PresetOutputSize(tier=tier)
-                for tier in higher_output_tiers(
-                    source_snapshot.width,
-                    source_snapshot.height,
-                    document.aspect_ratio,
-                )
-            ),
-        )
-        if output_size not in available_output_sizes:
-            self._cleanup_source_snapshot_if_idle()
-            raise BackgroundWorkflowError(
-                "select the current Evolve size or a preset with more pixels"
-            )
-        try:
-            settings = self._settings_provider()
-        except Exception:
-            self._cleanup_source_snapshot_if_idle()
-            raise
-        style = self._style_snapshot(document, revision)
-        edit_lineage = image_edit_lineage(background.provenance)
-        render_prompt = compose_refine_prompt(
-            revision.description,
-            style,
-            edit_lineage,
-        )
-        source = DerivedImageSourceSnapshot(
-            card_id=card.id,
-            revision_id=revision.id,
-            background_id=background.id,
-            width=source_snapshot.width,
-            height=source_snapshot.height,
-            seed=image_operation_settings(background.provenance).seed,
-            edit_lineage=edit_lineage,
-        )
-        width, height = selected_output_dimensions(
-            output_size,
-            document.aspect_ratio,
-        )
-        request_id = uuid4()
-        asset_id = uuid4()
-        target = _RefineTarget(
-            stack_id=document.id,
-            card_id=card.id,
-            revision=revision.model_copy(deep=True),
-            bundle_path=store.bundle_path.resolve(),
-            style=style,
-            edit_lineage=edit_lineage,
-            aspect_ratio=document.aspect_ratio,
-            output_size=output_size,
-            transformation=transformation,
-            settings=settings,
-            history_token=self.controller.current_undo_token,
-            source_snapshot=source_snapshot,
-            source_background_id=background.id,
-        )
-        request = MfluxRefineRequest(
-            source=source,
-            source_image_path=source_snapshot.snapshot_path,
-            description=revision.description,
-            style=style,
-            render_prompt=render_prompt,
-            output_size=output_size,
-            transformation=transformation,
-            image_strength=transformation.strength,
-            output_path=self._temporary_directory / f"refined-{asset_id}.png",
-            model_identifier=settings.mflux_model,
-            aspect_ratio=document.aspect_ratio,
-            width=width,
-            height=height,
-            step_count=settings.step_count,
-            quantization=settings.quantization,
-        )
-        cancellation = MfluxCancellationToken()
-        self._request_id = request_id
-        self._request_target = target
-        self._active_operation = "refine"
-        self._set_busy(True, "Evolving image...")
-        try:
-            operation = self.workers.run_mflux(
-                lambda: self._mflux_generator.refine(
-                    request,
-                    progress=partial(
-                        self._generation_progress,
-                        request_id,
-                    ),
-                    cancellation=cancellation,
-                ),
-                stage="evolving background image",
-                request_cancel=cancellation.cancel,
-                dispose_result=dispose_mflux_result,
-                invocation_started=self._invocation_started,
-                invocation_finished=self._invocation_finished,
-            )
-        except Exception:
-            self._request_id = None
-            self._request_target = None
-            self._active_operation = None
-            self._cleanup_source_snapshot_if_idle()
-            self._set_busy(False, "Image evolution failed")
-            raise
-        self._operation = operation
-        operation.succeeded.connect(partial(self._refine_succeeded, request_id, target, asset_id))
         operation.failed.connect(partial(self._operation_failed, request_id))
         return operation
 
@@ -819,11 +603,7 @@ class BackgroundWorkflow(QObject):
             self._active_operation = None
             self._set_busy(
                 False,
-                (
-                    "Evolve cancelled"
-                    if operation == "refine"
-                    else ("Edit cancelled" if operation == "edit" else "Generation cancelled")
-                ),
+                "Edit cancelled" if operation == "edit" else "Generation cancelled",
             )
 
     def close(self) -> None:
@@ -850,14 +630,6 @@ class BackgroundWorkflow(QObject):
         return (
             self._busy
             and self._active_operation == "generate"
-            and self._request_target is not None
-            and self._request_target.card_id == card_id
-        )
-
-    def is_refining_for(self, card_id: UUID) -> bool:
-        return (
-            self._busy
-            and self._active_operation == "refine"
             and self._request_target is not None
             and self._request_target.card_id == card_id
         )
@@ -902,38 +674,6 @@ class BackgroundWorkflow(QObject):
             is_current=lambda: self._target_is_current(target),
         )
 
-    def _refine_succeeded(
-        self,
-        request_id: UUID,
-        target: _RefineTarget,
-        asset_id: UUID,
-        result: object,
-    ) -> None:
-        if request_id != self._request_id:
-            if isinstance(result, MfluxRefineResult):
-                result.dispose_output()
-            return
-        if not isinstance(result, MfluxRefineResult):
-            self._finish_with_error(
-                BackgroundWorkflowError("image evolution returned an unexpected result")
-            )
-            return
-        self._pending_result = result
-        if not self._refine_target_is_current(target):
-            self._finish_with_error(
-                BackgroundWorkflowError(
-                    "the stack or source revision changed before Evolve completed"
-                )
-            )
-            return
-        self._accept_image(
-            request_id,
-            target,
-            asset_id,
-            result,
-            is_current=lambda: self._refine_target_is_current(target),
-        )
-
     def _edit_succeeded(
         self,
         request_id: UUID,
@@ -969,9 +709,9 @@ class BackgroundWorkflow(QObject):
     def _accept_image(
         self,
         request_id: UUID,
-        target: _GenerationTarget | _RefineTarget | _EditTarget,
+        target: _GenerationTarget | _EditTarget,
         asset_id: UUID,
-        result: MfluxGenerateResult | MfluxRefineResult | MfluxEditResult,
+        result: MfluxGenerateResult | MfluxEditResult,
         *,
         is_current: Callable[[], bool],
     ) -> None:
@@ -1006,13 +746,11 @@ class BackgroundWorkflow(QObject):
                 operation=(
                     EditImageOperation(instruction=target.instruction)
                     if isinstance(target, _EditTarget)
-                    else ImageOperation(
-                        "refine" if isinstance(target, _RefineTarget) else "generate"
-                    )
+                    else ImageOperation("generate")
                 ),
             )
             owned_assets: list[OwnedImageAsset] = []
-            derived = target if isinstance(target, (_RefineTarget, _EditTarget)) else None
+            derived = target if isinstance(target, _EditTarget) else None
 
             def persist(candidate: Stack) -> None:
                 try:
@@ -1025,9 +763,7 @@ class BackgroundWorkflow(QObject):
                         expected_source_snapshot=derived.source_snapshot if derived else None,
                         expected_source_card_id=derived.card_id if derived else None,
                         expected_source_asset_id=derived.source_background_id if derived else None,
-                        expected_source_operation="Edit"
-                        if isinstance(target, _EditTarget)
-                        else "Evolve",
+                        expected_source_operation="Edit",
                     )
                 except StackStoreTransactionError as error:
                     if isinstance(error.owned_asset, StoredImageAsset):
@@ -1151,11 +887,7 @@ class BackgroundWorkflow(QObject):
         self._cleanup_source_snapshot_if_idle()
         self._set_busy(
             False,
-            (
-                "Image evolution failed"
-                if operation == "refine"
-                else ("Image editing failed" if operation == "edit" else "Image generation failed")
-            ),
+            "Image editing failed" if operation == "edit" else "Image generation failed",
         )
         self.failed.emit(failure)
 
@@ -1171,7 +903,7 @@ class BackgroundWorkflow(QObject):
     def _track_source_snapshot(self, snapshot: StoredImageSnapshot) -> None:
         with self._source_snapshot_lock:
             if self._source_snapshot is not None:
-                raise BackgroundWorkflowError("an Evolve source snapshot is already active")
+                raise BackgroundWorkflowError("an image source snapshot is already active")
             self._source_snapshot = snapshot
 
     def _cleanup_source_snapshot_if_idle(self) -> bool:
@@ -1194,7 +926,7 @@ class BackgroundWorkflow(QObject):
             with self._source_snapshot_lock:
                 assert self._source_snapshot is snapshot
             logger.warning(
-                "Evolve source snapshot cleanup preserved a changed file: %s",
+                "Image source snapshot cleanup preserved a changed file: %s",
                 snapshot.snapshot_path,
             )
         return disposed
@@ -1210,7 +942,7 @@ class BackgroundWorkflow(QObject):
         with self._source_snapshot_lock:
             if self._source_snapshot is not None:
                 raise BackgroundWorkflowError(
-                    "the previous Evolve source snapshot could not be cleaned up"
+                    "the previous image source snapshot could not be cleaned up"
                 )
         if self.controller.mutation_blocked:
             raise BackgroundWorkflowError(
@@ -1281,33 +1013,6 @@ class BackgroundWorkflow(QObject):
             return self._resolve_references(document, card) == target.references
         except BackgroundWorkflowError:
             return False
-
-    def _refine_target_is_current(self, target: _RefineTarget) -> bool:
-        bundle_path = self.session.state.bundle_path
-        if bundle_path is None or bundle_path.resolve() != target.bundle_path:
-            return False
-        document = self.controller.document
-        if (
-            document.id != target.stack_id
-            or document.aspect_ratio != target.aspect_ratio
-            or self.controller.current_undo_token != target.history_token
-        ):
-            return False
-        card = next(
-            (card for card in document.cards if card.id == target.card_id),
-            None,
-        )
-        if card is None or card.active_revision_id != target.revision.id:
-            return False
-        revision = card.active_revision
-        if (
-            revision != target.revision
-            or self._style_snapshot(document, revision) != target.style
-            or revision.background is None
-            or image_edit_lineage(revision.background.provenance) != target.edit_lineage
-        ):
-            return False
-        return self._settings_provider() == target.settings
 
     def _edit_target_is_current(self, target: _EditTarget) -> bool:
         bundle_path = self.session.state.bundle_path

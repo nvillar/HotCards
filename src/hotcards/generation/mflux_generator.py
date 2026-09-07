@@ -40,10 +40,6 @@ from hotcards.domain.models import (
     NonEmptyString,
     PositiveInt,
     PresetOutputSize,
-    RefineOutputSize,
-    RefineProvenance,
-    RefineTransformation,
-    StyleSnapshot,
     selected_output_dimensions,
 )
 from hotcards.generation.errors import (
@@ -61,7 +57,7 @@ class MfluxCallbackRegistryProtocol(Protocol):
 
 
 class MfluxRegularModelProtocol(Protocol):
-    """Subset of regular Flux2Klein used by Generate and Refine."""
+    """Subset of regular Flux2Klein used by plain Generate."""
 
     callbacks: MfluxCallbackRegistryProtocol
 
@@ -75,8 +71,6 @@ class MfluxRegularModelProtocol(Protocol):
         width: int,
         guidance: float,
         scheduler: str,
-        image_path: Path | None = None,
-        image_strength: float | None = None,
     ) -> GeneratedImageProtocol: ...
 
 
@@ -235,7 +229,7 @@ class _MfluxRequest(DomainModel):
 
     def require_dimensions(
         self,
-        output_size: GenerateOutputSize | RefineOutputSize | EditOutputSize,
+        output_size: GenerateOutputSize | EditOutputSize,
     ) -> None:
         if isinstance(output_size, (CurrentSourceSize, ExactOutputSize)):
             validate_exact_output_dimensions(
@@ -271,39 +265,6 @@ class MfluxGenerateRequest(_MfluxRequest):
         return self
 
 
-class MfluxRefineRequest(_MfluxRequest):
-    """Regular Flux2Klein img2img request for one current source image."""
-
-    operation: Literal["refine"] = "refine"
-    source: DerivedImageSourceSnapshot
-    source_image_path: Path
-    description: str
-    style: StyleSnapshot | None = None
-    render_prompt: NonEmptyString
-    output_size: RefineOutputSize
-    transformation: RefineTransformation
-    image_strength: FiniteFloat = Field(ge=0.0, le=1.0)
-
-    @property
-    def source_seed(self) -> int:
-        return self.source.seed
-
-    @property
-    def edit_lineage(self) -> tuple[AcceptedEdit, ...]:
-        return self.source.edit_lineage
-
-    @model_validator(mode="after")
-    def require_refine_contract(self) -> MfluxRefineRequest:
-        self.require_dimensions(self.output_size)
-        self.source.require_output_dimensions(self.output_size, self.width, self.height)
-        if self.image_strength != self.transformation.strength:
-            raise ValueError(
-                f"{self.transformation.value} Refine image strength must be "
-                f"{self.transformation.strength:.2f}"
-            )
-        return self
-
-
 class MfluxEditRequest(_MfluxRequest):
     """Flux2KleinEdit request for one current source image."""
 
@@ -335,7 +296,7 @@ class MfluxEditRequest(_MfluxRequest):
         return self
 
 
-type MfluxOperationRequest = MfluxGenerateRequest | MfluxRefineRequest | MfluxEditRequest
+type MfluxOperationRequest = MfluxGenerateRequest | MfluxEditRequest
 
 
 class MfluxOutputOwnership(DomainModel):
@@ -383,15 +344,11 @@ class MfluxGenerateResult(_MfluxResult):
     provenance: DirectGenerateProvenance
 
 
-class MfluxRefineResult(_MfluxResult):
-    provenance: RefineProvenance
-
-
 class MfluxEditResult(_MfluxResult):
     provenance: EditProvenance
 
 
-type MfluxOperationResult = MfluxGenerateResult | MfluxRefineResult | MfluxEditResult
+type MfluxOperationResult = MfluxGenerateResult | MfluxEditResult
 
 
 def _package_version(package: str) -> str:
@@ -668,22 +625,6 @@ class MfluxGenerator:
         assert isinstance(result, MfluxGenerateResult)
         return result
 
-    def refine(
-        self,
-        request: MfluxRefineRequest,
-        *,
-        progress: MfluxProgressCallback | None = None,
-        cancellation: MfluxCancellationToken | None = None,
-    ) -> MfluxRefineResult:
-        """Execute regular Flux2Klein true img2img Refine."""
-        result = self._execute(
-            request,
-            progress=progress,
-            cancellation=cancellation,
-        )
-        assert isinstance(result, MfluxRefineResult)
-        return result
-
     def edit(
         self,
         request: MfluxEditRequest,
@@ -919,15 +860,13 @@ class MfluxGenerator:
 
     @staticmethod
     def _family(request: MfluxOperationRequest) -> _ModelFamily:
-        if isinstance(request, MfluxRefineRequest):
-            return _ModelFamily.REGULAR
         if isinstance(request, MfluxEditRequest):
             return _ModelFamily.EDIT
         return _ModelFamily.EDIT if request.reference_image_paths else _ModelFamily.REGULAR
 
     @staticmethod
     def _seed(request: MfluxOperationRequest) -> int:
-        return request.source_seed if isinstance(request, MfluxRefineRequest) else request.seed
+        return request.seed
 
     @classmethod
     def _generation_arguments(
@@ -943,14 +882,7 @@ class MfluxGenerator:
             "guidance": request.guidance,
             "scheduler": request.scheduler,
         }
-        if isinstance(request, MfluxRefineRequest):
-            arguments.update(
-                {
-                    "image_path": request.source_image_path,
-                    "image_strength": request.image_strength,
-                }
-            )
-        elif isinstance(request, MfluxEditRequest):
+        if isinstance(request, MfluxEditRequest):
             arguments.update(
                 {
                     "image_paths": [request.source_image_path],
@@ -1020,7 +952,7 @@ class MfluxGenerator:
     @staticmethod
     def _require_request_paths(request: MfluxOperationRequest) -> None:
         sources: tuple[Path, ...]
-        if isinstance(request, (MfluxRefineRequest, MfluxEditRequest)):
+        if isinstance(request, MfluxEditRequest):
             sources = (request.source_image_path,)
         else:
             sources = request.reference_image_paths
@@ -1029,7 +961,7 @@ class MfluxGenerator:
                 raise ImageGenerationError(
                     f"MFLUX {request.operation} source image {position} does not exist: {source}"
                 )
-        if isinstance(request, (MfluxRefineRequest, MfluxEditRequest)):
+        if isinstance(request, MfluxEditRequest):
             try:
                 with Image.open(request.source_image_path) as image:
                     image.load()
@@ -1095,20 +1027,6 @@ class MfluxGenerator:
             "generation_duration_seconds": generation_duration_seconds,
             "serialization_duration_seconds": serialization_duration_seconds,
         }
-        if isinstance(request, MfluxRefineRequest):
-            return MfluxRefineResult(
-                **timing,
-                provenance=RefineProvenance(
-                    source=request.source,
-                    description=request.description,
-                    style=request.style,
-                    render_prompt=request.render_prompt,
-                    output_size=request.output_size,
-                    transformation=request.transformation,
-                    strength=request.image_strength,
-                    settings=settings,
-                ),
-            )
         if isinstance(request, MfluxEditRequest):
             if prompt_token_count is None:
                 raise ImageGenerationError(
@@ -1141,7 +1059,7 @@ def dispose_mflux_result(result: object) -> None:
     """Dispose only a typed MFLUX result's identity-verified output."""
     if not isinstance(
         result,
-        (MfluxGenerateResult, MfluxRefineResult, MfluxEditResult),
+        (MfluxGenerateResult, MfluxEditResult),
     ):
         raise TypeError("MFLUX result disposer requires a typed MFLUX result")
     result.dispose_output()
@@ -1158,6 +1076,4 @@ __all__ = [
     "MfluxOperationRequest",
     "MfluxOperationResult",
     "MfluxOutputOwnership",
-    "MfluxRefineRequest",
-    "MfluxRefineResult",
 ]
