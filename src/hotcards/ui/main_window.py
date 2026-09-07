@@ -373,6 +373,14 @@ class MainWindow(QMainWindow):
             )
             window.change_applied.connect(self._show_undo_notification)
             window.hotspot_usage_requested.connect(self._show_hotspot_usage)
+            window.invalid_name_discarded.connect(
+                lambda name: self._show_info(
+                    "sound-name-discarded",
+                    f'Kept Sound name "{name}"',
+                    detail="The invalid name was discarded.",
+                    priority=3,
+                )
+            )
             window.closing.connect(
                 lambda geometry: self.settings.setValue(
                     self._SOUND_MANAGER_GEOMETRY_KEY,
@@ -413,6 +421,7 @@ class MainWindow(QMainWindow):
                     "key-name-discarded",
                     f'Kept Key name "{name}"',
                     detail="The invalid name was discarded.",
+                    priority=3,
                 )
             )
             window.closing.connect(
@@ -1197,13 +1206,21 @@ class MainWindow(QMainWindow):
             ),
         )
 
-    def _show_info(self, key: str, message: str, *, detail: str = "") -> None:
+    def _show_info(
+        self,
+        key: str,
+        message: str,
+        *,
+        detail: str = "",
+        priority: int | None = None,
+    ) -> None:
         self.notification_bar.show_notification(
             key,
             Notification(
                 message=message,
                 kind=NotificationKind.INFO,
                 detail=detail,
+                priority=priority,
             ),
         )
 

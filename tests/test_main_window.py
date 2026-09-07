@@ -566,6 +566,53 @@ def test_key_manager_done_discards_invalid_name_and_notifies(
     application.processEvents()
 
 
+def test_sound_manager_invalid_name_keeps_other_edits_and_does_not_trap(
+    application: QApplication,
+) -> None:
+    first = SoundDefinition(name="First", prompt="Original", duration_seconds=2)
+    second = SoundDefinition(name="Second", prompt="Other", duration_seconds=3)
+    window, controller, _workers, _background = _window(
+        Stack(name="Demo", sounds=(first, second), cards=(Card(name="Card"),))
+    )
+    window._show_sound_manager()
+    manager = window.sound_manager_window
+    assert manager is not None
+
+    manager.name_edit.setText("Second")
+    manager.prompt_edit.setPlainText("Updated prompt")
+    manager.duration_spin.setValue(4)
+    assert "unique" in manager.error_label.text()
+    QTest.keyClick(manager.name_edit, Qt.Key.Key_Return)
+    assert manager.name_edit.text() == "Second"
+    QTest.keyClick(manager.name_edit, Qt.Key.Key_Escape)
+    assert manager.name_edit.text() == "First"
+    assert manager.prompt_edit.toPlainText() == "Updated prompt"
+
+    manager.name_edit.setText("Second")
+    manager.done_button.click()
+    application.processEvents()
+
+    assert window.sound_manager_window is None
+    changed = controller.document.sound_by_id(first.id)
+    assert (changed.name, changed.prompt, changed.duration_seconds) == (
+        "First",
+        "Updated prompt",
+        4,
+    )
+    assert window.notification_bar.current_key == "sound-name-discarded"
+    assert window.notification_bar.current_notification is not None
+    assert window.notification_bar.current_notification.message == 'Kept Sound name "First"'
+
+    window._show_sound_manager()
+    manager = window.sound_manager_window
+    assert manager is not None
+    manager.name_edit.setText("Second")
+    manager.delete_button.click()
+    assert [sound.name for sound in controller.document.sounds] == ["Second"]
+    window.close()
+    application.processEvents()
+
+
 def test_sound_manager_edits_catalog_shows_usage_and_starts_generation(
     application: QApplication,
 ) -> None:

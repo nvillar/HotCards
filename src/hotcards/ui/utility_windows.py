@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -99,6 +99,24 @@ def _compact_button(
     font.setBold(True)
     button.setFont(font)
     return button
+
+
+def _catalog_name_validation_error(
+    name: str,
+    *,
+    current_id: UUID,
+    candidates: Sequence[KeyDefinition | SoundDefinition],
+    noun: str,
+) -> str | None:
+    normalized = name.strip()
+    if not normalized:
+        return f"{noun} name must not be empty."
+    if any(
+        candidate.id != current_id and candidate.name.casefold() == normalized.casefold()
+        for candidate in candidates
+    ):
+        return f"{noun} names must be unique within a stack."
+    return None
 
 
 class _ControllerUtilityWindow(QWidget):
@@ -672,15 +690,12 @@ class KeyManagerWindow(_ControllerUtilityWindow):
         key: KeyDefinition,
         name: str,
     ) -> str | None:
-        normalized = name.strip()
-        if not normalized:
-            return "Key name must not be empty."
-        if any(
-            candidate.id != key.id and candidate.name.casefold() == normalized.casefold()
-            for candidate in self.controller.document.keys
-        ):
-            return "Key names must be unique within a stack."
-        return None
+        return _catalog_name_validation_error(
+            name,
+            current_id=key.id,
+            candidates=self.controller.document.keys,
+            noun="Key",
+        )
 
     def _discard_invalid_name(
         self,
@@ -883,6 +898,7 @@ class SoundManagerWindow(_ControllerUtilityWindow):
     """Generate and manage the authoritative stack Sound catalog."""
 
     hotspot_usage_requested = Signal(object, object, object)
+    invalid_name_discarded = Signal(str)
 
     def __init__(
         self,
@@ -1004,6 +1020,8 @@ class SoundManagerWindow(_ControllerUtilityWindow):
         self.prompt_edit.textChanged.connect(self._draft_changed)
         self.duration_spin.valueChanged.connect(self._draft_changed)
         self.name_edit.editing_finished.connect(self._editing_finished)
+        self.name_edit.returnPressed.connect(self._return_pressed)
+        self.name_edit.escape_pressed.connect(self._revert_name_draft)
         self.prompt_edit.editing_finished.connect(self._editing_finished)
         self.generate_button.clicked.connect(self._generate)
         self.preview_button.clicked.connect(self._toggle_preview)
@@ -1091,13 +1109,21 @@ class SoundManagerWindow(_ControllerUtilityWindow):
         if self._selected_sound_id not in {sound.id for sound in self.controller.document.sounds}:
             return True
         sound = self.controller.document.sound_by_id(self._selected_sound_id)
-        values = (
+        draft_values = (
             self.name_edit.text(),
             self.prompt_edit.toPlainText(),
             self.duration_spin.value(),
         )
+        validation_error = self._name_validation_error(sound, draft_values[0])
+        values = (
+            sound.name if validation_error is not None else draft_values[0],
+            draft_values[1],
+            draft_values[2],
+        )
         if values == (sound.name, sound.prompt, sound.duration_seconds):
             self._draft_dirty = False
+            if validation_error is not None:
+                self._discard_invalid_name(sound, notify=True)
             return True
         committed = self._execute(
             UpdateSoundCommand(
@@ -1112,7 +1138,60 @@ class SoundManagerWindow(_ControllerUtilityWindow):
         )
         if committed:
             self._draft_dirty = False
+            if validation_error is not None:
+                changed_sound = self.controller.document.sound_by_id(sound.id)
+                self._render_properties(
+                    self.controller.document,
+                    changed_sound,
+                    draft=None,
+                )
+                self._set_error(self.error_label, "")
+                self.invalid_name_discarded.emit(changed_sound.name)
         return committed
+
+    def _name_validation_error(
+        self,
+        sound: SoundDefinition,
+        name: str,
+    ) -> str | None:
+        return _catalog_name_validation_error(
+            name,
+            current_id=sound.id,
+            candidates=self.controller.document.sounds,
+            noun="Sound",
+        )
+
+    def _discard_invalid_name(
+        self,
+        sound: SoundDefinition,
+        *,
+        notify: bool,
+    ) -> None:
+        with QSignalBlocker(self.name_edit):
+            self.name_edit.setText(sound.name)
+        self._draft_dirty = (
+            self.prompt_edit.toPlainText(),
+            self.duration_spin.value(),
+        ) != (sound.prompt, sound.duration_seconds)
+        self._set_error(self.error_label, "")
+        if notify:
+            self.invalid_name_discarded.emit(sound.name)
+
+    def _revert_name_draft(self) -> None:
+        if self._selected_sound_id is None:
+            return
+        sound = self.controller.document.sound_by_id(self._selected_sound_id)
+        self._discard_invalid_name(sound, notify=False)
+
+    def _return_pressed(self) -> None:
+        if self._selected_sound_id is None:
+            return
+        sound = self.controller.document.sound_by_id(self._selected_sound_id)
+        validation_error = self._name_validation_error(sound, self.name_edit.text())
+        if validation_error is not None:
+            self._set_error(self.error_label, validation_error)
+            return
+        self.commit_pending_edits(render_change=True)
 
     def _render_properties(
         self,
@@ -1189,6 +1268,12 @@ class SoundManagerWindow(_ControllerUtilityWindow):
 
     def _editing_finished(self, _next_focus: object, reason: object) -> None:
         mouse_focus = reason == Qt.FocusReason.MouseFocusReason
+        if self._selected_sound_id is not None:
+            sound = self.controller.document.sound_by_id(self._selected_sound_id)
+            validation_error = self._name_validation_error(sound, self.name_edit.text())
+            if validation_error is not None:
+                self._set_error(self.error_label, validation_error)
+                return
         if not self.commit_pending_edits(render_change=not mouse_focus) or not mouse_focus:
             return
         sound_id = self._selected_sound_id
@@ -1204,6 +1289,12 @@ class SoundManagerWindow(_ControllerUtilityWindow):
     def _draft_changed(self) -> None:
         if not self._rendering:
             self._draft_dirty = True
+            if self._selected_sound_id is not None:
+                sound = self.controller.document.sound_by_id(self._selected_sound_id)
+                self._set_error(
+                    self.error_label,
+                    self._name_validation_error(sound, self.name_edit.text()) or "",
+                )
             self._update_enabled_state()
 
     def _add_sound(self) -> None:
@@ -1226,9 +1317,15 @@ class SoundManagerWindow(_ControllerUtilityWindow):
             self.name_edit.selectAll()
 
     def _delete_sound(self) -> None:
-        if self._selected_sound_id is None or not self.commit_pending_edits(render_change=False):
+        if self._selected_sound_id is None:
             return
         sound_id = self._selected_sound_id
+        sound = self.controller.document.sound_by_id(sound_id)
+        if (
+            self._name_validation_error(sound, self.name_edit.text()) is None
+            and not self.commit_pending_edits(render_change=False)
+        ):
+            return
         self._selected_sound_id = None
         self._stop_preview()
         self._execute(
