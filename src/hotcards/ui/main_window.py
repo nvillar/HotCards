@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from PySide6.QtCore import QSettings, QSignalBlocker, Qt
 from PySide6.QtGui import QAction, QCloseEvent, QKeySequence
 from PySide6.QtWidgets import (
+    QApplication,
     QComboBox,
     QDialog,
     QFileDialog,
@@ -32,10 +33,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from hotcards.application.applied_image_change import (
-    AppliedImageChange,
-    EditImageOperation,
-)
+from hotcards.application.applied_image_change import AppliedImageChange
 from hotcards.application.background_workflow import (
     BackgroundGenerationSettings,
     BackgroundWorkflow,
@@ -90,7 +88,7 @@ from hotcards.domain.models import (
 from hotcards.storage.stack_store import StackStoreError
 from hotcards.ui.card_canvas import CardCanvas
 from hotcards.ui.card_sidebar import CardSidebar
-from hotcards.ui.inspector import EditInstructionDraft, Inspector
+from hotcards.ui.inspector import Inspector
 from hotcards.ui.new_stack_dialog import NewStackDialog
 from hotcards.ui.notification_bar import (
     Notification,
@@ -169,9 +167,6 @@ class MainWindow(QMainWindow):
         self._service_notification_dismissed = False
         self._undo_notification_token: UndoToken | None = None
         self._applied_image_change: AppliedImageChange | None = None
-        self._edit_undo_changes: dict[UndoToken, AppliedImageChange] = {}
-        self._submitted_edit_draft: EditInstructionDraft | None = None
-        self._restored_edit_drafts: dict[UndoToken, EditInstructionDraft] = {}
         self._card_selection_history: dict[
             UndoToken,
             tuple[UUID | None, UUID | None],
@@ -206,6 +201,9 @@ class MainWindow(QMainWindow):
         self._build_toolbar()
         self._build_panes()
         self._build_menu()
+        application = QApplication.instance()
+        if application is not None:
+            application.focusChanged.connect(self._authoring_focus_changed)
         self.workers.availability_changed.connect(self.apply_availability_diagnostic)
         if self.document_session is not None:
             self.document_session.document_replaced.connect(self._document_replaced)
@@ -724,11 +722,7 @@ class MainWindow(QMainWindow):
         """Refresh all panes from the controller's authoritative snapshot."""
         snapshot = self.controller.document
         retained_tokens = self.controller.retained_history_tokens
-        for metadata in (
-            self._edit_undo_changes,
-            self._restored_edit_drafts,
-            self._card_selection_history,
-        ):
+        for metadata in (self._card_selection_history,):
             for token in metadata.keys() - retained_tokens:
                 del metadata[token]
         previous_card_id = self._rendered_card_id
@@ -1009,15 +1003,6 @@ class MainWindow(QMainWindow):
             or change.token not in self.controller.retained_history_tokens
         ):
             return
-        if isinstance(change.operation, EditImageOperation):
-            first_completion = change.token not in self._edit_undo_changes
-            self._edit_undo_changes.setdefault(change.token, change)
-            if (
-                first_completion
-                and not self._is_running
-                and self.controller.is_history_token_applied(change.token)
-            ):
-                self._clear_submitted_edit_instruction(change)
         if self._is_running or self.controller.current_undo_token != change.token:
             return
         self._applied_image_change = change
@@ -1037,43 +1022,6 @@ class MainWindow(QMainWindow):
             ),
         )
 
-    def _restore_edit_instruction_after_undo(self, token: UndoToken | None) -> None:
-        change = self._edit_undo_changes.get(token) if token is not None else None
-        if change is None or not isinstance(change.operation, EditImageOperation):
-            return
-        draft = self.inspector.edit_instruction_draft
-        if (
-            self._is_running
-            or draft.card_id != change.card_id
-            or draft.revision_id != change.revision_id
-            or draft.text
-        ):
-            return
-        self.inspector.set_edit_instruction(change.operation.instruction)
-        self._restored_edit_drafts[change.token] = self.inspector.edit_instruction_draft
-        self._update_generation_actions()
-
-    def _clear_restored_edit_instruction_after_redo(self, token: UndoToken | None) -> None:
-        restored = self._restored_edit_drafts.pop(token, None) if token is not None else None
-        if restored is None or self.inspector.edit_instruction_draft != restored:
-            return
-        self.inspector.clear_edit_instruction()
-        self._update_generation_actions()
-
-    def _clear_submitted_edit_instruction(self, change: AppliedImageChange) -> None:
-        submitted = self._submitted_edit_draft
-        if (
-            submitted is not None
-            and isinstance(change.operation, EditImageOperation)
-            and submitted.card_id == change.card_id
-            and submitted.revision_id == change.revision_id
-            and submitted.text.strip() == change.operation.instruction
-        ):
-            self._submitted_edit_draft = None
-            if self.inspector.edit_instruction_draft == submitted:
-                self.inspector.clear_edit_instruction()
-                self._update_generation_actions()
-
     def _undo_notification(self) -> None:
         if self._is_running:
             return
@@ -1089,7 +1037,6 @@ class MainWindow(QMainWindow):
         if changed:
             self._restore_card_selection(token, undoing=True)
             self.render_document()
-            self._restore_edit_instruction_after_undo(token)
 
     def _create_image_revision(self) -> None:
         if self._is_running:
@@ -1299,6 +1246,20 @@ class MainWindow(QMainWindow):
     def undo(self) -> None:
         if self._is_running:
             return
+        draft_context = self._focused_edit_draft_context()
+        if (
+            draft_context is not None
+            and self.controller.can_undo_edit_draft(*draft_context)
+        ):
+            try:
+                changed = self.controller.undo_edit_draft(*draft_context)
+            except DocumentMutationBlockedError as error:
+                self._show_pending_durability_error(str(error))
+                return
+            if changed:
+                self.render_document(render_sidebar=False)
+                self._update_document_actions()
+            return
         self._clear_undo_notification()
         if self.background_workflow is not None and self.background_workflow.busy:
             self._cancel_background_generation()
@@ -1311,10 +1272,23 @@ class MainWindow(QMainWindow):
         if changed:
             self._restore_card_selection(token, undoing=True)
             self.render_document()
-            self._restore_edit_instruction_after_undo(token)
 
     def redo(self) -> None:
         if self._is_running:
+            return
+        draft_context = self._focused_edit_draft_context()
+        if (
+            draft_context is not None
+            and self.controller.can_redo_edit_draft(*draft_context)
+        ):
+            try:
+                changed = self.controller.redo_edit_draft(*draft_context)
+            except DocumentMutationBlockedError as error:
+                self._show_pending_durability_error(str(error))
+                return
+            if changed:
+                self.render_document(render_sidebar=False)
+                self._update_document_actions()
             return
         self._clear_undo_notification()
         if self.background_workflow is not None and self.background_workflow.busy:
@@ -1328,7 +1302,6 @@ class MainWindow(QMainWindow):
         if changed:
             self._restore_card_selection(token, undoing=False)
             self.render_document()
-            self._clear_restored_edit_instruction_after_redo(token)
 
     def _restore_card_selection(
         self,
@@ -1345,6 +1318,33 @@ class MainWindow(QMainWindow):
         if self.background_workflow is not None and self.background_workflow.busy:
             self._cancel_background_generation()
         self._update_generation_actions()
+        self._update_document_actions()
+
+    def _focused_edit_draft_context(self) -> tuple[UUID, UUID] | None:
+        if (
+            not self.inspector.edit_instruction_edit.hasFocus()
+            or self._selected_card_id is None
+        ):
+            return None
+        card = next(
+            (
+                candidate
+                for candidate in self.controller.document.cards
+                if candidate.id == self._selected_card_id
+            ),
+            None,
+        )
+        if card is None:
+            return None
+        return card.id, card.active_revision.id
+
+    def _authoring_focus_changed(self, _previous: QWidget | None, _current: QWidget | None) -> None:
+        editor = self.inspector.edit_instruction_edit
+        if any(
+            widget is not None and (widget is editor or editor.isAncestorOf(widget))
+            for widget in (_previous, _current)
+        ):
+            self._update_document_actions()
 
     def _primary_empty_action(self) -> None:
         if self._is_running:
@@ -1473,9 +1473,6 @@ class MainWindow(QMainWindow):
         self.sound_player.stop()
         self._close_utility_windows(commit_pending=False)
         self._clear_undo_notification()
-        self._edit_undo_changes.clear()
-        self._restored_edit_drafts.clear()
-        self._submitted_edit_draft = None
         self._card_selection_history.clear()
         self._rendered_card_id = None
         self._card_name_commit_failed = False
@@ -1579,11 +1576,24 @@ class MainWindow(QMainWindow):
             and self.document_session is not None
             and self.document_session.store is not None
         )
+        draft_context = self._focused_edit_draft_context()
+        can_undo_draft = (
+            draft_context is not None
+            and self.controller.can_undo_edit_draft(*draft_context)
+        )
+        can_redo_draft = (
+            draft_context is not None
+            and self.controller.can_redo_edit_draft(*draft_context)
+        )
         self.undo_action.setEnabled(
-            mutation_allowed and not self._is_running and self.controller.can_undo
+            mutation_allowed
+            and not self._is_running
+            and (can_undo_draft or self.controller.can_undo)
         )
         self.redo_action.setEnabled(
-            mutation_allowed and not self._is_running and self.controller.can_redo
+            mutation_allowed
+            and not self._is_running
+            and (can_redo_draft or self.controller.can_redo)
         )
         self.duplicate_card_action.setEnabled(
             mutation_allowed
@@ -1699,10 +1709,19 @@ class MainWindow(QMainWindow):
         if not self._commit_authoring_metadata():
             return
         try:
-            self._submitted_edit_draft = self.inspector.edit_instruction_draft
+            card = next(
+                card
+                for card in self.controller.document.cards
+                if card.id == card_id
+            )
+            draft = card.active_revision.edit_draft
+            if draft.instruction.strip() != instruction:
+                raise BackgroundWorkflowError(
+                    "the Edit Instruction changed before editing started"
+                )
             workflow.edit(
                 card_id,
-                instruction=instruction,
+                draft=draft,
                 output_size=output_size,
             )
         except (BackgroundWorkflowError, ValidationError) as error:

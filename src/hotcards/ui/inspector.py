@@ -353,16 +353,6 @@ def _first_selectable_combo_index(combo: QComboBox) -> int:
     return -1
 
 
-@dataclass(frozen=True, slots=True)
-class EditInstructionDraft:
-    """An exact editor state, including user recalls and context transitions."""
-
-    card_id: UUID | None
-    revision_id: UUID | None
-    text: str
-    sequence: int
-
-
 class Inspector(QWidget):
     """Render the selected active revision and issue typed commands."""
 
@@ -388,7 +378,6 @@ class Inspector(QWidget):
         self.selected_card_id: UUID | None = None
         self._rendered_revision_id: UUID | None = None
         self._rendered_background_id: UUID | None = None
-        self._edit_instruction_sequence = 0
         self._generate_using_text = ""
         self._generate_reason = ""
         self._image_source_size: tuple[int, int] | None = None
@@ -575,6 +564,7 @@ class Inspector(QWidget):
         self.edit_instruction_edit.setAccessibleName("Edit Instruction")
         self.edit_instruction_edit.setPlaceholderText("Describe the change to make")
         self.edit_instruction_edit.setMaximumHeight(110)
+        self.edit_instruction_edit.setUndoRedoEnabled(False)
         layout.addWidget(self.edit_instruction_edit)
         self.edit_instruction_error = QLabel()
         self.edit_instruction_error.setObjectName("editInstructionValidationError")
@@ -909,8 +899,26 @@ class Inspector(QWidget):
             self.render_inputs_changed.emit()
 
     def _edit_instruction_changed(self) -> None:
-        self._edit_instruction_sequence += 1
+        if self._rendering:
+            return
+        self._replace_edit_draft(self.edit_instruction_edit.toPlainText())
         self._edit_inputs_changed()
+
+    def _replace_edit_draft(self, instruction: str) -> bool:
+        card = self._selected_card()
+        if card is None:
+            return False
+        try:
+            self.controller.replace_edit_draft(
+                card.id,
+                card.active_revision.id,
+                instruction,
+            )
+        except (DocumentMutationBlockedError, ValidationError, ValueError) as error:
+            self._set_error(self.edit_instruction_error, str(error))
+            self._render_edit_instruction(card.active_revision.edit_draft.instruction)
+            return False
+        return True
 
     def _edit_inputs_changed(self) -> None:
         if self._rendering:
@@ -962,11 +970,10 @@ class Inspector(QWidget):
             )
             self.selected_card_id = card.id if card is not None else None
             if card is None:
-                if previous_card_id is not None:
-                    self._edit_instruction_sequence += 1
                 self._rendered_revision_id = None
                 self._rendered_background_id = None
                 self._render_edit_history(None)
+                self._render_edit_instruction("")
                 self.pages.setCurrentIndex(0)
                 self._set_error(self._description_errors, "")
                 self._set_error(self.reference_error, "")
@@ -986,7 +993,6 @@ class Inspector(QWidget):
             background_id = revision.background.id if revision.background is not None else None
             same_image = same_revision and self._rendered_background_id == background_id
             if not same_revision:
-                self._edit_instruction_sequence += 1
                 self._set_error(self._description_errors, "")
                 self._set_error(self.reference_error, "")
                 self.set_hotspot_error("")
@@ -999,6 +1005,7 @@ class Inspector(QWidget):
             )
             if self.description_edit.toPlainText() != description:
                 self.description_edit.setPlainText(description)
+            self._render_edit_instruction(revision.edit_draft.instruction)
             self._render_style_selector(document, revision)
             self._render_reference(document, card, revision)
             self._render_resolution(
@@ -1119,17 +1126,12 @@ class Inspector(QWidget):
     def set_edit_error(self, message: str) -> None:
         self._set_error(self.edit_instruction_error, message)
 
-    @property
-    def edit_instruction_draft(self) -> EditInstructionDraft:
-        return EditInstructionDraft(
-            card_id=self.selected_card_id,
-            revision_id=self._rendered_revision_id,
-            text=self.edit_instruction_edit.toPlainText(),
-            sequence=self._edit_instruction_sequence,
-        )
-
     def set_edit_instruction(self, instruction: str) -> None:
-        self._edit_instruction_sequence += 1
+        self._render_edit_instruction(instruction)
+        self._replace_edit_draft(instruction)
+        self._edit_inputs_changed()
+
+    def _render_edit_instruction(self, instruction: str) -> None:
         with QSignalBlocker(self.edit_instruction_edit):
             self.edit_instruction_edit.setPlainText(instruction)
         self._set_error(self.edit_instruction_error, "")
@@ -1157,7 +1159,6 @@ class Inspector(QWidget):
         if self._rendering:
             return
         self.set_edit_instruction(instruction)
-        self._render_inputs_changed()
 
     def _refresh_generation_tooltips(self) -> None:
         self.generate_background_button.setToolTip(
@@ -1210,7 +1211,7 @@ class Inspector(QWidget):
         self._rendered_revision_id = None
         self._rendered_background_id = None
         self._render_edit_history(None)
-        self.clear_edit_instruction()
+        self._render_edit_instruction("")
         self._set_error(self._description_errors, "")
         self._set_error(self.reference_error, "")
         self._set_error(self._style_errors, "")

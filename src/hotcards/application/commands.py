@@ -919,6 +919,36 @@ class ReplaceRevisionBackgroundCommand:
 
 
 @dataclass(frozen=True, slots=True)
+class ApplyEditResultCommand:
+    """Replace a background and consume only the exact submitted Edit draft."""
+
+    card_id: UUID
+    revision_id: UUID
+    background: Background
+    submitted_draft_generation_id: UUID
+    cleared_draft_generation_id: UUID = field(default_factory=uuid4)
+
+    def apply(self, document: Stack) -> Stack:
+        card_index = _card_index(document, self.card_id)
+        card = document.cards[card_index]
+        revision_index = _revision_index(card, self.revision_id)
+        current_revision = card.revisions[revision_index]
+        updates: dict[str, object] = {
+            "background": self.background.model_copy(deep=True),
+        }
+        if (
+            current_revision.edit_draft.generation_id
+            == self.submitted_draft_generation_id
+        ):
+            updates["edit_draft"] = EditDraft(
+                generation_id=self.cleared_draft_generation_id,
+            )
+        revision = current_revision.model_copy(update=updates)
+        card = _replace_revision(card, revision_index, revision)
+        return validated_copy(_replace_card(document, card_index, card))
+
+
+@dataclass(frozen=True, slots=True)
 class ReplaceHotspotSetCommand:
     """Replace one revision's complete applied hotspot set atomically."""
 

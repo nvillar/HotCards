@@ -524,7 +524,7 @@ def test_same_version_image_replacement_refreshes_sizes_history_not_drafts_or_ho
     inspector.description_edit.setPlainText("A focused Description draft")
     inspector.set_edit_instruction("A pending instruction\nwith exact line breaks.")
     application.processEvents()
-    draft = inspector.edit_instruction_draft
+    draft = controller.edit_draft(card.id, card.active_revision.id)
     controls = (
         inspector.resolution_combo,
         inspector.edit_resolution_combo,
@@ -576,7 +576,8 @@ def test_same_version_image_replacement_refreshes_sizes_history_not_drafts_or_ho
             for index in range(inspector.edit_history_list.count())
         ] == list(history)
         assert inspector.description_edit.toPlainText() == "A focused Description draft"
-        assert inspector.edit_instruction_draft == draft
+        assert controller.edit_draft(card.id, card.active_revision.id) == draft
+        assert inspector.edit_instruction_edit.toPlainText() == draft.instruction
         assert inspector.selected_interaction_id == selected
         inspector.render(controller.document, card.id, image_source_size=current_size)
         assert controller.current_undo_token == expected_token
@@ -614,7 +615,7 @@ def test_edit_history_uses_only_active_image_authored_lineage(
     inspector = Inspector(controller)
     inspector.render(controller.document, card.id)
     inspector.set_edit_instruction("Do not overwrite this editor.")
-    draft = inspector.edit_instruction_draft
+    draft = controller.edit_draft(card.id, revision.id)
     expected = (
         ()
         if operation == "generate"
@@ -633,17 +634,20 @@ def test_edit_history_uses_only_active_image_authored_lineage(
         assert item.toolTip() == instruction
         assert "Hidden Style" not in item.text()
     inspector.render(controller.document, card.id)
-    assert inspector.edit_instruction_draft == draft
+    assert controller.edit_draft(card.id, revision.id) == draft
 
     controller.execute(ActivateRevisionCommand(card_id=card.id, revision_id=card.revisions[0].id))
     inspector.render(controller.document, card.id)
     assert inspector.edit_history_list.count() == len(instructions)
-    assert inspector.edit_instruction_edit.toPlainText() == draft.text
+    assert inspector.edit_instruction_edit.toPlainText() == ""
     inspector.render(controller.document, other.id)
     assert inspector.edit_history_list.count() == 0
     assert not inspector.edit_history_list.isHidden()
     inspector.render(controller.document, card.id)
     assert inspector.edit_history_list.count() == len(instructions)
+    controller.execute(ActivateRevisionCommand(card_id=card.id, revision_id=revision.id))
+    inspector.render(controller.document, card.id)
+    assert inspector.edit_instruction_edit.toPlainText() == draft.instruction
     inspector.reset_context()
     assert inspector.edit_history_list.count() == 0
     inspector.render(controller.document, None)
@@ -670,12 +674,12 @@ def test_edit_history_recall_is_exact_accessible_and_has_no_document_side_effect
     inspector.edit_background_requested.connect(lambda *_args: requests.append("edit"))
     inspector.document_changed.connect(lambda *_args: requests.append("document"))
     inspector.hotspot_selected.connect(lambda *_args: requests.append("hotspot"))
-    draft = inspector.edit_instruction_draft
+    draft = controller.edit_draft(card.id, card.active_revision.id)
     document = controller.document
     token = controller.current_undo_token
     history.setCurrentRow(0)
     QTest.keyClick(history, Qt.Key.Key_Down)
-    assert inspector.edit_instruction_draft == draft
+    assert controller.edit_draft(card.id, card.active_revision.id) == draft
     assert history.currentRow() == 1
     if activation == "click":
         item = history.item(1)
@@ -693,15 +697,15 @@ def test_edit_history_recall_is_exact_accessible_and_has_no_document_side_effect
         }[activation]
         QTest.keyClick(history, key)
     assert inspector.edit_instruction_edit.toPlainText() == instruction
-    assert inspector.edit_instruction_draft.sequence == draft.sequence + 1
-    recalled = inspector.edit_instruction_draft
+    recalled = controller.edit_draft(card.id, card.active_revision.id)
+    assert recalled.generation_id != draft.generation_id
     refresh_signals: list[object] = []
     history.currentItemChanged.connect(lambda *_args: refresh_signals.append("selection"))
     history.instruction_requested.connect(lambda *_args: refresh_signals.append("recall"))
     inspector.render(controller.document, card.id)
-    assert inspector.edit_instruction_draft == recalled
+    assert controller.edit_draft(card.id, card.active_revision.id) == recalled
     assert refresh_signals == []
-    assert controller.document == document
+    assert controller.document != document
     assert controller.current_undo_token == token
     assert requests == []
     assert inspector.inspector_tabs.currentIndex() == inspector._edit_tab_index

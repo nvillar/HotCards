@@ -7,7 +7,7 @@ import os
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -58,6 +58,7 @@ from hotcards.domain.models import (
     DerivedImageSourceSnapshot,
     DirectGenerateProvenance,
     DuplicateProvenance,
+    EditDraft,
     EditProvenance,
     ExactOutputSize,
     GeneratedBackground,
@@ -291,9 +292,29 @@ def _start_image_operation(workflow: BackgroundWorkflow, card: Card, operation: 
     else:
         workflow.edit(
             card.id,
-            instruction="Open the gate.",
+            draft=_edit_draft(workflow, card.id, "Open the gate."),
             output_size=workflow.available_edit_output_sizes(card.id)[0],
         )
+
+
+def _edit_draft(
+    workflow: BackgroundWorkflow,
+    card_id: UUID,
+    instruction: str,
+) -> EditDraft:
+    card = next(card for card in workflow.controller.document.cards if card.id == card_id)
+    return workflow.controller.replace_edit_draft(
+        card.id,
+        card.active_revision.id,
+        instruction,
+    )
+
+
+def _assert_same_revision_except_draft(
+    actual: CardRevision,
+    expected: CardRevision,
+) -> None:
+    assert actual.model_copy(update={"edit_draft": expected.edit_draft}) == expected
 
 
 def _create_generated_source(
@@ -429,10 +450,16 @@ def test_explicit_image_journey_reopens_without_sources_and_preserves_run_naviga
         )
         inspector.edit_background_button.click()
         assert workflow.busy
-        assert controller.document.cards[0].active_revision == generated
+        submitted = controller.document.cards[0].active_revision
+        assert submitted.model_copy(update={"edit_draft": generated.edit_draft}) == generated
         _complete_generation(workers)
         edited = controller.document.cards[0].active_revision
-        assert edited.model_copy(update={"background": generated.background}) == generated
+        assert edited.model_copy(
+            update={
+                "background": generated.background,
+                "edit_draft": generated.edit_draft,
+            }
+        ) == generated
         assert len(controller.document.cards[0].revisions) == 1
         assert isinstance(edited.provenance, EditProvenance)
         assert edited.provenance.source == DerivedImageSourceSnapshot(
@@ -455,7 +482,7 @@ def test_explicit_image_journey_reopens_without_sources_and_preserves_run_naviga
         edited_path = session.store.asset_path(edited.image_path)
 
         assert [change.operation.kind for change in applied] == ["generate", "edit"]
-        assert [change.previous_revision for change in applied] == [before, generated]
+        assert [change.previous_revision for change in applied] == [before, submitted]
         assert all(change.revision_id == before.id for change in applied)
         assert session.store.load() == controller.document
 
@@ -469,7 +496,10 @@ def test_explicit_image_journey_reopens_without_sources_and_preserves_run_naviga
         ) == edited
         assert checkpoint.edit_draft.instruction == ""
         assert checkpoint.edit_draft.generation_id != edited.edit_draft.generation_id
-        assert controller.document.cards[0].revisions == (generated, checkpoint)
+        restored_original = controller.document.cards[0].revisions[0]
+        _assert_same_revision_except_draft(restored_original, generated)
+        assert restored_original.edit_draft == edited.edit_draft
+        assert controller.document.cards[0].revisions == (restored_original, checkpoint)
         assert controller.current_undo_token != applied[-1].token
         assert checkpoint.background == edited.background
         assert len(model.calls) == invocation_count
@@ -498,21 +528,22 @@ def test_explicit_image_journey_reopens_without_sources_and_preserves_run_naviga
         assert controller.document.cards[0].active_revision == checkpoint
         assert not controller.can_undo
         _assert_current_image_controls(window, ResolutionTier.MEDIUM)
-        assert window._edit_undo_changes == {}
         inspector.inspector_tabs.setCurrentIndex(inspector._edit_tab_index)
         window.show()
         application.processEvents()
         history = inspector.edit_history_list
         assert history.count() == 1
-        draft = inspector.edit_instruction_draft
+        draft = controller.edit_draft(card.id, checkpoint.id)
         QTest.mouseClick(
             history.viewport(),
             Qt.MouseButton.LeftButton,
             pos=history.visualItemRect(history.item(0)).center(),
         )
-        assert inspector.edit_instruction_draft.text == instruction
-        assert inspector.edit_instruction_draft.sequence == draft.sequence + 1
-        assert controller.document == saved
+        recalled = controller.edit_draft(card.id, checkpoint.id)
+        assert recalled.instruction == instruction
+        assert recalled.generation_id != draft.generation_id
+        assert controller.document != saved
+        recalled_document = controller.document
         assert not controller.can_undo
         assert len(model.calls) == invocation_count
 
@@ -528,7 +559,7 @@ def test_explicit_image_journey_reopens_without_sources_and_preserves_run_naviga
         assert window._run_session.state.current_card_id == references[0].id
         window.back_button.click()
         assert window._run_session.state.current_card_id == card.id
-        assert controller.document == saved
+        assert controller.document == recalled_document
         assert len(model.calls) == invocation_count
         assert not workflow.busy
     finally:
@@ -588,7 +619,8 @@ def test_restored_edit_branch_survives_duplication_source_deletion_and_further_e
         assert inspector.edit_history_list.count() == 2
 
         window.undo()
-        assert controller.document.cards[0].active_revision == first
+        restored_first = controller.document.cards[0].active_revision
+        assert restored_first.model_copy(update={"edit_draft": first.edit_draft}) == first
         assert inspector.edit_history_list.count() == 1
         assert inspector.edit_instruction_edit.toPlainText() == instruction
         _assert_current_image_controls(window, ResolutionTier.LARGE)
@@ -598,23 +630,25 @@ def test_restored_edit_branch_survives_duplication_source_deletion_and_further_e
         assert inspector.edit_instruction_edit.toPlainText() == ""
         _assert_current_image_controls(window, ResolutionTier.FULL)
         window.undo()
-        assert controller.document.cards[0].active_revision == first
+        restored_first = controller.document.cards[0].active_revision
+        assert restored_first.model_copy(update={"edit_draft": first.edit_draft}) == first
         assert inspector.edit_instruction_edit.toPlainText() == instruction
         assert abandoned_path.is_file()
         assert session.flush()
 
         history = inspector.edit_history_list
         history.setCurrentRow(0)
-        previous_draft = inspector.edit_instruction_draft
+        previous_draft = controller.edit_draft(card.id, first.id)
         QTest.keyClick(history, Qt.Key.Key_Return)
-        recalled = inspector.edit_instruction_draft
-        assert recalled.text == instruction
-        assert recalled.sequence == previous_draft.sequence + 1
+        recalled = controller.edit_draft(card.id, first.id)
+        assert recalled.instruction == instruction
+        assert recalled.generation_id != previous_draft.generation_id
         window.redo()
-        assert inspector.edit_instruction_draft == recalled
+        assert controller.edit_draft(card.id, first.id) == recalled
         window.undo()
-        assert inspector.edit_instruction_draft == recalled
-        assert controller.document.cards[0].active_revision == first
+        assert controller.edit_draft(card.id, first.id) == recalled
+        restored_first = controller.document.cards[0].active_revision
+        assert restored_first.model_copy(update={"edit_draft": first.edit_draft}) == first
         _assert_current_image_controls(window, ResolutionTier.LARGE)
         inspector.edit_background_button.click()
         assert workflow.busy
@@ -633,7 +667,7 @@ def test_restored_edit_branch_survives_duplication_source_deletion_and_further_e
             instruction,
         ]
         assert not controller.can_redo
-        assert abandoned_token not in window._edit_undo_changes
+        assert abandoned_token not in controller.retained_history_tokens
         assert not abandoned_path.exists()
         assert inspector.edit_instruction_edit.toPlainText() == ""
         assert session.store.load() == controller.document
@@ -701,9 +735,12 @@ def test_restored_edit_branch_survives_duplication_source_deletion_and_further_e
         _complete_generation(workers)
         result = controller.document.cards[0].active_revision
         assert len(controller.document.cards[0].revisions) == 1
-        assert result.model_copy(update={"background": duplicate_revision.background}) == (
-            duplicate_revision
-        )
+        assert result.model_copy(
+            update={
+                "background": duplicate_revision.background,
+                "edit_draft": duplicate_revision.edit_draft,
+            }
+        ) == duplicate_revision
         assert result.provenance.source.background_id == duplicate_revision.background.id
         assert result.provenance.settings.seed == 404
         lineage = image_edit_lineage(result.provenance)
@@ -807,7 +844,6 @@ def test_edit_completion_retains_its_token_across_reentrant_session_changes(
         change = applied[0]
         assert change.token != controller.current_undo_token
         assert change.token in controller.retained_history_tokens
-        assert change.token in window._edit_undo_changes
         assert window._applied_image_change is None
         assert window.inspector.edit_instruction_edit.toPlainText() == ""
         assert window.canvas_card_name.text() == "After Edit"
@@ -819,7 +855,8 @@ def test_edit_completion_retains_its_token_across_reentrant_session_changes(
         assert controller.current_undo_token == change.token
         assert window.inspector.edit_instruction_edit.toPlainText() == ""
         window.undo()
-        assert controller.document.cards[0].active_revision == source
+        restored = controller.document.cards[0].active_revision
+        assert restored.model_copy(update={"edit_draft": source.edit_draft}) == source
         assert window.inspector.edit_instruction_edit.toPlainText() == instruction
     finally:
         window.close()
@@ -990,11 +1027,9 @@ def test_edit_uses_only_secure_current_image_and_replaces_complete_version(
     options = workflow.available_edit_output_sizes(card.id)
     assert options[0] == CurrentSourceSize(width=512, height=384)
 
-    workflow.edit(
-        card.id,
-        instruction="  Open the garden gate.  ",
-        output_size=options[0],
-    )
+    draft = _edit_draft(workflow, card.id, "  Open the garden gate.  ")
+    submitted = controller.document.cards[0].active_revision
+    workflow.edit(card.id, draft=draft, output_size=options[0])
     snapshot_path = next((tmp_path / "temporary").glob(".image-source-*.png"))
     _complete_generation(workers)
 
@@ -1042,7 +1077,7 @@ def test_edit_uses_only_secure_current_image_and_replaces_complete_version(
     assert snapshot_path != source_path
     assert not snapshot_path.exists()
     assert applied[-1].message == "Image edited"
-    assert applied[-1].previous_revision == source
+    assert applied[-1].previous_revision == submitted
     assert len(applied) == 1
     assert applied[0].card_id == card.id
     assert applied[0].revision_id == edited.id
@@ -1054,7 +1089,9 @@ def test_edit_uses_only_secure_current_image_and_replaces_complete_version(
     edited_path = session.store.asset_path(edited.background.image_path)
     assert controller.undo_if_current(token)
     assert session.flush()
-    assert controller.document.cards[0].active_revision == source
+    restored = controller.document.cards[0].active_revision
+    _assert_same_revision_except_draft(restored, source)
+    assert restored.edit_draft.instruction == "  Open the garden gate.  "
     assert edited_path.is_file()
     assert controller.redo()
     assert session.flush()
@@ -1086,7 +1123,7 @@ def test_sequential_edits_append_lineage_and_use_fresh_seeds(
         current_size = workflow.available_edit_output_sizes(card.id)[0]
         workflow.edit(
             card.id,
-            instruction=instruction,
+            draft=_edit_draft(workflow, card.id, instruction),
             output_size=current_size,
         )
         _complete_generation(workers)
@@ -1134,7 +1171,7 @@ def test_edit_flattens_duplicate_source_provenance(
 
     workflow.edit(
         card.id,
-        instruction="Open the gate.",
+        draft=_edit_draft(workflow, card.id, "Open the gate."),
         output_size=workflow.available_edit_output_sizes(card.id)[0],
     )
     _complete_generation(workers)
@@ -1185,7 +1222,7 @@ def test_edit_rejects_replaced_source_and_failed_model_without_new_version(
 
     workflow.edit(
         card.id,
-        instruction="Open the gate.",
+        draft=_edit_draft(workflow, card.id, "Open the gate."),
         output_size=workflow.available_edit_output_sizes(card.id)[0],
     )
     snapshot_path = next((tmp_path / "temporary").glob(".image-source-*.png"))
@@ -1194,17 +1231,21 @@ def test_edit_rejects_replaced_source_and_failed_model_without_new_version(
 
     assert model.consumed_source_pixels[-1] == (0, 0, 128)
     assert model.calls[-1]["image_paths"] == [snapshot_path]
-    assert controller.document.cards[0].revisions == (source,)
+    failed_revision = controller.document.cards[0].active_revision
+    _assert_same_revision_except_draft(failed_revision, source)
+    assert failed_revision.edit_draft.instruction == "Open the gate."
     assert "changed while Edit was running" in str(failures[-1])
     assert not snapshot_path.exists()
 
     workflow.edit(
         card.id,
-        instruction="Add ivy.",
+        draft=_edit_draft(workflow, card.id, "Add ivy."),
         output_size=workflow.available_edit_output_sizes(card.id)[0],
     )
     workers.operations[-1].failed.emit(RuntimeError("model failed"))
-    assert controller.document.cards[0].revisions == (source,)
+    failed_revision = controller.document.cards[0].active_revision
+    _assert_same_revision_except_draft(failed_revision, source)
+    assert failed_revision.edit_draft.instruction == "Add ivy."
     assert "model failed" in str(failures[-1])
     assert not workflow.busy
 
@@ -1226,7 +1267,7 @@ def test_edit_allows_empty_description_but_suppresses_complete_revision_changes(
     empty_description_source = controller.document.cards[0].active_revision
     workflow.edit(
         card.id,
-        instruction="Open the gate.",
+        draft=_edit_draft(workflow, card.id, "Open the gate."),
         output_size=workflow.available_edit_output_sizes(card.id)[0],
     )
     _complete_generation(workers)
@@ -1246,7 +1287,7 @@ def test_edit_allows_empty_description_but_suppresses_complete_revision_changes(
     workflow.failed.connect(failures.append)
     workflow.edit(
         card.id,
-        instruction="Add ivy.",
+        draft=_edit_draft(workflow, card.id, "Add ivy."),
         output_size=workflow.available_edit_output_sizes(card.id)[0],
     )
     controller.execute(
@@ -1258,7 +1299,9 @@ def test_edit_allows_empty_description_but_suppresses_complete_revision_changes(
     )
     _complete_generation(workers)
 
-    assert controller.document.cards[0].active_revision == styled
+    failed_revision = controller.document.cards[0].active_revision
+    _assert_same_revision_except_draft(failed_revision, styled)
+    assert failed_revision.edit_draft.instruction == "Add ivy."
     assert len(controller.document.cards[0].revisions) == 1
     assert "changed before Edit completed" in str(failures[-1])
     assert empty_description_source.description == ""
@@ -1293,7 +1336,7 @@ def test_invalid_current_size_keeps_named_workflow_outputs_available(
         with pytest.raises(BackgroundWorkflowError, match="more pixels"):
             workflow.edit(
                 card.id,
-                instruction="Open the gate.",
+                draft=_edit_draft(workflow, card.id, "Open the gate."),
                 output_size=PresetOutputSize(tier=ResolutionTier.FULL),
             )
         assert not workflow.busy
@@ -1303,7 +1346,7 @@ def test_invalid_current_size_keeps_named_workflow_outputs_available(
     selected_tier = edit_tiers[0]
     workflow.edit(
         card.id,
-        instruction="Open the gate.",
+        draft=_edit_draft(workflow, card.id, "Open the gate."),
         output_size=PresetOutputSize(tier=selected_tier),
     )
     _complete_generation(workers)
@@ -1327,7 +1370,7 @@ def test_derived_image_reopens_after_replaced_source_asset_is_reclaimed(
     source_path = session.store.asset_path(source.background.image_path)
     workflow.edit(
         card.id,
-        instruction="Open the gate.",
+        draft=_edit_draft(workflow, card.id, "Open the gate."),
         output_size=CurrentSourceSize(width=512, height=384),
     )
     _complete_generation(workers)
@@ -1337,7 +1380,9 @@ def test_derived_image_reopens_after_replaced_source_asset_is_reclaimed(
     assert source_path.is_file()
     assert controller.undo()
     assert session.flush()
-    assert controller.document.cards[0].revisions == (source,)
+    restored = controller.document.cards[0].active_revision
+    _assert_same_revision_except_draft(restored, source)
+    assert restored.edit_draft.instruction == "Open the gate."
     assert controller.redo()
     assert session.flush()
     controller.clear_history()
@@ -1398,9 +1443,10 @@ def test_edit_indeterminate_observed_after_keeps_instruction_and_promotes_histor
     )
     workflow.edit(
         card.id,
-        instruction="Open the gate.",
+        draft=_edit_draft(workflow, card.id, "Open the gate."),
         output_size=workflow.available_edit_output_sizes(card.id)[0],
     )
+    submitted = controller.document
     _complete_generation(workers)
 
     pending = controller.document
@@ -1422,14 +1468,16 @@ def test_edit_indeterminate_observed_after_keeps_instruction_and_promotes_histor
     assert len(applied) == 1
     assert applied[0].message == "Image edited"
     assert applied[0].token == controller.current_undo_token
-    assert applied[0].previous_revision == source.cards[0].active_revision
+    assert applied[0].previous_revision == submitted.cards[0].active_revision
     assert applied[0].operation == EditImageOperation(instruction="Open the gate.")
     assert applied[0].card_id == card.id
     assert applied[0].revision_id == pending.cards[0].active_revision.id
     assert changed_documents[-1] == pending
     assert controller.undo()
     assert session.flush()
-    assert controller.document == source
+    restored = controller.document.cards[0].active_revision
+    _assert_same_revision_except_draft(restored, source.cards[0].active_revision)
+    assert restored.edit_draft.instruction == "Open the gate."
 
 
 @pytest.mark.parametrize("operation", ("generate", "edit"))
@@ -1454,7 +1502,7 @@ def test_image_transaction_failure_retains_exact_before_and_no_result_context(
     workflow.image_applied.connect(applied.append)
     workflow.failed.connect(failures.append)
     _start_image_operation(workflow, card, operation)
-    assert controller.document == before
+    before = controller.document
 
     def fail_checkpoint(name: str) -> None:
         if name == checkpoint:
@@ -1519,6 +1567,7 @@ def test_image_partial_transaction_ownership_completion_and_retry(
         )
 
     _start_image_operation(workflow, card, operation)
+    before = controller.document
     monkeypatch.setattr(store, "store_image_asset_and_save", partial_transaction)
     _complete_generation(workers)
     assert failures
@@ -1591,6 +1640,7 @@ def test_explicit_versions_share_assets_until_their_last_reachable_revision(
     applied: list[AppliedImageChange] = []
     workflow.image_applied.connect(applied.append)
     _start_image_operation(workflow, card, operation)
+    before = controller.document
     _complete_generation(workers)
     after = controller.document
     assert len(after.cards[0].revisions) == 2
@@ -1607,7 +1657,11 @@ def test_explicit_versions_share_assets_until_their_last_reachable_revision(
     )
     explicit = controller.document
     assert len(explicit.cards[0].revisions) == 3
-    assert explicit.cards[0].revisions[:2] == before.cards[0].revisions
+    assert explicit.cards[0].revisions[0] == before.cards[0].revisions[0]
+    _assert_same_revision_except_draft(
+        explicit.cards[0].revisions[1],
+        before.cards[0].revisions[1],
+    )
     assert controller.current_undo_token != change.token
     assert session.flush()
     assert controller.undo()
@@ -1714,10 +1768,10 @@ def test_durable_edit_completion_updates_actions_and_drafts_once(
     window.inspector.set_edit_instruction(f"  {instruction}  ")
     window._edit_background(instruction, workflow.available_edit_output_sizes(card.id)[0])
     _complete_generation(workers)
-    assert window.inspector.edit_instruction_edit.toPlainText() == (
-        f"  {instruction}  " if outcome == "observed-after" else ""
-    )
+    assert window.inspector.edit_instruction_edit.toPlainText() == ""
     assert len(applied) == (0 if outcome == "observed-after" else 1)
+    if outcome == "observed-after":
+        assert session.flush()
     if draft_change == "new-text":
         window.inspector.edit_instruction_edit.setPlainText("Paint a blue gate instead.")
     elif draft_change == "recalled":
@@ -1736,7 +1790,7 @@ def test_durable_edit_completion_updates_actions_and_drafts_once(
         change = applied[0]
         assert change.operation == EditImageOperation(instruction)
         assert window._applied_image_change is change
-        assert window._edit_undo_changes == {change.token: change}
+        assert change.token in controller.retained_history_tokens
         assert window.inspector.edit_instruction_edit.toPlainText() == expected_text
         after = controller.document
         invocation_count = len(model.calls)
@@ -1750,12 +1804,14 @@ def test_durable_edit_completion_updates_actions_and_drafts_once(
         assert controller.document == after
         assert window.inspector.edit_instruction_edit.toPlainText() == expected_text
         window.undo()
-        assert controller.document == before
+        assert controller.document.cards[0].active_revision.background == (
+            before.cards[0].active_revision.background
+        )
         assert window.inspector.edit_instruction_edit.toPlainText() == (
-            instruction if draft_change == "unchanged" else expected_text
+            f"  {instruction}  " if draft_change == "unchanged" else expected_text
         )
         assert session.flush()
-        assert store.load() == before
+        assert store.load() == controller.document
     finally:
         window.close()
         window_workers.shutdown()
@@ -1884,6 +1940,7 @@ def test_derived_source_replacement_during_commit_rolls_back(
     )
     assets_before = set((session.store.bundle_path / "assets" / "cards").glob("*/image-*.png"))
     _start_image_operation(workflow, card, "edit")
+    source = controller.document
     _complete_generation(workers)
 
     assert replaced

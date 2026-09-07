@@ -12,6 +12,7 @@ from hotcards.application.commands import (
     AddKeyCommand,
     AddSoundCommand,
     AddStyleCommand,
+    ApplyEditResultCommand,
     ChangeHotspotDestinationCommand,
     ChangeHotspotSoundCommand,
     CommandError,
@@ -696,6 +697,52 @@ def test_replace_refined_background_preserves_complete_revision(
         tier=ResolutionTier.LARGE
     )
     assert changed_card.active_revision.background == new_background
+
+
+def test_apply_edit_result_clears_only_the_matching_submitted_draft() -> None:
+    submitted = EditDraft(instruction="Open the gate.")
+    revision = CardRevision(
+        background=generated_background("Source"),
+        edit_draft=submitted,
+    )
+    card = Card(name="Card", revisions=(revision,), active_revision_id=revision.id)
+    result = generated_background("Edited")
+    command = ApplyEditResultCommand(
+        card_id=card.id,
+        revision_id=revision.id,
+        background=result,
+        submitted_draft_generation_id=submitted.generation_id,
+    )
+    document = Stack(name="Stack", cards=(card,))
+
+    changed = command.apply(document)
+
+    assert changed == command.apply(document)
+    assert changed.cards[0].active_revision.background == result
+    assert changed.cards[0].active_revision.edit_draft == EditDraft(
+        generation_id=command.cleared_draft_generation_id
+    )
+
+
+def test_apply_edit_result_preserves_a_newer_draft_generation() -> None:
+    submitted = EditDraft(instruction="Open the gate.")
+    newer = EditDraft(instruction="Add ivy.")
+    revision = CardRevision(
+        background=generated_background("Source"),
+        edit_draft=newer,
+    )
+    card = Card(name="Card", revisions=(revision,), active_revision_id=revision.id)
+    result = generated_background("Edited")
+
+    changed = ApplyEditResultCommand(
+        card_id=card.id,
+        revision_id=revision.id,
+        background=result,
+        submitted_draft_generation_id=submitted.generation_id,
+    ).apply(Stack(name="Stack", cards=(card,)))
+
+    assert changed.cards[0].active_revision.background == result
+    assert changed.cards[0].active_revision.edit_draft == newer
 
 
 def test_revision_description_and_reference_edits_are_typed_changes() -> None:

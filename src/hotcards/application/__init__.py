@@ -18,6 +18,7 @@ from hotcards.application.card_duplication import (
 from hotcards.application.commands import (
     ActivateRevisionCommand,
     AddInteractionCommand,
+    ApplyEditResultCommand,
     ChangeHotspotDestinationCommand,
     CommandError,
     CreateCardAndResolveCommand,
@@ -66,6 +67,7 @@ from hotcards.application.workers import (
 __all__ = [
     "ActivateRevisionCommand",
     "AddInteractionCommand",
+    "ApplyEditResultCommand",
     "AdapterKind",
     "AdapterWorkers",
     "AppliedImageChange",

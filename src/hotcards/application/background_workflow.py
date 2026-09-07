@@ -24,6 +24,7 @@ from hotcards.application.applied_image_change import (
 )
 from hotcards.application.commands import (
     ActivateRevisionCommand,
+    ApplyEditResultCommand,
     CommandError,
     DeleteRevisionCommand,
     DuplicateRevisionCommand,
@@ -56,6 +57,7 @@ from hotcards.domain.models import (
     CardRevision,
     CurrentSourceSize,
     DerivedImageSourceSnapshot,
+    EditDraft,
     EditOutputSize,
     EditPreserveOptions,
     GeneratedBackground,
@@ -152,6 +154,7 @@ class _EditTarget:
     card_id: UUID
     revision: CardRevision
     bundle_path: Path
+    draft: EditDraft
     instruction: str
     preserve: EditPreserveOptions
     expanded_prompt: str
@@ -374,7 +377,7 @@ class BackgroundWorkflow(QObject):
         self,
         card_id: UUID,
         *,
-        instruction: str,
+        draft: EditDraft,
         output_size: EditOutputSize,
     ) -> WorkerOperation:
         """Durably replace the current revision's image with an Edit result."""
@@ -383,12 +386,14 @@ class BackgroundWorkflow(QObject):
             raise BackgroundWorkflowError(
                 self.session.state.error or "the current stack could not be saved"
             )
-        normalized_instruction = instruction.strip()
-        if not normalized_instruction:
-            raise BackgroundWorkflowError("enter an Edit Instruction before editing")
         document = self.controller.document
         card = self._card(document, card_id)
         revision = card.active_revision
+        if revision.edit_draft != draft:
+            raise BackgroundWorkflowError("the Edit Instruction changed before editing started")
+        normalized_instruction = draft.instruction.strip()
+        if not normalized_instruction:
+            raise BackgroundWorkflowError("enter an Edit Instruction before editing")
         background = revision.background
         if background is None:
             raise BackgroundWorkflowError("generate an image before editing")
@@ -473,6 +478,7 @@ class BackgroundWorkflow(QObject):
             card_id=card.id,
             revision=revision.model_copy(deep=True),
             bundle_path=store.bundle_path.resolve(),
+            draft=draft.model_copy(deep=True),
             instruction=normalized_instruction,
             preserve=preserve,
             expanded_prompt=expanded_prompt,
@@ -728,15 +734,25 @@ class BackgroundWorkflow(QObject):
             store = self._require_store()
             before = self.controller.document
             previous_revision = self._card(before, target.card_id).active_revision
-            command = ReplaceRevisionBackgroundCommand(
-                card_id=target.card_id,
-                revision_id=previous_revision.id,
-                background=GeneratedBackground(
-                    id=asset_id,
-                    image_path=store.image_asset_path(target.card_id, asset_id),
-                    provenance=result.provenance,
-                    created_at=result.provenance.settings.generated_at,
-                ),
+            background = GeneratedBackground(
+                id=asset_id,
+                image_path=store.image_asset_path(target.card_id, asset_id),
+                provenance=result.provenance,
+                created_at=result.provenance.settings.generated_at,
+            )
+            command = (
+                ApplyEditResultCommand(
+                    card_id=target.card_id,
+                    revision_id=previous_revision.id,
+                    background=background,
+                    submitted_draft_generation_id=target.draft.generation_id,
+                )
+                if isinstance(target, _EditTarget)
+                else ReplaceRevisionBackgroundCommand(
+                    card_id=target.card_id,
+                    revision_id=previous_revision.id,
+                    background=background,
+                )
             )
             completion = _PendingImageCompletion(
                 store=store,
@@ -1033,7 +1049,8 @@ class BackgroundWorkflow(QObject):
             return False
         revision = card.active_revision
         if (
-            revision != target.revision
+            revision.model_copy(update={"edit_draft": target.revision.edit_draft})
+            != target.revision
             or self._style_snapshot(document, revision) != target.style
             or revision.background is None
             or image_edit_lineage(revision.background.provenance) != target.edit_lineage[:-1]
