@@ -14,6 +14,7 @@ from PySide6.QtGui import (
     QHideEvent,
     QIcon,
     QKeyEvent,
+    QKeySequence,
     QPainter,
     QPalette,
     QStandardItemModel,
@@ -95,6 +96,22 @@ class _CommitPlainTextEdit(QPlainTextEdit):
     def focusOutEvent(self, event: QFocusEvent) -> None:
         super().focusOutEvent(event)
         self.editing_finished.emit(QApplication.focusWidget(), event.reason())
+
+
+class _EditDraftPlainTextEdit(QPlainTextEdit):
+    undo_requested = Signal()
+    redo_requested = Signal()
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        if event.matches(QKeySequence.StandardKey.Undo):
+            self.undo_requested.emit()
+            event.accept()
+            return
+        if event.matches(QKeySequence.StandardKey.Redo):
+            self.redo_requested.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
 
 class _CommitLineEdit(QLineEdit):
@@ -559,7 +576,7 @@ class Inspector(QWidget):
 
         self.edit_instruction_label = QLabel("Edit Instruction")
         layout.addWidget(self.edit_instruction_label)
-        self.edit_instruction_edit = QPlainTextEdit()
+        self.edit_instruction_edit = _EditDraftPlainTextEdit()
         self.edit_instruction_edit.setObjectName("editInstructionEdit")
         self.edit_instruction_edit.setAccessibleName("Edit Instruction")
         self.edit_instruction_edit.setPlaceholderText("Describe the change to make")

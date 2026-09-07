@@ -121,12 +121,17 @@ for live MFLUX runs.
   FLUX Edit tokenizer's hard 512-token budget without rewriting or truncation,
   use a fresh random seed, and never send Description or Generate References.
   Retain the exact effective prompt, including Style text, in provenance.
+  Persist one raw text Edit draft on every revision. Draft changes autosave but
+  use separate context-local Undo/Redo and must not add document-history entries
+  or clear document Redo. Merge authoritative drafts across document Undo/Redo,
+  retain drafts for revisions still reachable from history, and discard retained
+  draft state when project or history replacement makes it unreachable.
   When Undo reverses a completed Edit, restore that Edit's exact authored
   instruction only in its card/revision context, without overwriting newer input.
-  Bind restoration to that Edit's exact Undo token, retaining the session-local
-  metadata across Undo/Redo and pruning it when history or the project is discarded.
-  Redo may clear only the exact automatically restored draft; user recalls count
-  as newer drafts even when their text is identical.
+  Bind consumption and restoration to persisted draft generation identity.
+  Redo may clear only the exact automatically restored generation; typing,
+  clearing, Undo/Redo, and user recalls create newer generations even when their
+  text is identical.
   Default output to the source image's exact decoded dimensions and additionally
   offer only higher-area presets. Pass
   MFLUX a private immutable no-follow source snapshot and reject replacement

@@ -128,15 +128,20 @@ This also works across repeated Undo/Redo. Redo clears only an untouched,
 automatically restored instruction, never a newer draft or a user recall.
 Generate starts a fresh accepted Edit lineage.
 
+Every card version owns a persisted text Edit draft. Raw editor text autosaves,
+survives card/version navigation, reopening, Save As, and Run-mode transitions,
+and uses context-local Undo/Redo without adding ordinary document-history entries.
+Duplicating a card or version starts the duplicate with an empty draft.
+
 Edit History shows only accepted authored instructions for the active image,
 oldest first with horizontal separators instead of numbering, including repeated
 instructions and edits inherited through historical Refine provenance or card duplication. It never
 displays expanded prompts or Style addenda. The history list stays visible when
 empty, keeping Edit controls consistently top-aligned. New Image starts with no
 accepted edits. Click a history row, or select it and press Enter or Space, to
-recall its exact instruction into the editor without
-changing the document or starting image generation. A recall counts as a new draft,
-even when its text matches a previously restored instruction.
+recall its exact instruction into the persisted draft without adding an ordinary
+document-history entry or starting image generation. A recall counts as a new
+draft, even when its text matches a previously restored instruction.
 
 Generated images are the only supported background source. Generate and Edit
 durably replace the active revision's background through one shared

@@ -1942,6 +1942,22 @@ def test_card_and_revision_changes_cancel_in_flight_generation(
     assert background.cancel_calls == 3
 
 
+def test_edit_draft_change_cancels_in_flight_work_without_losing_text(
+    application: QApplication,
+) -> None:
+    window, controller, _workers, background = _window()
+    card = controller.document.cards[0]
+    background.busy = True
+
+    window.inspector.edit_instruction_edit.setPlainText("Keep the blue gate.")
+
+    assert background.cancel_calls == 1
+    assert controller.edit_draft(
+        card.id,
+        card.active_revision.id,
+    ).instruction == "Keep the blue gate."
+
+
 def test_successful_save_as_cancels_generation_and_expires_undo(
     application: QApplication,
     monkeypatch: pytest.MonkeyPatch,
@@ -1964,6 +1980,11 @@ def test_successful_save_as_cancels_generation_and_expires_undo(
     card = controller.document.cards[0]
     changed = controller.execute(RenameCardCommand(card_id=card.id, name="Renamed"))
     window.render_document(changed)
+    draft = controller.replace_edit_draft(
+        card.id,
+        card.active_revision.id,
+        "Unfinished Edit",
+    )
     token = controller.current_undo_token
     assert token is not None
     window._show_undo_notification("Renamed", token)
@@ -1980,6 +2001,13 @@ def test_successful_save_as_cancels_generation_and_expires_undo(
     assert background.cancel_calls == 1
     assert window.notification_bar.current_key != "undo"
     assert not controller.can_undo
+    assert controller.edit_draft(card.id, card.active_revision.id) == draft
+    assert StackStore(tmp_path / "Original.hotcards").load().cards[
+        0
+    ].active_revision.edit_draft == draft
+    assert StackStore(tmp_path / "Copy.hotcards").load().cards[
+        0
+    ].active_revision.edit_draft == draft
 
 
 def test_failed_authoring_commit_blocks_save_and_close(
@@ -2033,6 +2061,79 @@ def test_failed_style_focus_commit_blocks_save(
     window.document_session = None
     window.close()
     application.processEvents()
+
+
+def test_entering_run_flushes_the_persisted_edit_draft(
+    application: QApplication,
+    tmp_path: Path,
+) -> None:
+    stack = _stack()
+    controller = DocumentController(stack)
+    session = DocumentSession(controller, debounce_milliseconds=60_000)
+    bundle = tmp_path / "RunDraft.hotcards"
+    session.create(stack, bundle)
+    window = MainWindow(
+        controller,
+        FakeWorkers(),  # type: ignore[arg-type]
+        FakeSettings(),
+        document_session=session,
+        background_workflow=FakeBackgroundWorkflow(controller),  # type: ignore[arg-type]
+        start_diagnostics=False,
+    )
+    card = controller.document.cards[0]
+    window.inspector.edit_instruction_edit.setPlainText("Finish the painted arch.")
+    assert session.state.dirty
+
+    window.mode_button.click()
+
+    assert window._is_running
+    assert not session.state.dirty
+    assert StackStore(bundle).load().cards[0].active_revision.edit_draft == (
+        controller.edit_draft(card.id, card.active_revision.id)
+    )
+    window.close()
+
+
+def test_failed_edit_draft_flush_blocks_run_without_losing_the_draft(
+    application: QApplication,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stack = _stack()
+    controller = DocumentController(stack)
+    session = DocumentSession(controller, debounce_milliseconds=60_000)
+    bundle = tmp_path / "BlockedRunDraft.hotcards"
+    session.create(stack, bundle)
+    window = MainWindow(
+        controller,
+        FakeWorkers(),  # type: ignore[arg-type]
+        FakeSettings(),
+        document_session=session,
+        background_workflow=FakeBackgroundWorkflow(controller),  # type: ignore[arg-type]
+        start_diagnostics=False,
+    )
+    card = controller.document.cards[0]
+    window.inspector.edit_instruction_edit.setPlainText("Keep this instruction.")
+    assert session.store is not None
+    real_save = session.store.save
+
+    def fail_save(_stack: Stack) -> None:
+        raise StackStoreError("draft storage unavailable")
+
+    monkeypatch.setattr(session.store, "save", fail_save)
+    window.mode_button.click()
+
+    assert not window._is_running
+    assert controller.edit_draft(
+        card.id,
+        card.active_revision.id,
+    ).instruction == "Keep this instruction."
+    assert session.state.dirty
+    assert window.notification_bar.message_label.text() == "Could Not Save Stack"
+
+    monkeypatch.setattr(session.store, "save", real_save)
+    assert session.flush()
+    window.close()
 
 
 def test_author_and_run_modes_apply_consistent_read_only_chrome(
@@ -2806,6 +2907,40 @@ def test_edit_instruction_survives_repeated_undo_redo(
         assert window.inspector.edit_instruction_edit.toPlainText() == ""
         window.undo()
     assert window.inspector.edit_instruction_edit.toPlainText() == instruction
+
+
+def test_focused_edit_instruction_routes_global_undo_and_redo_to_draft_history(
+    application: QApplication,
+) -> None:
+    window, controller, _workers, _background = _window()
+    card = controller.document.cards[0]
+    window.show()
+    window.inspector.inspector_tabs.setCurrentIndex(window.inspector._edit_tab_index)
+    window.inspector.edit_instruction_edit.setFocus()
+    window.inspector.edit_instruction_edit.setPlainText("Open the gate.")
+    application.processEvents()
+    token = controller.current_undo_token
+
+    assert window.undo_action.isEnabled()
+    QTest.keySequence(
+        window.inspector.edit_instruction_edit,
+        QKeySequence(QKeySequence.StandardKey.Undo),
+    )
+
+    assert controller.current_undo_token == token
+    assert controller.edit_draft(card.id, card.active_revision.id).instruction == ""
+    assert window.redo_action.isEnabled()
+    QTest.keySequence(
+        window.inspector.edit_instruction_edit,
+        QKeySequence(QKeySequence.StandardKey.Redo),
+    )
+    assert controller.current_undo_token == token
+    assert controller.edit_draft(
+        card.id,
+        card.active_revision.id,
+    ).instruction == "Open the gate."
+    window.close()
+    application.processEvents()
 
 
 @pytest.mark.parametrize("newer_draft", ("typed", "recalled", "changed-back"))

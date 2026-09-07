@@ -581,6 +581,8 @@ class MainWindow(QMainWindow):
         )
         self.inspector.document_changed.connect(self.render_document)
         self.inspector.render_inputs_changed.connect(self._authoring_inputs_changed)
+        self.inspector.edit_instruction_edit.undo_requested.connect(self.undo)
+        self.inspector.edit_instruction_edit.redo_requested.connect(self.redo)
         self.inspector.inspector_tabs.currentChanged.connect(self._inspector_tab_changed)
         self.inspector.generate_background_requested.connect(self._generate_background)
         self.inspector.edit_background_requested.connect(self._edit_background)
@@ -2326,7 +2328,10 @@ class MainWindow(QMainWindow):
         if should_run == self._is_running:
             return
         if should_run:
-            if not self._commit_authoring_metadata():
+            if not self._prepare_authoring_lifecycle(
+                save_error_title="Could Not Save Stack",
+                flush_after_commit=True,
+            ):
                 return
             self.card_canvas.cancel_drawing()
             self._cancel_ai_activity_for_run()

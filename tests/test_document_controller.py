@@ -469,6 +469,30 @@ def test_replace_document_clears_session_history_without_autosave() -> None:
     assert signals == []
 
 
+def test_replace_document_discards_draft_state_even_when_ids_are_reused() -> None:
+    card = Card(name="Old")
+    controller = DocumentController(Stack(name="Old", cards=(card,)))
+    controller.replace_edit_draft(
+        card.id,
+        card.active_revision.id,
+        "Old project draft",
+    )
+    replacement_revision = card.active_revision.model_copy(
+        update={"edit_draft": EditDraft(instruction="Replacement draft")}
+    )
+    replacement_card = card.model_copy(
+        update={"name": "Replacement", "revisions": (replacement_revision,)}
+    )
+
+    controller.replace_document(Stack(name="Replacement", cards=(replacement_card,)))
+
+    assert controller.edit_draft(card.id, card.active_revision.id) == (
+        replacement_revision.edit_draft
+    )
+    assert not controller.can_undo_edit_draft(card.id, card.active_revision.id)
+    assert not controller.can_redo_edit_draft(card.id, card.active_revision.id)
+
+
 def test_draft_replacement_autosaves_without_changing_document_history() -> None:
     card = Card(name="Card")
     signals: list[Stack] = []

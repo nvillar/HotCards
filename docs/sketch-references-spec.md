@@ -2,7 +2,7 @@
 
 **Repository:** `nvillar/HotCards`  
 **Specification date:** September 7, 2026  
-**Status:** Sketch-reference work parked; reduced non-sketch scope adopted
+**Status:** Sketch-reference work parked; reduced non-sketch scope implemented
 
 **Intended file:** `docs/sketch-references-spec.md`
 
@@ -11,10 +11,9 @@
 > document. The adopted work is limited to removing executable Evolve while
 > retaining historical Refine provenance, and making text-only Edit drafts
 > revision-local with the lifecycle and durability semantics specified here.
-> Evolve removal is the current implementation phase; text-only revision-local
-> drafts follow in later phases. Except for those two areas and the one-off
-> stack conversion they require, the sections below describe the parked,
-> non-normative sketch proposal.
+> Evolve removal and text-only revision-local drafts are implemented. Except for
+> those two areas and the remaining one-off stack conversion they require, the
+> sections below describe the parked, non-normative sketch proposal.
 > The sketch feasibility findings are retained below for future reconsideration.
 
 ---
