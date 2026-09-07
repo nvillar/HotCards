@@ -1889,8 +1889,10 @@ def test_resolution_change_cancels_in_flight_generation(
     assert all("resolution" not in key for key in window.settings.values)
 
 
+@pytest.mark.parametrize("evolve", (False, True))
 def test_description_style_and_reference_changes_cancel_in_flight_generation(
     application: QApplication,
+    evolve: bool,
 ) -> None:
     style = StyleDefinition(name="Ink", prompt_text="Rendered in ink.")
     source = Card(name="Source")
@@ -1904,15 +1906,14 @@ def test_description_style_and_reference_changes_cancel_in_flight_generation(
         )
     )
 
-    background.busy = True
-    window.inspector.description_edit.setPlainText("Changed")
-    background.busy = True
-    window.inspector.style_combo.setCurrentIndex(
-        window.inspector._combo_index_for_data(
-            window.inspector.style_combo,
-            style.id,
-        )
+    editor = (
+        window.inspector.evolve_description_edit if evolve else window.inspector.description_edit
     )
+    combo = window.inspector.evolve_style_combo if evolve else window.inspector.style_combo
+    background.busy = True
+    editor.setPlainText("Changed")
+    background.busy = True
+    combo.setCurrentIndex(window.inspector._combo_index_for_data(combo, style.id))
     background.busy = True
     window.inspector.reference_button.click()
     reference_item = next(
@@ -2475,7 +2476,8 @@ def test_generate_tab_wires_evolve_current_image_options_and_cancels_live_change
     window._availability[AdapterKind.MFLUX] = True
     window._update_generation_actions()
 
-    assert window.inspector.inspector_tabs.tabText(1) == "Edit"
+    assert window.inspector.inspector_tabs.tabText(1) == "Evolve"
+    window.inspector.inspector_tabs.setCurrentIndex(window.inspector._evolve_tab_index)
     assert window.inspector.refine_background_button.isEnabled()
     assert window.inspector.refine_resolution_combo.currentData() == CurrentSourceSize(
         width=512, height=384
@@ -2483,7 +2485,8 @@ def test_generate_tab_wires_evolve_current_image_options_and_cancels_live_change
     assert window.inspector.refine_background_button.toolTip() == (
         "Evolve the current image using Description."
     )
-    window.inspector.description_edit.setPlainText("A courtyard with an open gate.")
+    window.inspector.evolve_description_edit.setPlainText("A courtyard with an open gate.")
+    assert window.inspector.description_edit.toPlainText() == "A courtyard with an open gate."
     window.inspector.refine_background_button.click()
     assert controller.document.cards[0].active_revision.description == (
         "A courtyard with an open gate."
@@ -2567,7 +2570,7 @@ def test_edit_tab_wires_current_image_defaults_errors_and_cancellation(
     window._availability[AdapterKind.MFLUX] = True
     window._update_generation_actions()
 
-    assert window.inspector.inspector_tabs.tabText(1) == "Edit"
+    assert window.inspector.inspector_tabs.tabText(2) == "Edit"
     assert window.inspector.generate_background_button.isEnabled() == bool(description)
     assert window.inspector.refine_background_button.isEnabled() == bool(description)
     assert not window.inspector.edit_background_button.isEnabled()
@@ -2739,6 +2742,48 @@ def test_notification_undo_expires_after_another_command(
     assert controller.document.cards[0].name == "Second"
 
 
+@pytest.mark.parametrize("source_tab", (0, 1))
+def test_generate_evolve_tab_switch_commits_shared_description_once(
+    application: QApplication,
+    source_tab: int,
+) -> None:
+    card = Card(name="Card", revisions=(CardRevision(description="Saved description"),))
+    window, controller, _workers, _background = _window(Stack(name="Demo", cards=(card,)))
+    window.resize(1100, 800)
+    window.show()
+    tabs = window.inspector.inspector_tabs
+    tabs.setCurrentIndex(source_tab)
+    editor = (
+        window.inspector.evolve_description_edit
+        if source_tab == 1
+        else window.inspector.description_edit
+    )
+    editor.setFocus()
+    editor.setPlainText("A description authored in either tab")
+    application.processEvents()
+    assert editor.hasFocus()
+    assert controller.current_undo_token is None
+    target_tab = 1 - source_tab
+    bar = tabs.tabBar()
+    QTest.mouseClick(bar, Qt.MouseButton.LeftButton, pos=bar.tabRect(target_tab).center())
+    application.processEvents()
+
+    assert tabs.currentIndex() == target_tab
+    assert controller.document.cards[0].active_revision.description == (
+        "A description authored in either tab"
+    )
+    assert window.inspector.description_edit.toPlainText() == (
+        window.inspector.evolve_description_edit.toPlainText()
+    )
+    token = controller.current_undo_token
+    assert token is not None
+    assert controller.retained_history_tokens == frozenset((token,))
+    QTest.mouseClick(bar, Qt.MouseButton.LeftButton, pos=bar.tabRect(source_tab).center())
+    application.processEvents()
+    assert controller.current_undo_token == token
+    window.close()
+
+
 @pytest.mark.parametrize("target", ("mouse", "evolve"))
 def test_mouse_focus_commit_does_not_render_before_button_release(
     application: QApplication,
@@ -2750,8 +2795,15 @@ def test_mouse_focus_commit_does_not_render_before_button_release(
     window, controller, _workers, _background = _window(Stack(name="Demo", cards=(card,)))
     window.show()
     draft = "A changed courtyard"
-    window.inspector.description_edit.setPlainText(draft)
-    window.inspector.description_edit.setFocus()
+    editor = (
+        window.inspector.evolve_description_edit
+        if target == "evolve"
+        else window.inspector.description_edit
+    )
+    if target == "evolve":
+        window.inspector.inspector_tabs.setCurrentIndex(window.inspector._evolve_tab_index)
+    editor.setPlainText(draft)
+    editor.setFocus()
     application.processEvents()
     renders: list[object] = []
     monkeypatch.setattr(
@@ -2760,7 +2812,7 @@ def test_mouse_focus_commit_does_not_render_before_button_release(
         lambda *_args: renders.append(object()),
     )
 
-    window.inspector.description_edit.editing_finished.emit(
+    editor.editing_finished.emit(
         window.inspector.refine_background_button if target == "evolve" else None,
         Qt.FocusReason.OtherFocusReason if target == "evolve" else Qt.FocusReason.MouseFocusReason,
     )
@@ -2975,7 +3027,7 @@ def test_history_recall_survives_edit_completion_or_redo_on_same_version(
     window, controller, _workers, workflow = _window(Stack(name="Demo", cards=(card,)))
     monkeypatch.setattr(window, "_refine_source_size", lambda _card: (512, 384))
     window.render_document()
-    window.inspector.inspector_tabs.setCurrentIndex(1)
+    window.inspector.inspector_tabs.setCurrentIndex(window.inspector._edit_tab_index)
     window.inspector.set_edit_instruction(instruction)
     window._edit_background(instruction, CurrentSourceSize(width=512, height=384))
     result = _edited_background(card, instruction)

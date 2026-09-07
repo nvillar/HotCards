@@ -10,8 +10,8 @@ from uuid import uuid4
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtCore import QSize, Qt
-from PySide6.QtGui import QColor, QPixmap
+from PySide6.QtCore import QRect, QSize, Qt
+from PySide6.QtGui import QColor, QImage, QPainter, QPalette, QPixmap
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QApplication,
@@ -23,6 +23,8 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QStyle,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
     QToolButton,
     QWidget,
 )
@@ -257,10 +259,11 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     inspector = Inspector(controller)
     inspector.render(controller.document, card.id)
 
-    assert inspector.inspector_tabs.count() == 3
+    assert inspector.inspector_tabs.count() == 4
     assert inspector.inspector_tabs.tabText(0) == "Generate"
-    assert inspector.inspector_tabs.tabText(1) == "Edit"
-    assert inspector.inspector_tabs.tabText(2) == "Hotspots"
+    assert inspector.inspector_tabs.tabText(1) == "Evolve"
+    assert inspector.inspector_tabs.tabText(2) == "Edit"
+    assert inspector.inspector_tabs.tabText(3) == "Hotspots"
     assert not hasattr(inspector, "style_list")
     assert not hasattr(inspector, "key_list")
     assert not hasattr(inspector, "edit_preserve_checkboxes")
@@ -285,11 +288,21 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     assert not hasattr(inspector, "image_prompt_button")
     assert not isinstance(inspector.reference_panel, QFrame)
     assert inspector.reference_panel.layout().contentsMargins().isNull()
-    new_image_group = inspector.reference_panel.parentWidget()
-    assert isinstance(new_image_group, QGroupBox)
-    assert not new_image_group.title()
-    new_image_layout = new_image_group.layout()
-    assert new_image_layout is not None
+    for index in (
+        inspector._generate_tab_index,
+        inspector._evolve_tab_index,
+        inspector._edit_tab_index,
+    ):
+        tab = inspector.inspector_tabs.widget(index)
+        assert not tab.findChildren(QGroupBox)
+        assert all(
+            label.text() not in {"New Image", "Evolve", "Edit"}
+            for label in tab.findChildren(QLabel)
+        )
+    assert inspector.reference_panel.parentWidget() is inspector.description_edit.parentWidget()
+    assert inspector.generate_background_button.parentWidget() is (
+        inspector.description_edit.parentWidget()
+    )
     content_layout = inspector.description_edit.parentWidget().layout()
     assert content_layout is not None
     assert content_layout.stretch(content_layout.indexOf(inspector.description_edit)) == 1
@@ -300,33 +313,32 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
         content_layout.indexOf(inspector.style_combo)
     )
     assert content_layout.indexOf(inspector.style_combo) < (
-        content_layout.indexOf(inspector.new_image_section_label)
+        content_layout.indexOf(inspector.reference_label)
     )
-    assert content_layout.indexOf(inspector.new_image_section_label) < (
-        content_layout.indexOf(new_image_group)
+    evolve_layout = inspector.evolve_description_edit.parentWidget().layout()
+    assert evolve_layout.indexOf(inspector.evolve_description_edit) < (
+        evolve_layout.indexOf(inspector.evolve_style_combo)
     )
-    assert content_layout.indexOf(new_image_group) < (
-        content_layout.indexOf(inspector.evolve_section_label)
+    assert evolve_layout.indexOf(inspector.evolve_style_combo) < (
+        evolve_layout.indexOf(inspector.refine_transformation_label)
     )
-    assert new_image_layout.indexOf(inspector.reference_label) < (
-        new_image_layout.indexOf(inspector.reference_panel)
+    assert content_layout.indexOf(inspector.reference_label) < (
+        content_layout.indexOf(inspector.reference_panel)
     )
-    assert new_image_layout.indexOf(inspector.reference_panel) < (
-        new_image_layout.indexOf(inspector.resolution_label)
+    assert content_layout.indexOf(inspector.reference_panel) < (
+        content_layout.indexOf(inspector.resolution_label)
     )
-    assert new_image_layout.indexOf(inspector.resolution_label) < (
-        new_image_layout.indexOf(inspector.resolution_combo)
+    assert content_layout.indexOf(inspector.resolution_label) < (
+        content_layout.indexOf(inspector.resolution_combo)
     )
 
-    assert new_image_layout.indexOf(inspector.resolution_combo) < (
-        new_image_layout.indexOf(inspector.generate_background_button)
+    assert content_layout.indexOf(inspector.resolution_combo) < (
+        content_layout.indexOf(inspector.generate_background_button)
     )
-    assert inspector.new_image_section_label.text() == "New Image"
-    assert inspector.new_image_section_label.font() == inspector.evolve_section_label.font()
-    assert "New Image only" in inspector.reference_label.toolTip()
+    assert "Generate only" in inspector.reference_label.toolTip()
     assert "never sent to Evolve" in inspector.reference_label.toolTip()
-    assert "Shared by New Image and Evolve" in inspector.description_edit.toolTip()
-    assert new_image_layout.contentsMargins() == (
+    assert "Shared by Generate and Evolve" in inspector.description_edit.toolTip()
+    assert content_layout.contentsMargins() == (
         inspector.refine_background_button.parentWidget().layout().contentsMargins()
     )
     for widget in (
@@ -334,11 +346,18 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
         inspector.style_combo,
         inspector.reference_panel,
         inspector.generate_background_button,
-        inspector.refine_background_button,
     ):
         assert inspector.inspector_tabs.widget(0).isAncestorOf(widget)
         assert not inspector.inspector_tabs.widget(1).isAncestorOf(widget)
-    assert inspector.inspector_tabs.widget(1).isAncestorOf(inspector.edit_instruction_edit)
+    for widget in (
+        inspector.evolve_description_edit,
+        inspector.evolve_style_combo,
+        inspector.refine_background_button,
+    ):
+        assert inspector.inspector_tabs.widget(1).isAncestorOf(widget)
+        assert not inspector.inspector_tabs.widget(0).isAncestorOf(widget)
+    assert inspector.inspector_tabs.widget(2).isAncestorOf(inspector.edit_instruction_edit)
+    assert inspector.evolve_description_edit.document() is inspector.description_edit.document()
     assert inspector.style_combo.currentText() == "No Style"
     assert not hasattr(inspector, "clear_background_button")
     assert inspector.hotspot_target_label.text() == "Go to card"
@@ -354,10 +373,10 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     assert not inspector.hotspot_when_panel.styleSheet()
     assert not inspector.hotspot_then_panel.styleSheet()
     assert inspector.hotspot_when_label.font().pointSizeF() == (
-        inspector.evolve_section_label.font().pointSizeF()
+        inspector.refine_transformation_label.font().pointSizeF()
     )
     assert inspector.hotspot_then_label.font().pointSizeF() == (
-        inspector.edit_section_label.font().pointSizeF()
+        inspector.edit_instruction_label.font().pointSizeF()
     )
     assert inspector.add_condition_button.text() == "+"
     assert inspector.add_condition_button.accessibleName() == "Add condition"
@@ -391,10 +410,10 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     assert hotspot_layout is not None
     assert inspector.hotspot_list.parentWidget().objectName() == "hotspotsInspectorContent"
     assert hotspot_layout.contentsMargins() == (
-        inspector.refine_background_button.parentWidget().parentWidget().layout().contentsMargins()
+        inspector.refine_background_button.parentWidget().layout().contentsMargins()
     )
     assert hotspot_layout.contentsMargins() == (
-        inspector.edit_instruction_edit.parentWidget().parentWidget().layout().contentsMargins()
+        inspector.edit_instruction_edit.parentWidget().layout().contentsMargins()
     )
     then_layout = inspector.hotspot_then_panel.layout()
     assert then_layout is not None
@@ -525,20 +544,25 @@ def test_generate_evolve_has_source_similarity_resolution_and_action(
     )
 
     assert inspector.inspector_tabs.tabText(inspector._edit_tab_index) == "Edit"
-    evolve_group = inspector.refine_background_button.parentWidget()
-    edit_group = inspector.edit_background_button.parentWidget()
-    assert isinstance(evolve_group, QGroupBox)
-    assert isinstance(edit_group, QGroupBox)
-    assert not evolve_group.title()
-    assert not edit_group.title()
-    assert inspector.evolve_section_label.text() == "Evolve"
-    assert inspector.edit_section_label.text() == "Edit"
-    assert inspector.evolve_section_label.font().pointSizeF() == (
-        inspector.refine_transformation_label.font().pointSizeF()
+    assert inspector.refine_background_button.parentWidget() is (
+        inspector.evolve_description_edit.parentWidget()
     )
-    assert inspector.edit_section_label.font().pointSizeF() == (
-        inspector.edit_instruction_label.font().pointSizeF()
+    assert inspector.edit_background_button.parentWidget() is (
+        inspector.edit_history_list.parentWidget()
     )
+    edit_layout = inspector.edit_history_list.parentWidget().layout()
+    edit_controls = (
+        inspector.edit_instruction_label,
+        inspector.edit_instruction_edit,
+        inspector.edit_resolution_label,
+        inspector.edit_resolution_combo,
+        inspector.edit_background_button,
+        inspector.edit_history_label,
+        inspector.edit_history_list,
+    )
+    edit_positions = [edit_layout.indexOf(widget) for widget in edit_controls]
+    assert all(position >= 0 for position in edit_positions)
+    assert edit_positions == sorted(edit_positions)
     assert not hasattr(inspector, "refine_description_label")
     assert not hasattr(inspector, "edit_description_label")
     assert (
@@ -803,12 +827,11 @@ def test_edit_history_uses_only_active_image_authored_lineage(
     )
     assert inspector.edit_history_list.wordWrap()
     assert inspector.edit_history_label.text() == "Edit History"
-    assert inspector.edit_history_empty_label.text() == "No accepted edits for this image."
-    assert inspector.edit_history_empty_label.isHidden() == bool(expected)
+    assert not inspector.edit_history_list.isHidden()
     assert [
         inspector.edit_history_list.item(index).text()
         for index in range(inspector.edit_history_list.count())
-    ] == [f"{number}. {text}" for number, text in enumerate(expected, start=1)]
+    ] == list(expected)
     for index, instruction in enumerate(expected):
         item = inspector.edit_history_list.item(index)
         assert item.data(Qt.ItemDataRole.UserRole) == instruction
@@ -823,7 +846,7 @@ def test_edit_history_uses_only_active_image_authored_lineage(
     assert inspector.edit_instruction_edit.toPlainText() == draft.text
     inspector.render(controller.document, other.id)
     assert inspector.edit_history_list.count() == 0
-    assert not inspector.edit_history_empty_label.isHidden()
+    assert not inspector.edit_history_list.isHidden()
     inspector.render(controller.document, card.id)
     assert inspector.edit_history_list.count() == len(instructions)
     inspector.reset_context()
@@ -841,7 +864,7 @@ def test_edit_history_recall_is_exact_accessible_and_has_no_document_side_effect
     controller = DocumentController(Stack(name="Demo", cards=(card,)))
     inspector = Inspector(controller)
     inspector.render(controller.document, card.id)
-    inspector.inspector_tabs.setCurrentIndex(1)
+    inspector.inspector_tabs.setCurrentIndex(inspector._edit_tab_index)
     inspector.resize(340, 800)
     inspector.show()
     inspector.set_edit_instruction("A different draft")
@@ -887,7 +910,7 @@ def test_edit_history_recall_is_exact_accessible_and_has_no_document_side_effect
     assert controller.document == document
     assert controller.current_undo_token == token
     assert requests == []
-    assert inspector.inspector_tabs.currentIndex() == 1
+    assert inspector.inspector_tabs.currentIndex() == inspector._edit_tab_index
     inspector.close()
 
 
@@ -900,7 +923,7 @@ def test_edit_history_wraps_full_instructions_as_inspector_resizes(
     card = _card_with_edits((instruction,))
     inspector = Inspector(DocumentController(Stack(name="Demo", cards=(card,))))
     inspector.render(inspector.controller.document, card.id)
-    inspector.inspector_tabs.setCurrentIndex(1)
+    inspector.inspector_tabs.setCurrentIndex(inspector._edit_tab_index)
     inspector.resize(340, 850)
     inspector.show()
     application.processEvents()
@@ -913,8 +936,79 @@ def test_edit_history_wraps_full_instructions_as_inspector_resizes(
     inspector.resize(700, 850)
     application.processEvents()
     assert history.visualItemRect(item).height() < narrow_height
-    assert item.text() == f"1. {instruction}"
+    assert item.text() == instruction
     assert item.data(Qt.ItemDataRole.UserRole) == instruction
+    inspector.close()
+
+
+def test_empty_history_keeps_edit_controls_at_the_same_top_positions(
+    application: QApplication,
+) -> None:
+    edited = _card_with_edits(("Open the gate.",))
+    blank = Card(
+        name="No edits",
+        revisions=(CardRevision(description="A courtyard", background=_background()),),
+    )
+    controller = DocumentController(Stack(name="Demo", cards=(blank, edited)))
+    inspector = Inspector(controller)
+    inspector.resize(380, 900)
+    inspector.inspector_tabs.setCurrentIndex(inspector._edit_tab_index)
+    inspector.render(controller.document, blank.id, refine_source_size=(512, 384))
+    inspector.show()
+    application.processEvents()
+    controls = (
+        inspector.edit_instruction_label,
+        inspector.edit_instruction_edit,
+        inspector.edit_resolution_label,
+        inspector.edit_resolution_combo,
+        inspector.edit_background_button,
+        inspector.edit_history_label,
+        inspector.edit_history_list,
+    )
+    empty_positions = [widget.geometry() for widget in controls]
+    assert inspector.edit_history_list.isVisible()
+    assert inspector.edit_history_list.count() == 0
+    assert inspector.edit_instruction_label.y() < 30
+    assert not hasattr(inspector, "edit_history_empty_label")
+
+    inspector.render(controller.document, edited.id, refine_source_size=(512, 384))
+    application.processEvents()
+    assert inspector.edit_history_list.count() == 1
+    assert [widget.geometry() for widget in controls] == empty_positions
+    inspector.render(controller.document, blank.id, refine_source_size=(512, 384))
+    application.processEvents()
+    assert [widget.geometry() for widget in controls] == empty_positions
+    assert inspector.edit_history_list.isVisible()
+    inspector.close()
+
+
+def test_history_delegate_adds_space_and_draws_only_between_entries(
+    application: QApplication,
+) -> None:
+    card = _card_with_edits(("Open the gate.", "Paint it blue."))
+    inspector = Inspector(DocumentController(Stack(name="Demo", cards=(card,))))
+    inspector.render(inspector.controller.document, card.id)
+    history = inspector.edit_history_list
+    delegate = history.itemDelegate()
+    ordinary = QStyledItemDelegate(history)
+    option = QStyleOptionViewItem()
+    option.initFrom(history)
+    option.widget = history
+    option.rect = QRect(0, 0, 320, 70)
+    separator_color = QColor(93, 81, 69)
+    option.palette.setColor(QPalette.ColorRole.Mid, separator_color)
+    for row in range(2):
+        index = history.model().index(row, 0)
+        assert delegate.sizeHint(option, index).height() == (
+            ordinary.sizeHint(option, index).height() + 12
+        )
+        image = QImage(option.rect.size(), QImage.Format.Format_ARGB32)
+        image.fill(Qt.GlobalColor.white)
+        painter = QPainter(image)
+        delegate.paint(painter, option, index)
+        painter.end()
+        has_separator = image.pixelColor(10, option.rect.bottom()) == separator_color
+        assert has_separator == (row == 0)
     inspector.close()
 
 
@@ -1277,8 +1371,10 @@ def test_hotspot_key_rows_fit_long_names_with_visible_remove_controls(
     inspector.close()
 
 
+@pytest.mark.parametrize("evolve", (False, True))
 def test_description_edits_target_active_revision(
     application: QApplication,
+    evolve: bool,
 ) -> None:
     card = Card(
         name="Card",
@@ -1288,13 +1384,61 @@ def test_description_edits_target_active_revision(
     inspector = Inspector(controller)
     inspector.render(controller.document, card.id)
 
-    inspector.description_edit.setPlainText("New description")
+    editor = inspector.evolve_description_edit if evolve else inspector.description_edit
+    editor.setPlainText("New description")
+    assert inspector.description_edit.toPlainText() == "New description"
+    assert inspector.evolve_description_edit.toPlainText() == "New description"
+    assert controller.document.cards[0].active_revision.description == "Old"
     assert inspector.commit_revision_metadata()
+    token = controller.current_undo_token
+    assert inspector.commit_revision_metadata()
+    assert controller.current_undo_token == token
 
     revision = controller.document.cards[0].active_revision
     assert revision.description == "New description"
     assert controller.undo()
     assert controller.document.cards[0].active_revision.description == "Old"
+    inspector.render(controller.document, card.id)
+    assert inspector.description_edit.toPlainText() == "Old"
+    assert inspector.evolve_description_edit.toPlainText() == "Old"
+    assert controller.redo()
+    inspector.render(controller.document, card.id)
+    assert inspector.description_edit.toPlainText() == "New description"
+    assert inspector.evolve_description_edit.toPlainText() == "New description"
+
+
+def test_generate_and_evolve_styles_share_one_undoable_selection(
+    application: QApplication,
+) -> None:
+    style = StyleDefinition(name="Ink", prompt_text="Black ink")
+    card = Card(name="Card")
+    controller = DocumentController(
+        Stack(name="Demo", styles=(style,), new_card_style_id=None, cards=(card,))
+    )
+    inspector = Inspector(controller)
+    inspector.render(controller.document, card.id)
+    changes: list[object] = []
+    inspector.document_changed.connect(changes.append)
+    inspector.evolve_style_combo.setCurrentIndex(inspector.evolve_style_combo.findData(style.id))
+    assert len(changes) == 1
+    assert controller.document.cards[0].active_revision.style_id == style.id
+    assert controller.document.new_card_style_id == style.id
+    assert inspector.style_combo.currentData() == style.id
+    assert inspector.evolve_style_combo.currentData() == style.id
+    assert controller.undo()
+    inspector.render(controller.document, card.id)
+    assert inspector.style_combo.currentData() is None
+    assert inspector.evolve_style_combo.currentData() is None
+    assert not controller.can_undo
+    assert controller.redo()
+    inspector.render(controller.document, card.id)
+    assert inspector.style_combo.currentData() == style.id
+    assert inspector.evolve_style_combo.currentData() == style.id
+    inspector.style_combo.setCurrentIndex(inspector.style_combo.findData(None))
+    assert len(changes) == 2
+    assert controller.document.cards[0].active_revision.style_id is None
+    assert controller.document.new_card_style_id is None
+    assert inspector.evolve_style_combo.currentData() is None
 
 
 @pytest.mark.parametrize("aspect_ratio", tuple(AspectRatio))
@@ -2020,8 +2164,10 @@ def test_deleted_reference_is_shown_as_unresolved(
     )
 
 
+@pytest.mark.parametrize("evolve", (False, True))
 def test_render_preserves_focused_description_draft(
     application: QApplication,
+    evolve: bool,
 ) -> None:
     interaction = _interaction()
     revision = CardRevision(
@@ -2033,13 +2179,21 @@ def test_render_preserves_focused_description_draft(
     inspector = Inspector(controller)
     inspector.show()
     inspector.render(controller.document, card.id)
-
-    inspector.description_edit.setFocus()
-    inspector.description_edit.setPlainText("Uncommitted description")
+    if evolve:
+        inspector.inspector_tabs.setCurrentIndex(inspector._evolve_tab_index)
+    editor = inspector.evolve_description_edit if evolve else inspector.description_edit
+    editor.setFocus()
+    editor.setPlainText("Uncommitted description")
+    cursor = editor.textCursor()
+    cursor.setPosition(4)
+    editor.setTextCursor(cursor)
     application.processEvents()
+    assert editor.hasFocus()
     changed = controller.execute(RenameCardCommand(card_id=card.id, name="Renamed"))
     inspector.render(changed, card.id)
     assert inspector.description_edit.toPlainText() == "Uncommitted description"
+    assert inspector.evolve_description_edit.toPlainText() == "Uncommitted description"
+    assert editor.textCursor().position() == 4
 
     assert not hasattr(inspector, "hotspot_label_edit")
     inspector.close()
@@ -2062,6 +2216,7 @@ def test_switching_cards_shows_each_description(
     inspector.render(controller.document, second.id)
 
     assert inspector.description_edit.toPlainText() == "Second description"
+    assert inspector.evolve_description_edit.toPlainText() == "Second description"
 
 
 def test_using_labels_name_single_reference(

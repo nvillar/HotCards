@@ -424,7 +424,7 @@ def test_explicit_image_journey_reopens_without_sources_and_preserves_run_naviga
         assert window._applied_image_change is None
 
         instruction = "Open the garden gate.\nKeep the hand-painted stars exactly as they are."
-        inspector.inspector_tabs.setCurrentIndex(1)
+        inspector.inspector_tabs.setCurrentIndex(inspector._edit_tab_index)
         inspector.edit_instruction_edit.setPlainText(f"  {instruction}  ")
         inspector.edit_resolution_combo.setCurrentIndex(
             inspector._combo_index_for_data(
@@ -455,7 +455,7 @@ def test_explicit_image_journey_reopens_without_sources_and_preserves_run_naviga
         assert len(model.calls[-1]["image_paths"]) == 1
         assert not model.calls[-1]["image_paths"][0].exists()
         assert inspector.edit_instruction_edit.toPlainText() == ""
-        assert inspector.edit_history_list.item(0).text() == f"1. {instruction}"
+        assert inspector.edit_history_list.item(0).text() == instruction
         _assert_current_image_controls(window, ResolutionTier.MEDIUM)
         edited_path = session.store.asset_path(edited.image_path)
         token = controller.current_undo_token
@@ -463,7 +463,7 @@ def test_explicit_image_journey_reopens_without_sources_and_preserves_run_naviga
         assert controller.current_undo_token == token
         assert controller.document.cards[0].active_revision == edited
 
-        inspector.inspector_tabs.setCurrentIndex(0)
+        inspector.inspector_tabs.setCurrentIndex(inspector._evolve_tab_index)
         inspector.refine_resolution_combo.setCurrentIndex(
             inspector._combo_index_for_data(
                 inspector.refine_resolution_combo,
@@ -537,7 +537,7 @@ def test_explicit_image_journey_reopens_without_sources_and_preserves_run_naviga
         assert not controller.can_undo
         _assert_current_image_controls(window, ResolutionTier.LARGE)
         assert window._edit_undo_changes == {}
-        inspector.inspector_tabs.setCurrentIndex(1)
+        inspector.inspector_tabs.setCurrentIndex(inspector._edit_tab_index)
         window.show()
         application.processEvents()
         history = inspector.edit_history_list
@@ -602,7 +602,7 @@ def test_restored_edit_branch_survives_duplication_source_deletion_and_further_e
         inspector.generate_background_button.click()
         _complete_generation(workers)
         window.notification_bar.dismiss_button.click()
-        inspector.inspector_tabs.setCurrentIndex(1)
+        inspector.inspector_tabs.setCurrentIndex(inspector._edit_tab_index)
         instruction = "Paint a small star on the gate.\nKeep its uneven brush strokes."
         edits: list[CardRevision] = []
         for tier in (ResolutionTier.LARGE, ResolutionTier.FULL):
@@ -667,8 +667,8 @@ def test_restored_edit_branch_survives_duplication_source_deletion_and_further_e
             instruction,
         )
         assert [history.item(index).text() for index in range(history.count())] == [
-            f"1. {instruction}",
-            f"2. {instruction}",
+            instruction,
+            instruction,
         ]
         assert not controller.can_redo
         assert abandoned_token not in window._edit_undo_changes
@@ -740,7 +740,7 @@ def test_restored_edit_branch_survives_duplication_source_deletion_and_further_e
         assert model.calls[-1]["seed"] == 303
         assert "image_paths" not in model.calls[-1]
         window.notification_bar.dismiss_button.click()
-        inspector.inspector_tabs.setCurrentIndex(1)
+        inspector.inspector_tabs.setCurrentIndex(inspector._edit_tab_index)
         final_instruction = "Add a blue ribbon beside the stars."
         inspector.edit_instruction_edit.setPlainText(final_instruction)
         inspector.edit_background_button.click()
@@ -764,7 +764,7 @@ def test_restored_edit_branch_survives_duplication_source_deletion_and_further_e
             final_instruction,
         )
         assert [history.item(index).text() for index in range(history.count())] == [
-            f"{number}. {edit.instruction}" for number, edit in enumerate(lineage, start=1)
+            edit.instruction for edit in lineage
         ]
         assert session.store.load() == controller.document
         result_path = session.store.asset_path(result.image_path)
@@ -842,7 +842,7 @@ def test_edit_completion_retains_its_token_across_reentrant_session_changes(
     monkeypatch.setattr(session.store, "store_image_asset_and_save", persist_with_outcome)
     instruction = "Open the gate."
     try:
-        window.inspector.inspector_tabs.setCurrentIndex(1)
+        window.inspector.inspector_tabs.setCurrentIndex(window.inspector._edit_tab_index)
         window.inspector.set_edit_instruction(instruction)
         window._update_generation_actions()
         window.inspector.edit_background_button.click()

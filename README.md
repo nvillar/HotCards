@@ -53,11 +53,14 @@ bundle transaction. Undo/Redo history retains the independent bytes only while
 needed to restore the duplicate, and discarding that history reclaims the
 unreferenced duplicate-owned asset without collecting unrelated bundle files.
 
-The inspector tabs are Generate, Edit, and Hotspots. Generate has one shared
-Description and Style above two compact sections: **New Image** contains optional
-References, Resolution, and Generate Image; **Evolve** contains Source Similarity,
-Resolution, and Evolve. The Edit tab contains Edit Instruction, Resolution, Edit,
-and the current image's Edit History. Resolution selectors show only named tiers,
+The inspector tabs are Generate, Evolve, Edit, and Hotspots. Generate and Evolve
+each expose the same revision's Description and Style: changes in either tab
+are reflected in the other, not stored as separate prompts or selections.
+Generate also contains optional References, Resolution, and
+Generate Image. The Evolve tab contains Source Similarity, Resolution, and Evolve.
+The Edit tab contains Edit Instruction, Resolution, Edit,
+and the current image's Edit History. All three tabs use flat controls without
+redundant section titles or group boxes. Resolution selectors show only named tiers,
 with exact dimensions in tooltips, and select the current image size when entering
 a card, revision, or newly replaced image (including Undo/Redo). Ordinary refreshes
 preserve deliberate resolution choices. A
@@ -139,10 +142,12 @@ to preserve the accepted edits unless they conflict with the current authoritati
 Description; Generate ignores them.
 
 Edit History shows only accepted authored instructions for the active image,
-oldest first and numbered, including repeated instructions and edits inherited
-through Evolve or card duplication. It never displays expanded prompts or Style
-addenda. New Image starts with no accepted edits. Click a history row, or select it
-and press Enter or Space, to recall its exact instruction into the editor without
+oldest first with horizontal separators instead of numbering, including repeated
+instructions and edits inherited through Evolve or card duplication. It never
+displays expanded prompts or Style addenda. The history list stays visible when
+empty, keeping Edit controls consistently top-aligned. New Image starts with no
+accepted edits. Click a history row, or select it and press Enter or Space, to
+recall its exact instruction into the editor without
 changing the document or starting image generation. A recall counts as a new draft,
 even when its text matches a previously restored instruction.
 

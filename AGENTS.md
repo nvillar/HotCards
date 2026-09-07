@@ -182,16 +182,20 @@ for live MFLUX runs.
   thread, cache at most one compatible family/model/quantization configuration,
   and release it when switching configuration. Cancellation while queued or
   running must publish no output; interrupted active models must not be reused.
-- Keep inspector tabs ordered Generate, Edit, Hotspots. In Generate, keep one
-  shared Description editor and Style selector above New Image and Evolve.
-  New Image contains References, revision-local Resolution, and Generate Image;
-  Evolve contains Source Similarity, Resolution, and Evolve. References belong to
-  New Image only and are never sent to Evolve or Edit. Use normal section labels
-  above untitled native grouped panels, with consistent inset scrollable content.
+- Keep inspector tabs ordered Generate, Evolve, Edit, Hotspots. Generate and Evolve
+  each expose Description and Style, bound to the same revision state. Share one
+  transient Description document between the two views, commit it through the
+  existing commands, and synchronize Style selections from the controller without
+  duplicate commands. Preserve a focused draft in either view during same-revision
+  rendering. Generate contains References, revision-local
+  Resolution, and Generate Image; Evolve contains Source Similarity, Resolution,
+  and Evolve. References belong to Generate only and are never sent to Evolve or
+  Edit. Keep Generate, Evolve, and Edit controls flat, without redundant section
+  titles or group boxes, on consistent inset scrollable content.
   Expose exact output dimensions and positional Reference guidance in tooltips,
   and keep generation provenance in the Generate button tooltip.
   Keep Evolve and Edit button tooltips to one concise action
-  sentence plus a disabled-state reason when needed. The Edit tab contains grouped
+  sentence plus a disabled-state reason when needed. The Edit tab contains
   Edit Instruction, Resolution, and Edit controls, followed by Edit History.
   The current canvas/header is the implicit source for both. Open
   Styles, Sounds, and Keys from right-aligned Author-toolbar actions into separate
@@ -202,9 +206,11 @@ for live MFLUX runs.
   Description for Generate and Evolve, but not Edit.
 - Derive Edit History exclusively from the active background's
   `image_edit_lineage()`, including duplicate originals. Show chronological,
-  oldest-first numbered, word-wrapped authored instructions, retaining duplicates
-  and exact text without expanded prompts, Style addenda, or timestamps. Use
-  "No accepted edits for this image." when empty. Generate clears lineage,
+  oldest-first word-wrapped authored instructions without numbering, with native
+  horizontal separators and vertical space between entries. Retain duplicates
+  and exact text without expanded prompts, Style addenda, or timestamps.
+  Keep the blank history list visible when empty and Edit controls top-aligned.
+  Generate clears lineage,
   Evolve inherits it, and Edit appends. Mouse and keyboard recall only repopulate
   Edit Instruction through `Inspector.set_edit_instruction()`, advancing its draft
   serial once per action without a command, Undo entry, navigation, or model call.
