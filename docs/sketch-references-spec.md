@@ -12,7 +12,7 @@
 > retaining historical Refine provenance, and making text-only Edit drafts
 > revision-local with the lifecycle and durability semantics specified here.
 > Evolve removal and text-only revision-local drafts are implemented. Except for
-> those two areas and the remaining one-off stack conversion they require, the
+> those two areas and the completed one-off stack conversion they required, the
 > sections below describe the parked, non-normative sketch proposal.
 > The sketch feasibility findings are retained below for future reconsideration.
 
@@ -1080,6 +1080,12 @@ Historical Refine and existing legacy Generate provenance remain valid operation
 
 ### 15.2 One-off Escape To Earth conversion
 
+**Completed for the adopted reduced scope.** The working bundle is schema 14
+with 31 cards and 73 revisions. Its 284 assets retain their pre-conversion
+bytes. A complete sibling bundle named
+`Escape to Earth.schema-13-backup.hotcards` remains untouched at schema 13.
+The conversion used no production migration or legacy-loading path.
+
 Perform this only after implementation, review, automated validation, live model evaluation, and documentation updates are complete:
 
 1. Identify the working Escape To Earth bundle and validate that it is schema 13 using the pre-change baseline tooling.
@@ -1457,9 +1463,9 @@ Each phase should preserve a usable application and focused review boundaries.
 
 ### Final step — Back up and convert Escape To Earth
 
-- After all six phases and their reviews are complete, create and verify a complete schema 13 backup of the working stack.
-- Perform the one-off conversion and preservation checks from Section 15.
-- Leave the backup untouched and keep migration logic out of the application.
+- **Complete for the adopted reduced scope.** The verified schema 13 backup is
+  retained, the working bundle is schema 14, and migration logic remains out of
+  the application.
 
 ---
 
