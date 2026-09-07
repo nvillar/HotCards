@@ -1071,6 +1071,53 @@ def test_key_manager_manages_global_names_and_lists_hotspot_usages(
     manager.close()
 
 
+def test_key_manager_invalid_name_drafts_are_cancelable_and_do_not_block_delete(
+    application: QApplication,
+) -> None:
+    first = KeyDefinition(name="First")
+    second = KeyDefinition(name="Second")
+    controller = DocumentController(Stack(name="Demo", keys=(first, second)))
+    parent = Inspector(controller)
+    manager = KeyManagerWindow(controller, parent)
+    discarded: list[str] = []
+    manager.invalid_name_discarded.connect(discarded.append)
+
+    manager.name_edit.setText("Second")
+    assert not manager.error_label.isHidden()
+    assert "unique" in manager.error_label.text()
+    assert controller.document.key_by_id(first.id).name == "First"
+
+    QTest.keyClick(manager.name_edit, Qt.Key.Key_Return)
+    assert manager.name_edit.text() == "Second"
+    assert discarded == []
+
+    QTest.keyClick(manager.name_edit, Qt.Key.Key_Escape)
+    assert manager.name_edit.text() == "First"
+    assert manager.error_label.isHidden()
+    assert discarded == []
+
+    manager.name_edit.setText(" ")
+    manager.done_button.click()
+    application.processEvents()
+    assert discarded == ["First"]
+    assert controller.document.key_by_id(first.id).name == "First"
+
+    manager = KeyManagerWindow(controller, parent)
+    manager.name_edit.setText("Second")
+    manager.delete_button.click()
+    assert [key.name for key in controller.document.keys] == ["Second"]
+    manager.close()
+
+    controller = DocumentController(Stack(name="Demo", keys=(first, second)))
+    manager = KeyManagerWindow(controller, parent)
+    manager.name_edit.setText("Renamed")
+    manager.delete_button.click()
+    assert [key.name for key in controller.document.keys] == ["Second"]
+    controller.undo()
+    assert controller.document.key_by_id(first.id).name == "Renamed"
+    manager.close()
+
+
 def test_hotspot_pipeline_edits_conditions_changes_and_navigation(
     application: QApplication,
 ) -> None:

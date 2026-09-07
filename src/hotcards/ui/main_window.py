@@ -408,6 +408,13 @@ class MainWindow(QMainWindow):
             )
             window.change_applied.connect(self._show_undo_notification)
             window.hotspot_usage_requested.connect(self._show_hotspot_usage)
+            window.invalid_name_discarded.connect(
+                lambda name: self._show_info(
+                    "key-name-discarded",
+                    f'Kept Key name "{name}"',
+                    detail="The invalid name was discarded.",
+                )
+            )
             window.closing.connect(
                 lambda geometry: self.settings.setValue(
                     self._KEY_MANAGER_GEOMETRY_KEY,

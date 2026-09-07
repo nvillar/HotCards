@@ -8,7 +8,7 @@ from uuid import UUID, uuid4
 
 from pydantic import ValidationError
 from PySide6.QtCore import QSignalBlocker, Qt, QTimer, Signal
-from PySide6.QtGui import QCloseEvent, QFocusEvent
+from PySide6.QtGui import QCloseEvent, QFocusEvent, QKeyEvent
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -68,10 +68,18 @@ class _CommitPlainTextEdit(QPlainTextEdit):
 
 class _CommitLineEdit(QLineEdit):
     editing_finished = Signal(object, object)
+    escape_pressed = Signal()
 
     def focusOutEvent(self, event: QFocusEvent) -> None:
         super().focusOutEvent(event)
         self.editing_finished.emit(QApplication.focusWidget(), event.reason())
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        if event.key() == Qt.Key.Key_Escape:
+            self.escape_pressed.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
 
 def _compact_button(
@@ -475,6 +483,7 @@ class KeyManagerWindow(_ControllerUtilityWindow):
     """Edit the authoritative stack Key catalog and inspect all usages."""
 
     hotspot_usage_requested = Signal(object, object, object)
+    invalid_name_discarded = Signal(str)
 
     def __init__(
         self,
@@ -551,7 +560,8 @@ class KeyManagerWindow(_ControllerUtilityWindow):
         self.add_button.clicked.connect(self._add_key)
         self.delete_button.clicked.connect(self._delete_key)
         self.name_edit.editing_finished.connect(self._editing_finished)
-        self.name_edit.returnPressed.connect(lambda: self.commit_pending_edits(render_change=True))
+        self.name_edit.returnPressed.connect(self._return_pressed)
+        self.name_edit.escape_pressed.connect(self._revert_name_draft)
         self.name_edit.textChanged.connect(self._draft_changed)
         self.usage_list.itemDoubleClicked.connect(lambda _item: self._show_usage())
         self.render(controller.document)
@@ -639,8 +649,13 @@ class KeyManagerWindow(_ControllerUtilityWindow):
             return True
         key = self.controller.document.key_by_id(self._selected_key_id)
         name = self.name_edit.text()
+        validation_error = self._name_validation_error(key, name)
+        if validation_error is not None:
+            self._discard_invalid_name(key, notify=True)
+            return True
         if name.strip() == key.name:
             self._draft_dirty = False
+            self._render_properties(self.controller.document, key)
             return True
         committed = self._execute(
             RenameKeyCommand(key_id=key.id, name=name),
@@ -651,6 +666,49 @@ class KeyManagerWindow(_ControllerUtilityWindow):
         if committed:
             self._draft_dirty = False
         return committed
+
+    def _name_validation_error(
+        self,
+        key: KeyDefinition,
+        name: str,
+    ) -> str | None:
+        normalized = name.strip()
+        if not normalized:
+            return "Key name must not be empty."
+        if any(
+            candidate.id != key.id and candidate.name.casefold() == normalized.casefold()
+            for candidate in self.controller.document.keys
+        ):
+            return "Key names must be unique within a stack."
+        return None
+
+    def _discard_invalid_name(
+        self,
+        key: KeyDefinition,
+        *,
+        notify: bool,
+    ) -> None:
+        self._draft_dirty = False
+        self._render_properties(self.controller.document, key)
+        self._set_error(self.error_label, "")
+        if notify:
+            self.invalid_name_discarded.emit(key.name)
+
+    def _revert_name_draft(self) -> None:
+        if self._selected_key_id is None:
+            return
+        key = self.controller.document.key_by_id(self._selected_key_id)
+        self._discard_invalid_name(key, notify=False)
+
+    def _return_pressed(self) -> None:
+        if self._selected_key_id is None:
+            return
+        key = self.controller.document.key_by_id(self._selected_key_id)
+        validation_error = self._name_validation_error(key, self.name_edit.text())
+        if validation_error is not None:
+            self._set_error(self.error_label, validation_error)
+            return
+        self.commit_pending_edits(render_change=True)
 
     def _render_properties(
         self,
@@ -717,6 +775,12 @@ class KeyManagerWindow(_ControllerUtilityWindow):
         reason: object,
     ) -> None:
         mouse_focus = reason == Qt.FocusReason.MouseFocusReason
+        if self._selected_key_id is not None:
+            key = self.controller.document.key_by_id(self._selected_key_id)
+            validation_error = self._name_validation_error(key, self.name_edit.text())
+            if validation_error is not None:
+                self._set_error(self.error_label, validation_error)
+                return
         if (
             not self.commit_pending_edits(render_change=not mouse_focus)
             or not mouse_focus
@@ -743,6 +807,12 @@ class KeyManagerWindow(_ControllerUtilityWindow):
     def _draft_changed(self) -> None:
         if not self._rendering:
             self._draft_dirty = True
+            if self._selected_key_id is not None:
+                key = self.controller.document.key_by_id(self._selected_key_id)
+                self._set_error(
+                    self.error_label,
+                    self._name_validation_error(key, self.name_edit.text()) or "",
+                )
 
     def _add_key(self) -> None:
         if not self.commit_pending_edits(render_change=False):
@@ -765,9 +835,15 @@ class KeyManagerWindow(_ControllerUtilityWindow):
             self.name_edit.selectAll()
 
     def _delete_key(self) -> None:
-        if self._selected_key_id is None or not self.commit_pending_edits(render_change=False):
+        if self._selected_key_id is None:
             return
         key_id = self._selected_key_id
+        key = self.controller.document.key_by_id(key_id)
+        if (
+            self._name_validation_error(key, self.name_edit.text()) is None
+            and not self.commit_pending_edits(render_change=False)
+        ):
+            return
         self._selected_key_id = None
         self._execute(
             DeleteKeyCommand(key_id=key_id),

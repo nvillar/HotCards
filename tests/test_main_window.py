@@ -541,6 +541,31 @@ def test_pending_durability_disables_utility_manager_mutations(
     application.processEvents()
 
 
+def test_key_manager_done_discards_invalid_name_and_notifies(
+    application: QApplication,
+) -> None:
+    first = KeyDefinition(name="First")
+    second = KeyDefinition(name="Second")
+    window, controller, _workers, _background = _window(
+        Stack(name="Demo", keys=(first, second), cards=(Card(name="Card"),))
+    )
+    window._show_key_manager()
+    manager = window.key_manager_window
+    assert manager is not None
+
+    manager.name_edit.setText("Second")
+    manager.done_button.click()
+    application.processEvents()
+
+    assert window.key_manager_window is None
+    assert controller.document.key_by_id(first.id).name == "First"
+    assert window.notification_bar.current_key == "key-name-discarded"
+    assert window.notification_bar.current_notification is not None
+    assert window.notification_bar.current_notification.message == 'Kept Key name "First"'
+    window.close()
+    application.processEvents()
+
+
 def test_sound_manager_edits_catalog_shows_usage_and_starts_generation(
     application: QApplication,
 ) -> None:
