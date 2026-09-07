@@ -22,7 +22,7 @@ Remove **Evolve** as an executable authoring operation.
 
 Introduce a small raster drawing editor whose sketches can serve as Generate references or Edit attachments. Make unfinished Edit instructions and their sketches belong to individual card versions, rather than shared inspector controls.
 
-The feature must preserve existing documents, accepted image history, durable image application, and protection against stale asynchronous results.
+The feature must preserve Escape To Earth's existing content and accepted image history through the one-off conversion in Section 15, while preserving durable image application and protection against stale asynchronous results. The application will support only the new schema, not legacy-schema loading or runtime migration.
 
 ### 1.1 Core principles
 
@@ -44,7 +44,8 @@ The feature must preserve existing documents, accepted image history, durable im
 ### 2.1 Included
 
 - Removal of Evolve UI and executable workflow.
-- Compatibility with existing Refine/Evolve provenance.
+- Historical Refine/Evolve provenance within the new schema.
+- A final, one-off conversion of Escape To Earth after making a complete schema 13 backup.
 - A shared raster sketch editor.
 - Sketches in either of Generate’s two reference slots.
 - One optional sketch in Edit.
@@ -59,6 +60,8 @@ The feature must preserve existing documents, accepted image history, durable im
 
 ### 2.2 Excluded
 
+- Legacy-schema readers, compatibility branches, and runtime migration logic.
+- A maintained migration framework or support for converting other stacks.
 - Image import.
 - Masking or inpainting controls.
 - Automatic interpretation of colors.
@@ -159,9 +162,9 @@ The inspector tab order becomes:
 
 Do not rely on old numeric tab indices after removal.
 
-### 4.2 Keep compatibility support
+### 4.2 Keep historical provenance support
 
-Retain the data types and validation needed to read historical:
+Retain the data types and validation needed to read historical facts within the new schema:
 
 - `refine` provenance.
 - Refine source snapshots.
@@ -181,6 +184,8 @@ Existing Evolve-created backgrounds must remain:
 
 Do not relabel historical Evolve operations as Generate or Edit.
 
+This is historical operation support, not support for loading schema 13 or older bundles. Section 15 defines the one-off conversion of the only existing stack in scope.
+
 ### 4.3 Preserve shared functionality
 
 Do not remove regular `Flux2Klein` support merely because Evolve used it. Generate without references still requires the existing plain-generation path.
@@ -194,7 +199,7 @@ Do not remove shared:
 - Provenance flattening.
 - Edit lineage extraction.
 
-Separate historical compatibility from executable operation support.
+Separate historical provenance support from executable operation support and legacy-schema loading.
 
 ### 4.4 Description after removal
 
@@ -1044,11 +1049,13 @@ Do not silently convert a sketch-bearing request into a text-only request.
 
 ---
 
-## 15. Schema Compatibility
+## 15. New Schema and One-Off Stack Conversion
 
 The inspected baseline uses schema version 13 and strict model validation.
 
 Adding persisted drafts, sketch assets, and reference variants requires an explicit schema change.
+
+**Binding rollout decision:** Escape To Earth is the only existing stack to convert. Make a complete schema 13 backup first, then convert the working stack as the final step of feature delivery. Do not add legacy-schema support or migration logic to the application.
 
 ### 15.1 Implementation default
 
@@ -1056,25 +1063,39 @@ Use schema version 14 if no intervening schema change has occurred.
 
 If another change has already consumed that version, use the next available version and update fixtures accordingly.
 
-### 15.2 Version 13 upgrade
+The production loader accepts only the new schema. Reject schema 13 and older bundles through normal load-error handling without rewriting them. Do not retain old-schema readers, add automatic upgrades on open, or introduce a migration framework.
 
-Provide a focused, validated version 13 upgrade:
+Historical Refine and existing legacy Generate provenance remain valid operation records within the new schema. Keeping those facts readable does not require keeping their former bundle schemas readable.
+
+### 15.2 One-off Escape To Earth conversion
+
+Perform this only after implementation, review, automated validation, live model evaluation, and documentation updates are complete:
+
+1. Identify the working Escape To Earth bundle and validate that it is schema 13 using the pre-change baseline tooling.
+2. Create and verify a separate, complete schema 13 backup of the bundle, including its manifest and all assets. Leave that backup untouched by conversion.
+3. Convert a working copy through manual patching or a one-off external script. This tooling is a delivery artifact, not maintained application code or a reusable migration subsystem.
+4. Validate the converted document against the new strict schema, confirm content and asset preservation, and exercise opening and saving with the updated application before replacing the working bundle.
+
+The conversion must preserve these invariants:
 
 - Existing card references retain their meaning and order.
 - Revisions receive empty Edit drafts.
 - Existing accepted edits receive no sketch attachment.
-- Historical Refine provenance remains unchanged.
+- The new sketch catalog starts empty.
+- Historical Refine facts and inherited accepted Edit lineage remain unchanged, including operations embedded in duplicate provenance.
 - Existing image paths, seeds, prompts, and output facts remain intact.
+- Cards, versions, IDs, selections, Styles, Keys, Sounds, and hotspots retain their existing meaning.
+- All asset files retain their exact bytes, including currently unreferenced files. Do not combine conversion with asset cleanup.
 
-Validate the old document before transforming it.
-
-Do not introduce support for schema 12 or older as part of this feature.
+Do not add support for schema 12 or older, convert other stacks, or modify any existing older backups.
 
 ### 15.3 Persistence safety
 
 Do not rewrite a bundle merely to inspect it.
 
-Persist the upgraded representation through the normal safe save path. A failed upgrade/save must leave a recoverable original document.
+Use the normal safe save path for the validated new-schema document. A failed conversion or save must leave the original working bundle recoverable and the schema 13 backup untouched.
+
+Do not reopen and resave the backup with the updated application. Keep source validation and transformation outside production loading and saving.
 
 Older applications are not expected to read the new schema. Do not claim backward compatibility in that direction.
 
@@ -1086,7 +1107,7 @@ Implementation must update `AGENTS.md` and `README.md` where their existing rule
 - Expanded reference types.
 - Persisted Edit drafts.
 - Sketch-aware history.
-- New schema support.
+- New-schema-only loading and the absence of runtime migration.
 
 This specification is explicitly requested design documentation, not a second maintained progress tracker. Track delivery through issues and pull requests.
 
@@ -1171,13 +1192,13 @@ Preserve:
 - Reference unions.
 - Provenance extensions.
 - Validation.
-- Compatibility types.
+- Historical provenance types within the new schema.
 
 ### Storage
 
 - Immutable sketch persistence.
 - Safe loading and snapshots.
-- Schema upgrade.
+- New-schema-only persistence and rejection of unsupported schemas.
 - Save As.
 - Reachability and cleanup.
 - Asset/manifest transaction support.
@@ -1209,6 +1230,11 @@ Preserve:
 - Evolve tab removal.
 
 Widgets must not own independent persisted truth or perform model/storage operations directly.
+
+### Final delivery operation
+
+- Back up and convert Escape To Earth once, following Section 15.
+- Keep conversion tooling outside maintained application code; no runtime migration responsibility belongs to Storage or any other production layer.
 
 ---
 
@@ -1299,12 +1325,12 @@ Verify:
 - Undo version creation and Undo Edit remain separate boundaries.
 - Newer unrelated drafts survive document Undo.
 
-### 18.7 Storage and compatibility
+### 18.7 Storage and historical provenance
 
 Verify:
 
-- Version 13 upgrade.
-- Historical Refine load/save/display.
+- New-schema round trips and rejection of schema 13 and older without rewriting the bundle.
+- Historical Refine load/save/display using new-schema fixtures.
 - Editing an old Refine background.
 - Duplicating old Refine provenance.
 - All sketch roots participate in retention.
@@ -1314,6 +1340,8 @@ Verify:
 - Symlink/path traversal rejection.
 - Corrupt PNG and dimension-limit rejection.
 - Rollback after asset/manifest failure.
+
+Separately, as the final delivery step, verify the complete schema 13 backup and one-off Escape To Earth conversion against Section 15. This is not an automated runtime-migration test or a reason to retain an old-schema reader.
 
 ### 18.8 Evolve removal
 
@@ -1376,7 +1404,7 @@ If quality is inadequate, report the limitation and revisit the model/input appr
 
 ## 20. Suggested Delivery Sequence
 
-### Phase 1 — Evolve removal and compatibility
+### Phase 1 — Evolve removal and historical provenance
 
 - Remove executable Evolve surfaces.
 - Preserve historical Refine records.
@@ -1410,11 +1438,17 @@ If quality is inadequate, report the limitation and revisit the model/input appr
 
 - Live model evaluation.
 - Failure injection.
-- Compatibility fixtures.
+- New-schema fixtures retaining historical provenance facts.
 - Accessibility and lifecycle testing.
 - Final documentation updates.
 
 Each phase should preserve a usable application and focused review boundaries.
+
+### Final step — Back up and convert Escape To Earth
+
+- After all six phases and their reviews are complete, create and verify a complete schema 13 backup of the working stack.
+- Perform the one-off conversion and preservation checks from Section 15.
+- Leave the backup untouched and keep migration logic out of the application.
 
 ---
 
@@ -1436,5 +1470,7 @@ The feature is complete when:
 - Request ordering and model support are verified.
 - Automated tests pass and representative live evaluations are recorded.
 - `README.md` and durable repository guidance reflect the new behavior.
+- Production loading supports only the new schema, without legacy-schema readers or runtime migration.
+- Escape To Earth has been converted as the final step, with its content and assets preserved and an untouched, verified schema 13 backup retained.
 
 **Final product rule: an Edit draft belongs to a card version, consists of an instruction and an optional sketch, and is applied to that version’s current image. The user—not a warning system—decides whether the sketch is appropriate.**
