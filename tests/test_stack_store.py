@@ -789,7 +789,8 @@ def test_load_rejects_missing_unsupported_and_future_versions(
         ({"schema_version": 3, "name": "Legacy"}, "schema_version"),
         ({"schema_version": 11, "name": "Previous"}, "schema_version"),
         ({"schema_version": 12, "name": "Previous"}, "schema_version"),
-        ({"schema_version": 14, "name": "Future"}, "schema_version"),
+        ({"schema_version": 13, "name": "Previous"}, "schema_version"),
+        ({"schema_version": 15, "name": "Future"}, "schema_version"),
     ]:
         store.stack_path.write_text(json.dumps(payload))
         with pytest.raises(StackStoreError, match=message):

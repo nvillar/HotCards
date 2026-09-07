@@ -54,6 +54,7 @@ from hotcards.domain.models import (
     DerivedImageSourceSnapshot,
     DirectGenerateProvenance,
     DuplicateProvenance,
+    EditDraft,
     GeneratedBackground,
     GeneratedSoundAsset,
     GenerateInputs,
@@ -215,6 +216,7 @@ def test_duplicate_card_copies_only_active_revision_with_independent_ids() -> No
         references=(ResolvedCardReference(target_card_id=destination.id),),
         style_id=style.id,
         generate_output_size=PresetOutputSize(tier=ResolutionTier.FULL),
+        edit_draft=EditDraft(instruction="Unfinished duplicate source"),
     )
     source = Card(
         id=source_id,
@@ -260,6 +262,8 @@ def test_duplicate_card_copies_only_active_revision_with_independent_ids() -> No
     assert revision.references == active.references
     assert revision.style_id == style.id
     assert revision.generate_output_size == PresetOutputSize(tier=ResolutionTier.FULL)
+    assert revision.edit_draft.instruction == ""
+    assert revision.edit_draft.generation_id != active.edit_draft.generation_id
     assert revision.hotspot_set is not None
     assert (
         tuple(copied.id for copied in revision.hotspot_set.interactions)
@@ -552,6 +556,7 @@ def test_revision_generate_output_size_is_typed_and_copied_completely() -> None:
     revision = CardRevision(
         style_id=style.id,
         generate_output_size=PresetOutputSize(tier=ResolutionTier.LARGE),
+        edit_draft=EditDraft(instruction="Do not duplicate"),
     )
     card = Card(name="Card", revisions=(revision,))
     document = Stack(
@@ -574,6 +579,11 @@ def test_revision_generate_output_size_is_typed_and_copied_completely() -> None:
     assert changed.cards[0].active_revision.style_id == style.id
     assert changed.cards[0].active_revision.generate_output_size == PresetOutputSize(
         tier=ResolutionTier.FULL
+    )
+    assert changed.cards[0].active_revision.edit_draft.instruction == ""
+    assert (
+        changed.cards[0].active_revision.edit_draft.generation_id
+        != revision.edit_draft.generation_id
     )
 
 
@@ -604,13 +614,42 @@ def test_create_image_revision_preserves_resolution_and_uses_stable_command_ids(
     assert changed == command.apply(document)
     assert changed.cards[0].revisions[0] == previous
     assert changed.cards[0].active_revision == generated.model_copy(
-        update={"id": command.new_revision_id}
+        update={
+            "id": command.new_revision_id,
+            "edit_draft": generated.edit_draft.model_copy(
+                update={"generation_id": command.new_edit_draft_generation_id}
+            ),
+        }
     )
 
     assert tuple(revision.generate_output_size for revision in changed.cards[0].revisions) == (
         PresetOutputSize(tier=ResolutionTier.LARGE),
         PresetOutputSize(tier=ResolutionTier.LARGE),
     )
+
+
+def test_create_image_revision_keeps_newer_draft_on_original_and_starts_result_empty() -> None:
+    previous = CardRevision(edit_draft=EditDraft(instruction="Submitted instruction"))
+    newer_draft = EditDraft(instruction="A newer unfinished instruction")
+    result = previous.model_copy(
+        update={
+            "background": generated_background("Result"),
+            "edit_draft": newer_draft,
+        }
+    )
+    card = Card(name="Card", revisions=(result,), active_revision_id=result.id)
+    command = CreateImageRevisionCommand(
+        card_id=card.id,
+        revision_id=result.id,
+        previous_revision=previous,
+    )
+
+    changed = command.apply(Stack(name="Stack", cards=(card,)))
+
+    restored, versioned_result = changed.cards[0].revisions
+    assert restored.edit_draft == newer_draft
+    assert versioned_result.edit_draft.instruction == ""
+    assert versioned_result.edit_draft.generation_id == command.new_edit_draft_generation_id
 
 
 @pytest.mark.parametrize("hotspot_set", (None, HotspotSet()))

@@ -2711,8 +2711,16 @@ def test_applied_image_can_move_to_a_new_complete_version(
     assert changed_card.active_revision.hotspot_set == original.hotspot_set
     assert changed_card.active_revision.background == background
     assert changed_card.revisions[0] == original
-    assert changed_card.active_revision.model_copy(update={"id": original.id}) == (
-        changed.cards[0].active_revision
+    assert changed_card.active_revision.model_copy(
+        update={
+            "id": original.id,
+            "edit_draft": changed.cards[0].active_revision.edit_draft,
+        }
+    ) == changed.cards[0].active_revision
+    assert changed_card.active_revision.edit_draft.instruction == ""
+    assert (
+        changed_card.active_revision.edit_draft.generation_id
+        != changed.cards[0].active_revision.edit_draft.generation_id
     )
     assert not background_workflow.generate_calls
     assert not background_workflow.edit_calls

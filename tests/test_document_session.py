@@ -291,6 +291,37 @@ def test_autosave_runs_after_debounce(
     assert not session.state.dirty
 
 
+def test_revision_edit_draft_survives_failed_autosave_retry_and_reopen(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    card = Card(name="Card")
+    controller = DocumentController(Stack(name="Welcome"))
+    session = DocumentSession(controller)
+    bundle = tmp_path / "Draft.hotcards"
+    session.create(Stack(name="Draft", cards=(card,)), bundle)
+    draft = controller.replace_edit_draft(
+        card.id,
+        card.active_revision.id,
+        "  Unfinished instruction.\n",
+    )
+    assert session.store is not None
+    real_save = session.store.save
+
+    def fail_save(_stack: Stack) -> None:
+        raise StackStoreError("disk is unavailable")
+
+    monkeypatch.setattr(session.store, "save", fail_save)
+    assert not session.flush()
+    assert controller.edit_draft(card.id, card.active_revision.id) == draft
+    assert session.state.dirty
+
+    monkeypatch.setattr(session.store, "save", real_save)
+    assert session.flush()
+    reopened = StackStore(bundle).load()
+    assert reopened.cards[0].active_revision.edit_draft == draft
+
+
 def test_failed_save_remains_dirty_and_can_retry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

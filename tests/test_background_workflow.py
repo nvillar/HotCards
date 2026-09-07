@@ -51,6 +51,7 @@ from hotcards.domain.image_dimensions import (
     output_dimensions,
 )
 from hotcards.domain.models import (
+    CURRENT_SCHEMA_VERSION,
     Card,
     CardRevision,
     CurrentSourceSize,
@@ -463,7 +464,11 @@ def test_explicit_image_journey_reopens_without_sources_and_preserves_run_naviga
         window.notification_bar.primary_button.click()
         checkpoint = controller.document.cards[0].active_revision
         assert checkpoint.id != before.id
-        assert checkpoint.model_copy(update={"id": before.id}) == edited
+        assert checkpoint.model_copy(
+            update={"id": before.id, "edit_draft": edited.edit_draft}
+        ) == edited
+        assert checkpoint.edit_draft.instruction == ""
+        assert checkpoint.edit_draft.generation_id != edited.edit_draft.generation_id
         assert controller.document.cards[0].revisions == (generated, checkpoint)
         assert controller.current_undo_token != applied[-1].token
         assert checkpoint.background == edited.background
@@ -485,7 +490,7 @@ def test_explicit_image_journey_reopens_without_sources_and_preserves_run_naviga
 
         saved = controller.document
         manifest = json.loads((session.store.bundle_path / "stack.json").read_text())
-        assert manifest["schema_version"] == 13
+        assert manifest["schema_version"] == CURRENT_SCHEMA_VERSION
         persisted_provenance = manifest["cards"][0]["revisions"][0]["background"]["provenance"]
         assert "edit_lineage" not in persisted_provenance
         assert persisted_provenance["source"] == edited.provenance.source.model_dump(mode="json")
@@ -659,9 +664,15 @@ def test_restored_edit_branch_survives_duplication_source_deletion_and_further_e
                     "id": branch.id,
                     "background": branch.background,
                     "hotspot_set": branch.hotspot_set,
+                    "edit_draft": branch.edit_draft,
                 }
             )
             == branch
+        )
+        assert duplicate_revision.edit_draft.instruction == ""
+        assert (
+            duplicate_revision.edit_draft.generation_id
+            != branch.edit_draft.generation_id
         )
         original_hotspot = branch.hotspot_set.interactions[0]
         copied_hotspot = duplicate_revision.hotspot_set.interactions[0]

@@ -12,6 +12,7 @@ from hotcards.domain.models import (
     CardReference,
     CardRevision,
     DuplicateProvenance,
+    EditDraft,
     GeneratedBackground,
     GeneratedSoundAsset,
     GenerateOutputSize,
@@ -288,6 +289,7 @@ class DuplicateCardCommand:
     name: str
     card_id: UUID = field(default_factory=uuid4)
     revision_id: UUID = field(default_factory=uuid4)
+    edit_draft_generation_id: UUID = field(default_factory=uuid4)
     background_id: UUID | None = None
     background_image_path: str | None = None
     interaction_ids: tuple[UUID, ...] = field(default_factory=tuple)
@@ -371,6 +373,9 @@ class DuplicateCardCommand:
                 "id": self.revision_id,
                 "background": background,
                 "hotspot_set": hotspot_set,
+                "edit_draft": EditDraft(
+                    generation_id=self.edit_draft_generation_id,
+                ),
             },
         )
         duplicate = Card(
@@ -792,6 +797,7 @@ class DuplicateRevisionCommand:
     card_id: UUID
     source_revision_id: UUID
     revision_id: UUID = field(default_factory=uuid4)
+    edit_draft_generation_id: UUID = field(default_factory=uuid4)
 
     def apply(self, document: Stack) -> Stack:
         card_index = _card_index(document, self.card_id)
@@ -799,7 +805,15 @@ class DuplicateRevisionCommand:
         source = card.revisions[_revision_index(card, self.source_revision_id)]
         if any(revision.id == self.revision_id for revision in card.revisions):
             raise CommandError(f"revision {self.revision_id} already exists on card {card.id}")
-        revision = source.model_copy(deep=True, update={"id": self.revision_id})
+        revision = source.model_copy(
+            deep=True,
+            update={
+                "id": self.revision_id,
+                "edit_draft": EditDraft(
+                    generation_id=self.edit_draft_generation_id,
+                ),
+            },
+        )
         card = card.model_copy(
             update={
                 "revisions": (*card.revisions, revision),
@@ -817,6 +831,7 @@ class CreateImageRevisionCommand:
     revision_id: UUID
     previous_revision: CardRevision
     new_revision_id: UUID = field(default_factory=uuid4)
+    new_edit_draft_generation_id: UUID = field(default_factory=uuid4)
 
     def apply(self, document: Stack) -> Stack:
         card_index = _card_index(document, self.card_id)
@@ -826,12 +841,21 @@ class CreateImageRevisionCommand:
             raise CommandError("the previous revision does not match the applied image result")
         if any(revision.id == self.new_revision_id for revision in card.revisions):
             raise CommandError(f"revision {self.new_revision_id} already exists on card {card.id}")
-        result_revision = card.revisions[source_index].model_copy(
+        current_revision = card.revisions[source_index]
+        result_revision = current_revision.model_copy(
             deep=True,
-            update={"id": self.new_revision_id},
+            update={
+                "id": self.new_revision_id,
+                "edit_draft": EditDraft(
+                    generation_id=self.new_edit_draft_generation_id,
+                ),
+            },
         )
         revisions = list(card.revisions)
-        revisions[source_index] = self.previous_revision.model_copy(deep=True)
+        revisions[source_index] = self.previous_revision.model_copy(
+            deep=True,
+            update={"edit_draft": current_revision.edit_draft},
+        )
         revisions.append(result_revision)
         card = card.model_copy(
             update={

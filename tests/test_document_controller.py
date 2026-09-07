@@ -13,6 +13,7 @@ from hotcards.application.commands import (
     CreateCardCommand,
     DeleteCardCommand,
     DeleteSoundCommand,
+    DuplicateRevisionCommand,
     EditRevisionDescriptionCommand,
     RenameCardCommand,
     ReplaceGeneratedSoundCommand,
@@ -26,6 +27,7 @@ from hotcards.application.document_controller import (
 from hotcards.domain.models import (
     Card,
     CardRevision,
+    EditDraft,
     GeneratedSoundAsset,
     HotspotSet,
     Interaction,
@@ -465,3 +467,164 @@ def test_replace_document_clears_session_history_without_autosave() -> None:
     assert not controller.can_undo
     assert not controller.can_redo
     assert signals == []
+
+
+def test_draft_replacement_autosaves_without_changing_document_history() -> None:
+    card = Card(name="Card")
+    signals: list[Stack] = []
+    controller = DocumentController(
+        Stack(name="Stack", cards=(card,)),
+        autosave_hook=signals.append,
+    )
+    controller.execute(RenameCardCommand(card_id=card.id, name="Renamed"))
+    assert controller.undo()
+    redo_token = controller.current_redo_token
+    signals.clear()
+
+    draft = controller.replace_edit_draft(
+        card.id,
+        card.active_revision.id,
+        "  Keep raw text.\n",
+    )
+
+    assert controller.document.cards[0].active_revision.edit_draft == draft
+    assert draft.instruction == "  Keep raw text.\n"
+    assert controller.current_redo_token == redo_token
+    assert controller.can_redo
+    assert not controller.can_undo
+    assert signals == [controller.document]
+
+
+def test_draft_undo_and_redo_are_context_local_and_create_fresh_generations() -> None:
+    first_card = Card(name="First")
+    second_card = Card(name="Second")
+    controller = DocumentController(Stack(name="Stack", cards=(first_card, second_card)))
+    first = controller.replace_edit_draft(
+        first_card.id,
+        first_card.active_revision.id,
+        "First",
+    )
+    second = controller.replace_edit_draft(
+        first_card.id,
+        first_card.active_revision.id,
+        "Second",
+    )
+    other = controller.replace_edit_draft(
+        second_card.id,
+        second_card.active_revision.id,
+        "Other",
+    )
+
+    assert controller.undo_edit_draft(first_card.id, first_card.active_revision.id)
+    restored = controller.edit_draft(first_card.id, first_card.active_revision.id)
+    assert restored.instruction == "First"
+    assert restored.generation_id not in {first.generation_id, second.generation_id}
+    assert controller.edit_draft(second_card.id, second_card.active_revision.id) == other
+
+    assert controller.redo_edit_draft(first_card.id, first_card.active_revision.id)
+    redone = controller.edit_draft(first_card.id, first_card.active_revision.id)
+    assert redone.instruction == "Second"
+    assert redone.generation_id not in {
+        first.generation_id,
+        second.generation_id,
+        restored.generation_id,
+    }
+    assert not controller.can_undo
+
+
+def test_clearing_history_discards_draft_undo_without_clearing_the_draft() -> None:
+    card = Card(name="Card")
+    controller = DocumentController(Stack(name="Stack", cards=(card,)))
+    draft = controller.replace_edit_draft(
+        card.id,
+        card.active_revision.id,
+        "Keep this draft",
+    )
+    assert controller.can_undo_edit_draft(card.id, card.active_revision.id)
+
+    controller.clear_history()
+
+    assert controller.edit_draft(card.id, card.active_revision.id) == draft
+    assert not controller.can_undo_edit_draft(card.id, card.active_revision.id)
+    assert not controller.can_redo_edit_draft(card.id, card.active_revision.id)
+
+
+def test_document_undo_and_redo_preserve_newer_revision_draft() -> None:
+    card = Card(name="Original")
+    controller = DocumentController(Stack(name="Stack", cards=(card,)))
+    controller.execute(RenameCardCommand(card_id=card.id, name="Renamed"))
+    draft = controller.replace_edit_draft(
+        card.id,
+        card.active_revision.id,
+        "Newer draft",
+    )
+
+    assert controller.undo()
+    assert controller.document.cards[0].name == "Original"
+    assert controller.document.cards[0].active_revision.edit_draft == draft
+    assert controller.redo()
+    assert controller.document.cards[0].name == "Renamed"
+    assert controller.document.cards[0].active_revision.edit_draft == draft
+
+
+def test_revision_draft_survives_undo_and_redo_of_its_creation() -> None:
+    card = Card(name="Card")
+    controller = DocumentController(Stack(name="Stack", cards=(card,)))
+    command = DuplicateRevisionCommand(
+        card_id=card.id,
+        source_revision_id=card.active_revision.id,
+    )
+    controller.execute(command)
+    draft = controller.replace_edit_draft(
+        card.id,
+        command.revision_id,
+        "Draft on duplicated version",
+    )
+
+    assert controller.undo()
+    assert [revision.id for revision in controller.document.cards[0].revisions] == [
+        card.active_revision.id
+    ]
+    assert controller.redo()
+    restored = controller.document.cards[0].active_revision
+    assert restored.id == command.revision_id
+    assert restored.edit_draft == draft
+
+
+def test_document_draft_transition_restores_only_an_unchanged_generation() -> None:
+    card = Card(name="Original")
+    controller = DocumentController(Stack(name="Stack", cards=(card,)))
+    submitted = controller.replace_edit_draft(
+        card.id,
+        card.active_revision.id,
+        "Submitted",
+    )
+    consumed = EditDraft()
+
+    class ConsumeDraftCommand:
+        def apply(self, document: Stack) -> Stack:
+            current_card = document.cards[0]
+            revision = current_card.active_revision.model_copy(
+                update={"edit_draft": consumed}
+            )
+            changed_card = current_card.model_copy(
+                update={"name": "Edited", "revisions": (revision,)}
+            )
+            return document.model_copy(update={"cards": (changed_card,)})
+
+    controller.execute(ConsumeDraftCommand())
+    assert controller.edit_draft(card.id, card.active_revision.id) == consumed
+    assert controller.undo()
+    assert controller.edit_draft(card.id, card.active_revision.id) == submitted
+    assert controller.redo()
+    assert controller.edit_draft(card.id, card.active_revision.id) == consumed
+
+    assert controller.undo()
+    newer = controller.replace_edit_draft(
+        card.id,
+        card.active_revision.id,
+        "Newer",
+    )
+    assert controller.redo()
+    assert controller.document.cards[0].name == "Edited"
+    assert controller.edit_draft(card.id, card.active_revision.id) == newer

@@ -27,7 +27,7 @@ from hotcards.domain.image_dimensions import (
     validate_exact_output_dimensions,
 )
 
-CURRENT_SCHEMA_VERSION = 13
+CURRENT_SCHEMA_VERSION = 14
 
 NonEmptyString = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 NormalizedCoordinate = Annotated[float, Field(ge=0.0, le=1.0)]
@@ -702,6 +702,13 @@ class GeneratedBackground(DomainModel):
 Background = GeneratedBackground
 
 
+class EditDraft(DomainModel):
+    """One revision-local, unfinished Edit instruction."""
+
+    generation_id: UUID = Field(default_factory=uuid4)
+    instruction: str = ""
+
+
 class CardRevision(DomainModel):
     """One complete revision of a card's authored content."""
 
@@ -715,6 +722,7 @@ class CardRevision(DomainModel):
     )
     style_id: UUID | None = None
     generate_output_size: GenerateOutputSize = PresetOutputSize(tier=ResolutionTier.MEDIUM)
+    edit_draft: EditDraft = Field(default_factory=EditDraft)
 
     @field_validator("hotspot_set")
     @classmethod

@@ -139,8 +139,8 @@ for live MFLUX runs.
   for direct Generate, externally patched legacy Generate, Refine, Edit, and
   independent card duplication.
   Keep operation-specific prompts and settings typed rather than accumulating
-  nullable fields. Accept schema 13 only, without runtime loading or migration
-  of schema 12. Historical Refine and current Edit provenance capture a
+  nullable fields. Accept schema 14 only, without runtime loading or migration
+  of schema 13 or older. Historical Refine and current Edit provenance capture a
   nonrecursive source snapshot:
   card/revision/background IDs, decoded width/height, flattened source operation
   seed, and one canonical inherited accepted Edit sequence. Store no source

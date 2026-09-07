@@ -24,6 +24,7 @@ from hotcards.domain.models import (
     DerivedImageSourceSnapshot,
     DirectGenerateProvenance,
     DuplicateProvenance,
+    EditDraft,
     EditPreserveOptions,
     EditProvenance,
     ExactOutputSize,
@@ -192,6 +193,21 @@ def test_stack_defaults_match_document_contract() -> None:
     assert stack.cards == ()
     with pytest.raises(ValidationError, match="frozen"):
         stack.aspect_ratio = AspectRatio.SQUARE
+
+
+def test_edit_drafts_preserve_raw_text_and_use_independent_generations() -> None:
+    first = CardRevision(edit_draft=EditDraft(instruction="  Keep raw text.\n"))
+    second = CardRevision()
+    stack = Stack(name="Drafts", cards=(Card(name="Card", revisions=(first, second)),))
+
+    loaded = Stack.model_validate_json(stack.model_dump_json())
+
+    assert loaded.cards[0].revisions[0].edit_draft == first.edit_draft
+    assert loaded.cards[0].revisions[0].edit_draft.instruction == "  Keep raw text.\n"
+    assert (
+        loaded.cards[0].revisions[0].edit_draft.generation_id
+        != loaded.cards[0].revisions[1].edit_draft.generation_id
+    )
 
 
 def test_built_in_style_ids_remain_stable_across_product_renames() -> None:
