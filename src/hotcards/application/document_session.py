@@ -16,13 +16,7 @@ from hotcards.application.document_controller import (
     OwnedImageAsset,
     OwnedSoundAsset,
 )
-from hotcards.domain.models import (
-    DirectGenerateProvenance,
-    DuplicateProvenance,
-    EditProvenance,
-    RefineProvenance,
-    Stack,
-)
+from hotcards.domain.models import Stack
 from hotcards.storage.stack_store import (
     StackStore,
     StackStoreError,
@@ -391,7 +385,7 @@ class DocumentSession(QObject):
                         asset_id=asset.asset_id,
                         stack=Stack(name="Owned asset cleanup"),
                     )
-            except StackStoreError as error:
+            except (OSError, StackStoreError) as error:
                 cleanup_error = str(error)
                 continue
             self._released_assets.pop(key, None)
@@ -410,15 +404,7 @@ class DocumentSession(QObject):
         for card in document.cards:
             for revision in card.revisions:
                 background = revision.background
-                if background is None or not isinstance(
-                    background.provenance,
-                    (
-                        DirectGenerateProvenance,
-                        RefineProvenance,
-                        EditProvenance,
-                        DuplicateProvenance,
-                    ),
-                ):
+                if background is None:
                     continue
                 if background.image_path in seen_paths:
                     continue

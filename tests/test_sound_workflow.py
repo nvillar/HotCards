@@ -313,3 +313,33 @@ def test_failed_sound_manifest_and_rollback_complete_only_after_durable_retry(
     controller.clear_history()
     assert session.flush()
     assert not list(store.bundle_path.rglob("*.wav"))
+
+
+def test_sound_cleanup_io_error_preserves_failure_and_finishes_operation(
+    tmp_path: Path, request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    generator = FakeStableAudioGenerator()
+    sound, controller, session, _workers, workflow = sound_session(tmp_path, generator, request)
+    assert session.store is not None
+    store = session.store
+    before = controller.document
+    failures: list[str] = []
+    workflow.failed.connect(failures.append)
+
+    def fail_manifest(name: str) -> None:
+        if name == "manifest-file-fsynced":
+            raise OSError("manifest interrupted")
+
+    def fail_cleanup(*_args: object, **_kwargs: object) -> bool:
+        raise OSError("cleanup directory fsync interrupted")
+
+    monkeypatch.setattr(storage_module, "_io_checkpoint", fail_manifest)
+    monkeypatch.setattr(store, "remove_owned_sound_asset_if_unreferenced", fail_cleanup)
+    workflow.generate(sound.id)
+    wait_for_workflow(workflow)
+    assert controller.document == before
+    assert not controller.can_undo
+    assert len(failures) == 1
+    assert "manifest interrupted" in failures[0]
+    assert "cleanup directory fsync interrupted" in failures[0]
+    assert generator.output_path is not None and not generator.output_path.exists()

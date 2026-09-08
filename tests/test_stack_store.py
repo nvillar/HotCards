@@ -166,6 +166,76 @@ def test_bundle_round_trip_preserves_document_and_relative_asset(tmp_path: Path)
     )
 
 
+def test_dimension_cache_reuses_only_unchanged_securely_opened_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source.png"
+    _write_png(source)
+    store = StackStore(tmp_path / "Dimensions.hotcards")
+    card_id, asset_id = uuid4(), uuid4()
+    relative = store.store_image_asset(source, card_id=card_id, asset_id=asset_id)
+    image_path = store.asset_path(relative)
+    real_decode = stack_store_module._validate_png_fd
+    decoded: list[str] = []
+
+    def decode(descriptor: int, label: str) -> tuple[int, int]:
+        decoded.append(label)
+        return real_decode(descriptor, label)
+
+    monkeypatch.setattr(stack_store_module, "_validate_png_fd", decode)
+    assert store.image_asset_dimensions(relative, card_id=card_id, asset_id=asset_id) == (512, 384)
+    assert store.image_asset_dimensions(relative, card_id=card_id, asset_id=asset_id) == (512, 384)
+    assert len(decoded) == 1
+    before = image_path.stat()
+    image_path.write_bytes(image_path.read_bytes())
+    os.utime(image_path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    assert store.image_asset_dimensions(relative, card_id=card_id, asset_id=asset_id) == (512, 384)
+    assert len(decoded) == 2
+    Image.new("RGB", (256, 192), "red").save(image_path)
+    os.utime(image_path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    assert store.image_asset_dimensions(relative, card_id=card_id, asset_id=asset_id) == (256, 192)
+    assert len(decoded) == 3
+    retained = image_path.with_suffix(".retained")
+    image_path.rename(retained)
+    _write_png(image_path)
+    assert store.image_asset_dimensions(relative, card_id=card_id, asset_id=asset_id) == (512, 384)
+    assert len(decoded) == 4
+    image_path.unlink()
+    image_path.symlink_to(retained.name)
+    with pytest.raises(StackStoreError, match="securely decode"):
+        store.image_asset_dimensions(relative, card_id=card_id, asset_id=asset_id)
+
+
+def test_dimension_cache_is_bounded_and_rejects_replacement_during_decode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source.png"
+    _write_png(source)
+    store = StackStore(tmp_path / "Dimensions.hotcards")
+    monkeypatch.setattr(stack_store_module, "_DIMENSION_CACHE_LIMIT", 2)
+    assets = []
+    for _ in range(3):
+        card_id, asset_id = uuid4(), uuid4()
+        relative = store.store_image_asset(source, card_id=card_id, asset_id=asset_id)
+        assets.append((relative, card_id, asset_id))
+        store.image_asset_dimensions(relative, card_id=card_id, asset_id=asset_id)
+    assert len(store._image_dimensions) == 2
+    relative, card_id, asset_id = assets[0]
+    real_decode = stack_store_module._validate_png_fd
+
+    def replace_after_decode(descriptor: int, label: str) -> tuple[int, int]:
+        dimensions = real_decode(descriptor, label)
+        image_path = store.asset_path(relative)
+        image_path.rename(image_path.with_suffix(".retained"))
+        _write_png(image_path)
+        return dimensions
+
+    monkeypatch.setattr(stack_store_module, "_validate_png_fd", replace_after_decode)
+    with pytest.raises(StackStoreError, match="changed while being decoded"):
+        store.image_asset_dimensions(relative, card_id=card_id, asset_id=asset_id)
+    assert len(store._image_dimensions) == 2
+
+
 def test_generated_sound_asset_and_manifest_are_committed_together(tmp_path: Path) -> None:
     source = tmp_path / "sound.wav"
     _write_wav(source)
@@ -322,6 +392,51 @@ def test_owned_sound_is_removed_only_after_all_references_leave(tmp_path: Path) 
         asset_id=asset_id,
         stack=previous,
     )
+    assert not store.asset_path(owned.relative_path).exists()
+
+
+@pytest.mark.parametrize("boundary", ["file-unlink", "directory-rmdir"])
+def test_owned_sound_cleanup_retries_identity_bound_quarantine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, boundary: str
+) -> None:
+    source = tmp_path / "sound.wav"
+    _write_wav(source)
+    store = StackStore(tmp_path / "Sounds.hotcards")
+    before = Stack(name="Sounds")
+    store.create(before)
+    sound_id, asset_id = uuid4(), uuid4()
+    after = before.model_copy(update={"sounds": (_generated_sound(sound_id, asset_id),)})
+    owned = store.store_sound_asset_and_save(
+        source,
+        sound_id=sound_id,
+        asset_id=asset_id,
+        duration_seconds=2,
+        previous_stack=before,
+        changed_stack=after,
+    )
+    store.save(before)
+    original_operation = os.unlink if boundary == "file-unlink" else os.rmdir
+
+    def fail_quarantine_removal(path, *args, **kwargs) -> None:
+        if ".owned-" in str(path):
+            raise OSError("quarantine removal interrupted")
+        original_operation(path, *args, **kwargs)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(
+            stack_store_module.os,
+            "unlink" if boundary == "file-unlink" else "rmdir",
+            fail_quarantine_removal,
+        )
+        with pytest.raises(StackStoreError, match="quarantine removal interrupted"):
+            store.remove_owned_sound_asset_if_unreferenced(
+                owned, sound_id=sound_id, asset_id=asset_id, stack=before
+            )
+    assert list(store.bundle_path.rglob("*.tmp"))
+    assert store.remove_owned_sound_asset_if_unreferenced(
+        owned, sound_id=sound_id, asset_id=asset_id, stack=before
+    )
+    assert not list(store.bundle_path.rglob("*.tmp"))
     assert not store.asset_path(owned.relative_path).exists()
 
 
