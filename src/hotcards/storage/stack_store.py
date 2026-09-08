@@ -127,6 +127,15 @@ class StoredImageSnapshot:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class ImageAssetExpectation:
+    """Identity and pinned content required while accepting a generated image."""
+
+    snapshot: StoredImageSnapshot
+    card_id: UUID
+    asset_id: UUID
+
+
 def _io_checkpoint(_name: str) -> None:
     """Fault-injection seam around durable transaction boundaries."""
 
@@ -910,11 +919,9 @@ class StackStore:
         if not isinstance(payload, dict):
             raise StackStoreError("stack document root must be a JSON object")
         version = payload.get("schema_version")
-        supported_versions = {CURRENT_SCHEMA_VERSION}
-        if type(version) is not int or version not in supported_versions:
+        if type(version) is not int or version != CURRENT_SCHEMA_VERSION:
             raise StackStoreError(
-                "invalid stack document: schema_version must be one of "
-                + ", ".join(str(item) for item in sorted(supported_versions))
+                f"invalid stack document: schema_version must be {CURRENT_SCHEMA_VERSION}"
             )
         try:
             stack = Stack.model_validate_json(json.dumps(payload))
@@ -1491,7 +1498,7 @@ class StackStore:
                     durability_indeterminate=error.durability_indeterminate,
                     owned_asset=retained_asset,
                 ) from error
-            except StackStoreError as error:
+            except (OSError, StackStoreError) as error:
                 # A preparation failure precedes the manifest transaction.
                 try:
                     store.remove_owned_sound_asset_if_unreferenced(
@@ -1501,7 +1508,9 @@ class StackStore:
                     raise StackStoreTransactionError(
                         error, (cleanup_error,), owned_asset=asset
                     ) from error
-                raise
+                raise StackStoreTransactionError(
+                    error, persisted_stack=previous_stack, observed_stack=previous_stack
+                ) from error
             return asset
 
         return commit(self)
@@ -1575,6 +1584,7 @@ class StackStore:
         expected_source_card_id: UUID | None = None,
         expected_source_asset_id: UUID | None = None,
         expected_source_operation: str = "Edit",
+        expected_references: tuple[ImageAssetExpectation, ...] = (),
     ) -> StoredImageAsset:
         """Atomically import one PNG and commit the manifest that references it."""
         try:
@@ -1591,6 +1601,7 @@ class StackStore:
                 expected_source_card_id=expected_source_card_id,
                 expected_source_asset_id=expected_source_asset_id,
                 expected_source_operation=expected_source_operation,
+                expected_references=expected_references,
             )
         except OSError as error:
             raise StackStoreError(
@@ -1613,6 +1624,7 @@ class StackStore:
         expected_source_card_id: UUID | None = None,
         expected_source_asset_id: UUID | None = None,
         expected_source_operation: str = "Edit",
+        expected_references: tuple[ImageAssetExpectation, ...] = (),
     ) -> StoredImageAsset:
         if (source_relative_path is None) == (source_file_path is None):
             raise StackStoreError("exactly one image source must be provided")
@@ -1817,17 +1829,24 @@ class StackStore:
                 changed_manifest_durable = True
 
             def require_expected_source() -> None:
-                if expected_source_snapshot is None:
-                    return
-                assert expected_source_card_id is not None
-                assert expected_source_asset_id is not None
-                _require_image_asset_unchanged_at(
-                    bundle_fd,
-                    expected_source_snapshot,
-                    card_id=expected_source_card_id,
-                    asset_id=expected_source_asset_id,
-                    operation=expected_source_operation,
-                )
+                if expected_source_snapshot is not None:
+                    assert expected_source_card_id is not None
+                    assert expected_source_asset_id is not None
+                    _require_image_asset_unchanged_at(
+                        bundle_fd,
+                        expected_source_snapshot,
+                        card_id=expected_source_card_id,
+                        asset_id=expected_source_asset_id,
+                        operation=expected_source_operation,
+                    )
+                for reference in expected_references:
+                    _require_image_asset_unchanged_at(
+                        bundle_fd,
+                        reference.snapshot,
+                        card_id=reference.card_id,
+                        asset_id=reference.asset_id,
+                        operation="Generate Reference",
+                    )
 
             try:
                 _io_checkpoint("destination-created")
@@ -2108,44 +2127,6 @@ class StackStore:
                 ) from operation_error
         finally:
             os.close(bundle_fd)
-
-    @_serialized_bundle_mutation
-    def remove_image_asset_if_unreferenced(
-        self,
-        relative_path: str,
-        *,
-        card_id: UUID,
-        asset_id: UUID,
-        stack: Stack,
-    ) -> bool:
-        """Remove one exact bundle-owned image only when the document cannot reach it."""
-        parsed_path = _relative_asset_path(relative_path)
-        expected_path = _image_asset_path(card_id, asset_id)
-        if parsed_path != expected_path:
-            raise StackStoreError(
-                f"image asset path {parsed_path} does not match its card and asset IDs"
-            )
-        documents = [stack]
-        if self.stack_path.is_file():
-            documents.append(self.load())
-        if any(
-            revision.background is not None and revision.background.image_path == relative_path
-            for document in documents
-            for card in document.cards
-            for revision in card.revisions
-        ):
-            raise StackStoreError(f"refusing to remove referenced image asset: {relative_path}")
-        destination = self._resolved_asset(parsed_path)
-        try:
-            if not destination.exists():
-                return False
-            destination.unlink()
-            _fsync_directory(destination.parent)
-        except OSError as error:
-            raise StackStoreError(
-                f"could not remove image asset {relative_path}: {error}"
-            ) from error
-        return True
 
     def stored_sound_asset(
         self,

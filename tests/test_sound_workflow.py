@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import wave
 from collections.abc import Callable
 from pathlib import Path
@@ -252,3 +253,63 @@ def test_sound_copy_error_finishes_and_cleans_temporary_output(
     assert generator.output_path is not None and not generator.output_path.exists()
     assert session.store is not None
     assert not list(session.store.bundle_path.rglob("*.wav"))
+
+
+def test_failed_sound_manifest_and_rollback_complete_only_after_durable_retry(
+    tmp_path: Path,
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generator = FakeStableAudioGenerator()
+    sound, controller, session, _workers, workflow = sound_session(tmp_path, generator, request)
+    assert session.store is not None
+    store = session.store
+    before = controller.document
+    directory = store.bundle_path.stat()
+    replaced = False
+    changes: list[object] = []
+    failures: list[str] = []
+    workflow.change_applied.connect(lambda _message, token: changes.append(token))
+    workflow.failed.connect(failures.append)
+    real_fsync, real_write = storage_module.os.fsync, storage_module._write_manifest_at
+
+    def checkpoint(name: str) -> None:
+        nonlocal replaced
+        if name == "manifest-replaced":
+            replaced = True
+
+    def fail_manifest_fsync(descriptor: int) -> None:
+        current = os.fstat(descriptor)
+        if replaced and (current.st_dev, current.st_ino) == (directory.st_dev, directory.st_ino):
+            raise OSError("manifest directory unavailable")
+        real_fsync(descriptor)
+
+    def fail_rollback(descriptor: int, payload: bytes, **kwargs) -> str:
+        if not kwargs["checkpoints"]:
+            raise OSError("rollback unavailable")
+        return real_write(descriptor, payload, **kwargs)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(storage_module, "_io_checkpoint", checkpoint)
+        fault.setattr(storage_module, "_write_manifest_at", fail_rollback)
+        fault.setattr(storage_module.os, "fsync", fail_manifest_fsync)
+        workflow.generate(sound.id)
+        wait_for_workflow(workflow)
+
+    assert controller.document != before
+    assert store.load() == controller.document
+    assert controller.mutation_blocked and session.state.dirty
+    assert controller.current_undo_token is None
+    assert len(failures) == 1 and "durability remains indeterminate" in failures[0]
+    assert changes == []
+    assert len(list(store.bundle_path.rglob("*.wav"))) == 1
+    assert generator.output_path is not None and not generator.output_path.exists()
+    assert session.flush()
+    assert not controller.mutation_blocked
+    assert changes == [controller.current_undo_token]
+    assert controller.undo()
+    assert controller.document == before
+    assert session.flush()
+    controller.clear_history()
+    assert session.flush()
+    assert not list(store.bundle_path.rglob("*.wav"))

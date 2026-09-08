@@ -35,6 +35,7 @@ from hotcards.domain.models import (
     Stack,
 )
 from hotcards.storage.stack_store import (
+    ImageAssetExpectation,
     StackStore,
     StackStoreError,
     StackStoreTransactionError,
@@ -827,51 +828,6 @@ def test_store_image_asset_refuses_overwrite_and_invalid_content(
         store.store_image_asset(invalid, card_id=card_id, revision_id=uuid4())
 
 
-def test_remove_image_asset_only_removes_unreferenced_owned_assets(
-    tmp_path: Path,
-) -> None:
-    source = tmp_path / "source.png"
-    _write_png(source)
-    store = StackStore(tmp_path / "Castle.hotcards")
-    card_id = uuid4()
-    asset_id = uuid4()
-    image_path = store.store_image_asset(
-        source,
-        card_id=card_id,
-        asset_id=asset_id,
-    )
-
-    assert store.remove_image_asset_if_unreferenced(
-        image_path,
-        card_id=card_id,
-        asset_id=asset_id,
-        stack=Stack(name="Empty"),
-    )
-    assert not store.asset_path(image_path).exists()
-
-    image_path = store.store_image_asset(
-        source,
-        card_id=card_id,
-        asset_id=asset_id,
-    )
-    revision = CardRevision(
-        background=_generated_background(asset_id, image_path),
-    )
-    stack = Stack(
-        name="Referenced",
-        cards=(Card(id=card_id, name="Card", revisions=(revision,)),),
-    )
-    store.save(stack)
-    with pytest.raises(StackStoreError, match="referenced image asset"):
-        store.remove_image_asset_if_unreferenced(
-            image_path,
-            card_id=card_id,
-            asset_id=asset_id,
-            stack=Stack(name="Stale"),
-        )
-    assert store.asset_path(image_path).is_file()
-
-
 def test_load_rejects_missing_unsupported_and_future_versions(
     tmp_path: Path,
 ) -> None:
@@ -880,11 +836,10 @@ def test_load_rejects_missing_unsupported_and_future_versions(
 
     for payload, message in [
         ({"name": "Missing"}, "schema_version"),
-        ({"schema_version": 3, "name": "Legacy"}, "schema_version"),
-        ({"schema_version": 11, "name": "Previous"}, "schema_version"),
-        ({"schema_version": 12, "name": "Previous"}, "schema_version"),
-        ({"schema_version": 13, "name": "Previous"}, "schema_version"),
-        ({"schema_version": 15, "name": "Future"}, "schema_version"),
+        ({"schema_version": str(CURRENT_SCHEMA_VERSION)}, "schema_version"),
+        ({"schema_version": True}, "schema_version"),
+        ({"schema_version": CURRENT_SCHEMA_VERSION - 1}, "schema_version"),
+        ({"schema_version": CURRENT_SCHEMA_VERSION + 1}, "schema_version"),
     ]:
         store.stack_path.write_text(json.dumps(payload))
         with pytest.raises(StackStoreError, match=message):
@@ -929,9 +884,9 @@ def test_clone_to_creates_independent_bundle_with_referenced_assets(tmp_path: Pa
 def test_external_image_and_manifest_commit_as_one_transaction(
     tmp_path: Path,
 ) -> None:
-    source = tmp_path / "refined.png"
+    source = tmp_path / "generated.png"
     _write_png(source)
-    store = StackStore(tmp_path / "Refine.hotcards")
+    store = StackStore(tmp_path / "Generated.hotcards")
     card = Card(name="Card")
     previous = Stack(name="Stack", cards=(card,))
     store.save(previous)
@@ -977,9 +932,9 @@ def test_external_image_transaction_rolls_back_manifest_and_asset(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    source = tmp_path / "refined.png"
+    source = tmp_path / "generated.png"
     _write_png(source)
-    store = StackStore(tmp_path / "Refine.hotcards")
+    store = StackStore(tmp_path / "Generated.hotcards")
     card = Card(name="Card")
     previous = Stack(name="Stack", cards=(card,))
     store.save(previous)
@@ -1006,13 +961,13 @@ def test_external_image_transaction_rolls_back_manifest_and_asset(
         nonlocal injected
         if name == "manifest-replaced" and not injected:
             injected = True
-            raise OSError("injected Refine durability failure")
+            raise OSError("injected image durability failure")
 
     monkeypatch.setattr(stack_store_module, "_io_checkpoint", fail_after_replace)
 
     with pytest.raises(
         StackStoreTransactionError,
-        match="Refine durability failure",
+        match="image durability failure",
     ):
         store.store_image_asset_and_save(
             source,
@@ -1024,6 +979,68 @@ def test_external_image_transaction_rolls_back_manifest_and_asset(
 
     assert store.load() == previous
     assert not store.asset_path(image_path).exists()
+
+
+@pytest.mark.parametrize("checkpoint", ["manifest-file-fsynced", "manifest-replaced"])
+def test_generate_reference_replacement_rolls_back_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, checkpoint: str
+) -> None:
+    source = tmp_path / "source.png"
+    _write_png(source)
+    store = StackStore(tmp_path / "References.hotcards")
+    before = _stack_with_asset(store, source)
+    store.create(before)
+    reference, target = before.cards
+    background = reference.active_revision.background
+    assert background is not None
+    private = tmp_path / "private"
+    private.mkdir()
+    snapshot = store.snapshot_image_asset(
+        background.image_path,
+        card_id=reference.id,
+        asset_id=background.id,
+        destination_directory=private,
+    )
+    asset_id = uuid4()
+    image_path = store.image_asset_path(target.id, asset_id)
+    target_revision = target.active_revision.model_copy(
+        update={"background": _generated_background(asset_id, image_path)}
+    )
+    after = before.model_copy(
+        update={
+            "cards": (
+                reference,
+                target.model_copy(update={"revisions": (target_revision,)}),
+            )
+        }
+    )
+    replaced = False
+    reference_path = store.asset_path(background.image_path)
+
+    def replace_reference(name: str) -> None:
+        nonlocal replaced
+        if name == checkpoint and not replaced:
+            replaced = True
+            reference_path.rename(reference_path.with_suffix(".original"))
+            _write_png(reference_path)
+
+    monkeypatch.setattr(stack_store_module, "_io_checkpoint", replace_reference)
+    try:
+        with pytest.raises(StackStoreTransactionError, match="Generate Reference"):
+            store.store_image_asset_and_save(
+                source,
+                destination_card_id=target.id,
+                destination_asset_id=asset_id,
+                previous_stack=before,
+                changed_stack=after,
+                expected_references=(ImageAssetExpectation(snapshot, reference.id, background.id),),
+            )
+        assert replaced
+        assert store.load() == before
+        assert not store.asset_path(image_path).exists()
+        assert reference_path.exists()
+    finally:
+        assert snapshot.dispose()
 
 
 def test_clone_to_refuses_existing_destination(tmp_path: Path) -> None:
