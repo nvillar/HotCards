@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Protocol
 
-from PySide6.QtCore import QObject, QUrl
+from PySide6.QtCore import QObject, QUrl, Signal
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 
 
@@ -22,11 +22,18 @@ class SoundPlayer(Protocol):
 class QtSoundPlayer(QObject):
     """Play one sound at a time through QtMultimedia."""
 
+    playback_failed = Signal(str)
+
     def __init__(self, *, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._audio_output = QAudioOutput(self)
         self._player = QMediaPlayer(self)
         self._player.setAudioOutput(self._audio_output)
+        self._player.errorOccurred.connect(self._playback_error)
+
+    def _playback_error(self, error: QMediaPlayer.Error, message: str) -> None:
+        if error != QMediaPlayer.Error.NoError:
+            self.playback_failed.emit(message.strip() or f"Sound playback failed ({error.name})")
 
     @property
     def is_playing(self) -> bool:
