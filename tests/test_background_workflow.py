@@ -518,7 +518,7 @@ def test_explicit_image_journey_reopens_without_sources_and_preserves_run_naviga
         assert isinstance(generated.provenance.authoring, GenerateOperation)
         assert image_edit_lineage(generated.provenance) == ()
         _assert_current_image_controls(window, ResolutionTier.SMALL)
-        generated_path = session.store.asset_path(generated.image_path)
+        generated_path = session.store.asset_path(generated.background.image_path)
         unrelated_path = generated_path.with_name("unowned.png")
         unrelated_path.write_bytes(generated_path.read_bytes())
         token = controller.current_undo_token
@@ -567,7 +567,7 @@ def test_explicit_image_journey_reopens_without_sources_and_preserves_run_naviga
         assert inspector.edit_instruction_edit.toPlainText() == ""
         assert inspector.edit_history_list.item(0).text() == instruction
         _assert_current_image_controls(window, ResolutionTier.MEDIUM)
-        edited_path = session.store.asset_path(edited.image_path)
+        edited_path = session.store.asset_path(edited.background.image_path)
 
         assert [change.operation.kind for change in applied] == ["generate", "edit"]
         assert [change.previous_revision for change in applied] == [before, submitted]
@@ -603,7 +603,7 @@ def test_explicit_image_journey_reopens_without_sources_and_preserves_run_naviga
         assert edited_path.is_file()
         assert unrelated_path.is_file()
         assert all(
-            session.store.asset_path(reference.active_revision.image_path).is_file()
+            session.store.asset_path(reference.active_revision.background.image_path).is_file()
             for reference in references
         )
 
@@ -708,7 +708,7 @@ def test_restored_edit_branch_survives_duplication_source_deletion_and_further_e
         assert first.id == abandoned.id == card.active_revision.id
         assert first.provenance.settings.seed == 101
         assert abandoned.provenance.settings.seed == 202
-        abandoned_path = session.store.asset_path(abandoned.image_path)
+        abandoned_path = session.store.asset_path(abandoned.background.image_path)
         abandoned_token = controller.current_undo_token
         assert inspector.edit_history_list.count() == 2
 
@@ -767,11 +767,11 @@ def test_restored_edit_branch_survives_duplication_source_deletion_and_further_e
         assert session.store.load() == controller.document
         window.notification_bar.dismiss_button.click()
 
-        branch_path = session.store.asset_path(branch.image_path)
+        branch_path = session.store.asset_path(branch.background.image_path)
         window._duplicate_card()
         duplicate = controller.document.cards[1]
         duplicate_revision = duplicate.active_revision
-        duplicate_path = session.store.asset_path(duplicate_revision.image_path)
+        duplicate_path = session.store.asset_path(duplicate_revision.background.image_path)
         assert window._selected_card_id == duplicate.id
         assert duplicate.id != card.id
         assert duplicate_path != branch_path
@@ -846,7 +846,7 @@ def test_restored_edit_branch_survives_duplication_source_deletion_and_further_e
             edit.instruction for edit in lineage
         ]
         assert session.store.load() == controller.document
-        result_path = session.store.asset_path(result.image_path)
+        result_path = session.store.asset_path(result.background.image_path)
         assert session.close_history()
         assert not duplicate_path.exists()
         assert result_path.is_file()
@@ -2525,7 +2525,7 @@ def test_generate_rejects_reference_asset_replacement_through_commit(
     workflow, controller, session, workers, model, target = _bound_workflow(tmp_path)
     references = _assign_two_references(workflow, workers)
     source = references[source_index]
-    source_path = session.store.asset_path(source.active_revision.image_path)
+    source_path = session.store.asset_path(source.active_revision.background.image_path)
     foreign = tmp_path / "foreign.png"
     Image.new("RGB", (256, 192), "gold").save(foreign)
     failures: list[object] = []
@@ -2581,7 +2581,7 @@ def test_generate_cleans_prior_snapshots_when_later_reference_is_invalid(
 ) -> None:
     workflow, controller, session, workers, _model, target = _bound_workflow(tmp_path)
     sources = _assign_two_references(workflow, workers)
-    path = session.store.asset_path(sources[1].active_revision.image_path)
+    path = session.store.asset_path(sources[1].active_revision.background.image_path)
     held = path.with_name("held-source.png")
     path.rename(held)
     if invalid_source == "unreadable":

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Annotated, Any, Literal
 from uuid import UUID, uuid4
@@ -677,21 +676,9 @@ class CardRevision(DomainModel):
         return value.model_copy(deep=True) if value is not None else None
 
     @property
-    def image_path(self) -> str | None:
-        """Return the active background path for transitional callers."""
-        return self.background.image_path if self.background is not None else None
-
-    @property
     def provenance(self) -> ImageProvenance | None:
         """Return generated-image provenance when available."""
         return self.background.provenance if self.background is not None else None
-
-    @property
-    def created_at(self) -> datetime:
-        """Return background creation time, or a neutral value for blank revisions."""
-        if self.background is not None:
-            return self.background.created_at
-        return datetime.min.replace(tzinfo=UTC)
 
 
 class Card(DomainModel):

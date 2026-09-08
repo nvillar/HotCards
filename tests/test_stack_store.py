@@ -155,7 +155,7 @@ def test_bundle_round_trip_preserves_document_and_relative_asset(tmp_path: Path)
     store.save(stack)
 
     assert store.load() == stack
-    image_path = stack.cards[0].revisions[0].image_path
+    image_path = stack.cards[0].revisions[0].background.image_path
     assert image_path is not None
     assert image_path.startswith("assets/cards/")
     assert not Path(image_path).is_absolute()
@@ -1024,7 +1024,7 @@ def test_clone_to_creates_independent_bundle_with_referenced_assets(tmp_path: Pa
     copied_store = original.clone_to(destination, stack)
 
     assert copied_store.load() == stack
-    image_path = stack.cards[0].revisions[0].image_path
+    image_path = stack.cards[0].revisions[0].background.image_path
     assert image_path is not None
     assert copied_store.asset_path(image_path).is_file()
     original_bytes = original.asset_path(image_path).read_bytes()

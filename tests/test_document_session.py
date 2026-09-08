@@ -657,7 +657,7 @@ def test_save_as_copies_assets_and_rebinds_autosave(
     copied = StackStore(destination).load()
     assert copied == stack
     assert (
-        StackStore(destination).asset_path(revision.image_path).read_bytes()
+        StackStore(destination).asset_path(revision.background.image_path).read_bytes()
         == source_image.read_bytes()
     )
     assert session.state.bundle_path == destination
