@@ -57,7 +57,7 @@ for live MFLUX runs.
   512 px, Large 768 px, and Full 1024 px. Square uses the tier on both edges;
   landscape and widescreen use it as width; portrait uses it as height. Derive
   the shorter edge from the aspect ratio and round it to the nearest multiple
-  of 16, minimum 16. Continue storing exact actual output width and height in
+  of 16, minimum 16. Store exact actual output width and height in
   image provenance.
 - Keep at least one revision per card. Duplicate a complete revision, including
   its Generate output size, hotspot semantics, and immutable background
@@ -71,13 +71,16 @@ for live MFLUX runs.
   transaction. Bind copy and cleanup to securely opened bundle objects and the
   owned file identity; never follow asset symlinks. Retain duplicate-owned bytes
   while reachable from the current document or Undo/Redo history, then reclaim
-  them when that history is discarded. Flatten duplicate provenance to the
-  original non-duplicate operation while recording the immediate source
+  them when that history is discarded. Flatten duplicate authoring attribution
+  while recording the immediate source
   informationally, so deleting the source never invalidates the duplicate.
 - Keep an ordered collection of at most two optional Reference cards per
   revision and reject self-references and duplicates. Display slots as `1.` and
   `2.` under one References section; clearing slot 1 promotes slot 2. Resolve
-  each active accepted background for image generation. Require user-facing
+  each active accepted background for image generation through a private
+  immutable no-follow snapshot. Revalidate every Reference's original file
+  identity and bytes throughout result acceptance, including the manifest
+  transaction. Require user-facing
   guidance to use positional `image 1` and `image 2` labels; do not translate
   card names or aliases. Send each Reference exactly once to MFLUX in stable
   order without hidden role instructions or complete source-card prose. Use one
@@ -101,23 +104,21 @@ for live MFLUX runs.
   prompts.
 - In Generate and Edit resolution selectors, show only the named tier
   names and expose exact dimensions in tooltips. Insert one selectable Current
-  row for an aligned nonstandard current image. On card, revision, or background
-  identity entry (including same-revision replacement and Undo/Redo), select the
+  row for an aligned, aspect-compatible nonstandard current image. On card,
+  revision, or background identity entry (including same-revision replacement
+  and Undo/Redo), select the
   current image size in both controls. Ordinary rerenders preserve deliberate
   choices, focused Description drafts, and valid same-revision hotspot selections.
   Generate offers every named tier; Edit offers only the current size
   and higher-area tiers. Treat resolution selection as a passive setting change
   without a notification.
-- Do not expose or dispatch Evolve/Refine as an executable authoring operation.
-  Retain its typed historical provenance so existing backgrounds remain
-  displayable, editable through current operations, duplicable, and saveable.
+- Keep Generate and Edit as the executable image-authoring operations.
 - Edit only the readable current background through Flux2KleinEdit with one
   direct authored Edit Instruction. Send that exact trimmed instruction without
   adding preservation or editing guidance. If a Style is selected, append only
   the exact selected Style text behind the UI as a visual-continuity addendum,
   unless the authored instruction explicitly changes the visual treatment.
-  Keep legacy Preserve metadata readable, but do not expose or apply Preserve
-  controls to new edits. Validate the deterministic expanded prompt against the
+  Validate the deterministic expanded prompt against the
   FLUX Edit tokenizer's hard 512-token budget without rewriting or truncation,
   use a fresh random seed, and never send Description or Generate References.
   Retain the exact effective prompt, including Style text, in provenance.
@@ -132,42 +133,38 @@ for live MFLUX runs.
   Redo may clear only the exact automatically restored generation; typing,
   clearing, Undo/Redo, and user recalls create newer generations even when their
   text is identical.
-  Default output to the source image's exact decoded dimensions and additionally
-  offer only higher-area presets. Pass
+  Default output to the source image's exact decoded dimensions when aligned and
+  aspect-compatible, and offer only higher-area presets otherwise. Pass
   MFLUX a private immutable no-follow source snapshot and reject replacement
   races before acceptance. Append the accepted Edit to inherited flattened
   lineage, atomically store the image, and replace the current revision's
   background through one Undo boundary, preserving its other authoring state.
   Clear only the matching submitted draft and context after definitive durable
   success, including delayed save retries; never clear a newer draft.
-- Persist generated backgrounds with a strict discriminated provenance union
-  for direct Generate, externally patched legacy Generate, Refine, Edit, and
-  independent card duplication.
-  Keep operation-specific prompts and settings typed rather than accumulating
-  nullable fields. Accept schema 14 only, without runtime loading or migration
-  of schema 13 or older. Historical Refine and current Edit provenance capture a
-  nonrecursive source snapshot:
-  card/revision/background IDs, decoded width/height, flattened source operation
-  seed, and one canonical inherited accepted Edit sequence. Store no source
-  paths or recursively embedded provenance. Refine exposes that sequence unchanged;
-  Edit exposes it plus exactly its accepted current Edit, without persisting a
-  second lineage array. Preserve exact instruction, Preserve, and expanded-prompt
-  facts. Source attribution need not resolve to retained cards or revisions, and
-  may name the result's revision, but source and result background IDs must differ.
-  Current Generate and historical Refine dimensions must match their typed
-  output-size selection. Preset output must match the stack aspect ratio;
-  exact Generate output must be positive, 16-aligned, and aspect-compatible;
-  current Refine/Edit output must equal its captured source dimensions. Derived
-  preset dimensions must match their named tier and stack aspect ratio and have
-  strictly greater area than the captured source. Refine must reuse the captured
-  source seed. Historical source dimensions are positive facts, not necessarily
-  modern aligned/aspect-compatible output sizes. Legacy
-  Generate preserves its exact historical prompt and dimensions without
-  imposing a modern preset. Historical provenance never blocks source revision
-  deletion, background replacement, or whole card deletion. Keep asset retention
-  tied to the current document and Undo/Redo history, not source attribution.
-  Preserve live immutable source snapshots, decoded-dimension request checks, and
-  stale-result/race rejection independently of these historical facts.
+- Persist every generated background with shared typed image-origin facts:
+  exact effective prompt, execution settings and dimensions, and one canonical
+  accepted Edit sequence. Record known authoring with a discriminated Generate,
+  Edit, or nonrecursive duplicate receipt; do not fabricate missing authoring
+  inputs from origin facts. Every newly accepted Generate or Edit must have
+  its complete operation-specific receipt. Receipt-free origins must not bypass
+  adapter result validation. Accept only `CURRENT_SCHEMA_VERSION`; reject
+  documents with any other schema version.
+  Capture Edit source card/revision/background IDs, decoded dimensions, and seed
+  without source paths, nested provenance, or a second lineage array. Edit
+  appends exactly its accepted instruction and effective prompt; Generate
+  starts an empty sequence. Duplicate attribution cannot recurse.
+  Source attribution need not resolve to retained cards or revisions, and may
+  name the result's revision, but source and result background IDs must differ.
+  Generate dimensions must match the typed output-size selection. Preset output
+  must match the stack aspect ratio; exact Generate output must be positive,
+  16-aligned, and aspect-compatible. Current-size Edit output must equal its
+  captured source dimensions. Derived presets must match their named tier and
+  aspect ratio and have strictly greater area than the source. Captured source
+  dimensions are positive facts, independently of current output constraints.
+  Attribution never blocks source deletion or replacement. Retain assets only
+  while the document or Undo/Redo can restore them. Preserve immutable source
+  snapshots, decoded-dimension request checks, and stale-result/race rejection
+  independently of persisted attribution.
 - Route all production and evaluation Generate and Edit inference
   through one typed MFLUX adapter. Plain Generate uses the regular family;
   Reference-backed Generate and Edit use the Edit family. Serialize
@@ -200,7 +197,7 @@ for live MFLUX runs.
   horizontal separators and vertical space between entries. Retain duplicates
   and exact text without expanded prompts, Style addenda, or timestamps.
   Keep the blank history list visible when empty and Edit controls top-aligned.
-  Generate clears lineage, historical Refine retains it, and Edit appends.
+  Generate clears lineage and Edit appends.
   Mouse and keyboard recall only repopulate
   Edit Instruction through `Inspector.set_edit_instruction()`, advancing its draft
   serial once per action without a command, Undo entry, navigation, or model call.
@@ -306,7 +303,16 @@ for live MFLUX runs.
   vendor weights or credentials. Store WAVs under deterministic
   `assets/sounds/<sound-id>/sound-<asset-id>.wav` paths, validate them as
   untrusted data, and commit each replacement with the manifest transactionally.
-  Retain replaced bytes only while Undo/Redo can restore them.
+  Validate complete PCM payloads and the copied destination, not only headers.
+  Use the same explicit durable, rolled-back, and indeterminate manifest
+  outcomes as image changes; observing a renamed manifest does not establish
+  durability. Capture the exact Sound Undo token at insertion, preserve
+  completion through cleanup errors and durable save retries, and gate all
+  manager and workflow mutations while persistence is blocked.
+  Retain replaced bytes only while Undo/Redo can restore them. Keep failed
+  identity-bound cleanup retryable across project binding. Reclaim only the
+  matching owned file or its identity-verified quarantine; do not compact the
+  bundle by scanning for arbitrary unreferenced assets.
 - Keep one optional Sound reference per hotspot and place Play after Go to in
   Then. Assign it through one reusable movable, resizable modeless searchable
   grid picker with a Play control above every Sound name and a bottom-right
@@ -345,6 +351,19 @@ for live MFLUX runs.
 - Prefer small, single-issue commits.
 - Validate model responses strictly. No arbitrary model output may become
   executable.
+- Validate incoming document mutations and serialization boundaries. Exposed
+  snapshots must independently own nested mutable values; avoid revalidating
+  already authoritative state for every UI read. Cache decoded dimensions only
+  behind secure asset opens and file-version checks, with a bounded cache.
+- Share small fresh test builders and retained Qt application setup. Keep
+  successful fixtures consistent with their actual image dimensions and typed
+  provenance. Retain Qt resource owners through scoped main-thread teardown;
+  native inference can trigger cyclic garbage collection. Register widget,
+  timer, and worker cleanup even when assertions fail; bound synchronization
+  with observable events instead of settling sleeps.
+  Preserve distinct ownership, durability, identity, and draft-generation
+  regressions. Assert behavior at the named boundary, not incidental forwarding
+  or formulas copied from implementation.
 - Treat paths in stack JSON as untrusted relative data. Prevent path traversal
   outside the stack directory and never allow image asset writes to overwrite
   arbitrary files.

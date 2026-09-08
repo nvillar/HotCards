@@ -1,274 +1,215 @@
 # HotCards
 
-HotCards is an experimental, local-first authoring tool for illustrated,
-spatially interactive stacks of cards, inspired by classic HyperCard.
+HotCards is a local-first desktop app for creating illustrated, interactive
+stacks of cards, inspired by HyperCard. Describe a scene, generate its image,
+add polygon hotspots, and connect cards with navigation, sound effects, and
+simple state. Image and sound generation run on-device.
 
-Authors describe each card in natural language, generate a background image
-locally, place clickable polygon hotspots, and run the stack as an interactive
-experience. All generation runs on-device.
-
-**Status:** early developer proof of concept. Not packaged for end users.
-
-**Platform:** Apple Silicon macOS. Local generation requires locally cached
-MFLUX image and Stable Audio sound models; the authoring shell remains usable
-when either is unavailable.
-
-Stacks are stored as self-contained `.hotcards` directory bundles and
-autosaved atomically after creation or opening. At startup, HotCards lists
-stacks in `~/Documents/HotCards` and offers Open, Create, and confirmed
-permanent Delete actions.
-Only the current schema (13) is accepted; older and future schemas are rejected.
-There is no runtime migration of older bundles.
-Each stack stores one immutable fixed aspect ratio: Square 1:1, Landscape 4:3,
-Portrait 3:4, or Widescreen 16:9. New Stack offers exactly those four formats
-and defaults to Landscape 4:3; the format cannot be changed after creation.
-
-Each card owns one or more numbered revisions. A revision contains its authored
-Description, selected stack Style, optional generated background, up to two
-ordered Reference cards, selected Generate output size, and hotspot set. Generate
-output size is revision-local, defaults to Medium, and is copied with the
-complete revision. The named long-edge tiers are Small (256 px), Medium
-(512 px), Large (768 px), and Full (1024 px). The stack aspect ratio determines
-the shorter edge, aligned to 16 pixels; for example, Landscape Full is
-1024 × 768 and Widescreen Full is 1024 × 576. The compact
-header above the canvas edits the card name and selects, duplicates, or deletes
-revisions; the Author toolbar places the Run toggle on the left and opens the
-stack-global Styles, Sounds, and Keys managers from the right. In Run mode it instead
-shows navigation and hotspot visibility controls. An
-image-generation step label and progress bar in the status bar show actual
-MFLUX inference-step completion.
-
-The Cards sidebar creates a new blank card immediately after the selected card.
-Deleting a selected card moves selection to the card immediately before it, or
-to the new first card when there was no preceding card. Command-D duplicates the
-selected card immediately after its source. A card
-duplicate contains exactly the active complete revision
-with new card, revision, background, and hotspot identities. Generated image
-bytes are copied into the duplicate card's own asset namespace, so either card
-can be deleted independently. Self-navigation is remapped to the duplicate;
-other destinations, References, Keys, Style selection, and Generate output size
-are preserved. The duplicate is one undoable change and is named `Name Copy`,
-then `Name Copy 2`, and so on. The asset and manifest commit as one rollback-safe
-bundle transaction. Undo/Redo history retains the independent bytes only while
-needed to restore the duplicate, and discarding that history reclaims the
-unreferenced duplicate-owned asset without collecting unrelated bundle files.
-
-The inspector tabs are Generate, Edit, and Hotspots. Generate contains
-Description, Style, optional References, Resolution, and Generate Image.
-The Edit tab contains Edit Instruction, Resolution, Edit,
-and the current image's Edit History. Both image-authoring tabs use flat controls without
-redundant section titles or group boxes. Resolution selectors show only named tiers,
-with exact dimensions in tooltips, and select the current image size when entering
-a card, revision, or newly replaced image (including Undo/Redo). Ordinary refreshes
-preserve deliberate resolution choices. A
-compatible aligned nonstandard image uses a selectable Current row. Generate
-offers every named tier. Edit offers only the current size and higher
-tiers. Generate requires a nonempty Description; Edit does not.
-Both require an available MFLUX model.
-The exact effective prompt is composed
-deterministically from the Description followed by the selected Style text; no
-language model prepares or rewrites it.
-
-References apply only to Generate, never to Edit.
-Reference order is authoritative. The first selected card is `image 1` and the
-optional second card is `image 2`; authors use those positional labels directly
-in the Description. References and Hotspot destinations use a shared movable,
-resizable modeless card picker window with active-revision thumbnails in a
-searchable responsive grid. Tiles show card names without numbering; ineligible
-Reference cards remain visible but disabled. Compact remove buttons clear
-selections through the existing undoable commands. Each active Reference
-background is sent to MFLUX exactly once in that stable order, with no hidden
-role instructions, card-name alias translation, or source-card prose. The exact
-Description, ordered Reference snapshots, Style ID/name/text, and composed
-render prompt are retained in generated-image provenance.
-
-Image provenance is a strict typed operation record for direct Generate,
-externally patched historical Generate, historical Evolve (stored as `refine`), Edit,
-or an independent card duplicate. Duplicate provenance records its immediate
-source and a flattened snapshot of the original image operation without
-retaining a live source dependency. Provenance retains exact
-prompts, model execution settings, seed, and actual output width and height;
-derived operations capture historical source card/revision/background IDs,
-decoded dimensions, the original operation seed (flattening duplicates), and
-inherited accepted Edit instructions. These nonrecursive snapshots contain no
-source asset paths. Source cards, revisions, and backgrounds can be deleted or
-replaced without invalidating later images. The inherited Edit sequence is stored
-once: historical Refine provenance exposes it unchanged, and Edit adds its accepted current
-instruction. Captured source dimensions and settings are validated locally;
-live inference still uses a private immutable source image and rejects stale
-results or source replacement races. Assets remain retained while reachable from
-the current document or Undo/Redo history, not by historical source attribution.
-
-The production MFLUX 0.19.1 adapter routes plain Generate through
-the regular model family, and Reference-backed Generate and Edit through the
-Edit family. Model loading and inference share one process-local serialized
-boundary with at most one compatible cached family/configuration. Cancellation
-discards candidate output, and changing the selected model releases the prior
-configuration.
-
-Evolve is no longer an executable authoring operation. Existing historical
-Refine provenance remains readable, displayable, editable through current
-operations, duplicable, and saveable without changing its recorded facts.
-
-Edit also replaces the current version's background in place. It
-sends that image alone to Flux2KleinEdit with the exact authored Edit Instruction.
-When a Style is selected, its exact text is appended behind the UI as a visual
-continuity addendum unless the authored instruction explicitly changes the visual
-treatment. No other preservation or editing instructions are added. Description
-and Generate References remain unchanged on the revision but are not model inputs.
-The effective prompt is deterministic, retained in provenance, and must fit the
-model's 512-token budget without truncation.
-Output defaults to the current image's exact decoded dimensions, including
-aligned non-preset sizes, and also offers only named tiers with strictly greater
-pixel area. Each Edit
-uses a fresh seed and appends its accepted instruction to ordered provenance
-lineage. Undoing an Edit restores its exact authored instruction in the same
-card/version for adjustment and another attempt, without overwriting newer input.
-This also works across repeated Undo/Redo. Redo clears only an untouched,
-automatically restored instruction, never a newer draft or a user recall.
-Generate starts a fresh accepted Edit lineage.
-
-Every card version owns a persisted text Edit draft. Raw editor text autosaves,
-survives card/version navigation, reopening, Save As, and Run-mode transitions,
-and uses context-local Undo/Redo without adding ordinary document-history entries.
-Duplicating a card or version starts the duplicate with an empty draft.
-
-Edit History shows only accepted authored instructions for the active image,
-oldest first with horizontal separators instead of numbering, including repeated
-instructions and edits inherited through historical Refine provenance or card duplication. It never
-displays expanded prompts or Style addenda. The history list stays visible when
-empty, keeping Edit controls consistently top-aligned. New Image starts with no
-accepted edits. Click a history row, or select it and press Enter or Space, to
-recall its exact instruction into the persisted draft without adding an ordinary
-document-history entry or starting image generation. A recall counts as a new
-draft, even when its text matches a previously restored instruction.
-
-Generated images are the only supported background source. Generate and Edit
-durably replace the active revision's background through one shared
-image-and-manifest transaction and one Undo boundary. Each completed result
-offers **Create New Version** (primary), **Undo**, and **Keep** (dismiss).
-Keep makes no further document change. Create New Version restores the complete
-previous version and appends and activates the accepted result with a new version
-identity, sharing the immutable image without another model call. It is a
-separate Undo boundary: undoing version creation leaves the result on the original
-version; the next Undo reverses the image operation and, for Edit, restores its
-instruction. Actions expire after another command and are unavailable in Run mode
-or another project. Indeterminate saves show the authoritative
-image but block mutations and defer result actions until a save retry establishes
-durability. Delayed completion never clears a newer Edit draft.
-Existing images remain visible until replacement succeeds, and successful
-changes offer a dismissible, history-safe Undo action in the notification bar.
-
-The modeless Styles utility window manages the stack's ordered, editable Style
-library with compact remove/add controls and full-width Name and Style Text
-fields. Reopening Styles raises the existing window rather than creating a
-second manager. The built-in
-library includes HyperCard, Cinematic Film, Isometric Game, Pixel Art,
-Watercolor Painting, Color Pencil, Pencil Sketch, Glazed Ceramic, Graphic
-Novel, and Miniature Toy. A new stack starts with HyperCard selected. An
-explicit Style or No Style selection becomes the default for subsequently
-created cards. Deleting a Style clears every revision that selected it and is
-reversible through Undo.
-
-The modeless Sounds utility window manages an ordered stack-global catalog of
-named sound effects. Each Sound keeps an editable generation Prompt and a
-duration from 1–30 seconds, defaulting to 2 seconds. Generate and Re-generate use
-Stable Audio 3 Small-SFX through its optimized MLX runtime with the Pingpong
-sampler, 8 steps, CFG 1.0, and a fresh random seed. Output is stored as 16-bit
-PCM stereo WAV at 44.1 kHz with exact prompt, duration, seed, model, runtime,
-sampler, and timing provenance. Existing audio remains available while a
-replacement is generated, and replacement is one undoable asset-and-manifest
-transaction. The manager previews audio, lists every hotspot usage, jumps to
-the selected usage, and blocks deletion while the Sound is referenced.
-Hotspot Sound assignment uses a movable, resizable modeless picker with a
-searchable responsive grid. Every tile has a Play control above the Sound name;
-Sounds without generated audio remain assignable but have Play disabled. A
-compact remove button clears the assignment through the existing undoable
-command. Picker previews share playback with the Sounds manager and stop when
-the picker is cancelled, closed, or used to select a Sound.
-
-The Hotspots inspector is the sole source of revision-local interaction
-semantics. Every persisted hotspot has exactly one polygon. Its label is derived
-automatically from its highest-priority effect: Go to, Play, Gain, then Lose,
-with long labels using two-line list entries. The bordered When section requires
-every Present key to exist and every Absent key not to exist. The bordered Then
-section applies disjoint explicit Remove and Grant sets before its optional Go
-to destination and optional Play Sound action. Renaming a Sound preserves
-hotspot assignments through stable IDs. Keys are stack-global free-form names
-with stable internal IDs.
-
-The modeless Keys utility window manages that global catalog with the same list,
-compact remove/add, and full-width Name patterns as Styles. It reports every
-card revision and hotspot that Requires, Forbids, Removes, or Grants the
-selected key, and can jump to that exact hotspot. Reopening Keys raises the
-existing window. Renaming updates every display through stable references.
-In-use keys cannot be deleted. Keys can also be created while adding a
-condition or key change.
-
-While the Hotspots tab is active, clicking empty canvas or pressing the
-inspector `+` begins drawing a new hotspot. The draft is not persisted until a
-valid polygon is completed, so Escape or leaving the tab cancels without
-creating a hotspot. While drawing, overlapping vertex clicks are ignored and
-clicking the first vertex closes a valid polygon. Drag a hotspot or vertex to
-move it, use the edge `+` or double-click an edge to add a vertex, and press
-Delete to remove the selected vertex or hotspot. Context menus expose vertex
-editing and hotspot deletion, but not alternate creation actions. Successful
-edits offer a dismissible Undo. Replacing a background preserves its hotspots
-so the author can review and adjust them manually. Complete backgrounds at
-different pixel resolutions are smoothly fitted and centered inside the
-stack's fixed logical card format without stretching or cropping; narrow
-rounding differences use letterboxing or
-pillarboxing. The canvas remains automatically fitted without zoom, pan, manual
-fit, or image-clear controls. Normalized hotspot geometry follows the fitted
-image bounds in Author and Run modes.
-
-Run mode keeps its current keys only in the session. It starts empty, Back
-retains keys, Restart clears them, and leaving Run discards them. Condition-
-failing and actionless placeholder hotspots are omitted from hover, overlays,
-and hit testing; existing z-order selects the topmost remaining hotspot.
-Activation rechecks conditions, removes keys, grants keys, and finally
-navigates, so the destination sees the updated state. A clicked Sound starts
-after that navigation and continues on the destination card. New playback
-replaces existing playback; navigation, Back, Restart, and leaving Run first
-stop the previous sound. Pure key and sound actions are valid. Run also retains
-deterministic Back/Restart navigation history and
-configurable overlays. It opens on the current Author card and, when that
-differs from the configured start card, offers a dismissible restart action.
-Run presents Back and Restart as standard-size controls and hides the
-authoring-only card name and version header. Run-only navigation and overlay
-controls stay hidden in Author mode. Cards without hotspots are valid terminal
-cards and do not produce a warning.
-Local MFLUX availability is checked automatically when Author mode is entered;
-Run mode starts no AI work. Settings → Models selects the Image and Sound
-models. Image offers FLUX.2 Klein 4B and FLUX.2 Klein 9B KV; Sound currently
-uses Stable Audio 3 Small-SFX.
-
-Transient outcomes, failures, Run warnings, and Undo actions appear in one
-notification bar beneath the main panes and directly above the status bar.
-Reversible deletions and replacements apply directly and offer Undo. Completed
-Generate and Edit operations also offer Create New Version, which restores
-the prior current revision and activates a complete new revision containing the
-result, plus an explicit Keep action that retains it on the current revision.
-Field validation remains beside the responsible input.
-AI failures and recovery actions stay in the notification bar.
+**Platform:** Apple Silicon macOS. HotCards runs from source; there is no
+packaged installer. The authoring interface remains usable when a generation
+model is unavailable.
 
 ## Setup and run
 
-Prerequisites: Python 3.12 and [uv](https://docs.astral.sh/uv/). To enable
-generation, cache the selected MFLUX model and
-`stabilityai/stable-audio-3-optimized` Small-SFX MLX weights locally. Accept the
-Stable Audio model terms and authenticate with Hugging Face outside HotCards;
-credentials are never stored in a stack or Qt settings. FLUX.2 Klein 4B uses
-Apache 2.0; FLUX.2 Klein 9B KV uses the FLUX Non-Commercial License. The 9B KV
-choice requires both the regular 9B weights for text-only generation and the
-9B KV weights for reference generation.
+Install Python 3.12 and [uv](https://docs.astral.sh/uv/), then run:
 
 ```sh
 uv sync
 uv run hotcards
 ```
 
-## Evaluation harness
+Generation requires locally cached model weights. Select models in
+**Settings → Models**; selections are saved on the machine, not in a stack.
+
+| Purpose | Supported models |
+|---|---|
+| Images | FLUX.2 Klein 4B; FLUX.2 Klein 9B KV |
+| Sound effects | Stable Audio 3 Small-SFX, using the optimized MLX weights |
+
+The 9B KV choice requires regular 9B weights for text-only generation and
+9B KV weights for Reference-backed generation and Edit. FLUX.2 Klein 4B uses
+Apache 2.0; the 9B models use the FLUX Non-Commercial License.
+
+For Sound generation, cache the Small-SFX weights from
+`stabilityai/stable-audio-3-optimized`. Accept the model's terms and authenticate
+with Hugging Face outside HotCards. Credentials are not stored in stack bundles
+or application settings.
+
+Sound inference uses an attributed
+[MIT-licensed subset](src/hotcards/vendor/stable_audio_3_mlx/NOTICE) of Stability
+AI's official MLX implementation. Model weights have separate license terms;
+review them before use.
+
+## Cards and revisions
+
+Stacks are self-contained `.hotcards` directory bundles containing their
+document and generated assets. The welcome window lists stacks in
+`~/Documents/HotCards` and provides Open, Create, and permanent Delete actions.
+Permanent stack deletion requires confirmation.
+
+Choose a stack format at creation: **Square 1:1**, **Landscape 4:3**,
+**Portrait 3:4**, or **Widescreen 16:9**. Landscape is the default. A stack's
+format is fixed.
+
+The Cards sidebar creates a blank card immediately after the selection.
+**Command-D** duplicates the selected card's active revision into an independent
+card, including its image, hotspots, References, Style, and Generate resolution.
+Self-navigation points to the duplicate; other destinations are preserved.
+
+Each card has at least one numbered revision. A revision contains its
+Description, Style selection, optional generated background, ordered References,
+Generate resolution, hotspots, and Edit draft. The header above the canvas
+selects, duplicates, and deletes revisions. Duplicating a card or revision starts
+its Edit draft empty.
+
+## Generate and Edit
+
+The inspector has three tabs: **Generate**, **Edit**, and **Hotspots**.
+Generate and Edit work on the selected card revision and replace its background
+in place. Backgrounds are generated in HotCards; image import is not supported.
+
+| | Generate | Edit |
+|---|---|---|
+| Text input | A nonempty Description | A nonempty Edit Instruction |
+| Image input | Up to two optional Reference cards | The current background |
+| Style | Selected Style text follows the Description | Selected Style text follows the instruction unless the instruction explicitly changes the visual treatment |
+| Resolution | Every named tier | Valid current dimensions and named tiers with greater pixel area |
+| Edit History | Starts empty | Appends the accepted instruction |
+
+Prompts are composed deterministically, without a language model rewriting
+them. Edit sends the exact trimmed instruction and applicable Style text, with
+no additional guidance. It never sends the Description or Generate References.
+The effective Edit prompt must fit the model's 512-token budget; it is not
+truncated. Each Edit uses a fresh random seed.
+
+### References and resolution
+
+Choose Reference cards in the searchable thumbnail picker. Their order matters:
+refer to them as **`image 1`** and **`image 2`** in the Description. Each
+Reference's active background is sent exactly once, in that order. Card names
+and source-card descriptions are not added to the prompt. Clearing the first
+Reference promotes the second. Self-references and duplicate References are
+not allowed.
+
+Resolution tiers name the image's long edge:
+
+| Small | Medium | Large | Full |
+|---|---|---|---|
+| 256 px | 512 px | 768 px | 1024 px |
+
+The stack format determines the other edge, rounded to a multiple of 16 pixels.
+For example, Landscape Full is 1024 × 768 and Widescreen Full is 1024 × 576.
+Exact dimensions appear in selector tooltips. New cards default to Medium;
+duplicated cards and revisions retain their source's Generate resolution.
+Edit defaults to the current image's decoded dimensions when they are aligned
+and compatible with the stack format.
+
+Entering a card, revision, or replacement image selects its current size.
+An aligned, format-compatible non-preset image has a **Current** row.
+Ordinary refreshes preserve deliberate resolution choices.
+
+### Results, drafts, and history
+
+Completed Generate and Edit operations offer **Create New Version**, **Undo**,
+and **Keep**. Keep leaves the result on the current revision. Create New Version
+restores the prior complete revision and activates a new revision containing
+the result, without generating another image.
+
+Version creation is a separate Undo step: its first Undo leaves the result on
+the original revision; the next Undo reverses the image operation.
+
+Edit drafts autosave per revision and survive navigation, reopening, Save As,
+and mode changes. Text editing has its own context-local Undo/Redo, separate
+from document history. Undoing an accepted Edit restores its instruction in
+that revision unless newer input would be overwritten.
+
+Edit History shows the active image's accepted authored instructions, oldest
+first, including repeated instructions and those inherited through duplication.
+Click a row, or select it and press Enter or Space, to recall its exact text
+without changing the image or starting generation.
+
+## Styles, Sounds, and Keys
+
+The Author toolbar opens stack-global **Styles**, **Sounds**, and **Keys**
+managers. Each is a single modeless window that stays synchronized with the
+document.
+
+**Styles** are editable named prompt texts. New stacks start with HyperCard
+selected and include a library of visual treatments. An explicit Style or
+No Style selection becomes the default for new cards. Deleting a Style clears
+its selections and is undoable.
+
+**Sounds** are named effects with a generation prompt and a duration of
+1–30 seconds, defaulting to two seconds. Generate or replace audio with
+Stable Audio 3 Small-SFX, then preview it in the manager or Sound picker.
+Generation uses Pingpong sampling, eight steps, CFG 1.0, and a fresh seed.
+Assets are 44.1 kHz stereo 16-bit PCM WAVs. An existing Sound remains available
+while its replacement is generated.
+
+**Keys** are named binary state used by hotspot conditions and actions.
+Create Keys in the Keys manager, then select them in hotspot rules.
+Key and Sound names are case-insensitively unique. Renaming preserves references;
+referenced Keys and Sounds cannot be deleted. Their managers list usages and
+can jump to the corresponding hotspot.
+
+## Hotspots and Run mode
+
+With the Hotspots tab active, click empty canvas or press the inspector's `+`
+to draw a polygon. Click its first vertex to close it after at least three
+vertices. Escape or leaving the tab cancels an unfinished polygon without
+changing the document.
+
+Drag polygons or vertices, insert vertices along edges, and delete the selected
+vertex or hotspot. Every saved hotspot has exactly one polygon. Replacing a
+background preserves its hotspots for manual review.
+
+A hotspot's **When** rules require specified Keys to be present or absent.
+Its **Then** rules can remove Keys, grant Keys, navigate to a card, and play
+one Sound. Key-only and Sound-only hotspots are valid. Hotspot labels describe
+their highest-priority action.
+
+Press **Run** to enter the current Author card. Run starts with no Keys.
+Activation checks conditions, removes Keys, grants Keys, navigates, then starts
+the selected Sound. Condition-failing and actionless hotspots are excluded from
+hit testing. Overlapping eligible hotspots follow their ordering.
+
+**Back** preserves Keys; **Restart** returns to the configured start card and
+clears them. Leaving Run discards its state. New playback replaces the previous
+Sound; navigation, Back, Restart, and leaving Run stop prior playback. A Sound
+started by a hotspot can continue on its destination card.
+
+The canvas fits and centers the complete image without cropping or stretching.
+Hotspots follow the fitted image bounds; letterbox and pillarbox bars are
+noninteractive. Run provides Back, Restart, and hotspot-overlay controls.
+
+## Saving and Undo
+
+Document changes autosave. Reversible authoring changes apply directly and
+offer Undo; outcomes and failures appear in the notification bar. Field
+validation appears beside its input.
+
+Image and Sound replacements coordinate asset storage with the document save.
+If a visible result's durability is uncertain, further mutations and normal
+result actions wait for a successful save retry. Newer Edit drafts are never
+cleared by delayed completion.
+
+Generated assets remain available while the document or session Undo/Redo
+history can restore them. Card duplication owns independent image bytes;
+revision duplication can share immutable image bytes. Image origin records
+retain exact prompts, execution settings, dimensions, and accepted Edit
+instructions without depending on source cards remaining in the stack.
+Save As creates an independent bundle.
+
+## Development and evaluation
+
+```sh
+uv run pytest
+uv run ruff check .
+uv run ruff format .
+```
+
+Automated tests use fakes and do not invoke or download models. Live evaluations
+are explicit:
 
 ```sh
 uv run hotcards-eval smoke
@@ -278,30 +219,20 @@ uv run hotcards-eval style-presets
 uv run hotcards-eval flux-references --stack /path/to/Stack.hotcards
 ```
 
-Each live command creates one immutable directory under `evals/runs/` with an
-immediate, failure-safe `manifest.json` and retained artifacts. Smoke and image
-runs add checksums, JSON/CSV summaries, and a static HTML report. Reference runs
-write detailed JSON results plus overall and per-case contact sheets. Report
-rendering is offline and never calls a model.
-The tracked default decision and evidence tradeoffs are in
-[`evals/DECISION.md`](evals/DECISION.md).
+Evaluation cases live in `evals/cases/`. Each live run writes an immutable
+directory under `evals/runs/` with a checkpointed manifest and retained
+artifacts. Reports summarize prompts, outputs, timing, and failures; rendering
+a report is offline. Generated run output is not tracked in Git.
 
-The `style-presets` suite renders two style-neutral scenes with matched seeds
-under ten proposed deterministic Style suffixes plus an unstyled control. It
-produces per-scene and cross-scene contact sheets for assessing Style fidelity,
-subject and composition preservation, consistency, and artifact leakage.
+| Package | Responsibility |
+|---|---|
+| `domain/` | Strict document models, geometry, and validation |
+| `storage/` | Bundle persistence and identity-bound asset ownership |
+| `application/` | Authoritative document, commands, Undo/Redo, workflows, and workers |
+| `generation/` | Prompt composition and local image/audio adapters |
+| `ui/` | PySide6 Author and Run interface |
+| `evaluation/` | Live evaluations using production schemas and adapters |
 
-## Architecture at a glance
-
-- `domain/` — in-memory stack model, geometry, validation.
-- `storage/` — human-readable `*.hotcards` bundle storage.
-- `generation/` — deterministic MFLUX image generation and attributed Stable
-  Audio 3 Small-SFX MLX sound generation.
-- `application/` — document controller, typed commands, session undo, workers.
-- `ui/` — PySide6 Author and Run interface.
-- `evaluation/` — `hotcards-eval` harness reusing production adapters.
-
-## Roadmap
-
-Planned work, acceptance criteria, and progress live in GitHub Issues and the
-[**HotCards POC** milestone](https://github.com/nvillar/HotCards/milestone/1).
+Image and Sound loading and inference share a serialized, process-local native
+invocation boundary. Application and evaluation calls use the same adapters.
+Contributor constraints and repository workflow are in [AGENTS.md](AGENTS.md).
