@@ -30,6 +30,8 @@ from hotcards.evaluation.manifest import (
     default_environment,
 )
 from hotcards.evaluation.reports import create_contact_sheet
+from hotcards.evaluation.results import generation_record
+from hotcards.generation.errors import ImageGenerationError
 from hotcards.generation.image_generation import compose_generation_prompt
 from hotcards.generation.mflux_generator import (
     MfluxEditModelFactory,
@@ -232,6 +234,7 @@ def _generate(
     *,
     generator: MfluxGenerator,
     output_path: Path,
+    output_dir: Path,
     prompt: str,
     reference_keys: tuple[str, ...],
     image_paths: tuple[Path, ...],
@@ -271,13 +274,7 @@ def _generate(
     rss_after = _resident_bytes()
     peak_after = _peak_resident_bytes()
     return {
-        "status": "success",
-        "artifact_path": output_path,
-        "queue_seconds": generated.queue_duration_seconds,
-        "model_load_seconds": generated.load_duration_seconds,
-        "inference_seconds": generated.generation_duration_seconds,
-        "serialization_seconds": generated.serialization_duration_seconds,
-        "settings": generated.provenance.settings.model_dump(mode="json"),
+        **generation_record(generated, output_dir),
         "resident_bytes_before": rss_before,
         "resident_bytes_after": rss_after,
         "resident_bytes_delta": (
@@ -314,6 +311,7 @@ def _generate_source(
     *,
     generator: MfluxGenerator,
     output_path: Path,
+    output_dir: Path,
     prompt: str,
     seed: int,
     model_identifier: str,
@@ -327,6 +325,7 @@ def _generate_source(
     return _generate(
         generator=generator,
         output_path=output_path,
+        output_dir=output_dir,
         prompt=prompt,
         reference_keys=(),
         image_paths=(),
@@ -419,6 +418,7 @@ def run_flux_reference_evaluation(
         character_generation = _generate_source(
             generator=generator,
             output_path=character_output,
+            output_dir=output_dir,
             prompt=character_prompt,
             seed=seed,
             model_identifier=model_identifier,
@@ -466,7 +466,7 @@ def run_flux_reference_evaluation(
         }
         model_load: dict[str, object] = {
             "source": {
-                "duration_seconds": character_generation["model_load_seconds"],
+                "duration_seconds": character_generation["load_duration_seconds"],
             },
             "edit": None,
         }
@@ -508,6 +508,7 @@ def run_flux_reference_evaluation(
                 generation = _generate(
                     generator=generator,
                     output_path=output_path,
+                    output_dir=output_dir,
                     prompt=prompt,
                     reference_keys=reference_keys,
                     image_paths=tuple(image_paths),  # type: ignore[arg-type]
@@ -523,7 +524,7 @@ def run_flux_reference_evaluation(
                 )
                 if model_load["edit"] is None:
                     model_load["edit"] = {
-                        "duration_seconds": generation["model_load_seconds"],
+                        "duration_seconds": generation["load_duration_seconds"],
                     }
                 generation["artifact_path"] = output_path.relative_to(output_dir).as_posix()
                 record["generation"] = generation
@@ -602,10 +603,28 @@ def run_flux_reference_evaluation(
             for case in cases
             if case["generation"]["status"] == "failed"  # type: ignore[index]
         ]
-        result["status"] = "completed_with_failures" if failures else "success"
+        result["status"] = (
+            "failed"
+            if len(failures) == len(cases)
+            else "completed_with_failures"
+            if failures
+            else "success"
+        )
         atomic_write_json(result_path, result)
-        lifecycle.finalize(status=str(result["status"]))
-        return result_path
+        lifecycle.finalize(
+            status=str(result["status"]),
+            failure=(
+                {
+                    "classification": "stage_failures",
+                    "stages": [
+                        {"case_id": case["case_id"], **case["generation"]["failure"]}
+                        for case in failures
+                    ],
+                }
+                if failures
+                else None
+            ),
+        )
     except Exception as error:
         result["status"] = "failed"
         result["failure"] = {
@@ -621,6 +640,11 @@ def run_flux_reference_evaluation(
         raise
     finally:
         generator.release()
+    if result["status"] == "failed":
+        raise ImageGenerationError(
+            f"Reference evaluation produced no images; diagnostics were retained at {result_path}"
+        )
+    return result_path
 
 
 __all__ = [

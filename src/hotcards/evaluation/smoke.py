@@ -32,6 +32,7 @@ from hotcards.evaluation.reports import (
     render_reports,
     render_reports_checked,
 )
+from hotcards.evaluation.results import generate_cold, generation_record
 from hotcards.generation.errors import GenerationError
 from hotcards.generation.image_generation import (
     DIRECT_GENERATION_PROMPT_VERSION,
@@ -131,22 +132,23 @@ def run_smoke(
         for phase in ("cold", "warm"):
             stage = f"image_generation_{phase}"
             lifecycle.set_stage(stage)
-            generated = mflux.generate(
-                MfluxGenerateRequest(
-                    inputs=inputs,
-                    render_prompt=render_prompt,
-                    output_path=settings.output_dir / f"generated-{phase}.png",
-                    model_identifier=settings.mflux_model,
-                    seed=settings.seed,
-                    aspect_ratio=settings.aspect_ratio,
-                    width=width,
-                    height=height,
-                    step_count=settings.step_count,
-                    quantization=settings.quantization,
-                )
+            request = MfluxGenerateRequest(
+                inputs=inputs,
+                render_prompt=render_prompt,
+                output_path=settings.output_dir / f"generated-{phase}.png",
+                model_identifier=settings.mflux_model,
+                seed=settings.seed,
+                aspect_ratio=settings.aspect_ratio,
+                width=width,
+                height=height,
+                step_count=settings.step_count,
+                quantization=settings.quantization,
+            )
+            generated = (
+                generate_cold(mflux, request) if phase == "cold" else mflux.generate(request)
             )
             image_stage = result["stages"].setdefault("image_generation", {})  # type: ignore[union-attr]
-            image_stage[phase] = generated.model_dump(mode="json")
+            image_stage[phase] = generation_record(generated, settings.output_dir)
             result_path = _write_result(settings.output_dir, result)
             lifecycle.complete_stage(stage)
     except Exception as error:

@@ -1,21 +1,28 @@
 """Tests for the local FLUX multi-reference feasibility suite."""
 
+import hashlib
 import json
 from datetime import UTC, datetime
 from pathlib import Path
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 import pytest
 from PIL import Image
+from test_generation_smoke import FakeMfluxModel
 
+import hotcards.evaluation.cli as cli_module
+import hotcards.evaluation.flux_references as reference_module
 from hotcards.domain.image_dimensions import AspectRatio, ResolutionTier
 from hotcards.domain.models import (
     Card,
     CardRevision,
-    DirectGenerateProvenance,
     GeneratedBackground,
     GenerateInputs,
+    GenerateOperation,
     ImageOperationSettings,
+    ImageOriginFacts,
+    ImageProvenance,
+    PresetOutputSize,
     Stack,
 )
 from hotcards.evaluation.cli import build_parser
@@ -25,39 +32,14 @@ from hotcards.evaluation.flux_references import (
 from hotcards.storage.stack_store import StackStore
 
 
-class FakeGeneratedImage:
-    def __init__(self, width: int, height: int) -> None:
-        self.width = width
-        self.height = height
-
-    def save(self, path: Path, *, overwrite: bool) -> None:
-        assert not overwrite
-        Image.new("RGB", (self.width, self.height), "navy").save(path, format="PNG")
-
-
-class FakeReferenceModel:
-    def __init__(
-        self,
-        requests: list[dict[str, object]],
-        *,
-        fail_prompt_fragment: str | None = None,
-    ) -> None:
-        self.requests = requests
-        self.fail_prompt_fragment = fail_prompt_fragment
-
-    def generate_image(self, **kwargs: object) -> FakeGeneratedImage:
-        self.requests.append(kwargs)
-        prompt = str(kwargs["prompt"])
-        if self.fail_prompt_fragment and self.fail_prompt_fragment in prompt:
-            raise RuntimeError("candidate failed")
-        return FakeGeneratedImage(
-            width=kwargs["width"],  # type: ignore[arg-type]
-            height=kwargs["height"],  # type: ignore[arg-type]
-        )
+@pytest.fixture(autouse=True)
+def fixed_memory_probes(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(reference_module, "_resident_bytes", lambda: 4096)
+    monkeypatch.setattr(reference_module, "_peak_resident_bytes", lambda: 8192)
 
 
 def _write_png(path: Path, color: str) -> None:
-    Image.new("RGB", (32, 24), color).save(path, format="PNG")
+    Image.new("RGB", (256, 192), color).save(path, format="PNG")
 
 
 def _card_with_image(
@@ -74,26 +56,31 @@ def _card_with_image(
         card_id=card_id,
         asset_id=background_id,
     )
-    generated_at = datetime.now(UTC)
+    generated_at = datetime(2026, 7, 19, tzinfo=UTC)
     revision = CardRevision(
         description=description,
         background=GeneratedBackground(
             id=background_id,
             image_path=image_path,
-            provenance=DirectGenerateProvenance(
-                inputs=GenerateInputs(
-                    description=description,
+            provenance=ImageProvenance(
+                authoring=GenerateOperation(
+                    inputs=GenerateInputs(
+                        description=description,
+                        output_size=PresetOutputSize(tier=ResolutionTier.SMALL),
+                    ),
                 ),
-                render_prompt=description,
-                settings=ImageOperationSettings(
-                    model_identifier="test",
-                    mflux_version="test",
-                    seed=1,
-                    width=512,
-                    height=384,
-                    step_count=4,
-                    generated_at=generated_at,
-                    duration_seconds=1,
+                origin=ImageOriginFacts(
+                    render_prompt=description,
+                    settings=ImageOperationSettings(
+                        model_identifier="test",
+                        mflux_version="test",
+                        seed=1,
+                        width=256,
+                        height=192,
+                        step_count=4,
+                        generated_at=generated_at,
+                        duration_seconds=1,
+                    ),
                 ),
             ),
             created_at=generated_at,
@@ -156,8 +143,8 @@ def test_reference_suite_preserves_order_prompts_and_provenance(
         stack_path=stack_path,
         tier=ResolutionTier.SMALL,
         aspect_ratio=AspectRatio.LANDSCAPE,
-        model_factory=lambda *_: FakeReferenceModel(requests),
-        source_model_factory=lambda *_: FakeReferenceModel(requests),
+        model_factory=lambda *_: FakeMfluxModel(requests),
+        source_model_factory=lambda *_: FakeMfluxModel(requests),
         environment_provider=lambda: {"git_sha": "test"},
     )
 
@@ -168,7 +155,7 @@ def test_reference_suite_preserves_order_prompts_and_provenance(
     assert result["settings"]["tier"] == "Small"
     assert result["settings"]["long_edge"] == 256
     assert result["settings"]["aspect_ratio"] == "4:3"
-    assert "image_paths" not in requests[0]
+    assert len([request for request in requests if "image_paths" not in request]) == 1
     combined = next(case for case in result["cases"] if case["case_id"] == "character-plus-style")
     assert combined["reference_keys"] == ["character_identity", "map_style"]
     assert [Path(path).name for path in combined["reference_paths"]] == [
@@ -179,27 +166,94 @@ def test_reference_suite_preserves_order_prompts_and_provenance(
     assert combined["prompt"].index("image 1") < combined["prompt"].index("image 2")
     assert "REFERENCE IMAGE" not in combined["prompt"]
     assert "SCENE\n" not in combined["prompt"]
-    assert [
-        Path(path).name
-        for path in requests[3]["image_paths"]  # type: ignore[arg-type]
-    ] == ["character_identity.png", "map_style.png"]
-    assert result["sources"]["map_style"]["card_id"]
-    assert result["sources"]["map_style"]["revision_id"]
-    assert result["sources"]["map_style"]["description"] == ("A hand-drawn fantasy map.")
-    assert (output_dir / "inputs" / "map_style.png").is_file()
+    expected_snapshots = {}
+    store = StackStore(stack_path)
+    for card in store.load().cards:
+        key = "map_style" if card.name == "Map" else "castle_identity"
+        revision = card.active_revision
+        background = revision.background
+        assert background is not None
+        snapshot = {
+            "card_id": str(card.id),
+            "revision_id": str(revision.id),
+            "background_id": str(background.id),
+        }
+        expected_snapshots[key] = snapshot
+        assert {field: result["sources"][key][field] for field in snapshot} == snapshot
+        assert result["sources"][key]["description"] == revision.description
+        source = store.asset_path(background.image_path)
+        copied = output_dir / result["sources"][key]["path"]
+        assert (
+            hashlib.sha256(copied.read_bytes()).hexdigest()
+            == hashlib.sha256(source.read_bytes()).hexdigest()
+        )
+        with Image.open(source) as image:
+            assert (
+                image.size
+                == (
+                    background.provenance.settings.width,
+                    background.provenance.settings.height,
+                )
+                == (256, 192)
+            )
+    for key in ("character_identity", "building_new_view"):
+        expected_snapshots[key] = {
+            field: str(uuid5(NAMESPACE_URL, f"hotcards:flux-reference:{key}:{field}"))
+            for field in ("card_id", "revision_id", "background_id")
+        }
+    assert [case["case_id"] for case in result["cases"]] == [
+        "character-identity",
+        "style-only",
+        "character-plus-style",
+        "building-new-view",
+        "building-two-views",
+        "reference-count-1",
+        "reference-count-2",
+    ]
+    for case in result["cases"]:
+        matches = [request for request in requests if request["prompt"] == case["scene"]]
+        assert len(matches) == 1
+        assert matches[0]["image_paths"] == [output_dir / path for path in case["reference_paths"]]
+        generation = case["generation"]
+        assert generation["metadata"]["origin"]["render_prompt"] == case["scene"]
+        assert generation["metadata"]["authoring"]["inputs"]["references"] == [
+            expected_snapshots[key] for key in case["reference_keys"]
+        ]
+        assert generation["resident_bytes_before"] == generation["resident_bytes_after"] == 4096
+        assert generation["resident_bytes_delta"] == generation["peak_resident_bytes_delta"] == 0
     assert len(list((output_dir / "outputs").glob("*.png"))) == 7
     assert (output_dir / "contact-sheet.png").is_file()
     assert len(list((output_dir / "comparisons").glob("*.png"))) == 7
-    assert result["model_load"]["source"]["duration_seconds"] >= 0
-    assert result["model_load"]["edit"]["duration_seconds"] >= 0
+    assert (
+        result["model_load"]["source"]["duration_seconds"]
+        == (result["sources"]["character_identity"]["generation"]["load_duration_seconds"])
+    )
+    assert (
+        result["model_load"]["edit"]["duration_seconds"]
+        == (result["cases"][0]["generation"]["load_duration_seconds"])
+    )
     manifest = json.loads((output_dir / "manifest.json").read_text())
     assert manifest["status"] == "success"
-    assert any(artifact["path"] == "inputs/map_style.png" for artifact in manifest["artifacts"])
+    map_artifact = next(
+        artifact for artifact in manifest["artifacts"] if artifact["path"] == "inputs/map_style.png"
+    )
+    assert map_artifact["sha256"] == hashlib.sha256((tmp_path / "map.png").read_bytes()).hexdigest()
 
 
 def test_reference_suite_isolates_failure_and_failed_dependency(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    cases = reference_module._case_specs()
+    monkeypatch.setattr(
+        reference_module,
+        "_case_specs",
+        lambda: tuple(
+            case
+            for case in cases
+            if case["case_id"] in ("building-new-view", "building-two-views", "reference-count-2")
+        ),
+    )
     stack_path = _write_reference_stack(tmp_path)
     requests: list[dict[str, object]] = []
     output_dir = tmp_path / "run"
@@ -209,11 +263,11 @@ def test_reference_suite_isolates_failure_and_failed_dependency(
         stack_path=stack_path,
         tier=ResolutionTier.SMALL,
         aspect_ratio=AspectRatio.LANDSCAPE,
-        model_factory=lambda *_: FakeReferenceModel(
+        model_factory=lambda *_: FakeMfluxModel(
             requests,
-            fail_prompt_fragment="rear garden at ground level",
+            fail_prompt_contains="rear garden at ground level",
         ),
-        source_model_factory=lambda *_: FakeReferenceModel(requests),
+        source_model_factory=lambda *_: FakeMfluxModel(requests),
         environment_provider=lambda: {"git_sha": "test"},
     )
 
@@ -230,8 +284,49 @@ def test_reference_suite_isolates_failure_and_failed_dependency(
         case for case in result["cases"] if case["case_id"] == "building-two-views"
     )
     assert failed_dependency["reference_paths"] == []
-    assert len(requests) == 7
+    assert len(requests) == 3
     assert (output_dir / "outputs" / "reference-count-2.png").is_file()
-    assert len(list((output_dir / "outputs").glob("*.png"))) == 5
+    assert len(list((output_dir / "outputs").glob("*.png"))) == 1
     manifest = json.loads((output_dir / "manifest.json").read_text())
     assert manifest["status"] == "completed_with_failures"
+
+
+def test_reference_suite_fails_when_no_reference_case_succeeds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cases = reference_module._case_specs()[:1]
+    monkeypatch.setattr(reference_module, "_case_specs", lambda: cases)
+    output_dir = tmp_path / "run"
+    monkeypatch.setattr(
+        cli_module,
+        "run_flux_reference_evaluation",
+        lambda **kwargs: run_flux_reference_evaluation(
+            **kwargs,
+            model_factory=lambda *_: FakeMfluxModel([], fail_prompt_contains=""),
+            source_model_factory=lambda *_: FakeMfluxModel([]),
+            environment_provider=lambda: {"git_sha": "test"},
+        ),
+    )
+    assert (
+        cli_module.run_cli(
+            [
+                "flux-references",
+                "--output-dir",
+                str(output_dir),
+                "--stack",
+                str(_write_reference_stack(tmp_path)),
+                "--tier",
+                "Small",
+            ]
+        )
+        == 1
+    )
+    assert "produced no images" in capsys.readouterr().err
+    result = json.loads((output_dir / "flux-reference-results.json").read_text())
+    manifest = json.loads((output_dir / "manifest.json").read_text())
+    assert result["status"] == manifest["status"] == "failed"
+    assert manifest["failure"]["stages"][0]["case_id"] == "character-identity"
+    assert result["sources"]["character_identity"]["generation"]["status"] == "success"
+    assert not (output_dir / "contact-sheet.png").exists()

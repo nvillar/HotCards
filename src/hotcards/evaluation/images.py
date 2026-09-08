@@ -34,13 +34,14 @@ from hotcards.evaluation.manifest import (
     default_environment,
 )
 from hotcards.evaluation.reports import render_reports, render_reports_checked
+from hotcards.evaluation.results import generate_cold, generation_record
+from hotcards.generation.errors import ImageGenerationError
 from hotcards.generation.image_generation import (
     DIRECT_GENERATION_PROMPT_VERSION,
     compose_generation_prompt,
 )
 from hotcards.generation.mflux_generator import (
     MfluxGenerateRequest,
-    MfluxGenerateResult,
     MfluxGenerator,
 )
 
@@ -105,21 +106,6 @@ def load_image_cases(case_dir: Path) -> tuple[ImageEvaluationCase, ...]:
     if len(case_ids) != len(set(case_ids)):
         raise ValueError("image evaluation case IDs must be unique")
     return cases
-
-
-def _generation_record(
-    result: MfluxGenerateResult,
-    output_dir: Path,
-) -> dict[str, object]:
-    return {
-        "status": "success",
-        "artifact_path": result.output_path.relative_to(output_dir).as_posix(),
-        "load_duration_seconds": result.load_duration_seconds,
-        "inference_duration_seconds": result.generation_duration_seconds,
-        "serialization_duration_seconds": result.serialization_duration_seconds,
-        "total_duration_seconds": result.provenance.settings.duration_seconds,
-        "metadata": result.provenance.model_dump(mode="json"),
-    }
 
 
 def _request(
@@ -209,17 +195,30 @@ def _execute_image_evaluation(
             case_model_dir.mkdir(parents=True, exist_ok=True)
             generations: dict[str, dict[str, object]] = {}
             for phase in ("cold", "warm"):
+                if phase == "warm" and generations["cold"]["status"] != "success":
+                    generations[phase] = {
+                        "status": "skipped",
+                        "failure": {
+                            "stage": f"{stage}:warm",
+                            "classification": "dependency",
+                            "message": "Warm measurement requires a successful cold invocation.",
+                        },
+                    }
+                    continue
                 try:
-                    generated = generator.generate(
-                        _request(
-                            case=case,
-                            render_prompt=render_prompt,
-                            output_path=case_model_dir / f"{phase}.png",
-                            model=model,
-                            settings=settings,
-                        )
+                    request = _request(
+                        case=case,
+                        render_prompt=render_prompt,
+                        output_path=case_model_dir / f"{phase}.png",
+                        model=model,
+                        settings=settings,
                     )
-                    generations[phase] = _generation_record(
+                    generated = (
+                        generate_cold(generator, request)
+                        if phase == "cold"
+                        else generator.generate(request)
+                    )
+                    generations[phase] = generation_record(
                         generated,
                         settings.output_dir,
                     )
@@ -249,9 +248,12 @@ def _execute_image_evaluation(
         item[phase]
         for item in mflux_results
         for phase in ("cold", "warm")
-        if item[phase].get("status") == "failed"  # type: ignore[union-attr]
+        if item[phase].get("status") != "success"  # type: ignore[union-attr]
     ]
-    result["status"] = "completed_with_failures" if failures else "success"
+    successes = len(mflux_results) * 2 - len(failures)
+    result["status"] = (
+        "failed" if successes == 0 else "completed_with_failures" if failures else "success"
+    )
     result_path = _write_result(settings.output_dir, result)
     lifecycle.set_stage("reports")
     render_reports_checked(result_path)
@@ -323,7 +325,7 @@ def run_image_evaluation(
         }
         for item in completed_result["mflux_axis"]
         for phase in ("cold", "warm")
-        if item[phase].get("status") == "failed"
+        if item[phase].get("status") != "success"
     ]
     lifecycle.finalize(
         status=completed_result["status"],
@@ -333,4 +335,8 @@ def run_image_evaluation(
             else None
         ),
     )
+    if completed_result["status"] == "failed":
+        raise ImageGenerationError(
+            f"Image evaluation produced no images; diagnostics were retained at {result_path}"
+        )
     return result_path
