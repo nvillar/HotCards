@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import os
-from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from helpers import DocumentSessionFactory, generated_background
+from helpers import document_session_factory as document_session_factory
 from PIL import Image
 
 import hotcards.storage.stack_store as stack_store_module
@@ -17,7 +18,6 @@ from hotcards.application.card_duplication import (
     CardDuplicationWorkflow,
 )
 from hotcards.application.commands import (
-    CommandError,
     DeleteCardCommand,
     DuplicateCardCommand,
     RenameCardCommand,
@@ -30,11 +30,7 @@ from hotcards.application.document_controller import (
 from hotcards.application.document_session import DocumentSession
 from hotcards.domain.models import (
     Card,
-    DirectGenerateProvenance,
-    DuplicateProvenance,
-    GeneratedBackground,
-    GenerateInputs,
-    ImageOperationSettings,
+    DuplicateOperation,
     Stack,
 )
 from hotcards.storage.stack_store import (
@@ -50,43 +46,28 @@ def _checksum(path: Path) -> str:
 
 def _bound_source(
     tmp_path: Path,
+    document_session_factory: DocumentSessionFactory,
     *,
     with_background: bool,
 ) -> tuple[CardDuplicationWorkflow, DocumentController, DocumentSession, Card]:
     card = Card(name="Scene")
     controller = DocumentController(Stack(name="Stack", cards=(card,), start_card_id=card.id))
-    session = DocumentSession(controller)
+    session = document_session_factory(controller)
     session.create(controller.document, tmp_path / "Stack.hotcards")
     if with_background:
         assert session.store is not None
+        background = generated_background(card.id)
+        settings = background.provenance.settings
         source_png = tmp_path / "source.png"
-        Image.new("RGB", (19, 13), (12, 34, 56)).save(source_png, format="PNG")
-        asset_id = uuid4()
+        Image.new("RGB", (settings.width, settings.height), (12, 34, 56)).save(
+            source_png, format="PNG"
+        )
         image_path = session.store.store_image_asset(
             source_png,
             card_id=card.id,
-            asset_id=asset_id,
+            asset_id=background.id,
         )
-        generated_at = datetime.now(UTC)
-        background = GeneratedBackground(
-            id=asset_id,
-            image_path=image_path,
-            provenance=DirectGenerateProvenance(
-                inputs=GenerateInputs(description="Scene"),
-                render_prompt="Scene",
-                settings=ImageOperationSettings(
-                    model_identifier="test",
-                    mflux_version="test",
-                    seed=7,
-                    width=512,
-                    height=384,
-                    step_count=4,
-                    generated_at=generated_at,
-                    duration_seconds=1,
-                ),
-            ),
-            created_at=generated_at,
-        )
+        assert image_path == background.image_path
         controller.execute(
             ReplaceRevisionBackgroundCommand(
                 card_id=card.id,
@@ -108,9 +89,11 @@ def _bound_source(
 def test_duplicate_is_persisted_undoable_and_redoable(
     tmp_path: Path,
     with_background: bool,
+    document_session_factory: DocumentSessionFactory,
 ) -> None:
     workflow, controller, session, source = _bound_source(
         tmp_path,
+        document_session_factory,
         with_background=with_background,
     )
 
@@ -135,7 +118,7 @@ def test_duplicate_is_persisted_undoable_and_redoable(
         assert _checksum(session.store.asset_path(source_background.image_path)) == _checksum(
             session.store.asset_path(duplicate_background.image_path)
         )
-        assert isinstance(duplicate_background.provenance, DuplicateProvenance)
+        assert isinstance(duplicate_background.provenance.authoring, DuplicateOperation)
 
     assert controller.undo_if_current(change.token)
     assert [card.name for card in controller.document.cards] == ["Scene"]
@@ -149,9 +132,11 @@ def test_duplicate_is_persisted_undoable_and_redoable(
 
 def test_duplicate_remains_valid_after_source_card_is_deleted(
     tmp_path: Path,
+    document_session_factory: DocumentSessionFactory,
 ) -> None:
     workflow, controller, session, source = _bound_source(
         tmp_path,
+        document_session_factory,
         with_background=True,
     )
     duplicate_change = workflow.duplicate(source.id)
@@ -175,33 +160,6 @@ def test_duplicate_remains_valid_after_source_card_is_deleted(
     assert controller.document.cards == (duplicate,)
 
 
-def test_duplicate_save_failure_rolls_back_document_and_new_asset(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    workflow, controller, session, source = _bound_source(
-        tmp_path,
-        with_background=True,
-    )
-    assert session.store is not None
-    before = controller.document
-    before_assets = set(session.store.bundle_path.rglob("*.png"))
-
-    def fail_command(
-        _command: object,
-        **_kwargs: object,
-    ) -> Stack:
-        raise CommandError("command rejected")
-
-    monkeypatch.setattr(session, "execute_persisted", fail_command)
-
-    with pytest.raises(CardDuplicationError, match="command rejected"):
-        workflow.duplicate(source.id)
-
-    assert controller.document == before
-    assert set(session.store.bundle_path.rglob("*.png")) == before_assets
-
-
 @pytest.mark.parametrize(
     "boundary",
     [
@@ -219,9 +177,11 @@ def test_duplicate_transaction_fault_restores_manifest_and_owned_asset(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     boundary: str,
+    document_session_factory: DocumentSessionFactory,
 ) -> None:
     workflow, controller, session, source = _bound_source(
         tmp_path,
+        document_session_factory,
         with_background=True,
     )
     assert session.store is not None
@@ -255,9 +215,11 @@ def test_duplicate_transaction_fault_restores_manifest_and_owned_asset(
 def test_blank_duplicate_post_replace_failure_restores_manifest(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    document_session_factory: DocumentSessionFactory,
 ) -> None:
     workflow, controller, session, source = _bound_source(
         tmp_path,
+        document_session_factory,
         with_background=False,
     )
     assert session.store is not None
@@ -285,9 +247,11 @@ def test_blank_duplicate_post_replace_failure_restores_manifest(
 def test_blank_duplicate_wraps_manifest_open_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    document_session_factory: DocumentSessionFactory,
 ) -> None:
     workflow, controller, session, source = _bound_source(
         tmp_path,
+        document_session_factory,
         with_background=False,
     )
     real_open = stack_store_module.os.open
@@ -314,9 +278,11 @@ def test_blank_duplicate_wraps_manifest_open_failure(
 def test_indeterminate_observed_duplicate_becomes_history_only_after_retry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    document_session_factory: DocumentSessionFactory,
 ) -> None:
     workflow, controller, session, source = _bound_source(
         tmp_path,
+        document_session_factory,
         with_background=True,
     )
     assert session.store is not None
@@ -409,9 +375,11 @@ def test_indeterminate_observed_duplicate_becomes_history_only_after_retry(
 def test_duplicate_copy_failure_leaves_document_and_assets_unchanged(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    document_session_factory: DocumentSessionFactory,
 ) -> None:
     workflow, controller, session, source = _bound_source(
         tmp_path,
+        document_session_factory,
         with_background=True,
     )
     assert session.store is not None
@@ -436,9 +404,11 @@ def test_duplicate_copy_failure_leaves_document_and_assets_unchanged(
 
 def test_duplicate_rejects_unsafe_source_asset_path_without_orphan(
     tmp_path: Path,
+    document_session_factory: DocumentSessionFactory,
 ) -> None:
     workflow, controller, session, source = _bound_source(
         tmp_path,
+        document_session_factory,
         with_background=True,
     )
     assert source.active_revision.background is not None
@@ -465,9 +435,11 @@ def test_duplicate_rejects_unsafe_source_asset_path_without_orphan(
 
 def test_duplicate_rejects_source_path_from_another_asset_namespace(
     tmp_path: Path,
+    document_session_factory: DocumentSessionFactory,
 ) -> None:
     workflow, controller, session, source = _bound_source(
         tmp_path,
+        document_session_factory,
         with_background=True,
     )
     assert source.active_revision.background is not None
@@ -502,11 +474,13 @@ def test_duplicate_rejects_source_path_from_another_asset_namespace(
 
 def test_secure_duplicate_rejects_symlink_source_without_reading_outside(
     tmp_path: Path,
+    document_session_factory: DocumentSessionFactory,
 ) -> None:
     if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
         pytest.skip("secure dirfd flags are unavailable")
     workflow, controller, session, source = _bound_source(
         tmp_path,
+        document_session_factory,
         with_background=True,
     )
     assert session.store is not None
@@ -530,11 +504,13 @@ def test_secure_duplicate_rejects_symlink_source_without_reading_outside(
 def test_secure_duplicate_detects_source_swap_after_open(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    document_session_factory: DocumentSessionFactory,
 ) -> None:
     if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
         pytest.skip("secure dirfd flags are unavailable")
     workflow, controller, session, source = _bound_source(
         tmp_path,
+        document_session_factory,
         with_background=True,
     )
     assert session.store is not None
@@ -571,11 +547,13 @@ def test_secure_duplicate_detects_source_swap_after_open(
 def test_secure_duplicate_parent_swap_never_writes_outside_bundle(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    document_session_factory: DocumentSessionFactory,
 ) -> None:
     if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
         pytest.skip("secure dirfd flags are unavailable")
     workflow, controller, session, source = _bound_source(
         tmp_path,
+        document_session_factory,
         with_background=True,
     )
     assert session.store is not None
@@ -612,11 +590,13 @@ def test_secure_duplicate_parent_swap_never_writes_outside_bundle(
 def test_secure_duplicate_destination_swap_never_writes_or_deletes_outside(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    document_session_factory: DocumentSessionFactory,
 ) -> None:
     if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
         pytest.skip("secure dirfd flags are unavailable")
     workflow, controller, session, source = _bound_source(
         tmp_path,
+        document_session_factory,
         with_background=True,
     )
     assert session.store is not None
@@ -662,9 +642,11 @@ def test_secure_duplicate_destination_swap_never_writes_or_deletes_outside(
 def test_duplicate_cards_directory_fsync_failure_precedes_manifest_commit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    document_session_factory: DocumentSessionFactory,
 ) -> None:
     workflow, controller, session, source = _bound_source(
         tmp_path,
+        document_session_factory,
         with_background=True,
     )
     assert session.store is not None
@@ -708,9 +690,11 @@ def test_duplicate_cards_directory_fsync_failure_precedes_manifest_commit(
 def test_precommit_failure_uses_already_durable_previous_manifest(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    document_session_factory: DocumentSessionFactory,
 ) -> None:
     workflow, controller, session, source = _bound_source(
         tmp_path,
+        document_session_factory,
         with_background=True,
     )
     assert session.store is not None
@@ -767,9 +751,11 @@ def test_precommit_failure_uses_already_durable_previous_manifest(
 def test_manifest_fsync_recovery_stabilizes_previous_state_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    document_session_factory: DocumentSessionFactory,
 ) -> None:
     workflow, controller, session, source = _bound_source(
         tmp_path,
+        document_session_factory,
         with_background=True,
     )
     assert session.store is not None
@@ -817,9 +803,11 @@ def test_manifest_fsync_recovery_stabilizes_previous_state_once(
 def test_repeated_manifest_fsync_failure_stays_dirty_until_retry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    document_session_factory: DocumentSessionFactory,
 ) -> None:
     workflow, controller, session, source = _bound_source(
         tmp_path,
+        document_session_factory,
         with_background=True,
     )
     assert session.store is not None
@@ -881,9 +869,11 @@ def test_repeated_manifest_fsync_failure_stays_dirty_until_retry(
 def test_blank_duplicate_repeated_manifest_fsync_failure_stays_dirty(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    document_session_factory: DocumentSessionFactory,
 ) -> None:
     workflow, controller, session, source = _bound_source(
         tmp_path,
+        document_session_factory,
         with_background=False,
     )
     assert session.store is not None
@@ -934,11 +924,13 @@ def test_blank_duplicate_repeated_manifest_fsync_failure_stays_dirty(
 def test_rollback_directory_cleanup_preserves_swapped_foreign_directory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    document_session_factory: DocumentSessionFactory,
 ) -> None:
     if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
         pytest.skip("secure dirfd flags are unavailable")
     workflow, controller, session, source = _bound_source(
         tmp_path,
+        document_session_factory,
         with_background=True,
     )
     assert session.store is not None
@@ -994,11 +986,13 @@ def test_rollback_directory_cleanup_preserves_swapped_foreign_directory(
 def test_rollback_file_quarantine_preserves_post_precheck_swap(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    document_session_factory: DocumentSessionFactory,
 ) -> None:
     if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
         pytest.skip("secure dirfd flags are unavailable")
     _workflow, controller, session, source = _bound_source(
         tmp_path,
+        document_session_factory,
         with_background=True,
     )
     assert session.store is not None
@@ -1070,11 +1064,13 @@ def test_rollback_file_quarantine_preserves_post_precheck_swap(
 def test_history_directory_quarantine_preserves_post_precheck_swap_for_retry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    document_session_factory: DocumentSessionFactory,
 ) -> None:
     if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
         pytest.skip("secure dirfd flags are unavailable")
     workflow, controller, session, source = _bound_source(
         tmp_path,
+        document_session_factory,
         with_background=True,
     )
     assert session.store is not None
@@ -1124,9 +1120,11 @@ def test_history_directory_quarantine_preserves_post_precheck_swap_for_retry(
 
 def test_undo_then_new_command_reclaims_duplicate_owned_asset(
     tmp_path: Path,
+    document_session_factory: DocumentSessionFactory,
 ) -> None:
     workflow, controller, session, source = _bound_source(
         tmp_path,
+        document_session_factory,
         with_background=True,
     )
     assert session.store is not None
@@ -1150,9 +1148,11 @@ def test_undo_then_new_command_reclaims_duplicate_owned_asset(
 
 def test_history_clear_retains_current_duplicate_but_reclaims_undone_copy(
     tmp_path: Path,
+    document_session_factory: DocumentSessionFactory,
 ) -> None:
     workflow, controller, session, source = _bound_source(
         tmp_path,
+        document_session_factory,
         with_background=True,
     )
     assert session.store is not None
@@ -1179,9 +1179,11 @@ def test_history_clear_retains_current_duplicate_but_reclaims_undone_copy(
 
 def test_deleted_duplicate_asset_is_retained_only_while_undo_can_restore_it(
     tmp_path: Path,
+    document_session_factory: DocumentSessionFactory,
 ) -> None:
     workflow, controller, session, source = _bound_source(
         tmp_path,
+        document_session_factory,
         with_background=True,
     )
     assert session.store is not None
@@ -1204,9 +1206,11 @@ def test_deleted_duplicate_asset_is_retained_only_while_undo_can_restore_it(
 
 def test_project_replacement_reclaims_only_undone_duplicate_asset(
     tmp_path: Path,
+    document_session_factory: DocumentSessionFactory,
 ) -> None:
     workflow, controller, session, source = _bound_source(
         tmp_path,
+        document_session_factory,
         with_background=True,
     )
     assert session.store is not None
@@ -1232,9 +1236,11 @@ def test_project_replacement_reclaims_only_undone_duplicate_asset(
 
 def test_session_close_reclaims_undone_duplicate_asset(
     tmp_path: Path,
+    document_session_factory: DocumentSessionFactory,
 ) -> None:
     workflow, controller, session, source = _bound_source(
         tmp_path,
+        document_session_factory,
         with_background=True,
     )
     assert session.store is not None
@@ -1256,9 +1262,11 @@ def test_session_close_reclaims_undone_duplicate_asset(
 
 def test_history_cleanup_refuses_foreign_replacement_at_owned_path(
     tmp_path: Path,
+    document_session_factory: DocumentSessionFactory,
 ) -> None:
     workflow, controller, session, source = _bound_source(
         tmp_path,
+        document_session_factory,
         with_background=True,
     )
     assert session.store is not None
@@ -1270,7 +1278,8 @@ def test_history_cleanup_refuses_foreign_replacement_at_owned_path(
     assert duplicate_background is not None
     duplicate_path = session.store.asset_path(duplicate_background.image_path)
     assert controller.undo_if_current(change.token)
-    duplicate_path.unlink()
+    owned_backup = duplicate_path.with_suffix(".retained")
+    duplicate_path.rename(owned_backup)
     duplicate_path.write_bytes(b"foreign replacement")
 
     controller.execute(RenameCardCommand(card_id=source.id, name="Renamed"))
@@ -1280,4 +1289,7 @@ def test_history_cleanup_refuses_foreign_replacement_at_owned_path(
     assert duplicate_path.read_bytes() == b"foreign replacement"
     assert source_path.is_file()
     assert not session.close_history()
+    assert not session.close_history()
+    duplicate_path.unlink()
+    owned_backup.rename(duplicate_path)
     assert session.close_history()

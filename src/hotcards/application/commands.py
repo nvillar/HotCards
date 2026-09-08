@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal, Protocol
+from typing import Protocol
 from uuid import UUID, uuid4
+
+from pydantic import BaseModel
 
 from hotcards.domain.models import (
     Background,
     Card,
     CardReference,
     CardRevision,
-    DuplicateProvenance,
+    DuplicateOperation,
     EditDraft,
     GeneratedBackground,
     GeneratedSoundAsset,
@@ -19,6 +21,7 @@ from hotcards.domain.models import (
     HotspotConditions,
     HotspotKeyChanges,
     HotspotSet,
+    ImageProvenance,
     ImageSourceSnapshot,
     Interaction,
     KeyDefinition,
@@ -48,7 +51,7 @@ class DocumentCommand(Protocol):
 
 def validated_copy(document: Stack) -> Stack:
     """Return an independently owned, recursively validated document."""
-    return Stack.model_validate(document.model_dump(mode="python", round_trip=True))
+    return Stack.model_validate(BaseModel.model_dump(document, mode="python", round_trip=True))
 
 
 def _card_index(document: Stack, card_id: UUID) -> int:
@@ -356,13 +359,18 @@ class DuplicateCardCommand:
             background = GeneratedBackground(
                 id=self.background_id,
                 image_path=self.background_image_path,
-                provenance=DuplicateProvenance(
-                    source=ImageSourceSnapshot(
-                        card_id=source_card.id,
-                        revision_id=source_revision.id,
-                        background_id=source_background.id,
+                provenance=ImageProvenance(
+                    origin=source_background.provenance.origin,
+                    authoring=DuplicateOperation(
+                        source=ImageSourceSnapshot(
+                            card_id=source_card.id,
+                            revision_id=source_revision.id,
+                            background_id=source_background.id,
+                        ),
+                        original_authoring=original_image_provenance(
+                            source_background.provenance
+                        ).authoring,
                     ),
-                    original_provenance=original_image_provenance(source_background.provenance),
                 ),
                 created_at=source_background.created_at,
             )
@@ -522,46 +530,6 @@ class AddKeyCommand:
             raise CommandError(f"Key {self.key_id} already exists")
         key = KeyDefinition(id=self.key_id, name=self.name)
         return validated_copy(document.model_copy(update={"keys": (*document.keys, key)}))
-
-
-@dataclass(frozen=True, slots=True)
-class CreateKeyAndAddHotspotReferenceCommand:
-    """Create one Key and reference it from one hotspot atomically."""
-
-    card_id: UUID
-    revision_id: UUID
-    interaction_id: UUID
-    name: str
-    role: Literal["requires", "forbids", "remove", "grant"]
-    key_id: UUID = field(default_factory=uuid4)
-
-    def apply(self, document: Stack) -> Stack:
-        changed = AddKeyCommand(name=self.name, key_id=self.key_id).apply(document)
-        interaction = _interaction(
-            changed,
-            card_id=self.card_id,
-            revision_id=self.revision_id,
-            interaction_id=self.interaction_id,
-        )
-        if self.role in {"requires", "forbids"}:
-            values = getattr(interaction.conditions, self.role)
-            conditions = interaction.conditions.model_copy(
-                update={self.role: (*values, self.key_id)}
-            )
-            return SetHotspotConditionsCommand(
-                card_id=self.card_id,
-                revision_id=self.revision_id,
-                interaction_id=self.interaction_id,
-                conditions=conditions,
-            ).apply(changed)
-        values = getattr(interaction.key_changes, self.role)
-        key_changes = interaction.key_changes.model_copy(update={self.role: (*values, self.key_id)})
-        return SetHotspotKeyChangesCommand(
-            card_id=self.card_id,
-            revision_id=self.revision_id,
-            interaction_id=self.interaction_id,
-            key_changes=key_changes,
-        ).apply(changed)
 
 
 @dataclass(frozen=True, slots=True)
@@ -936,10 +904,7 @@ class ApplyEditResultCommand:
         updates: dict[str, object] = {
             "background": self.background.model_copy(deep=True),
         }
-        if (
-            current_revision.edit_draft.generation_id
-            == self.submitted_draft_generation_id
-        ):
+        if current_revision.edit_draft.generation_id == self.submitted_draft_generation_id:
             updates["edit_draft"] = EditDraft(
                 generation_id=self.cleared_draft_generation_id,
             )
@@ -1191,49 +1156,6 @@ class ReorderHotspotCommand:
         return validated_copy(_replace_card(document, card_index, card))
 
 
-@dataclass(frozen=True, slots=True)
-class CreateCardAndResolveCommand:
-    """Create a blank card and resolve one unresolved hotspot to it atomically."""
-
-    source_card_id: UUID
-    revision_id: UUID
-    interaction_id: UUID
-    card_name: str | None = None
-    new_card_id: UUID = field(default_factory=uuid4)
-    index: int | None = None
-
-    def apply(self, document: Stack) -> Stack:
-        interaction = _interaction(
-            document,
-            card_id=self.source_card_id,
-            revision_id=self.revision_id,
-            interaction_id=self.interaction_id,
-        )
-        target = interaction.action.target if interaction.action is not None else None
-        name = (
-            self.card_name
-            if self.card_name is not None
-            else target.target_name
-            if isinstance(target, UnresolvedCardReference)
-            else None
-        )
-        if name is None:
-            raise CommandError(
-                "card_name is required when the hotspot has no unresolved target name"
-            )
-        changed = CreateCardCommand(
-            name=name,
-            card_id=self.new_card_id,
-            index=self.index,
-        ).apply(document)
-        return ChangeHotspotDestinationCommand(
-            card_id=self.source_card_id,
-            revision_id=self.revision_id,
-            interaction_id=self.interaction_id,
-            destination=ResolvedCardReference(target_card_id=self.new_card_id),
-        ).apply(changed)
-
-
 __all__ = [
     "ActivateRevisionCommand",
     "AddKeyCommand",
@@ -1243,9 +1165,7 @@ __all__ = [
     "ChangeHotspotDestinationCommand",
     "ChangeHotspotSoundCommand",
     "CommandError",
-    "CreateCardAndResolveCommand",
     "CreateCardCommand",
-    "CreateKeyAndAddHotspotReferenceCommand",
     "CreateImageRevisionCommand",
     "DeleteCardCommand",
     "DeleteInteractionCommand",

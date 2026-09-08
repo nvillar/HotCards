@@ -46,11 +46,7 @@ def compose_edit_prompt(
         raise ValueError("enter an Edit Instruction before editing")
     parts = [normalized_instruction]
     if style is not None and style.prompt_text.strip():
-        parts.append(
-            "Unless the Edit Instruction explicitly changes the visual treatment, "
-            "keep the result consistent with this selected Style:\n\n"
-            f"{style.prompt_text.strip()}"
-        )
+        parts.append(style.prompt_text)
     return "\n\n".join(parts)
 
 

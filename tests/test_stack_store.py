@@ -3,7 +3,10 @@
 import errno
 import json
 import os
+import subprocess
+import sys
 import wave
+from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -16,12 +19,14 @@ from hotcards.domain.models import (
     CURRENT_SCHEMA_VERSION,
     Card,
     CardRevision,
-    DirectGenerateProvenance,
     GeneratedBackground,
     GeneratedSoundAsset,
     GenerateInputs,
+    GenerateOperation,
     HotspotSet,
     ImageOperationSettings,
+    ImageOriginFacts,
+    ImageProvenance,
     Interaction,
     NavigateAction,
     Point,
@@ -32,6 +37,7 @@ from hotcards.domain.models import (
     Stack,
 )
 from hotcards.storage.stack_store import (
+    ImageAssetExpectation,
     StackStore,
     StackStoreError,
     StackStoreTransactionError,
@@ -39,7 +45,7 @@ from hotcards.storage.stack_store import (
 
 
 def _write_png(path: Path) -> None:
-    Image.new("RGB", (32, 24), "navy").save(path, format="PNG")
+    Image.new("RGB", (512, 384), "navy").save(path, format="PNG")
 
 
 def _write_wav(path: Path, *, duration_seconds: int = 2, channels: int = 2) -> None:
@@ -80,21 +86,21 @@ def _generated_background(asset_id: UUID, image_path: str) -> GeneratedBackgroun
     return GeneratedBackground(
         id=asset_id,
         image_path=image_path,
-        provenance=DirectGenerateProvenance(
-            inputs=GenerateInputs(
-                description="A courtyard",
+        provenance=ImageProvenance(
+            origin=ImageOriginFacts(
+                render_prompt="A courtyard",
+                settings=ImageOperationSettings(
+                    model_identifier="test",
+                    mflux_version="test",
+                    seed=1,
+                    width=512,
+                    height=384,
+                    step_count=4,
+                    generated_at=generated_at,
+                    duration_seconds=1,
+                ),
             ),
-            render_prompt="A courtyard",
-            settings=ImageOperationSettings(
-                model_identifier="test",
-                mflux_version="test",
-                seed=1,
-                width=512,
-                height=384,
-                step_count=4,
-                generated_at=generated_at,
-                duration_seconds=1,
-            ),
+            authoring=GenerateOperation(inputs=GenerateInputs(description="A courtyard")),
         ),
         created_at=generated_at,
     )
@@ -107,7 +113,7 @@ def _stack_with_asset(store: StackStore, source: Path) -> Stack:
     image_path = store.store_image_asset(
         source,
         card_id=source_card_id,
-        revision_id=revision_id,
+        asset_id=revision_id,
     )
     interaction = Interaction(
         label="Garden gate",
@@ -149,7 +155,7 @@ def test_bundle_round_trip_preserves_document_and_relative_asset(tmp_path: Path)
     store.save(stack)
 
     assert store.load() == stack
-    image_path = stack.cards[0].revisions[0].image_path
+    image_path = stack.cards[0].revisions[0].background.image_path
     assert image_path is not None
     assert image_path.startswith("assets/cards/")
     assert not Path(image_path).is_absolute()
@@ -158,8 +164,79 @@ def test_bundle_round_trip_preserves_document_and_relative_asset(tmp_path: Path)
     assert payload["aspect_ratio"] == "4:3"
     assert "canvas" not in payload
     assert (
-        payload["cards"][0]["revisions"][0]["background"]["provenance"]["operation"] == "generate"
+        payload["cards"][0]["revisions"][0]["background"]["provenance"]["authoring"]["operation"]
+        == "generate"
     )
+
+
+def test_dimension_cache_reuses_only_unchanged_securely_opened_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source.png"
+    _write_png(source)
+    store = StackStore(tmp_path / "Dimensions.hotcards")
+    card_id, asset_id = uuid4(), uuid4()
+    relative = store.store_image_asset(source, card_id=card_id, asset_id=asset_id)
+    image_path = store.asset_path(relative)
+    real_decode = stack_store_module._validate_png_fd
+    decoded: list[str] = []
+
+    def decode(descriptor: int, label: str) -> tuple[int, int]:
+        decoded.append(label)
+        return real_decode(descriptor, label)
+
+    monkeypatch.setattr(stack_store_module, "_validate_png_fd", decode)
+    assert store.image_asset_dimensions(relative, card_id=card_id, asset_id=asset_id) == (512, 384)
+    assert store.image_asset_dimensions(relative, card_id=card_id, asset_id=asset_id) == (512, 384)
+    assert len(decoded) == 1
+    before = image_path.stat()
+    image_path.write_bytes(image_path.read_bytes())
+    os.utime(image_path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    assert store.image_asset_dimensions(relative, card_id=card_id, asset_id=asset_id) == (512, 384)
+    assert len(decoded) == 2
+    Image.new("RGB", (256, 192), "red").save(image_path)
+    os.utime(image_path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    assert store.image_asset_dimensions(relative, card_id=card_id, asset_id=asset_id) == (256, 192)
+    assert len(decoded) == 3
+    retained = image_path.with_suffix(".retained")
+    image_path.rename(retained)
+    _write_png(image_path)
+    assert store.image_asset_dimensions(relative, card_id=card_id, asset_id=asset_id) == (512, 384)
+    assert len(decoded) == 4
+    image_path.unlink()
+    image_path.symlink_to(retained.name)
+    with pytest.raises(StackStoreError, match="securely decode"):
+        store.image_asset_dimensions(relative, card_id=card_id, asset_id=asset_id)
+
+
+def test_dimension_cache_is_bounded_and_rejects_replacement_during_decode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source.png"
+    _write_png(source)
+    store = StackStore(tmp_path / "Dimensions.hotcards")
+    monkeypatch.setattr(stack_store_module, "_DIMENSION_CACHE_LIMIT", 2)
+    assets = []
+    for _ in range(3):
+        card_id, asset_id = uuid4(), uuid4()
+        relative = store.store_image_asset(source, card_id=card_id, asset_id=asset_id)
+        assets.append((relative, card_id, asset_id))
+        store.image_asset_dimensions(relative, card_id=card_id, asset_id=asset_id)
+    assert len(store._image_dimensions) == 2
+    relative, card_id, asset_id = assets[0]
+    real_decode = stack_store_module._validate_png_fd
+
+    def replace_after_decode(descriptor: int, label: str) -> tuple[int, int]:
+        dimensions = real_decode(descriptor, label)
+        image_path = store.asset_path(relative)
+        image_path.rename(image_path.with_suffix(".retained"))
+        _write_png(image_path)
+        return dimensions
+
+    monkeypatch.setattr(stack_store_module, "_validate_png_fd", replace_after_decode)
+    with pytest.raises(StackStoreError, match="changed while being decoded"):
+        store.image_asset_dimensions(relative, card_id=card_id, asset_id=asset_id)
+    assert len(store._image_dimensions) == 2
 
 
 def test_generated_sound_asset_and_manifest_are_committed_together(tmp_path: Path) -> None:
@@ -217,6 +294,75 @@ def test_sound_storage_rejects_wrong_audio_contract(tmp_path: Path) -> None:
         )
 
 
+def test_sound_storage_rejects_truncated_payload_before_and_after_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "sound.wav"
+    _write_wav(source)
+    store = StackStore(tmp_path / "Sounds.hotcards")
+    store.create(Stack(name="Sounds"))
+    complete = source.read_bytes()
+    source.write_bytes(complete[:-4])
+    with pytest.raises(StackStoreError, match="truncated PCM"):
+        store.store_sound_asset(source, sound_id=uuid4(), asset_id=uuid4(), duration_seconds=2)
+    source.write_bytes(complete)
+
+    def truncate_copy(source_file, destination_file) -> None:
+        destination_file.write(source_file.read()[:-4])
+
+    monkeypatch.setattr(stack_store_module.shutil, "copyfileobj", truncate_copy)
+    with pytest.raises(StackStoreError, match="truncated PCM"):
+        store.store_sound_asset(source, sound_id=uuid4(), asset_id=uuid4(), duration_seconds=2)
+    assert not list(store.bundle_path.rglob("*.wav"))
+
+
+@pytest.mark.parametrize("failures", [1, 3])
+def test_sound_manifest_fsync_failure_is_never_reported_as_committed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failures: int
+) -> None:
+    source = tmp_path / "sound.wav"
+    _write_wav(source)
+    store = StackStore(tmp_path / "Sounds.hotcards")
+    before = Stack(name="Sounds")
+    store.create(before)
+    sound_id, asset_id = uuid4(), uuid4()
+    after = before.model_copy(update={"sounds": (_generated_sound(sound_id, asset_id),)})
+    real_fsync = os.fsync
+    bundle_stat = store.bundle_path.stat()
+    replaced = False
+    failed = 0
+
+    def checkpoint(name: str) -> None:
+        nonlocal replaced
+        if name == "manifest-replaced":
+            replaced = True
+
+    def fail_fsync(descriptor: int) -> None:
+        nonlocal failed
+        current = os.fstat(descriptor)
+        if replaced and current.st_ino == bundle_stat.st_ino and failed < failures:
+            failed += 1
+            raise OSError("manifest fsync interrupted")
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(stack_store_module, "_io_checkpoint", checkpoint)
+    monkeypatch.setattr(stack_store_module.os, "fsync", fail_fsync)
+    with pytest.raises(StackStoreTransactionError) as caught:
+        store.store_sound_asset_and_save(
+            source,
+            sound_id=sound_id,
+            asset_id=asset_id,
+            duration_seconds=2,
+            previous_stack=before,
+            changed_stack=after,
+        )
+    assert failed == failures
+    assert caught.value.persisted_stack != after
+    assert store.load() == before
+    assert caught.value.durability_indeterminate == (failures == 3)
+    assert bool(list(store.bundle_path.rglob("*.wav"))) == (failures == 3)
+
+
 def test_owned_sound_is_removed_only_after_all_references_leave(tmp_path: Path) -> None:
     source = tmp_path / "sound.wav"
     _write_wav(source)
@@ -250,6 +396,84 @@ def test_owned_sound_is_removed_only_after_all_references_leave(tmp_path: Path) 
         stack=previous,
     )
     assert not store.asset_path(owned.relative_path).exists()
+
+
+@pytest.mark.parametrize("boundary", ["file-unlink", "directory-rmdir"])
+def test_owned_sound_cleanup_retries_identity_bound_quarantine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, boundary: str
+) -> None:
+    source = tmp_path / "sound.wav"
+    _write_wav(source)
+    store = StackStore(tmp_path / "Sounds.hotcards")
+    before = Stack(name="Sounds")
+    store.create(before)
+    sound_id, asset_id = uuid4(), uuid4()
+    after = before.model_copy(update={"sounds": (_generated_sound(sound_id, asset_id),)})
+    owned = store.store_sound_asset_and_save(
+        source,
+        sound_id=sound_id,
+        asset_id=asset_id,
+        duration_seconds=2,
+        previous_stack=before,
+        changed_stack=after,
+    )
+    store.save(before)
+    original_operation = os.unlink if boundary == "file-unlink" else os.rmdir
+
+    def fail_quarantine_removal(path, *args, **kwargs) -> None:
+        if ".owned-" in str(path):
+            raise OSError("quarantine removal interrupted")
+        original_operation(path, *args, **kwargs)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(
+            stack_store_module.os,
+            "unlink" if boundary == "file-unlink" else "rmdir",
+            fail_quarantine_removal,
+        )
+        with pytest.raises(StackStoreError, match="quarantine removal interrupted"):
+            store.remove_owned_sound_asset_if_unreferenced(
+                owned, sound_id=sound_id, asset_id=asset_id, stack=before
+            )
+    assert list(store.bundle_path.rglob("*.tmp"))
+    assert store.remove_owned_sound_asset_if_unreferenced(
+        owned, sound_id=sound_id, asset_id=asset_id, stack=before
+    )
+    assert not list(store.bundle_path.rglob("*.tmp"))
+    assert not store.asset_path(owned.relative_path).exists()
+
+
+def test_cleanup_retry_fsyncs_an_already_absent_owned_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "owned.png"
+    _write_png(path)
+    identity = path.stat()
+    parent = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    real_fsync = os.fsync
+    fsynced: list[int] = []
+
+    def fail_fsync(_descriptor: int) -> None:
+        raise OSError("directory fsync interrupted")
+
+    def record_fsync(descriptor: int) -> None:
+        fsynced.append(descriptor)
+        real_fsync(descriptor)
+
+    try:
+        monkeypatch.setattr(stack_store_module.os, "fsync", fail_fsync)
+        with pytest.raises(StackStoreError, match="directory fsync interrupted"):
+            stack_store_module._quarantine_owned_file_at(
+                parent, path.name, device=identity.st_dev, inode=identity.st_ino
+            )
+        assert not path.exists()
+        monkeypatch.setattr(stack_store_module.os, "fsync", record_fsync)
+        assert not stack_store_module._quarantine_owned_file_at(
+            parent, path.name, device=identity.st_dev, inode=identity.st_ino
+        )
+        assert fsynced == [parent]
+    finally:
+        os.close(parent)
 
 
 def test_failed_replace_preserves_active_stack_and_removes_temporary_file(
@@ -611,12 +835,34 @@ def test_source_revalidation_rejects_fifo_without_blocking(tmp_path: Path) -> No
     logical_source.unlink()
     os.mkfifo(logical_source)
 
-    with pytest.raises(StackStoreError, match="no longer a regular file"):
-        store.require_image_asset_unchanged(
-            snapshot,
-            card_id=card_id,
-            asset_id=asset_id,
-        )
+    # A lost O_NONBLOCK flag must fail this test instead of hanging pytest.
+    script = """
+import sys
+from pathlib import Path
+from uuid import UUID
+from hotcards.storage.stack_store import StackStore, StackStoreError, StoredImageSnapshot
+snapshot = StoredImageSnapshot(**__import__('json').loads(sys.argv[2]))
+try:
+    StackStore(Path(sys.argv[1])).require_image_asset_unchanged(
+        snapshot, card_id=UUID(sys.argv[3]), asset_id=UUID(sys.argv[4]))
+except StackStoreError as error:
+    assert 'no longer a regular file' in str(error), str(error)
+else:
+    raise AssertionError('FIFO was accepted')
+"""
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            script,
+            str(store.bundle_path),
+            json.dumps(asdict(snapshot), default=str),
+            str(card_id),
+            str(asset_id),
+        ],
+        check=True,
+        timeout=5,
+    )
 
     assert snapshot.dispose()
 
@@ -692,7 +938,7 @@ def test_save_requires_asset_path_to_match_card_and_revision_ids(tmp_path: Path)
     image_path = store.store_image_asset(
         source,
         card_id=wrong_card_id,
-        revision_id=revision_id,
+        asset_id=revision_id,
     )
     stack = Stack(
         name="Mismatch",
@@ -722,60 +968,15 @@ def test_store_image_asset_refuses_overwrite_and_invalid_content(
     card_id = uuid4()
     revision_id = uuid4()
 
-    store.store_image_asset(source, card_id=card_id, revision_id=revision_id)
+    store.store_image_asset(source, card_id=card_id, asset_id=revision_id)
 
     with pytest.raises(StackStoreError, match="overwrite"):
-        store.store_image_asset(source, card_id=card_id, revision_id=revision_id)
+        store.store_image_asset(source, card_id=card_id, asset_id=revision_id)
 
     invalid = tmp_path / "invalid.png"
     invalid.write_bytes(b"not an image")
     with pytest.raises(StackStoreError, match="decode"):
-        store.store_image_asset(invalid, card_id=card_id, revision_id=uuid4())
-
-
-def test_remove_image_asset_only_removes_unreferenced_owned_assets(
-    tmp_path: Path,
-) -> None:
-    source = tmp_path / "source.png"
-    _write_png(source)
-    store = StackStore(tmp_path / "Castle.hotcards")
-    card_id = uuid4()
-    asset_id = uuid4()
-    image_path = store.store_image_asset(
-        source,
-        card_id=card_id,
-        asset_id=asset_id,
-    )
-
-    assert store.remove_image_asset_if_unreferenced(
-        image_path,
-        card_id=card_id,
-        asset_id=asset_id,
-        stack=Stack(name="Empty"),
-    )
-    assert not store.asset_path(image_path).exists()
-
-    image_path = store.store_image_asset(
-        source,
-        card_id=card_id,
-        asset_id=asset_id,
-    )
-    revision = CardRevision(
-        background=_generated_background(asset_id, image_path),
-    )
-    stack = Stack(
-        name="Referenced",
-        cards=(Card(id=card_id, name="Card", revisions=(revision,)),),
-    )
-    store.save(stack)
-    with pytest.raises(StackStoreError, match="referenced image asset"):
-        store.remove_image_asset_if_unreferenced(
-            image_path,
-            card_id=card_id,
-            asset_id=asset_id,
-            stack=Stack(name="Stale"),
-        )
-    assert store.asset_path(image_path).is_file()
+        store.store_image_asset(invalid, card_id=card_id, asset_id=uuid4())
 
 
 def test_load_rejects_missing_unsupported_and_future_versions(
@@ -786,11 +987,10 @@ def test_load_rejects_missing_unsupported_and_future_versions(
 
     for payload, message in [
         ({"name": "Missing"}, "schema_version"),
-        ({"schema_version": 3, "name": "Legacy"}, "schema_version"),
-        ({"schema_version": 11, "name": "Previous"}, "schema_version"),
-        ({"schema_version": 12, "name": "Previous"}, "schema_version"),
-        ({"schema_version": 13, "name": "Previous"}, "schema_version"),
-        ({"schema_version": 15, "name": "Future"}, "schema_version"),
+        ({"schema_version": str(CURRENT_SCHEMA_VERSION)}, "schema_version"),
+        ({"schema_version": True}, "schema_version"),
+        ({"schema_version": CURRENT_SCHEMA_VERSION - 1}, "schema_version"),
+        ({"schema_version": CURRENT_SCHEMA_VERSION + 1}, "schema_version"),
     ]:
         store.stack_path.write_text(json.dumps(payload))
         with pytest.raises(StackStoreError, match=message):
@@ -810,7 +1010,7 @@ def test_symlinked_asset_directory_cannot_escape_bundle(tmp_path: Path) -> None:
     _write_png(source)
 
     with pytest.raises(StackStoreError, match="outside"):
-        store.store_image_asset(source, card_id=card_id, revision_id=revision_id)
+        store.store_image_asset(source, card_id=card_id, asset_id=revision_id)
 
 
 def test_clone_to_creates_independent_bundle_with_referenced_assets(tmp_path: Path) -> None:
@@ -824,19 +1024,20 @@ def test_clone_to_creates_independent_bundle_with_referenced_assets(tmp_path: Pa
     copied_store = original.clone_to(destination, stack)
 
     assert copied_store.load() == stack
-    image_path = stack.cards[0].revisions[0].image_path
+    image_path = stack.cards[0].revisions[0].background.image_path
     assert image_path is not None
     assert copied_store.asset_path(image_path).is_file()
-    copied_store.asset_path(image_path).unlink()
-    assert original.asset_path(image_path).is_file()
+    original_bytes = original.asset_path(image_path).read_bytes()
+    copied_store.asset_path(image_path).write_bytes(b"independent replacement")
+    assert original.asset_path(image_path).read_bytes() == original_bytes
 
 
 def test_external_image_and_manifest_commit_as_one_transaction(
     tmp_path: Path,
 ) -> None:
-    source = tmp_path / "refined.png"
+    source = tmp_path / "generated.png"
     _write_png(source)
-    store = StackStore(tmp_path / "Refine.hotcards")
+    store = StackStore(tmp_path / "Generated.hotcards")
     card = Card(name="Card")
     previous = Stack(name="Stack", cards=(card,))
     store.save(previous)
@@ -882,9 +1083,9 @@ def test_external_image_transaction_rolls_back_manifest_and_asset(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    source = tmp_path / "refined.png"
+    source = tmp_path / "generated.png"
     _write_png(source)
-    store = StackStore(tmp_path / "Refine.hotcards")
+    store = StackStore(tmp_path / "Generated.hotcards")
     card = Card(name="Card")
     previous = Stack(name="Stack", cards=(card,))
     store.save(previous)
@@ -911,13 +1112,13 @@ def test_external_image_transaction_rolls_back_manifest_and_asset(
         nonlocal injected
         if name == "manifest-replaced" and not injected:
             injected = True
-            raise OSError("injected Refine durability failure")
+            raise OSError("injected image durability failure")
 
     monkeypatch.setattr(stack_store_module, "_io_checkpoint", fail_after_replace)
 
     with pytest.raises(
         StackStoreTransactionError,
-        match="Refine durability failure",
+        match="image durability failure",
     ):
         store.store_image_asset_and_save(
             source,
@@ -929,6 +1130,68 @@ def test_external_image_transaction_rolls_back_manifest_and_asset(
 
     assert store.load() == previous
     assert not store.asset_path(image_path).exists()
+
+
+@pytest.mark.parametrize("checkpoint", ["manifest-file-fsynced", "manifest-replaced"])
+def test_generate_reference_replacement_rolls_back_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, checkpoint: str
+) -> None:
+    source = tmp_path / "source.png"
+    _write_png(source)
+    store = StackStore(tmp_path / "References.hotcards")
+    before = _stack_with_asset(store, source)
+    store.create(before)
+    reference, target = before.cards
+    background = reference.active_revision.background
+    assert background is not None
+    private = tmp_path / "private"
+    private.mkdir()
+    snapshot = store.snapshot_image_asset(
+        background.image_path,
+        card_id=reference.id,
+        asset_id=background.id,
+        destination_directory=private,
+    )
+    asset_id = uuid4()
+    image_path = store.image_asset_path(target.id, asset_id)
+    target_revision = target.active_revision.model_copy(
+        update={"background": _generated_background(asset_id, image_path)}
+    )
+    after = before.model_copy(
+        update={
+            "cards": (
+                reference,
+                target.model_copy(update={"revisions": (target_revision,)}),
+            )
+        }
+    )
+    replaced = False
+    reference_path = store.asset_path(background.image_path)
+
+    def replace_reference(name: str) -> None:
+        nonlocal replaced
+        if name == checkpoint and not replaced:
+            replaced = True
+            reference_path.rename(reference_path.with_suffix(".original"))
+            _write_png(reference_path)
+
+    monkeypatch.setattr(stack_store_module, "_io_checkpoint", replace_reference)
+    try:
+        with pytest.raises(StackStoreTransactionError, match="Generate Reference"):
+            store.store_image_asset_and_save(
+                source,
+                destination_card_id=target.id,
+                destination_asset_id=asset_id,
+                previous_stack=before,
+                changed_stack=after,
+                expected_references=(ImageAssetExpectation(snapshot, reference.id, background.id),),
+            )
+        assert replaced
+        assert store.load() == before
+        assert not store.asset_path(image_path).exists()
+        assert reference_path.exists()
+    finally:
+        assert snapshot.dispose()
 
 
 def test_clone_to_refuses_existing_destination(tmp_path: Path) -> None:

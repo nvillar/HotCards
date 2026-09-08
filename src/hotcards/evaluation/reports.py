@@ -74,35 +74,8 @@ def _phase_row(
     phase: str = "",
     record: Mapping[str, object],
 ) -> dict[str, object]:
-    metrics = record.get("metrics") or record.get("cold_metrics") or {}
-    token_usage = record.get("token_usage") or {}
     failure = record.get("failure") or {}
-    rubric = record.get("human_rubric") or record.get("rubric")
-    elapsed = record.get("elapsed_seconds")
-    if elapsed is None and isinstance(metrics, Mapping):
-        elapsed = metrics.get("elapsed_seconds")
-    if elapsed is None:
-        elapsed = record.get("total_duration_seconds") or record.get("inference_duration_seconds")
-    nested_result = record.get("result")
-    if elapsed is None and isinstance(nested_result, Mapping):
-        elapsed = nested_result.get("duration_seconds")
-    prompt_tokens = token_usage.get("prompt_tokens") if isinstance(token_usage, Mapping) else None
-    output_tokens = token_usage.get("output_tokens") if isinstance(token_usage, Mapping) else None
-    prompt_tokens = prompt_tokens if prompt_tokens is not None else record.get("prompt_eval_count")
-    output_tokens = output_tokens if output_tokens is not None else record.get("eval_count")
-    timings = {key: value for key, value in record.items() if "duration" in key or key == "timings"}
-    if isinstance(nested_result, Mapping):
-        timings.update({key: value for key, value in nested_result.items() if "duration" in key})
-    render_prompt = record.get("render_prompt") or record.get("prompt")
-    interactive_subjects = record.get("interactive_subjects")
-    if isinstance(nested_result, Mapping):
-        render_prompt = (
-            render_prompt or nested_result.get("render_prompt") or nested_result.get("prompt")
-        )
-        interactive_subjects = interactive_subjects or nested_result.get("interactive_subjects")
-    metadata = record.get("metadata")
-    if isinstance(metadata, Mapping):
-        render_prompt = render_prompt or metadata.get("render_prompt")
+    metadata = record.get("metadata", {})
     return {
         "suite": suite,
         "axis": axis,
@@ -110,29 +83,35 @@ def _phase_row(
         "mflux_model": mflux_model,
         "phase": phase,
         "status": record.get("status", "success"),
+        "cache_reused": record.get("cache_reused"),
         "failure_classification": (
             failure.get("classification", "") if isinstance(failure, Mapping) else ""
         ),
-        "elapsed_seconds": elapsed,
-        "timings": timings,
-        "prompt_tokens": prompt_tokens,
-        "output_tokens": output_tokens,
-        "render_prompt": render_prompt,
-        "interactive_subjects": interactive_subjects,
-        "structured_valid": record.get("structured_valid"),
-        "repetition": record.get("repetition"),
-        "schema_limits": record.get("schema_limits"),
-        "geometry": record.get("geometry"),
-        "destinations": record.get("destinations"),
+        "elapsed_seconds": record.get("total_duration_seconds"),
+        "timings": {
+            key: record[key]
+            for key in (
+                "queue_duration_seconds",
+                "load_duration_seconds",
+                "inference_duration_seconds",
+                "serialization_duration_seconds",
+                "total_duration_seconds",
+            )
+            if key in record
+        },
+        "render_prompt": record.get(
+            "render_prompt", metadata.get("origin", {}).get("render_prompt")
+        ),
+        "artifact_path": record.get("artifact_path"),
         "warnings": record.get("warnings", []),
-        "human_rubric": rubric,
+        "human_rubric": record.get("rubric"),
     }
 
 
 def _summary_rows(result: Mapping[str, object]) -> list[dict[str, object]]:
     version = str(result.get("result_version", ""))
     rows: list[dict[str, object]] = []
-    if version.startswith("image-result"):
+    if version == "image-result-v2":
         for item in result.get("mflux_axis", []):  # type: ignore[union-attr]
             for phase in ("cold", "warm"):
                 rows.append(
@@ -144,12 +123,12 @@ def _summary_rows(result: Mapping[str, object]) -> list[dict[str, object]]:
                         phase=phase,
                         record={
                             **item[phase],
-                            "render_prompt": item.get("render_prompt") or item.get("fixed_prompt"),
+                            "render_prompt": item["render_prompt"],
                             "rubric": item.get("rubric"),
                         },
                     )
                 )
-    elif version.startswith("smoke-result"):
+    elif version == "smoke-result-v3":
         for stage_name, stage in result.get("stages", {}).items():  # type: ignore[union-attr]
             if isinstance(stage, Mapping) and ("cold" in stage or "warm" in stage):
                 for phase in ("cold", "warm"):
@@ -160,9 +139,14 @@ def _summary_rows(result: Mapping[str, object]) -> list[dict[str, object]]:
                                 axis=str(stage_name),
                                 mflux_model=result.get("mflux_model", ""),
                                 phase=phase,
-                                record=stage[phase],
+                                record={
+                                    **stage[phase],
+                                    "render_prompt": result["render_prompt"],
+                                },
                             )
                         )
+    else:
+        raise ValueError(f"unsupported evaluation result version: {version}")
     failure = result.get("failure")
     if isinstance(failure, Mapping):
         rows.append(
@@ -181,14 +165,11 @@ def _artifact_entries(
     result: Mapping[str, object],
 ) -> list[tuple[Path, str]]:
     entries: list[tuple[Path, str]] = []
-    version = str(result.get("result_version", ""))
-    if version.startswith("image-result"):
-        for item in result.get("mflux_axis", []):  # type: ignore[union-attr]
-            for phase in ("cold", "warm"):
-                path_value = item[phase].get("artifact_path")
-                if path_value:
-                    path = safe_run_path(run_dir, path_value)
-                    entries.append((path, f"{item['case_id']}: {item['model']} {phase}"))
+    for row in _summary_rows(result):
+        if path_value := row["artifact_path"]:
+            path = safe_run_path(run_dir, str(path_value))
+            label = f"{row['case_id'] or row['axis']}: {row['mflux_model']} {row['phase']}"
+            entries.append((path, label))
     return entries
 
 
@@ -222,22 +203,12 @@ def _gallery(run_dir: Path, entries: Iterable[tuple[Path, str]]) -> str:
         relative = path.relative_to(run_dir).as_posix()
         figures.append(
             "<figure>"
+            f'<a href="{html.escape(quote(relative))}">'
             f'<img src="{html.escape(quote(relative))}" alt="{html.escape(label)}">'
+            "</a>"
             f"<figcaption>{html.escape(label)}</figcaption></figure>"
         )
     return "".join(figures)
-
-
-def _visual_entries(
-    artifacts: Sequence[tuple[Path, str]],
-    annotations: Sequence[tuple[Path, str]],
-) -> list[tuple[Path, str]]:
-    """Prefer annotations while retaining artifacts without one."""
-    annotations_by_label = {label: path for path, label in annotations}
-    artifact_labels = {label for _, label in artifacts}
-    entries = [(annotations_by_label.get(label, path), label) for path, label in artifacts]
-    entries.extend((path, label) for path, label in annotations if label not in artifact_labels)
-    return entries
 
 
 def render_reports(result_path: Path) -> dict[str, Path]:
@@ -247,9 +218,8 @@ def render_reports(result_path: Path) -> dict[str, Path]:
     result = json.loads(result_path.read_text(encoding="utf-8"))
     rows = _summary_rows(result)
     artifacts = _artifact_entries(run_dir, result)
-    sheet_entries = _visual_entries(artifacts, ())
     contact_sheet_path = run_dir / "contact-sheet.png"
-    contact_sheet = create_contact_sheet(sheet_entries, contact_sheet_path)
+    contact_sheet = create_contact_sheet(artifacts, contact_sheet_path)
     stage_metrics: list[dict[str, object]] = []
     for axis in sorted({str(row["axis"]) for row in rows}):
         axis_rows = [row for row in rows if row["axis"] == axis]
@@ -279,25 +249,7 @@ def render_reports(result_path: Path) -> dict[str, Path]:
     summary_path = run_dir / "summary.json"
     _write_json(summary_path, summary)
     csv_path = run_dir / "summary.csv"
-    columns = (
-        tuple(rows[0])
-        if rows
-        else (
-            "suite",
-            "axis",
-            "case_id",
-            "mflux_model",
-            "phase",
-            "status",
-            "failure_classification",
-            "elapsed_seconds",
-            "timings",
-            "prompt_tokens",
-            "output_tokens",
-            "warnings",
-            "human_rubric",
-        )
-    )
+    columns = tuple(rows[0] if rows else _phase_row(suite="", axis="", record={}))
     with csv_path.open("w", encoding="utf-8", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=columns)
         writer.writeheader()
@@ -327,10 +279,10 @@ figure{{margin:0;max-width:360px}} img{{max-width:100%;height:auto}} code{{white
 </style></head><body><h1>{html.escape(title)}</h1>
 <div class="rubric"><h2>Human quality rubric is primary</h2>
 <p>Every <strong>UNSCORED / null</strong> value requires manual assessment. Automated validity,
-geometry, timings, and token counts do not substitute for image or hotspot quality review.</p></div>
+timings do not substitute for image quality review.</p></div>
 <p>Status: <strong>{html.escape(str(summary["suite_status"]))}</strong></p>
 {contact_link}<h2>Structured results</h2>{_html_table(rows)}
-<h2>Visual artifacts</h2><div class="gallery">{_gallery(run_dir, sheet_entries)}</div>
+<h2>Visual artifacts</h2><div class="gallery">{_gallery(run_dir, artifacts)}</div>
 </body></html>"""
     html_path = run_dir / "report.html"
     html_path.write_text(report_html, encoding="utf-8")

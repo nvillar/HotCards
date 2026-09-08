@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Collection
 from uuid import UUID
 
 from PySide6.QtCore import QSignalBlocker, QSize, Qt, Signal
@@ -155,34 +154,20 @@ class CardSidebar(QWidget):
         self,
         document: Stack,
         selected_card_id: UUID | None = None,
-        *,
-        draft_card_ids: Collection[UUID] = (),
     ) -> None:
         """Render a controller snapshot while preserving valid selection."""
         current_card_id = self.selected_card_id
         desired = selected_card_id if selected_card_id is not None else current_card_id
         scroll_bar = self.card_list.verticalScrollBar()
         scroll_position = scroll_bar.value()
-        draft_ids = frozenset(draft_card_ids)
         with QSignalBlocker(self.card_list):
             self.card_list.clear()
             for card in document.cards:
                 is_start = card.id == document.start_card_id
                 label = f"★  {card.name}" if is_start else card.name
-                has_draft = card.id in draft_ids
-                if has_draft:
-                    label = f"{label}  · Draft"
                 item = QListWidgetItem(self._card_icon(card), label)
                 item.setData(Qt.ItemDataRole.UserRole, card.id)
-                states = [
-                    state
-                    for state, active in (
-                        ("Start card", is_start),
-                        ("Background draft pending", has_draft),
-                    )
-                    if active
-                ]
-                item.setToolTip(" · ".join(states) if states else card.name)
+                item.setToolTip("Start card" if is_start else card.name)
                 self.card_list.addItem(item)
             selected_row = self._row_for(desired)
             preserve_scroll = selected_row >= 0 and desired == current_card_id

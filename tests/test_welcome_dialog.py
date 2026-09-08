@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import os
+from collections.abc import Iterator
 from pathlib import Path
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-
 import pytest
+from PySide6.QtCore import QCoreApplication, QEvent
 from PySide6.QtWidgets import QApplication, QDialog, QLabel, QMessageBox
+from shiboken6 import isValid
 
 import hotcards.ui.welcome_dialog as welcome_dialog_module
 from hotcards.application.document_controller import DocumentController
@@ -19,9 +19,26 @@ from hotcards.ui.project_paths import bundle_path, default_project_directory
 from hotcards.ui.welcome_dialog import WelcomeDialog, WelcomeSelection
 
 
-@pytest.fixture(scope="module")
-def application() -> QApplication:
-    return QApplication.instance() or QApplication([])
+@pytest.fixture
+def application(
+    qt_application: QApplication, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[QApplication]:
+    dialogs: list[WelcomeDialog] = []
+    initialize = WelcomeDialog.__init__
+
+    def initialize_owned(dialog: WelcomeDialog, *args: object, **kwargs: object) -> None:
+        initialize(dialog, *args, **kwargs)
+        dialogs.append(dialog)
+
+    monkeypatch.setattr(WelcomeDialog, "__init__", initialize_owned)
+    try:
+        yield qt_application
+    finally:
+        for dialog in reversed(dialogs):
+            if isValid(dialog):
+                dialog.close()
+                dialog.deleteLater()
+                QCoreApplication.sendPostedEvents(dialog, QEvent.Type.DeferredDelete)
 
 
 def test_default_project_directory_is_under_documents(tmp_path: Path) -> None:

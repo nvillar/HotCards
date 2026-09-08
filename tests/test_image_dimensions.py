@@ -65,15 +65,21 @@ def test_higher_output_tiers_filters_by_actual_pixel_area(
     )
 
 
-def test_full_landscape_pixels_are_the_maximum_tier() -> None:
-    assert (
-        higher_output_tiers(
-            1024,
-            768,
-            AspectRatio.LANDSCAPE,
-        )
-        == ()
-    )
+@pytest.mark.parametrize(
+    ("width", "height", "expected"),
+    [
+        (592, 448, (ResolutionTier.LARGE, ResolutionTier.FULL)),
+        (1024, 192, (ResolutionTier.LARGE, ResolutionTier.FULL)),
+        (128, 128, tuple(ResolutionTier)),
+        (2048, 1536, ()),
+    ],
+)
+def test_higher_output_tiers_uses_area_not_source_long_edge(
+    width: int,
+    height: int,
+    expected: tuple[ResolutionTier, ...],
+) -> None:
+    assert higher_output_tiers(width, height, AspectRatio.LANDSCAPE) == expected
 
 
 def test_resolution_tiers_expose_exact_user_facing_names() -> None:

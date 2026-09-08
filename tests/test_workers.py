@@ -3,21 +3,16 @@
 from __future__ import annotations
 
 import gc
-import os
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
-from threading import Event, Lock, current_thread, get_ident
-from time import monotonic, sleep
+from threading import Event, current_thread, get_ident
+from time import monotonic
 from types import SimpleNamespace
 from weakref import ref
 
 import pytest
 from PIL import Image
-
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-
 from PySide6.QtCore import QEventLoop, QTimer
-from PySide6.QtWidgets import QApplication
 
 import hotcards.generation.mflux_generator as mflux_module
 from hotcards.application.workers import (
@@ -43,32 +38,63 @@ from hotcards.generation.stable_audio import (
 )
 
 
-@pytest.fixture(scope="session", autouse=True)
-def qt_application() -> Iterator[QApplication]:
-    application = QApplication.instance() or QApplication([])
-    yield application
+@pytest.fixture(autouse=True)
+def release_gates_and_drain_workers(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    gates: list[Event] = []
+    instances: list[AdapterWorkers] = []
+    event_type, workers_type = Event, AdapterWorkers
+
+    def event() -> Event:
+        gate = event_type()
+        gates.append(gate)
+        return gate
+
+    def workers(**kwargs: object) -> AdapterWorkers:
+        instance = workers_type(**kwargs)
+        instances.append(instance)
+        return instance
+
+    monkeypatch.setitem(globals(), "Event", event)
+    monkeypatch.setitem(globals(), "AdapterWorkers", workers)
+    try:
+        yield
+    finally:
+        for gate in gates:
+            gate.set()
+        for instance in instances:
+            instance.shutdown(wait_milliseconds=1_000)
+        mflux_module.submit_model_invocation(lambda: None).result(timeout=3)
+
+
+def wait_until(predicate: Callable[[], bool], *, timeout_seconds: float = 1.0) -> None:
+    if predicate():
+        return
+    loop = QEventLoop()
+    poll = QTimer(loop)
+    poll.timeout.connect(lambda: loop.quit() if predicate() else None)
+    timeout = QTimer(loop)
+    timeout.setSingleShot(True)
+    timeout.timeout.connect(loop.quit)
+    poll.start(1)
+    timeout.start(round(timeout_seconds * 1000))
+    try:
+        loop.exec()
+    finally:
+        poll.stop()
+        timeout.stop()
+    assert predicate()
 
 
 def wait_for(operation: object, *, timeout_seconds: float = 1.0) -> None:
-    if operation.is_finished:  # type: ignore[attr-defined]
-        return
-    loop = QEventLoop()
-    operation.finished.connect(loop.quit)  # type: ignore[attr-defined]
-    QTimer.singleShot(round(timeout_seconds * 1000), loop.quit)
-    loop.exec()
-    assert operation.is_finished  # type: ignore[attr-defined]
+    wait_until(lambda: operation.is_finished, timeout_seconds=timeout_seconds)
 
 
-def spin_event_loop(milliseconds: int) -> None:
-    loop = QEventLoop()
-    QTimer.singleShot(milliseconds, loop.quit)
-    loop.exec()
-
-
-def test_mflux_success_runs_off_the_main_thread() -> None:
+@pytest.mark.parametrize("adapter", (AdapterKind.MFLUX, AdapterKind.STABLE_AUDIO))
+def test_adapter_success_runs_off_the_main_thread(adapter: AdapterKind) -> None:
     workers = AdapterWorkers(mflux_timeout_seconds=0.5)
     main_thread = get_ident()
-    operation = workers.run_mflux(
+    run = workers.run_mflux if adapter is AdapterKind.MFLUX else workers.run_stable_audio
+    operation = run(
         lambda: (get_ident(), "result"),
         stage="generating image",
     )
@@ -76,22 +102,6 @@ def test_mflux_success_runs_off_the_main_thread() -> None:
     wait_for(operation)
 
     assert operation.status is OperationStatus.SUCCEEDED
-    assert operation.result[0] != main_thread
-    workers.shutdown(wait_milliseconds=500)
-
-
-def test_stable_audio_success_runs_off_the_main_thread() -> None:
-    workers = AdapterWorkers(stable_audio_timeout_seconds=0.5)
-    main_thread = get_ident()
-    operation = workers.run_stable_audio(
-        lambda: (get_ident(), "sound"),
-        stage="generating sound",
-    )
-
-    wait_for(operation)
-
-    assert operation.status is OperationStatus.SUCCEEDED
-    assert operation.result[1] == "sound"
     assert operation.result[0] != main_thread
     workers.shutdown(wait_milliseconds=500)
 
@@ -114,7 +124,7 @@ def test_stable_audio_generation_error_is_typed() -> None:
     workers.shutdown(wait_milliseconds=500)
 
 
-def test_mflux_operations_share_one_stable_invocation_thread() -> None:
+def test_app_image_audio_and_direct_invocations_share_one_stable_thread() -> None:
     first_workers = AdapterWorkers(mflux_timeout_seconds=0.5)
     first = first_workers.run_mflux(
         current_thread,
@@ -124,15 +134,16 @@ def test_mflux_operations_share_one_stable_invocation_thread() -> None:
     first_workers.shutdown(wait_milliseconds=500)
 
     second_workers = AdapterWorkers(mflux_timeout_seconds=0.5)
-    second = second_workers.run_mflux(
+    second = second_workers.run_stable_audio(
         current_thread,
-        stage="generating second image",
+        stage="generating sound",
     )
     wait_for(second)
 
     assert first.status is OperationStatus.SUCCEEDED
     assert second.status is OperationStatus.SUCCEEDED
     assert second.result is first.result
+    assert mflux_module.run_model_invocation(current_thread) is first.result
     second_workers.shutdown(wait_milliseconds=500)
 
 
@@ -297,7 +308,7 @@ def test_disposer_failure_does_not_abort_cancellation_or_shutdown(
     assert returned.wait(0.5)
     operation.cancel()
     release_delivery.set()
-    spin_event_loop(50)
+    wait_until(lambda: bool(disposal_attempts))
     workers.shutdown(wait_milliseconds=500)
 
     assert operation.status is OperationStatus.CANCELLED
@@ -332,7 +343,7 @@ def test_cancellation_discards_a_late_success() -> None:
 
     operation.cancel()
     release.set()
-    spin_event_loop(50)
+    wait_until(lambda: disposed == [result])
 
     assert operation.status is OperationStatus.CANCELLED
     assert results == []
@@ -365,7 +376,7 @@ def test_cancellation_before_invocation_requests_cancel_without_disposal() -> No
     second.cancel()
     release_first.set()
     wait_for(first)
-    spin_event_loop(50)
+    assert workers._mflux_pool.waitForDone(1_000)
 
     assert second.status is OperationStatus.CANCELLED
     assert not second_called.is_set()
@@ -377,17 +388,26 @@ def test_cancellation_before_invocation_requests_cancel_without_disposal() -> No
 def test_cancel_after_return_before_delivery_disposes_result_once() -> None:
     workers = AdapterWorkers(mflux_timeout_seconds=0.5)
     returned = Event()
+    release_delivery = Event()
     result = object()
     disposed: list[object] = []
+
+    def pause_delivery() -> None:
+        returned.set()
+        assert release_delivery.wait(2)
+
     operation = workers.run_mflux(
-        lambda: returned.set() or result,
+        lambda: result,
         stage="returning image",
         dispose_result=disposed.append,
+        invocation_finished=pause_delivery,
     )
     assert returned.wait(0.5)
 
     operation.cancel()
-    spin_event_loop(50)
+    assert disposed == [result]
+    release_delivery.set()
+    assert workers._mflux_pool.waitForDone(1_000)
 
     assert operation.status is OperationStatus.CANCELLED
     assert disposed == [result]
@@ -413,29 +433,29 @@ def test_normal_success_transfers_result_without_disposal() -> None:
 
 def test_mflux_operations_are_serialized() -> None:
     workers = AdapterWorkers(mflux_timeout_seconds=0.5)
-    lock = Lock()
-    active = 0
-    maximum_active = 0
+    first_entered = Event()
+    release_first = Event()
+    second_entered = Event()
     order: list[str] = []
 
     def generate(name: str) -> str:
-        nonlocal active, maximum_active
-        with lock:
-            active += 1
-            maximum_active = max(maximum_active, active)
-            order.append(f"{name}:start")
-        sleep(0.04)
-        with lock:
-            order.append(f"{name}:end")
-            active -= 1
+        order.append(f"{name}:start")
+        if name == "first":
+            first_entered.set()
+            assert release_first.wait(2)
+        else:
+            second_entered.set()
+        order.append(f"{name}:end")
         return name
 
     first = workers.run_mflux(lambda: generate("first"), stage="generating first image")
+    assert first_entered.wait(0.5)
     second = workers.run_mflux(lambda: generate("second"), stage="generating second image")
+    assert not second_entered.is_set()
+    release_first.set()
     wait_for(first)
     wait_for(second)
 
-    assert maximum_active == 1
     assert order == ["first:start", "first:end", "second:start", "second:end"]
     workers.shutdown(wait_milliseconds=500)
 
@@ -462,7 +482,6 @@ def test_mflux_stays_serialized_after_ui_timeout() -> None:
         stage="next image",
         timeout_seconds=0.5,
     )
-    spin_event_loop(75)
     assert not second_entered.is_set()
 
     release_first.set()
@@ -538,7 +557,7 @@ def test_timeout_requests_cancel_and_disposes_late_success_once() -> None:
 
     wait_for(operation)
     release.set()
-    spin_event_loop(75)
+    wait_until(lambda: disposed == [result])
 
     assert operation.status is OperationStatus.FAILED
     assert operation.failure is not None
@@ -635,7 +654,8 @@ def test_mflux_deadline_cancels_adapter_before_single_failure_delivery(
     release.set()
     assert cancellation_seen.wait(0.5)
     assert cache_released.wait(0.5)
-    spin_event_loop(50)
+    assert workers._mflux_pool.waitForDone(1_000)
+    mflux_module.submit_model_invocation(lambda: None).result(timeout=1)
 
     assert failures == [operation.failure]
     assert not output_path.exists()
@@ -684,25 +704,25 @@ def test_cancel_after_mflux_return_disposes_owned_output_before_delivery(
         seed=42,
     )
 
-    def generate_then_pause() -> object:
-        result = generator.generate(request, cancellation=token)
+    def pause_delivery() -> None:
         adapter_returned.set()
         assert allow_delivery.wait(2)
-        return result
 
     workers = AdapterWorkers(mflux_timeout_seconds=0.5)
     operation = workers.run_mflux(
-        generate_then_pause,
+        lambda: generator.generate(request, cancellation=token),
         stage="discarded MFLUX image",
         request_cancel=token.cancel,
         dispose_result=dispose_mflux_result,
+        invocation_finished=pause_delivery,
     )
     assert adapter_returned.wait(0.5)
     assert output_path.is_file()
 
     operation.cancel()
+    assert not output_path.exists()
     allow_delivery.set()
-    spin_event_loop(75)
+    assert workers._mflux_pool.waitForDone(1_000)
 
     assert operation.status is OperationStatus.CANCELLED
     assert not output_path.exists()

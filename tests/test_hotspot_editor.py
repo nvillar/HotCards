@@ -2,18 +2,17 @@
 
 from __future__ import annotations
 
-import os
+from collections.abc import Iterator
 from pathlib import Path
 from uuid import uuid4
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-
 import pytest
 from PIL import Image
-from PySide6.QtCore import QPoint, QPointF, Qt
+from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QPointF, Qt
 from PySide6.QtGui import QContextMenuEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
+from shiboken6 import isValid
 
 import hotcards.ui.card_canvas as card_canvas_module
 from hotcards.domain.models import (
@@ -28,9 +27,26 @@ from hotcards.domain.models import (
 from hotcards.ui.card_canvas import CardCanvas
 
 
-@pytest.fixture(scope="module")
-def application() -> QApplication:
-    return QApplication.instance() or QApplication([])
+@pytest.fixture
+def application(
+    qt_application: QApplication, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[QApplication]:
+    canvases: list[CardCanvas] = []
+    initialize = CardCanvas.__init__
+
+    def initialize_owned(canvas: CardCanvas, *args: object, **kwargs: object) -> None:
+        initialize(canvas, *args, **kwargs)
+        canvases.append(canvas)
+
+    monkeypatch.setattr(CardCanvas, "__init__", initialize_owned)
+    try:
+        yield qt_application
+    finally:
+        for canvas in reversed(canvases):
+            if isValid(canvas):
+                canvas.close()
+                canvas.deleteLater()
+                QCoreApplication.sendPostedEvents(canvas, QEvent.Type.DeferredDelete)
 
 
 def triangle(offset: float = 0.0) -> Polygon:

@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
-import os
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-
 import pytest
-from PySide6.QtCore import QRect, QSize, Qt
+from PySide6.QtCore import QCoreApplication, QEvent, QRect, QSize, Qt
 from PySide6.QtGui import QColor, QImage, QPainter, QPalette, QPixmap
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
@@ -27,6 +25,7 @@ from PySide6.QtWidgets import (
     QStyleOptionViewItem,
     QToolButton,
 )
+from shiboken6 import isValid
 
 from hotcards.application.commands import (
     ActivateRevisionCommand,
@@ -43,22 +42,24 @@ from hotcards.domain.image_dimensions import (
     output_dimensions,
 )
 from hotcards.domain.models import (
+    AcceptedEdit,
     Card,
     CardRevision,
     CurrentSourceSize,
     DerivedImageSourceSnapshot,
-    DirectGenerateProvenance,
-    DuplicateProvenance,
-    EditPreserveOptions,
-    EditProvenance,
+    DuplicateOperation,
+    EditOperation,
     ExactOutputSize,
     GeneratedBackground,
     GeneratedSoundAsset,
     GenerateInputs,
+    GenerateOperation,
     HotspotConditions,
     HotspotKeyChanges,
     HotspotSet,
     ImageOperationSettings,
+    ImageOriginFacts,
+    ImageProvenance,
     ImageSourceSnapshot,
     Interaction,
     KeyDefinition,
@@ -66,8 +67,6 @@ from hotcards.domain.models import (
     Point,
     Polygon,
     PresetOutputSize,
-    RefineProvenance,
-    RefineTransformation,
     ResolvedCardReference,
     SoundDefinition,
     SoundGenerationProvenance,
@@ -80,9 +79,26 @@ from hotcards.ui.inspector import Inspector
 from hotcards.ui.utility_windows import KeyManagerWindow, StyleManagerWindow
 
 
-@pytest.fixture(scope="module")
-def application() -> QApplication:
-    return QApplication.instance() or QApplication([])
+@pytest.fixture
+def application(
+    qt_application: QApplication, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[QApplication]:
+    inspectors: list[Inspector] = []
+    initialize = Inspector.__init__
+
+    def initialize_owned(inspector: Inspector, *args: object, **kwargs: object) -> None:
+        initialize(inspector, *args, **kwargs)
+        inspectors.append(inspector)
+
+    monkeypatch.setattr(Inspector, "__init__", initialize_owned)
+    try:
+        yield qt_application
+    finally:
+        for inspector in reversed(inspectors):
+            if isValid(inspector):
+                inspector.close()
+                inspector.deleteLater()
+                QCoreApplication.sendPostedEvents(inspector, QEvent.Type.DeferredDelete)
 
 
 def _polygon() -> Polygon:
@@ -109,21 +125,25 @@ def _background(size: tuple[int, int] = (512, 384)) -> GeneratedBackground:
     return GeneratedBackground(
         id=asset_id,
         image_path=f"assets/cards/card/image-{asset_id}.png",
-        provenance=DirectGenerateProvenance(
-            inputs=GenerateInputs(
-                description="A courtyard",
-                output_size=ExactOutputSize(width=size[0], height=size[1]),
+        provenance=ImageProvenance(
+            authoring=GenerateOperation(
+                inputs=GenerateInputs(
+                    description="A courtyard",
+                    output_size=ExactOutputSize(width=size[0], height=size[1]),
+                ),
             ),
-            render_prompt="A courtyard",
-            settings=ImageOperationSettings(
-                model_identifier="test",
-                mflux_version="test",
-                seed=7,
-                width=size[0],
-                height=size[1],
-                step_count=4,
-                generated_at=generated_at,
-                duration_seconds=1,
+            origin=ImageOriginFacts(
+                render_prompt="A courtyard",
+                settings=ImageOperationSettings(
+                    model_identifier="test",
+                    mflux_version="test",
+                    seed=7,
+                    width=size[0],
+                    height=size[1],
+                    step_count=4,
+                    generated_at=generated_at,
+                    duration_seconds=1,
+                ),
             ),
         ),
         created_at=generated_at,
@@ -151,7 +171,6 @@ def _image_result(
         width=source_settings.width,
         height=source_settings.height,
         seed=source_settings.seed,
-        edit_lineage=image_edit_lineage(background.provenance),
     )
     output_size = (
         CurrentSourceSize(width=size[0], height=size[1])
@@ -159,27 +178,19 @@ def _image_result(
         else PresetOutputSize(tier=ResolutionTier.LARGE)
     )
     settings = result.provenance.settings
-    if operation == "refine":
-        provenance = RefineProvenance(
-            source=source,
-            description=revision.description,
-            render_prompt="Current Description and accepted Edit instructions.",
-            output_size=output_size,
-            transformation=RefineTransformation.BALANCED,
-            strength=0.5,
-            settings=settings.model_copy(update={"seed": source.seed}),
-        )
-    else:
-        assert operation == "edit"
-        provenance = EditProvenance(
-            source=source,
-            instruction=instruction,
-            preserve=EditPreserveOptions(),
-            expanded_prompt=f"{instruction}\n\nHidden Style addendum",
-            output_size=output_size,
-            prompt_token_count=20,
+    assert operation == "edit"
+    expanded_prompt = f"{instruction}\n\nHidden Style addendum"
+    provenance = ImageProvenance(
+        origin=ImageOriginFacts(
+            render_prompt=expanded_prompt,
             settings=settings.model_copy(update={"seed": source.seed + 1}),
-        )
+            edit_lineage=(
+                *image_edit_lineage(background.provenance),
+                AcceptedEdit(instruction=instruction, expanded_prompt=expanded_prompt),
+            ),
+        ),
+        authoring=EditOperation(source=source, output_size=output_size, prompt_token_count=20),
+    )
     return result.model_copy(update={"provenance": provenance})
 
 
@@ -262,12 +273,6 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     assert inspector.inspector_tabs.tabText(0) == "Generate"
     assert inspector.inspector_tabs.tabText(1) == "Edit"
     assert inspector.inspector_tabs.tabText(2) == "Hotspots"
-    assert not hasattr(inspector, "style_list")
-    assert not hasattr(inspector, "key_list")
-    assert not hasattr(inspector, "edit_preserve_checkboxes")
-    assert all(
-        label.text() != "Keys are global to this stack." for label in inspector.findChildren(QLabel)
-    )
     root_layout = inspector.layout()
     assert root_layout is not None
     assert root_layout.contentsMargins().top() == 16
@@ -281,9 +286,6 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     )
     assert inspector.description_edit.maximumHeight() > (inspector.description_edit.minimumHeight())
     assert inspector.generate_background_button.text() == "Generate Image"
-    assert not hasattr(inspector, "enrich_button")
-    assert not hasattr(inspector, "description_toggle")
-    assert not hasattr(inspector, "image_prompt_button")
     assert not isinstance(inspector.reference_panel, QFrame)
     assert inspector.reference_panel.layout().contentsMargins().isNull()
     for index in (
@@ -303,28 +305,21 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     content_layout = inspector.description_edit.parentWidget().layout()
     assert content_layout is not None
     assert content_layout.stretch(content_layout.indexOf(inspector.description_edit)) == 1
-    assert content_layout.indexOf(inspector.description_edit) < (
-        content_layout.indexOf(inspector.style_label)
-    )
-    assert content_layout.indexOf(inspector.style_label) < (
-        content_layout.indexOf(inspector.style_combo)
-    )
-    assert content_layout.indexOf(inspector.style_combo) < (
-        content_layout.indexOf(inspector.reference_label)
-    )
-    assert content_layout.indexOf(inspector.reference_label) < (
-        content_layout.indexOf(inspector.reference_panel)
-    )
-    assert content_layout.indexOf(inspector.reference_panel) < (
-        content_layout.indexOf(inspector.resolution_label)
-    )
-    assert content_layout.indexOf(inspector.resolution_label) < (
-        content_layout.indexOf(inspector.resolution_combo)
-    )
-
-    assert content_layout.indexOf(inspector.resolution_combo) < (
-        content_layout.indexOf(inspector.generate_background_button)
-    )
+    field_positions = [
+        content_layout.indexOf(widget)
+        for widget in (
+            inspector.description_edit,
+            inspector.style_label,
+            inspector.style_combo,
+            inspector.reference_label,
+            inspector.reference_panel,
+            inspector.resolution_label,
+            inspector.resolution_combo,
+            inspector.generate_background_button,
+        )
+    ]
+    assert all(position >= 0 for position in field_positions)
+    assert field_positions == sorted(field_positions)
     assert content_layout.contentsMargins() == (
         inspector.edit_background_button.parentWidget().layout().contentsMargins()
     )
@@ -338,7 +333,6 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
         assert not inspector.inspector_tabs.widget(1).isAncestorOf(widget)
     assert inspector.inspector_tabs.widget(1).isAncestorOf(inspector.edit_instruction_edit)
     assert inspector.style_combo.currentText() == "No Style"
-    assert not hasattr(inspector, "clear_background_button")
     assert inspector.hotspot_target_label.text() == "Go to card"
     assert inspector.hotspot_target_label.font().pointSizeF() == (
         inspector.description_label.font().pointSizeF()
@@ -357,34 +351,16 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     assert inspector.hotspot_then_label.font().pointSizeF() == (
         inspector.edit_instruction_label.font().pointSizeF()
     )
-    assert inspector.add_condition_button.text() == "+"
-    assert inspector.add_condition_button.accessibleName() == "Add condition"
-    assert inspector.add_condition_label.text() == "Key condition"
-    assert inspector.add_key_change_button.text() == "+"
-    assert inspector.add_key_change_button.accessibleName() == "Add key change"
-    assert inspector.add_key_change_label.text() == "Key change"
-    assert inspector.add_condition_button.size() == QSize(20, 20)
-    assert inspector.add_key_change_button.size() == QSize(20, 20)
     assert inspector.hotspot_destination_button.text() == "Unresolved card"
-    assert inspector.hotspot_destination_remove_button.text() == "−"
-    assert inspector.reference_remove_button.text() == "−"
-    assert inspector.additional_reference_remove_button.text() == "−"
-    assert inspector.hotspot_destination_remove_button.size() == QSize(20, 20)
-    assert inspector.reference_remove_button.size() == QSize(20, 20)
-    assert inspector.additional_reference_remove_button.size() == QSize(20, 20)
-    assert inspector.hotspot_destination_remove_button.testAttribute(
-        Qt.WidgetAttribute.WA_LayoutUsesWidgetRect
-    )
-    assert inspector.reference_remove_button.testAttribute(
-        Qt.WidgetAttribute.WA_LayoutUsesWidgetRect
-    )
-    assert inspector.additional_reference_remove_button.testAttribute(
-        Qt.WidgetAttribute.WA_LayoutUsesWidgetRect
-    )
-    assert inspector.reference_remove_container.height() == 22
-    assert inspector.additional_reference_remove_container.height() == 22
-    assert not hasattr(inspector, "clear_all_keys_checkbox")
-    assert not hasattr(inspector, "hotspot_summary")
+    for button in (
+        inspector.hotspot_destination_remove_button,
+        inspector.reference_remove_button,
+        inspector.additional_reference_remove_button,
+        inspector.hotspot_sound_remove_button,
+    ):
+        assert button.text() == "−"
+        assert button.size() == QSize(20, 20)
+        assert button.testAttribute(Qt.WidgetAttribute.WA_LayoutUsesWidgetRect)
     hotspot_layout = inspector.hotspot_list.parentWidget().layout()
     assert hotspot_layout is not None
     assert inspector.hotspot_list.parentWidget().objectName() == "hotspotsInspectorContent"
@@ -410,21 +386,10 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
         then_layout.indexOf(inspector.hotspot_sound_row)
     )
     assert inspector.hotspot_sound_button.text() == "Choose Sound…"
-    assert inspector.hotspot_sound_remove_button.text() == "−"
-    assert inspector.hotspot_sound_remove_button.size() == QSize(20, 20)
-    assert inspector.hotspot_sound_remove_button.testAttribute(
-        Qt.WidgetAttribute.WA_LayoutUsesWidgetRect
-    )
-    assert inspector.hotspot_destination_remove_container.height() == 22
-    assert inspector.hotspot_sound_remove_container.height() == 22
     assert inspector.condition_rows_layout.contentsMargins().isNull()
     assert inspector.key_change_rows_layout.contentsMargins().isNull()
     assert inspector.condition_controls_layout.spacing() == 3
     assert inspector.key_change_controls_layout.spacing() == 3
-    assert not hasattr(inspector, "condition_table")
-    assert not hasattr(inspector, "key_change_table")
-    assert not hasattr(inspector, "no_conditions_label")
-    assert not hasattr(inspector, "no_key_changes_label")
     assert inspector.hotspot_list.minimumHeight() == 120
     assert inspector.hotspot_list.maximumHeight() == 120
     assert hotspot_layout.stretch(hotspot_layout.indexOf(inspector.hotspot_list)) == 0
@@ -448,17 +413,6 @@ def test_inspector_has_minimal_background_and_hotspot_hierarchy(
     assert hotspot_controls.indexOf(inspector.delete_hotspot_button) < hotspot_controls.indexOf(
         inspector.add_hotspot_button
     )
-    visible_copy = " ".join(label.text() for label in inspector.findChildren(QLabel))
-    for obsolete in (
-        "Inspector",
-        "Scene",
-        "Intent",
-        "Details",
-        "Areas",
-        "Summarize",
-        "Generate Hotspots",
-    ):
-        assert obsolete not in visible_copy
 
 
 def test_edit_uses_current_or_higher_size_and_emits_exact_inputs(
@@ -596,13 +550,16 @@ def test_edit_history_uses_only_active_image_authored_lineage(
         result = result.model_copy(
             update={
                 "id": uuid4(),
-                "provenance": DuplicateProvenance(
-                    source=ImageSourceSnapshot(
-                        card_id=uuid4(),
-                        revision_id=uuid4(),
-                        background_id=result.id,
+                "provenance": ImageProvenance(
+                    origin=result.provenance.origin,
+                    authoring=DuplicateOperation(
+                        source=ImageSourceSnapshot(
+                            card_id=uuid4(),
+                            revision_id=uuid4(),
+                            background_id=result.id,
+                        ),
+                        original_authoring=result.provenance.authoring,
                     ),
-                    original_provenance=result.provenance,
                 ),
             }
         )
@@ -616,11 +573,7 @@ def test_edit_history_uses_only_active_image_authored_lineage(
     inspector.render(controller.document, card.id)
     inspector.set_edit_instruction("Do not overwrite this editor.")
     draft = controller.edit_draft(card.id, revision.id)
-    expected = (
-        ()
-        if operation == "generate"
-        else ((*instructions, "Add a flower.") if operation == "edit" else instructions)
-    )
+    expected = () if operation == "generate" else (*instructions, "Add a flower.")
     assert inspector.edit_history_list.wordWrap()
     assert inspector.edit_history_label.text() == "Edit History"
     assert not inspector.edit_history_list.isHidden()
@@ -1216,6 +1169,57 @@ def test_hotspot_key_rows_fit_long_names_with_visible_remove_controls(
     inspector.close()
 
 
+@pytest.mark.parametrize("rule", ("condition", "key_change"))
+def test_invalid_key_rule_preserves_image_sizes_drafts_and_selection(
+    application: QApplication, rule: str
+) -> None:
+    first, second = KeyDefinition(name="First"), KeyDefinition(name="Second")
+    interaction = Interaction(
+        conditions=HotspotConditions(requires=(first.id,), forbids=(second.id,)),
+        key_changes=HotspotKeyChanges(grant=(first.id,), remove=(second.id,)),
+        polygons=(_polygon(),),
+    )
+    card = Card(
+        name="Card",
+        revisions=(
+            CardRevision(
+                description="A courtyard",
+                background=_background((640, 480)),
+                hotspot_set=HotspotSet(interactions=(interaction,)),
+            ),
+        ),
+    )
+    controller = DocumentController(Stack(name="Demo", keys=(first, second), cards=(card,)))
+    inspector = Inspector(controller)
+    inspector.render(controller.document, card.id, image_source_size=(640, 480))
+    full = PresetOutputSize(tier=ResolutionTier.FULL)
+    inspector.resolution_combo.setCurrentIndex(
+        inspector._combo_index_for_data(inspector.resolution_combo, full)
+    )
+    inspector.edit_resolution_combo.setCurrentIndex(
+        inspector._combo_index_for_data(inspector.edit_resolution_combo, full)
+    )
+    inspector.set_edit_instruction("Keep this unfinished Edit.")
+    document = controller.document
+    token = controller.current_undo_token
+    if rule == "condition":
+        inspector._change_condition(second.id, "forbids", first.id, "forbids")
+    else:
+        inspector._change_key_change(second.id, "remove", first.id, "remove")
+    assert inspector.hotspot_error.text()
+    assert controller.document == document
+    assert controller.current_undo_token == token
+    assert inspector.selected_interaction_id == interaction.id
+    assert inspector.resolution_combo.currentData() == full
+    assert inspector.edit_resolution_combo.currentData() == full
+    assert inspector.edit_instruction_edit.toPlainText() == "Keep this unfinished Edit."
+    assert inspector._image_source_size == (640, 480)
+    assert any(
+        inspector.edit_resolution_combo.itemData(index) == CurrentSourceSize(width=640, height=480)
+        for index in range(inspector.edit_resolution_combo.count())
+    )
+
+
 def test_description_edits_target_active_revision(
     application: QApplication,
 ) -> None:
@@ -1258,14 +1262,20 @@ def test_generate_style_selection_is_undoable(
     inspector.render(controller.document, card.id)
     changes: list[object] = []
     inspector.document_changed.connect(changes.append)
-    inspector.style_combo.setCurrentIndex(inspector.style_combo.findData(style.id))
+    applied: list[tuple[str, object]] = []
+    inspector.change_applied.connect(lambda message, token: applied.append((message, token)))
+    inspector.style_combo.setCurrentIndex(
+        inspector._combo_index_for_data(inspector.style_combo, style.id)
+    )
     assert len(changes) == 1
     assert controller.document.cards[0].active_revision.style_id == style.id
     assert controller.document.new_card_style_id == style.id
     assert inspector.style_combo.currentData() == style.id
-    assert controller.undo()
+    assert applied == [("Style changed", controller.current_undo_token)]
+    assert controller.undo_if_current(applied[-1][1])
     inspector.render(controller.document, card.id)
     assert inspector.style_combo.currentData() is None
+    assert controller.document.new_card_style_id is None
     assert not controller.can_undo
     assert controller.redo()
     inspector.render(controller.document, card.id)
@@ -1787,36 +1797,6 @@ def test_second_reference_is_ordered_unique_and_promoted_when_first_clears(
     assert inspector.additional_reference_button.text() == "Choose Reference…"
 
 
-def test_style_selector_updates_revision_and_new_card_default_with_undo(
-    application: QApplication,
-) -> None:
-    ink = StyleDefinition(name="Ink", prompt_text="Rendered in ink.")
-    source = Card(name="Source")
-    controller = DocumentController(
-        Stack(
-            name="Demo",
-            styles=(ink,),
-            new_card_style_id=None,
-            cards=(source,),
-        )
-    )
-    inspector = Inspector(controller)
-    inspector.render(controller.document, source.id)
-    applied: list[tuple[str, object]] = []
-    inspector.change_applied.connect(lambda message, token: applied.append((message, token)))
-
-    ink_index = inspector._combo_index_for_data(inspector.style_combo, ink.id)
-    inspector.style_combo.setCurrentIndex(ink_index)
-
-    revision = controller.document.cards[0].active_revision
-    assert revision.style_id == ink.id
-    assert controller.document.new_card_style_id == ink.id
-    assert applied[-1][0] == "Style changed"
-    assert controller.undo_if_current(applied[-1][1])  # type: ignore[arg-type]
-    assert controller.document.cards[0].active_revision.style_id is None
-    assert controller.document.new_card_style_id is None
-
-
 def test_style_manager_edits_global_definition_and_deletes_with_undo(
     application: QApplication,
 ) -> None:
@@ -2116,7 +2096,6 @@ def test_generation_activity_is_reflected_on_the_initiating_button(
     inspector.set_background_capabilities(
         can_generate=False,
         generate_reason="Generating",
-        has_image=True,
         busy=True,
         generating=True,
     )

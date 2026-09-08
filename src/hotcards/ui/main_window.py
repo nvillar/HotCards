@@ -154,13 +154,14 @@ class MainWindow(QMainWindow):
         self._availability_checks_factory = availability_checks_factory
         self._settings_dialog_factory = settings_dialog_factory
         self._owns_workers = owns_workers
-        self._selected_card_id = (
-            controller.document.cards[0].id if controller.document.cards else None
-        )
+        document = controller.document
+        self._selected_card_id = document.cards[0].id if document.cards else None
         self._rendered_card_id: UUID | None = None
         self._availability: dict[AdapterKind, bool | None] = {
             AdapterKind.MFLUX: None,
         }
+        if self.sound_workflow is not None:
+            self._availability[AdapterKind.STABLE_AUDIO] = None
         self._diagnostic_messages: dict[AdapterKind, str] = {}
         self._diagnostic_operations: list[WorkerOperation] = []
         self._diagnostic_generation = 0
@@ -195,7 +196,7 @@ class MainWindow(QMainWindow):
                 controller,
                 self.document_session,
             )
-        self.setWindowTitle(f"HotCards — {controller.document.name}")
+        self.setWindowTitle(f"HotCards — {document.name}")
         self.setObjectName("mainWindow")
         self.resize(1180, 760)
         self._build_toolbar()
@@ -208,7 +209,7 @@ class MainWindow(QMainWindow):
         if self.document_session is not None:
             self.document_session.document_replaced.connect(self._document_replaced)
             self.document_session.state_changed.connect(self._session_state_changed)
-        self.render_document(controller.document)
+        self.render_document()
         self._session_state_changed(
             self.document_session.state
             if self.document_session is not None
@@ -342,8 +343,9 @@ class MainWindow(QMainWindow):
             if geometry is not None:
                 window.restoreGeometry(geometry)
             window.resize(UTILITY_WINDOW_WIDTH, UTILITY_WINDOW_HEIGHT)
-        window.set_mutation_allowed(not self.controller.mutation_blocked)
-        window.render(self.controller.document)
+        snapshot = self.controller.document
+        window.set_mutation_allowed(not self.controller.mutation_blocked, snapshot)
+        window.render(snapshot)
         window.show()
         window.raise_()
         window.activateWindow()
@@ -391,8 +393,14 @@ class MainWindow(QMainWindow):
             if geometry is not None:
                 window.restoreGeometry(geometry)
             window.resize(UTILITY_WINDOW_WIDTH, UTILITY_WINDOW_HEIGHT)
-        window.set_mutation_allowed(not self.controller.mutation_blocked)
-        window.render(self.controller.document)
+        snapshot = self.controller.document
+        window.set_mutation_allowed(not self.controller.mutation_blocked, snapshot)
+        window.render(snapshot)
+        window.set_generation_available(
+            self._availability.get(AdapterKind.STABLE_AUDIO) is True,
+            self._action_diagnostic(AdapterKind.STABLE_AUDIO),
+            snapshot,
+        )
         window.show()
         window.raise_()
         window.activateWindow()
@@ -434,8 +442,9 @@ class MainWindow(QMainWindow):
             if geometry is not None:
                 window.restoreGeometry(geometry)
             window.resize(UTILITY_WINDOW_WIDTH, UTILITY_WINDOW_HEIGHT)
-        window.set_mutation_allowed(not self.controller.mutation_blocked)
-        window.render(self.controller.document)
+        snapshot = self.controller.document
+        window.set_mutation_allowed(not self.controller.mutation_blocked, snapshot)
+        window.render(snapshot)
         window.show()
         window.raise_()
         window.activateWindow()
@@ -463,6 +472,7 @@ class MainWindow(QMainWindow):
 
     def _render_utility_windows(
         self,
+        document: Stack,
         *,
         skip: QWidget | None = None,
     ) -> None:
@@ -472,7 +482,7 @@ class MainWindow(QMainWindow):
             self.key_manager_window,
         ):
             if window is not None and window is not skip:
-                window.render(self.controller.document)
+                window.render(document)
 
     def _close_utility_windows(self, *, commit_pending: bool = True) -> None:
         for attribute in (
@@ -578,6 +588,7 @@ class MainWindow(QMainWindow):
         self.inspector = Inspector(
             self.controller,
             image_path_resolver=self._resolve_revision_image_path,
+            render_on_change=False,
         )
         self.inspector.document_changed.connect(self.render_document)
         self.inspector.render_inputs_changed.connect(self._authoring_inputs_changed)
@@ -627,6 +638,13 @@ class MainWindow(QMainWindow):
         self.notification_bar = NotificationBar()
         self.notification_bar.action_requested.connect(self._notification_action_requested)
         self.notification_bar.notification_dismissed.connect(self._notification_dismissed)
+        if self.sound_workflow is not None:
+            self.sound_workflow.document_changed.connect(self.render_document)
+            self.sound_workflow.change_applied.connect(self._show_undo_notification)
+            self.sound_workflow.failed.connect(self._sound_generation_failed)
+        playback_failed = getattr(self.sound_player, "playback_failed", None)
+        if playback_failed is not None:
+            playback_failed.connect(self._sound_playback_failed)
         central_widget = QWidget()
         central_layout = QVBoxLayout(central_widget)
         central_layout.setContentsMargins(0, 0, 0, 0)
@@ -750,7 +768,6 @@ class MainWindow(QMainWindow):
                 self.card_sidebar.render(
                     snapshot,
                     self._selected_card_id,
-                    draft_card_ids=(),
                 )
             self.inspector.render(
                 snapshot,
@@ -795,16 +812,16 @@ class MainWindow(QMainWindow):
                 self.delete_revision_button.setEnabled(
                     not self._is_running and len(selected_card.revisions) > 1
                 )
-                self._render_card_canvas(selected_card)
+                self._render_card_canvas(selected_card, snapshot)
             overlay_index = self.overlay_selector.findData(snapshot.run_overlay_mode)
             self.overlay_selector.setCurrentIndex(overlay_index)
         finally:
             self._rendering = False
-        self._update_document_actions()
-        self._update_window_title()
-        self._update_generation_actions()
+        self._update_document_actions(snapshot)
+        self._update_window_title(snapshot)
+        self._update_generation_actions(snapshot)
         self._update_run_actions()
-        self._render_utility_windows(skip=utility_source)
+        self._render_utility_windows(snapshot, skip=utility_source)
 
     def select_card(self, card_id: object) -> None:
         if self._is_running:
@@ -1249,10 +1266,7 @@ class MainWindow(QMainWindow):
         if self._is_running:
             return
         draft_context = self._focused_edit_draft_context()
-        if (
-            draft_context is not None
-            and self.controller.can_undo_edit_draft(*draft_context)
-        ):
+        if draft_context is not None and self.controller.can_undo_edit_draft(*draft_context):
             try:
                 changed = self.controller.undo_edit_draft(*draft_context)
             except DocumentMutationBlockedError as error:
@@ -1279,10 +1293,7 @@ class MainWindow(QMainWindow):
         if self._is_running:
             return
         draft_context = self._focused_edit_draft_context()
-        if (
-            draft_context is not None
-            and self.controller.can_redo_edit_draft(*draft_context)
-        ):
+        if draft_context is not None and self.controller.can_redo_edit_draft(*draft_context):
             try:
                 changed = self.controller.redo_edit_draft(*draft_context)
             except DocumentMutationBlockedError as error:
@@ -1319,21 +1330,18 @@ class MainWindow(QMainWindow):
     def _authoring_inputs_changed(self) -> None:
         if self.background_workflow is not None and self.background_workflow.busy:
             self._cancel_background_generation()
-        self._update_generation_actions()
-        self._update_document_actions()
+        snapshot = self.controller.document
+        self._update_generation_actions(snapshot)
+        self._update_document_actions(snapshot)
 
-    def _focused_edit_draft_context(self) -> tuple[UUID, UUID] | None:
-        if (
-            not self.inspector.edit_instruction_edit.hasFocus()
-            or self._selected_card_id is None
-        ):
+    def _focused_edit_draft_context(
+        self, document: Stack | None = None
+    ) -> tuple[UUID, UUID] | None:
+        if not self.inspector.edit_instruction_edit.hasFocus() or self._selected_card_id is None:
             return None
+        snapshot = document if document is not None else self.controller.document
         card = next(
-            (
-                candidate
-                for candidate in self.controller.document.cards
-                if candidate.id == self._selected_card_id
-            ),
+            (candidate for candidate in snapshot.cards if candidate.id == self._selected_card_id),
             None,
         )
         if card is None:
@@ -1491,6 +1499,7 @@ class MainWindow(QMainWindow):
     def _session_state_changed(self, state: object) -> None:
         if not isinstance(state, DocumentSessionState):
             return
+        snapshot = self.controller.document
         durability_resolved = self._last_session_mutation_blocked and not state.mutation_blocked
         self._last_session_mutation_blocked = state.mutation_blocked
         if (
@@ -1507,10 +1516,11 @@ class MainWindow(QMainWindow):
         mutation_allowed = (self.document_session is None or bound) and not state.mutation_blocked
         for window in (
             self.style_manager_window,
+            self.sound_manager_window,
             self.key_manager_window,
         ):
             if window is not None:
-                window.set_mutation_allowed(mutation_allowed)
+                window.set_mutation_allowed(mutation_allowed, snapshot)
         self.card_sidebar.set_document_editable(self.document_session is None or mutation_allowed)
         if self.document_session is not None and not bound:
             self.create_first_card_button.setText("Create New Stack")
@@ -1529,14 +1539,14 @@ class MainWindow(QMainWindow):
             )
         else:
             self.create_first_card_button.setText("Create Your First Card")
-        self._update_document_actions()
+        self._update_document_actions(snapshot)
         self.styles_button.setEnabled(mutation_allowed and not self._is_running)
         self.sounds_button.setEnabled(
             mutation_allowed and not self._is_running and self.sound_workflow is not None
         )
         self.keys_button.setEnabled(mutation_allowed and not self._is_running)
-        self._update_window_title()
-        self._update_generation_actions()
+        self._update_window_title(snapshot)
+        self._update_generation_actions(snapshot)
         if durability_resolved:
             self.render_document()
 
@@ -1562,7 +1572,8 @@ class MainWindow(QMainWindow):
             and (workflow.busy or bool(getattr(workflow, "invocation_active", False)))
         )
 
-    def _update_document_actions(self) -> None:
+    def _update_document_actions(self, document: Stack | None = None) -> None:
+        snapshot = document if document is not None else self.controller.document
         bound = self.document_session is None or self.document_session.store is not None
         mutation_allowed = bound and not self.controller.mutation_blocked
         self.save_action.setEnabled(
@@ -1578,14 +1589,12 @@ class MainWindow(QMainWindow):
             and self.document_session is not None
             and self.document_session.store is not None
         )
-        draft_context = self._focused_edit_draft_context()
-        can_undo_draft = (
-            draft_context is not None
-            and self.controller.can_undo_edit_draft(*draft_context)
+        draft_context = self._focused_edit_draft_context(snapshot)
+        can_undo_draft = draft_context is not None and self.controller.can_undo_edit_draft(
+            *draft_context
         )
-        can_redo_draft = (
-            draft_context is not None
-            and self.controller.can_redo_edit_draft(*draft_context)
+        can_redo_draft = draft_context is not None and self.controller.can_redo_edit_draft(
+            *draft_context
         )
         self.undo_action.setEnabled(
             mutation_allowed
@@ -1618,7 +1627,7 @@ class MainWindow(QMainWindow):
             authoring_enabled and self._selected_card_id is not None
         )
         selected_card = next(
-            (card for card in self.controller.document.cards if card.id == self._selected_card_id),
+            (card for card in snapshot.cards if card.id == self._selected_card_id),
             None,
         )
         self.delete_revision_button.setEnabled(
@@ -1626,10 +1635,11 @@ class MainWindow(QMainWindow):
         )
         self.create_first_card_button.setEnabled(mutation_allowed)
 
-    def _update_window_title(self) -> None:
+    def _update_window_title(self, document: Stack | None = None) -> None:
+        snapshot = document if document is not None else self.controller.document
         dirty = self.document_session is not None and self.document_session.state.dirty
         suffix = " *" if dirty else ""
-        self.setWindowTitle(f"HotCards — {self.controller.document.name}{suffix}")
+        self.setWindowTitle(f"HotCards — {snapshot.name}{suffix}")
 
     @staticmethod
     def _bundle_path(selected_path: str) -> Path:
@@ -1711,16 +1721,10 @@ class MainWindow(QMainWindow):
         if not self._commit_authoring_metadata():
             return
         try:
-            card = next(
-                card
-                for card in self.controller.document.cards
-                if card.id == card_id
-            )
+            card = next(card for card in self.controller.document.cards if card.id == card_id)
             draft = card.active_revision.edit_draft
             if draft.instruction.strip() != instruction:
-                raise BackgroundWorkflowError(
-                    "the Edit Instruction changed before editing started"
-                )
+                raise BackgroundWorkflowError("the Edit Instruction changed before editing started")
             workflow.edit(
                 card_id,
                 draft=draft,
@@ -1912,7 +1916,14 @@ class MainWindow(QMainWindow):
         self._diagnostic_messages[diagnostic.adapter] = diagnostic.message
         self._update_generation_actions()
 
-    def _update_generation_actions(self) -> None:
+    def _update_generation_actions(self, document: Stack | None = None) -> None:
+        snapshot = document if document is not None else self.controller.document
+        if self.sound_manager_window is not None:
+            self.sound_manager_window.set_generation_available(
+                self._availability.get(AdapterKind.STABLE_AUDIO) is True,
+                self._action_diagnostic(AdapterKind.STABLE_AUDIO),
+                snapshot,
+            )
         bound = self.document_session is None or self.document_session.store is not None
         mutation_allowed = bound and not self.controller.mutation_blocked
         workflow_available = self.background_workflow is not None
@@ -1925,7 +1936,7 @@ class MainWindow(QMainWindow):
         mflux_available = self._availability[AdapterKind.MFLUX] is True
         has_description_input = self.inspector.has_description_input()
         selected_card = next(
-            (card for card in self.controller.document.cards if card.id == self._selected_card_id),
+            (card for card in snapshot.cards if card.id == self._selected_card_id),
             None,
         )
         workflow_busy = self._image_operation_active()
@@ -1957,7 +1968,6 @@ class MainWindow(QMainWindow):
         self.inspector.set_background_capabilities(
             can_generate=(has_card and has_description_input and mflux_available),
             generate_reason=generate_reason,
-            has_image=has_image,
             busy=workflow_busy,
             generating=workflow_busy and active_operation == "generate",
         )
@@ -2015,7 +2025,13 @@ class MainWindow(QMainWindow):
         elif pending:
             summary = "AI services not checked"
         elif unavailable:
-            summary = "MFLUX unavailable"
+            summary = (
+                ", ".join(
+                    "MFLUX" if adapter is AdapterKind.MFLUX else "Stable Audio"
+                    for adapter in unavailable
+                )
+                + " unavailable"
+            )
         else:
             summary = "Local AI services ready"
         self._service_status_detail = "\n".join(
@@ -2023,7 +2039,7 @@ class MainWindow(QMainWindow):
                 adapter,
                 f"{adapter.value} availability check pending",
             )
-            for adapter in AdapterKind
+            for adapter in self._availability
         )
         if (
             unavailable
@@ -2074,10 +2090,11 @@ class MainWindow(QMainWindow):
         except StackStoreError:
             return None
 
-    def _render_card_canvas(self, card: object) -> None:
+    def _render_card_canvas(self, card: Card, document: Stack | None = None) -> None:
         if not isinstance(card, Card):
             return
-        self.card_canvas.set_canvas_size(self.controller.document.canvas)
+        snapshot = document if document is not None else self.controller.document
+        self.card_canvas.set_canvas_size(snapshot.canvas)
         revision = card.active_revision
         if revision.background is None:
             self.card_canvas.show_message("No image")
@@ -2099,8 +2116,8 @@ class MainWindow(QMainWindow):
         self.card_canvas.show_image(asset_path)
         if self._is_running:
             self.card_canvas.set_run_hotspots(
-                self._run_session.active_hotspot_set(self.controller.document),
-                self.controller.document.run_overlay_mode,
+                self._run_session.active_hotspot_set(snapshot),
+                snapshot.run_overlay_mode,
             )
             return
         self.card_canvas.set_hotspots(
@@ -2173,10 +2190,14 @@ class MainWindow(QMainWindow):
             return
         self.sound_player.stop()
 
-    def _reference_image_path(self, image_path: str) -> Path:
-        if self.document_session is None or self.document_session.store is None:
-            raise BackgroundWorkflowError("save the stack before generating with a Reference image")
-        return self.document_session.store.asset_path(image_path)
+    def _sound_generation_failed(self, message: str) -> None:
+        self._show_error("sound-error", "Sound generation failed", detail=message)
+
+    def _sound_playback_failed(self, message: str) -> None:
+        self._sound_picker_previewing = False
+        if self.sound_manager_window is not None:
+            self.sound_manager_window.stop_preview()
+        self._show_error("sound-playback", "Could not play Sound", detail=message)
 
     def _create_hotspot_polygon(
         self,
@@ -2555,8 +2576,7 @@ class MainWindow(QMainWindow):
         if self.document_session is not None and not self.document_session.close_history():
             self._show_document_error(
                 "Could Not Clean Up Stack",
-                self.document_session.state.error
-                or "Duplicate-owned assets could not be cleaned up.",
+                self.document_session.state.error or "Generated assets could not be cleaned up.",
             )
         if self.background_workflow is not None:
             self.background_workflow.close()

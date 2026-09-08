@@ -2,16 +2,14 @@
 
 from __future__ import annotations
 
-import os
-from datetime import UTC, datetime
+from collections.abc import Iterator
 from pathlib import Path
-from uuid import uuid4
-
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
+from helpers import DocumentSessionFactory, generated_background
+from helpers import document_session_factory as document_session_factory
 from PIL import Image
-from PySide6.QtCore import QObject, QPointF, Qt, Signal
+from PySide6.QtCore import QCoreApplication, QEvent, QObject, QPointF, Qt, Signal
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
@@ -21,13 +19,9 @@ from hotcards.application.run_session import RunSession
 from hotcards.domain.models import (
     Card,
     CardRevision,
-    DirectGenerateProvenance,
-    GeneratedBackground,
-    GenerateInputs,
     HotspotConditions,
     HotspotKeyChanges,
     HotspotSet,
-    ImageOperationSettings,
     Interaction,
     KeyDefinition,
     NavigateAction,
@@ -85,11 +79,6 @@ class FakeSettings:
 
     def setValue(self, key: str, value: object) -> None:
         self.values[key] = value
-
-
-@pytest.fixture(scope="module")
-def application() -> QApplication:
-    return QApplication.instance() or QApplication([])
 
 
 def interaction(
@@ -321,15 +310,19 @@ def polygon(
     )
 
 
-def build_run_window(
-    tmp_path: Path,
-) -> tuple[
+type RunWindow = tuple[
     MainWindow,
     DocumentSession,
     Interaction,
     Interaction,
     Interaction,
-]:
+]
+
+
+@pytest.fixture
+def run_window(
+    tmp_path: Path, document_session_factory: DocumentSessionFactory
+) -> Iterator[RunWindow]:
     first = Card(name="First")
     incomplete = Card(name="Incomplete")
     third = Card(name="Third")
@@ -357,37 +350,18 @@ def build_run_window(
         color: str,
         interactions: tuple[Interaction, ...],
     ) -> CardRevision:
+        background = generated_background(card.id, description=name)
+        settings = background.provenance.settings
         image = tmp_path / f"{name}.png"
-        Image.new("RGB", (1024, 768), color).save(image)
-        asset_id = uuid4()
+        Image.new("RGB", (settings.width, settings.height), color).save(image)
         image_path = store.store_image_asset(
             image,
             card_id=card.id,
-            asset_id=asset_id,
+            asset_id=background.id,
         )
-        generated_at = datetime.now(UTC)
+        assert image_path == background.image_path
         return CardRevision(
-            background=GeneratedBackground(
-                id=asset_id,
-                image_path=image_path,
-                provenance=DirectGenerateProvenance(
-                    inputs=GenerateInputs(
-                        description=name,
-                    ),
-                    render_prompt=name,
-                    settings=ImageOperationSettings(
-                        model_identifier="test",
-                        mflux_version="test",
-                        seed=1,
-                        width=512,
-                        height=384,
-                        step_count=4,
-                        generated_at=generated_at,
-                        duration_seconds=1,
-                    ),
-                ),
-                created_at=generated_at,
-            ),
+            background=background,
             hotspot_set=HotspotSet(interactions=interactions),
         )
 
@@ -423,7 +397,7 @@ def build_run_window(
         )
     )
     controller = DocumentController(Stack(name="Bootstrap"))
-    session = DocumentSession(controller)
+    session = document_session_factory(controller)
     session.open(bundle)
     window = MainWindow(
         controller,
@@ -433,18 +407,23 @@ def build_run_window(
         background_workflow=FakeBackgroundWorkflow(),  # type: ignore[arg-type]
         start_diagnostics=False,
     )
-    return window, session, to_incomplete, to_third, unresolved
+    try:
+        yield window, session, to_incomplete, to_third, unresolved
+    finally:
+        window.close()
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(window, QEvent.Type.DeferredDelete)
 
 
 def test_run_canvas_uses_topmost_hit_with_back_and_restart(
-    application: QApplication,
-    tmp_path: Path,
+    qt_application: QApplication,
+    run_window: RunWindow,
 ) -> None:
-    window, _session, _to_incomplete, to_third, unresolved = build_run_window(tmp_path)
+    window, _session, _to_incomplete, to_third, unresolved = run_window
     window.resize(1000, 700)
     window.show()
     window.mode_button.click()
-    application.processEvents()
+    qt_application.processEvents()
 
     assert window.canvas_card_name.text() == "First"
     assert window.card_sidebar.isHidden()
@@ -480,14 +459,13 @@ def test_run_canvas_uses_topmost_hit_with_back_and_restart(
     assert window.canvas_card_name.text() == "First"
     assert not window.back_action.isEnabled()
     assert unresolved.id != to_third.id
-    window.close()
 
 
 def test_run_canvas_skips_inactive_overlapping_hotspots_before_z_order(
-    application: QApplication,
-    tmp_path: Path,
+    qt_application: QApplication,
+    run_window: RunWindow,
 ) -> None:
-    window, _session, to_incomplete, to_third, _unresolved = build_run_window(tmp_path)
+    window, _session, to_incomplete, to_third, _unresolved = run_window
     locked = KeyDefinition(name="Door unlocked")
     document = window.controller.document
     first = document.cards[0]
@@ -518,7 +496,7 @@ def test_run_canvas_skips_inactive_overlapping_hotspots_before_z_order(
     window.resize(1000, 700)
     window.show()
     window.mode_button.click()
-    application.processEvents()
+    qt_application.processEvents()
 
     overlap = window.card_canvas.viewport_point_for(QPointF(0.3, 0.3))
     QTest.mouseMove(
@@ -534,20 +512,19 @@ def test_run_canvas_skips_inactive_overlapping_hotspots_before_z_order(
         pos=overlap,
     )
     assert window.canvas_card_name.text() == "Incomplete"
-    window.close()
 
 
 def test_run_starts_from_current_card_and_toolbar_can_restart(
-    application: QApplication,
-    tmp_path: Path,
+    qt_application: QApplication,
+    run_window: RunWindow,
 ) -> None:
-    window, _session, _to_incomplete, _to_third, _unresolved = build_run_window(tmp_path)
+    window, _session, _to_incomplete, _to_third, _unresolved = run_window
     third = window.controller.document.cards[2]
     start = window.controller.document.cards[0]
     window.select_card(third.id)
 
     window.mode_button.click()
-    application.processEvents()
+    qt_application.processEvents()
 
     assert window.canvas_card_name.text() == "Third"
     assert window.notification_bar.current_key != "run-entry"
@@ -556,14 +533,13 @@ def test_run_starts_from_current_card_and_toolbar_can_restart(
 
     assert window.canvas_card_name.text() == "First"
     assert window._run_session.state.current_card_id == start.id
-    window.close()
 
 
 def test_run_card_without_hotspots_does_not_warn(
-    application: QApplication,
-    tmp_path: Path,
+    qt_application: QApplication,
+    run_window: RunWindow,
 ) -> None:
-    window, _session, _to_incomplete, _to_third, _unresolved = build_run_window(tmp_path)
+    window, _session, _to_incomplete, _to_third, _unresolved = run_window
     document = window.controller.document
     third = document.cards[2]
     revision = third.active_revision.model_copy(update={"hotspot_set": HotspotSet()})
@@ -588,22 +564,21 @@ def test_run_card_without_hotspots_does_not_warn(
     window.select_card(third.id)
 
     window.mode_button.click()
-    application.processEvents()
+    qt_application.processEvents()
 
     assert window.canvas_card_name.text() == "Third"
     assert window.notification_bar.current_key != "run-warning"
-    window.close()
 
 
 def test_run_overlays_persist_and_incomplete_cards_warn(
-    application: QApplication,
-    tmp_path: Path,
+    qt_application: QApplication,
+    run_window: RunWindow,
 ) -> None:
-    window, session, to_incomplete, _to_third, _unresolved = build_run_window(tmp_path)
+    window, session, to_incomplete, _to_third, _unresolved = run_window
     window.resize(1000, 700)
     window.show()
     window.mode_button.click()
-    application.processEvents()
+    qt_application.processEvents()
 
     window.overlay_selector.setCurrentText("Visible")
     assert window.controller.document.run_overlay_mode is RunOverlayMode.VISIBLE
@@ -625,4 +600,3 @@ def test_run_overlays_persist_and_incomplete_cards_warn(
     assert window.notification_bar.message_label.text() == (
         '"Incomplete" has no image in this revision.'
     )
-    window.close()

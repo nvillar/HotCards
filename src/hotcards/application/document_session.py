@@ -16,13 +16,7 @@ from hotcards.application.document_controller import (
     OwnedImageAsset,
     OwnedSoundAsset,
 )
-from hotcards.domain.models import (
-    DirectGenerateProvenance,
-    DuplicateProvenance,
-    EditProvenance,
-    RefineProvenance,
-    Stack,
-)
+from hotcards.domain.models import Stack
 from hotcards.storage.stack_store import (
     StackStore,
     StackStoreError,
@@ -252,8 +246,6 @@ class DocumentSession(QObject):
         self.controller.detach_owned_assets()
         self._cleanup_released_assets()
         cleaned = not self._released_assets
-        if not cleaned:
-            self._released_assets.clear()
         self._emit_state()
         return cleaned
 
@@ -264,23 +256,23 @@ class DocumentSession(QObject):
         replace_document: bool,
     ) -> Stack:
         self._timer.stop()
-        self.controller.detach_owned_assets()
-        self._cleanup_released_assets()
-        if self._released_assets:
-            self._released_assets.clear()
-            raise DocumentSessionError(
-                self._error or "duplicate-owned assets could not be cleaned up"
-            )
+        # Binding has been validated. Cleanup cannot undo a history discard, so
+        # complete the binding and retain failed cleanup for a later retry.
+        self._executing_persisted_change = True
+        try:
+            if replace_document:
+                document = self.controller.replace_document(candidate.document)
+            else:
+                self.controller.detach_owned_assets()
+                document = self.controller.document
+        finally:
+            self._executing_persisted_change = False
         self._store = candidate.store
         self._pending_snapshot = None
         self._dirty = False
         self._error = None
-        document = (
-            self.controller.replace_document(candidate.document)
-            if replace_document
-            else self.controller.document
-        )
         self.controller.register_owned_assets(candidate.owned_assets)
+        self._cleanup_released_assets()
         if replace_document:
             self.document_replaced.emit(document)
         self._emit_state()
@@ -315,9 +307,7 @@ class DocumentSession(QObject):
         if confirmed.stored_document != candidate.stored_document:
             raise DocumentSessionError("candidate stack document identity changed before binding")
         if confirmed.owned_assets != candidate.owned_assets:
-            raise DocumentSessionError(
-                "candidate duplicate-owned asset identity changed before binding"
-            )
+            raise DocumentSessionError("candidate generated-asset identity changed before binding")
         return confirmed
 
     def _bind_latest(
@@ -392,7 +382,7 @@ class DocumentSession(QObject):
                         asset_id=asset.asset_id,
                         stack=Stack(name="Owned asset cleanup"),
                     )
-            except StackStoreError as error:
+            except (OSError, StackStoreError) as error:
                 cleanup_error = str(error)
                 continue
             self._released_assets.pop(key, None)
@@ -411,15 +401,7 @@ class DocumentSession(QObject):
         for card in document.cards:
             for revision in card.revisions:
                 background = revision.background
-                if background is None or not isinstance(
-                    background.provenance,
-                    (
-                        DirectGenerateProvenance,
-                        RefineProvenance,
-                        EditProvenance,
-                        DuplicateProvenance,
-                    ),
-                ):
+                if background is None:
                     continue
                 if background.image_path in seen_paths:
                     continue

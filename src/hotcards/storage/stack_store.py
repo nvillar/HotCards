@@ -12,6 +12,7 @@ import stat
 import sys
 import tempfile
 import wave
+from collections import OrderedDict
 from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -33,6 +34,7 @@ SOUND_ASSET_ROOT = ASSET_ROOT / "sounds"
 logger = logging.getLogger(__name__)
 _BUNDLE_LOCKS_GUARD = Lock()
 _BUNDLE_LOCKS: dict[str, RLock] = {}
+_DIMENSION_CACHE_LIMIT = 32
 
 
 class StackStoreError(ValueError):
@@ -127,6 +129,15 @@ class StoredImageSnapshot:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class ImageAssetExpectation:
+    """Identity and pinned content required while accepting a generated image."""
+
+    snapshot: StoredImageSnapshot
+    card_id: UUID
+    asset_id: UUID
+
+
 def _io_checkpoint(_name: str) -> None:
     """Fault-injection seam around durable transaction boundaries."""
 
@@ -212,6 +223,10 @@ def _copy_all(source_fd: int, destination_fd: int) -> None:
         _write_all(destination_fd, chunk)
 
 
+def _file_version(info: os.stat_result) -> tuple[int, int, int, int, int]:
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
+
+
 def _sha256_fd(fd: int) -> str:
     os.lseek(fd, 0, os.SEEK_SET)
     digest = hashlib.sha256()
@@ -244,6 +259,7 @@ def _file_at_matches(
     *,
     device: int,
     inode: int,
+    report_io_errors: bool = False,
 ) -> bool:
     try:
         candidate_fd = os.open(
@@ -253,7 +269,11 @@ def _file_at_matches(
         )
     except FileNotFoundError:
         return False
-    except OSError:
+    except OSError as error:
+        if report_io_errors and error.errno not in {errno.ELOOP, errno.ENOTDIR}:
+            raise StackStoreError(
+                f"could not inspect owned quarantine {name!r}: {error}"
+            ) from error
         return False
     try:
         candidate_stat = os.fstat(candidate_fd)
@@ -273,74 +293,14 @@ def _dispose_owned_private_file(
     inode: int,
 ) -> bool:
     parent_fd: int | None = None
-    quarantine_name: str | None = None
     try:
-        try:
-            parent_fd = os.open(
-                path.parent,
-                _secure_open_flags(directory=True),
-            )
-            current = os.stat(
-                path.name,
-                dir_fd=parent_fd,
-                follow_symlinks=False,
-            )
-            if not stat.S_ISREG(current.st_mode) or (current.st_dev, current.st_ino) != (
-                device,
-                inode,
-            ):
-                return False
-            quarantine_name = f".image-cleanup-{uuid4()}"
-            os.rename(
-                path.name,
-                quarantine_name,
-                src_dir_fd=parent_fd,
-                dst_dir_fd=parent_fd,
-            )
-        except FileNotFoundError:
-            return True
-        except OSError:
-            return False
-
-        def restore_quarantine() -> None:
-            try:
-                os.link(
-                    quarantine_name,
-                    path.name,
-                    src_dir_fd=parent_fd,
-                    dst_dir_fd=parent_fd,
-                    follow_symlinks=False,
-                )
-            except OSError:
-                return
-            try:
-                os.unlink(quarantine_name, dir_fd=parent_fd)
-            except OSError:
-                pass
-
-        try:
-            candidate_fd = os.open(
-                quarantine_name,
-                _secure_open_flags(),
-                dir_fd=parent_fd,
-            )
-            try:
-                current = os.fstat(candidate_fd)
-            finally:
-                os.close(candidate_fd)
-        except OSError:
-            restore_quarantine()
-            return False
-        if (current.st_dev, current.st_ino) != (device, inode):
-            restore_quarantine()
-            return False
-        try:
-            os.unlink(quarantine_name, dir_fd=parent_fd)
-        except FileNotFoundError:
-            return True
-        except OSError:
-            return False
+        parent_fd = os.open(path.parent, _secure_open_flags(directory=True))
+        _quarantine_owned_file_at(parent_fd, path.name, device=device, inode=inode)
         return True
+    except FileNotFoundError:
+        return True
+    except (OSError, StackStoreError):
+        return False
     finally:
         if parent_fd is not None:
             os.close(parent_fd)
@@ -459,6 +419,41 @@ def _quarantine_owned_file_at(
     inode: int,
 ) -> bool:
     try:
+        removed = _remove_owned_file_candidate(
+            parent_fd, name, owner_name=name, device=device, inode=inode
+        )
+        # An unlink failure can leave the owned inode in quarantine. Retry only
+        # this asset's identity-bound quarantines, never arbitrary bundle files.
+        prefix = f".{name}.owned-file-"
+        for candidate in os.listdir(parent_fd):
+            if (
+                candidate.startswith(prefix)
+                and candidate.endswith(".tmp")
+                and _file_at_matches(
+                    parent_fd, candidate, device=device, inode=inode, report_io_errors=True
+                )
+            ):
+                removed = (
+                    _remove_owned_file_candidate(
+                        parent_fd, candidate, owner_name=name, device=device, inode=inode
+                    )
+                    or removed
+                )
+        os.fsync(parent_fd)
+        return removed
+    except OSError as error:
+        raise StackStoreError(f"could not clean up owned asset {name!r}: {error}") from error
+
+
+def _remove_owned_file_candidate(
+    parent_fd: int,
+    name: str,
+    *,
+    owner_name: str,
+    device: int,
+    inode: int,
+) -> bool:
+    try:
         candidate_fd = os.open(
             name,
             _secure_open_flags(),
@@ -477,7 +472,7 @@ def _quarantine_owned_file_at(
         ):
             raise StackStoreError(f"refusing to remove image asset whose identity changed: {name}")
         _io_checkpoint("owned-file-cleanup-prechecked")
-        quarantine_name = _quarantine_name(name, "owned-file")
+        quarantine_name = _quarantine_name(owner_name, "owned-file")
         try:
             os.rename(
                 name,
@@ -513,7 +508,6 @@ def _quarantine_owned_file_at(
             os.close(quarantine_fd)
         try:
             os.unlink(quarantine_name, dir_fd=parent_fd)
-            os.fsync(parent_fd)
         except OSError as error:
             raise StackStoreError(
                 f"could not remove owned image quarantine {quarantine_name!r}: {error}"
@@ -527,6 +521,40 @@ def _quarantine_owned_directory_if_empty(
     parent_fd: int,
     name: str,
     *,
+    device: int,
+    inode: int,
+) -> bool:
+    try:
+        removed = _remove_owned_directory_candidate(
+            parent_fd, name, owner_name=name, device=device, inode=inode
+        )
+        prefix = f".{name}.owned-directory-"
+        for candidate in os.listdir(parent_fd):
+            if not (candidate.startswith(prefix) and candidate.endswith(".tmp")):
+                continue
+            descriptor = _open_matching_directory_at(
+                parent_fd, candidate, device=device, inode=inode
+            )
+            if descriptor is None:
+                continue
+            os.close(descriptor)
+            removed = (
+                _remove_owned_directory_candidate(
+                    parent_fd, candidate, owner_name=name, device=device, inode=inode
+                )
+                or removed
+            )
+        os.fsync(parent_fd)
+        return removed
+    except OSError as error:
+        raise StackStoreError(f"could not clean up owned directory {name!r}: {error}") from error
+
+
+def _remove_owned_directory_candidate(
+    parent_fd: int,
+    name: str,
+    *,
+    owner_name: str,
     device: int,
     inode: int,
 ) -> bool:
@@ -550,7 +578,7 @@ def _quarantine_owned_directory_if_empty(
         if os.listdir(candidate_fd):
             return False
         _io_checkpoint("owned-directory-cleanup-prechecked")
-        quarantine_name = _quarantine_name(name, "owned-directory")
+        quarantine_name = _quarantine_name(owner_name, "owned-directory")
         try:
             os.rename(
                 name,
@@ -589,7 +617,6 @@ def _quarantine_owned_directory_if_empty(
             os.close(quarantine_fd)
         try:
             os.rmdir(quarantine_name, dir_fd=parent_fd)
-            os.fsync(parent_fd)
         except OSError as error:
             raise StackStoreError(
                 f"could not remove owned directory quarantine {quarantine_name!r}: {error}"
@@ -810,6 +837,9 @@ class StackStore:
 
     def __init__(self, bundle_path: Path) -> None:
         self.bundle_path = bundle_path
+        self._image_dimensions: OrderedDict[tuple[int, int, int, int, int], tuple[int, int]] = (
+            OrderedDict()
+        )
 
     @property
     def stack_path(self) -> Path:
@@ -910,11 +940,9 @@ class StackStore:
         if not isinstance(payload, dict):
             raise StackStoreError("stack document root must be a JSON object")
         version = payload.get("schema_version")
-        supported_versions = {CURRENT_SCHEMA_VERSION}
-        if type(version) is not int or version not in supported_versions:
+        if type(version) is not int or version != CURRENT_SCHEMA_VERSION:
             raise StackStoreError(
-                "invalid stack document: schema_version must be one of "
-                + ", ".join(str(item) for item in sorted(supported_versions))
+                f"invalid stack document: schema_version must be {CURRENT_SCHEMA_VERSION}"
             )
         try:
             stack = Stack.model_validate_json(json.dumps(payload))
@@ -966,7 +994,7 @@ class StackStore:
         card_id: UUID,
         asset_id: UUID,
     ) -> tuple[int, int]:
-        """Decode one exact bundle PNG through no-follow descriptors."""
+        """Read dimensions through no-follow descriptors, caching unchanged bytes."""
         source_path = _relative_asset_path(relative_path)
         expected_path = _image_asset_path(card_id, asset_id)
         if source_path != expected_path:
@@ -996,22 +1024,20 @@ class StackStore:
                 before = os.fstat(source_fd)
                 if not stat.S_ISREG(before.st_mode):
                     raise StackStoreError(f"source image is not a regular file: {source_path}")
-                dimensions = _validate_png_fd(source_fd, source_path.as_posix())
+                version = _file_version(before)
+                dimensions = self._image_dimensions.get(version)
+                if dimensions is None:
+                    dimensions = _validate_png_fd(source_fd, source_path.as_posix())
                 after = os.fstat(source_fd)
-                if (
-                    before.st_dev,
-                    before.st_ino,
-                    before.st_size,
-                    before.st_mtime_ns,
-                ) != (
-                    after.st_dev,
-                    after.st_ino,
-                    after.st_size,
-                    after.st_mtime_ns,
-                ):
+                current = os.stat(source_path.name, dir_fd=card_fd, follow_symlinks=False)
+                if version != _file_version(after) or version != _file_version(current):
                     raise StackStoreError(
                         f"source image changed while being decoded: {source_path}"
                     )
+                self._image_dimensions[version] = dimensions
+                self._image_dimensions.move_to_end(version)
+                if len(self._image_dimensions) > _DIMENSION_CACHE_LIMIT:
+                    self._image_dimensions.popitem(last=False)
                 return dimensions
         except StackStoreError:
             raise
@@ -1237,14 +1263,10 @@ class StackStore:
         source_path: Path,
         *,
         card_id: UUID,
-        asset_id: UUID | None = None,
-        revision_id: UUID | None = None,
+        asset_id: UUID,
     ) -> str:
         """Copy a validated PNG into its deterministic bundle-owned asset path."""
-        resolved_asset_id = asset_id if asset_id is not None else revision_id
-        if resolved_asset_id is None:
-            raise StackStoreError("an image asset ID is required")
-        relative_path = _image_asset_path(card_id, resolved_asset_id)
+        relative_path = _image_asset_path(card_id, asset_id)
         destination = self._resolved_asset(relative_path)
         if destination.exists():
             raise StackStoreError(f"refusing to overwrite existing image asset: {relative_path}")
@@ -1305,6 +1327,24 @@ class StackStore:
         duration_seconds: int,
     ) -> StoredSoundAsset:
         """Copy one validated generated WAV into its reserved bundle path."""
+        try:
+            return self._store_sound_asset(
+                source_path,
+                sound_id=sound_id,
+                asset_id=asset_id,
+                duration_seconds=duration_seconds,
+            )
+        except OSError as error:
+            raise StackStoreError(f"could not store sound asset {source_path}: {error}") from error
+
+    def _store_sound_asset(
+        self,
+        source_path: Path,
+        *,
+        sound_id: UUID,
+        asset_id: UUID,
+        duration_seconds: int,
+    ) -> StoredSoundAsset:
         if not 1 <= duration_seconds <= 30:
             raise StackStoreError("sound duration must be between 1 and 30 seconds")
         relative_path = _sound_asset_path(sound_id, asset_id)
@@ -1356,6 +1396,13 @@ class StackStore:
                 ) from error
             descriptors.callback(os.close, destination_fd)
             destination_stat = os.fstat(destination_fd)
+            stored = StoredSoundAsset(
+                relative_path=relative_path.as_posix(),
+                device=destination_stat.st_dev,
+                inode=destination_stat.st_ino,
+                directory_device=sound_directory_stat.st_dev,
+                directory_inode=sound_directory_stat.st_ino,
+            )
             try:
                 with (
                     os.fdopen(os.dup(source_fd), "rb") as source,
@@ -1364,23 +1411,33 @@ class StackStore:
                     shutil.copyfileobj(source, destination)
                     destination.flush()
                     os.fsync(destination.fileno())
+                self._validate_sound_file(
+                    destination_fd,
+                    source_path=relative_path.as_posix(),
+                    duration_seconds=duration_seconds,
+                )
+                current_source = os.fstat(source_fd)
+                if (
+                    source_stat.st_size,
+                    source_stat.st_mtime_ns,
+                ) != (current_source.st_size, current_source.st_mtime_ns):
+                    raise StackStoreError("generated sound changed while being copied")
                 for directory_fd in (sound_fd, sounds_fd, assets_fd, bundle_fd):
                     os.fsync(directory_fd)
-            except Exception:
-                _quarantine_owned_file_at(
-                    sound_fd,
-                    relative_path.name,
-                    device=destination_stat.st_dev,
-                    inode=destination_stat.st_ino,
-                )
+            except (OSError, StackStoreError) as error:
+                try:
+                    _quarantine_owned_file_at(
+                        sound_fd,
+                        relative_path.name,
+                        device=destination_stat.st_dev,
+                        inode=destination_stat.st_ino,
+                    )
+                except (OSError, StackStoreError) as cleanup_error:
+                    raise StackStoreTransactionError(
+                        error, (cleanup_error,), owned_asset=stored
+                    ) from error
                 raise
-            return StoredSoundAsset(
-                relative_path=relative_path.as_posix(),
-                device=destination_stat.st_dev,
-                inode=destination_stat.st_ino,
-                directory_device=sound_directory_stat.st_dev,
-                directory_inode=sound_directory_stat.st_ino,
-            )
+            return stored
 
     def store_sound_asset_and_save(
         self,
@@ -1420,53 +1477,55 @@ class StackStore:
                 asset_id=asset_id,
                 duration_seconds=duration_seconds,
             )
+
+            def require_owned_asset() -> None:
+                if (
+                    store.stored_sound_asset(
+                        asset.relative_path, sound_id=sound_id, asset_id=asset_id
+                    )
+                    != asset
+                ):
+                    raise StackStoreError("sound asset identity changed during the transaction")
+
             try:
-                store.save(changed_stack)
-            except Exception as operation_error:
-                rollback_errors: list[Exception] = []
-                try:
-                    observed_stack = store.load()
-                except Exception as observe_error:
-                    rollback_errors.append(observe_error)
-                    raise StackStoreTransactionError(
-                        operation_error,
-                        tuple(rollback_errors),
-                        persisted_stack=None,
-                        observed_stack=None,
-                        durability_indeterminate=True,
-                        owned_asset=asset,
-                    ) from operation_error
-                if observed_stack == changed_stack:
-                    raise StackStoreTransactionError(
-                        operation_error,
-                        persisted_stack=changed_stack,
-                        observed_stack=changed_stack,
-                        owned_asset=asset,
-                    ) from operation_error
-                if observed_stack != previous_stack:
-                    raise StackStoreTransactionError(
-                        operation_error,
-                        persisted_stack=observed_stack,
-                        observed_stack=observed_stack,
-                        durability_indeterminate=True,
-                        owned_asset=asset,
-                    ) from operation_error
+                store.save_stack_transaction(
+                    previous_stack, changed_stack, validate_assets=require_owned_asset
+                )
+            except StackStoreTransactionError as error:
+                rollback_errors = list(error.rollback_errors)
+                retained_asset: StoredSoundAsset | None = asset
+                if error.persisted_stack == previous_stack and not error.durability_indeterminate:
+                    try:
+                        store.remove_owned_sound_asset_if_unreferenced(
+                            asset,
+                            sound_id=sound_id,
+                            asset_id=asset_id,
+                            stack=previous_stack,
+                        )
+                        retained_asset = None
+                    except (OSError, StackStoreError) as cleanup_error:
+                        rollback_errors.append(cleanup_error)
+                raise StackStoreTransactionError(
+                    error.operation_error,
+                    tuple(rollback_errors),
+                    persisted_stack=error.persisted_stack,
+                    observed_stack=error.observed_stack,
+                    durability_indeterminate=error.durability_indeterminate,
+                    owned_asset=retained_asset,
+                ) from error
+            except (OSError, StackStoreError) as error:
+                # A preparation failure precedes the manifest transaction.
                 try:
                     store.remove_owned_sound_asset_if_unreferenced(
-                        asset,
-                        sound_id=sound_id,
-                        asset_id=asset_id,
-                        stack=previous_stack,
+                        asset, sound_id=sound_id, asset_id=asset_id, stack=previous_stack
                     )
-                except Exception as rollback_error:
-                    rollback_errors.append(rollback_error)
-                raise StackStoreTransactionError(
-                    operation_error,
-                    tuple(rollback_errors),
-                    persisted_stack=previous_stack,
-                    observed_stack=previous_stack,
-                    owned_asset=None if not rollback_errors else asset,
-                ) from operation_error
+                except (OSError, StackStoreError) as cleanup_error:
+                    raise StackStoreTransactionError(
+                        error, (cleanup_error,), owned_asset=asset
+                    ) from error
+                raise StackStoreError(
+                    f"could not prepare the sound manifest transaction: {error}"
+                ) from error
             return asset
 
         return commit(self)
@@ -1479,22 +1538,31 @@ class StackStore:
         duration_seconds: int,
     ) -> None:
         try:
+            os.lseek(descriptor, 0, os.SEEK_SET)
             with os.fdopen(os.dup(descriptor), "rb") as source:
                 with wave.open(source, "rb") as generated:
                     channels = generated.getnchannels()
                     sample_width = generated.getsampwidth()
                     sample_rate = generated.getframerate()
                     frame_count = generated.getnframes()
+                    if (channels, sample_width, sample_rate) != (2, 2, 44_100):
+                        raise StackStoreError(
+                            "generated sound must be 16-bit PCM stereo WAV at 44.1 kHz"
+                        )
+                    if frame_count != duration_seconds * sample_rate:
+                        raise StackStoreError(
+                            f"generated sound must contain exactly {duration_seconds} seconds"
+                        )
+                    remaining = frame_count
+                    while remaining:
+                        count = min(remaining, 16_384)
+                        if len(generated.readframes(count)) != count * channels * sample_width:
+                            raise StackStoreError("generated sound has a truncated PCM payload")
+                        remaining -= count
         except (EOFError, OSError, wave.Error) as error:
             raise StackStoreError(
                 f"could not decode generated sound {source_path}: {error}"
             ) from error
-        if (channels, sample_width, sample_rate) != (2, 2, 44_100):
-            raise StackStoreError("generated sound must be 16-bit PCM stereo WAV at 44.1 kHz")
-        if frame_count != duration_seconds * sample_rate:
-            raise StackStoreError(
-                f"generated sound must contain exactly {duration_seconds} seconds"
-            )
 
     def copy_image_asset_and_save(
         self,
@@ -1531,6 +1599,7 @@ class StackStore:
         expected_source_card_id: UUID | None = None,
         expected_source_asset_id: UUID | None = None,
         expected_source_operation: str = "Edit",
+        expected_references: tuple[ImageAssetExpectation, ...] = (),
     ) -> StoredImageAsset:
         """Atomically import one PNG and commit the manifest that references it."""
         try:
@@ -1547,6 +1616,7 @@ class StackStore:
                 expected_source_card_id=expected_source_card_id,
                 expected_source_asset_id=expected_source_asset_id,
                 expected_source_operation=expected_source_operation,
+                expected_references=expected_references,
             )
         except OSError as error:
             raise StackStoreError(
@@ -1569,6 +1639,7 @@ class StackStore:
         expected_source_card_id: UUID | None = None,
         expected_source_asset_id: UUID | None = None,
         expected_source_operation: str = "Edit",
+        expected_references: tuple[ImageAssetExpectation, ...] = (),
     ) -> StoredImageAsset:
         if (source_relative_path is None) == (source_file_path is None):
             raise StackStoreError("exactly one image source must be provided")
@@ -1773,17 +1844,24 @@ class StackStore:
                 changed_manifest_durable = True
 
             def require_expected_source() -> None:
-                if expected_source_snapshot is None:
-                    return
-                assert expected_source_card_id is not None
-                assert expected_source_asset_id is not None
-                _require_image_asset_unchanged_at(
-                    bundle_fd,
-                    expected_source_snapshot,
-                    card_id=expected_source_card_id,
-                    asset_id=expected_source_asset_id,
-                    operation=expected_source_operation,
-                )
+                if expected_source_snapshot is not None:
+                    assert expected_source_card_id is not None
+                    assert expected_source_asset_id is not None
+                    _require_image_asset_unchanged_at(
+                        bundle_fd,
+                        expected_source_snapshot,
+                        card_id=expected_source_card_id,
+                        asset_id=expected_source_asset_id,
+                        operation=expected_source_operation,
+                    )
+                for reference in expected_references:
+                    _require_image_asset_unchanged_at(
+                        bundle_fd,
+                        reference.snapshot,
+                        card_id=reference.card_id,
+                        asset_id=reference.asset_id,
+                        operation="Generate Reference",
+                    )
 
             try:
                 _io_checkpoint("destination-created")
@@ -1965,6 +2043,8 @@ class StackStore:
         self,
         previous_stack: Stack,
         changed_stack: Stack,
+        *,
+        validate_assets: Callable[[], None] | None = None,
     ) -> None:
         """Replace one manifest with durable rollback on any reported failure."""
         changed_payload = changed_stack.model_dump_json(indent=2).encode() + b"\n"
@@ -2014,6 +2094,8 @@ class StackStore:
                 changed_manifest_durable = True
 
             try:
+                if validate_assets is not None:
+                    validate_assets()
                 manifest_temporary_name = _write_manifest_at(
                     bundle_fd,
                     changed_payload,
@@ -2028,6 +2110,8 @@ class StackStore:
                     on_directory_fsynced=mark_changed_manifest_durable,
                 )
                 manifest_temporary_name = None
+                if validate_assets is not None:
+                    validate_assets()
                 if not changed_manifest_durable:
                     raise StackStoreError("duplicate manifest durability was not established")
             except Exception as operation_error:
@@ -2058,44 +2142,6 @@ class StackStore:
                 ) from operation_error
         finally:
             os.close(bundle_fd)
-
-    @_serialized_bundle_mutation
-    def remove_image_asset_if_unreferenced(
-        self,
-        relative_path: str,
-        *,
-        card_id: UUID,
-        asset_id: UUID,
-        stack: Stack,
-    ) -> bool:
-        """Remove one exact bundle-owned image only when the document cannot reach it."""
-        parsed_path = _relative_asset_path(relative_path)
-        expected_path = _image_asset_path(card_id, asset_id)
-        if parsed_path != expected_path:
-            raise StackStoreError(
-                f"image asset path {parsed_path} does not match its card and asset IDs"
-            )
-        documents = [stack]
-        if self.stack_path.is_file():
-            documents.append(self.load())
-        if any(
-            revision.background is not None and revision.background.image_path == relative_path
-            for document in documents
-            for card in document.cards
-            for revision in card.revisions
-        ):
-            raise StackStoreError(f"refusing to remove referenced image asset: {relative_path}")
-        destination = self._resolved_asset(parsed_path)
-        try:
-            if not destination.exists():
-                return False
-            destination.unlink()
-            _fsync_directory(destination.parent)
-        except OSError as error:
-            raise StackStoreError(
-                f"could not remove image asset {relative_path}: {error}"
-            ) from error
-        return True
 
     def stored_sound_asset(
         self,
@@ -2161,6 +2207,21 @@ class StackStore:
         stack: Stack,
     ) -> bool:
         """Remove one exact owned WAV after all document history releases it."""
+        try:
+            return self._remove_owned_sound_asset(
+                asset, sound_id=sound_id, asset_id=asset_id, stack=stack
+            )
+        except OSError as error:
+            raise StackStoreError(f"could not remove owned Sound asset: {error}") from error
+
+    def _remove_owned_sound_asset(
+        self,
+        asset: StoredSoundAsset,
+        *,
+        sound_id: UUID,
+        asset_id: UUID,
+        stack: Stack,
+    ) -> bool:
         parsed_path = _relative_asset_path(asset.relative_path)
         expected_path = _sound_asset_path(sound_id, asset_id)
         if parsed_path != expected_path:
@@ -2200,6 +2261,15 @@ class StackStore:
                 inode=asset.directory_inode,
             )
             if sound_fd is None:
+                try:
+                    os.stat(str(sound_id), dir_fd=sounds_fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    return _quarantine_owned_directory_if_empty(
+                        sounds_fd,
+                        str(sound_id),
+                        device=asset.directory_device,
+                        inode=asset.directory_inode,
+                    )
                 raise StackStoreError(
                     f"refusing to remove sound asset whose directory identity changed: {sound_id}"
                 )
@@ -2285,6 +2355,21 @@ class StackStore:
         stack: Stack,
     ) -> bool:
         """Remove only the exact owned inode after all document references leave."""
+        try:
+            return self._remove_owned_image_asset(
+                asset, card_id=card_id, asset_id=asset_id, stack=stack
+            )
+        except OSError as error:
+            raise StackStoreError(f"could not remove owned image asset: {error}") from error
+
+    def _remove_owned_image_asset(
+        self,
+        asset: StoredImageAsset,
+        *,
+        card_id: UUID,
+        asset_id: UUID,
+        stack: Stack,
+    ) -> bool:
         parsed_path = _relative_asset_path(asset.relative_path)
         expected_path = _image_asset_path(card_id, asset_id)
         if parsed_path != expected_path:
@@ -2319,7 +2404,19 @@ class StackStore:
             descriptors.callback(os.close, assets_fd)
             cards_fd = _open_directory_at(assets_fd, "cards")
             descriptors.callback(os.close, cards_fd)
-            card_fd = _open_directory_at(cards_fd, str(card_id))
+            try:
+                card_fd = _open_directory_at(cards_fd, str(card_id))
+            except StackStoreError:
+                try:
+                    os.stat(str(card_id), dir_fd=cards_fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    return _quarantine_owned_directory_if_empty(
+                        cards_fd,
+                        str(card_id),
+                        device=asset.directory_device,
+                        inode=asset.directory_inode,
+                    )
+                raise
             descriptors.callback(os.close, card_fd)
             removed = _quarantine_owned_file_at(
                 card_fd,

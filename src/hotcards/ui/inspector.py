@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from functools import partial
 from uuid import UUID
 
 from pydantic import ValidationError
@@ -26,7 +25,6 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QPlainTextEdit,
@@ -112,14 +110,6 @@ class _EditDraftPlainTextEdit(QPlainTextEdit):
             event.accept()
             return
         super().keyPressEvent(event)
-
-
-class _CommitLineEdit(QLineEdit):
-    editing_finished = Signal(object, object)
-
-    def focusOutEvent(self, event: QFocusEvent) -> None:
-        super().focusOutEvent(event)
-        self.editing_finished.emit(QApplication.focusWidget(), event.reason())
 
 
 class _EditHistoryDelegate(QStyledItemDelegate):
@@ -389,9 +379,11 @@ class Inspector(QWidget):
         parent: QWidget | None = None,
         *,
         image_path_resolver: ImagePathResolver | None = None,
+        render_on_change: bool = True,
     ) -> None:
         super().__init__(parent)
         self.controller = controller
+        self._render_on_change = render_on_change
         self.selected_card_id: UUID | None = None
         self._rendered_revision_id: UUID | None = None
         self._rendered_background_id: UUID | None = None
@@ -430,7 +422,6 @@ class Inspector(QWidget):
         self._build_background_tab()
         self._build_edit_tab()
         self._build_hotspots_tab()
-        self._authoring_fields = (self._generate_fields,)
         self._description_errors = (self.description_error,)
         self._style_errors = (self.style_selection_error,)
         self.card_picker = CardPickerWindow(
@@ -460,9 +451,7 @@ class Inspector(QWidget):
         layout.addSpacing(8)
         self.reference_label = QLabel("References")
         self.reference_label.setObjectName("referenceLabel")
-        self.reference_label.setToolTip(
-            "Use image 1 and image 2 in the Description."
-        )
+        self.reference_label.setToolTip("Use image 1 and image 2 in the Description.")
         layout.addWidget(self.reference_label)
         self.reference_panel = QWidget()
         self.reference_panel.setObjectName("referencePanel")
@@ -874,11 +863,8 @@ class Inspector(QWidget):
         super().closeEvent(event)
 
     def _connect_signals(self) -> None:
-        for fields in self._authoring_fields:
-            fields.description_edit.editing_finished.connect(self._description_editing_finished)
-            fields.style_combo.currentIndexChanged.connect(
-                partial(self._revision_style_changed, fields)
-            )
+        self.description_edit.editing_finished.connect(self._description_editing_finished)
+        self.style_combo.currentIndexChanged.connect(self._revision_style_changed)
         self.description_edit.document().contentsChanged.connect(self._render_inputs_changed)
         self.generate_background_button.clicked.connect(self._request_generate_background)
         self.edit_instruction_edit.textChanged.connect(self._edit_instruction_changed)
@@ -975,9 +961,7 @@ class Inspector(QWidget):
     ) -> None:
         previous_card_id = self.selected_card_id
         previous_revision_id = self._rendered_revision_id
-        preserve_description = any(
-            fields.description_edit.hasFocus() for fields in self._authoring_fields
-        )
+        preserve_description = self.description_edit.hasFocus()
         description_draft = self.description_edit.toPlainText()
         self._rendering = True
         try:
@@ -987,6 +971,7 @@ class Inspector(QWidget):
             )
             self.selected_card_id = card.id if card is not None else None
             if card is None:
+                self._image_source_size = None
                 self._rendered_revision_id = None
                 self._rendered_background_id = None
                 self._render_edit_history(None)
@@ -994,8 +979,6 @@ class Inspector(QWidget):
                 self.pages.setCurrentIndex(0)
                 self._set_error(self._description_errors, "")
                 self._set_error(self.reference_error, "")
-                self._set_error(self.edit_instruction_error, "")
-                self._set_error(self.edit_output_error, "")
                 self._set_error(self.edit_instruction_error, "")
                 self._set_error(self.edit_output_error, "")
                 self._set_error(self._style_errors, "")
@@ -1067,10 +1050,9 @@ class Inspector(QWidget):
         return self.commit_revision_metadata(render_change=render_change)
 
     def has_description_input(self) -> bool:
-        card = self._selected_card()
-        if card is None:
-            return False
-        return bool(self.description_edit.toPlainText().strip())
+        return self.selected_card_id is not None and bool(
+            self.description_edit.toPlainText().strip()
+        )
 
     def has_edit_instruction_input(self) -> bool:
         return bool(self.edit_instruction_edit.toPlainText().strip())
@@ -1118,7 +1100,6 @@ class Inspector(QWidget):
         *,
         can_generate: bool,
         generate_reason: str,
-        has_image: bool,
         busy: bool,
         generating: bool,
     ) -> None:
@@ -1239,27 +1220,26 @@ class Inspector(QWidget):
         document: Stack,
         revision: CardRevision,
     ) -> None:
-        for fields in self._authoring_fields:
-            combo = fields.style_combo
-            with QSignalBlocker(combo):
-                combo.clear()
-                combo.addItem("No Style", None)
-                for style in document.styles:
-                    combo.addItem(style.name, style.id)
-                combo.setCurrentIndex(
-                    self._combo_index_for_data(
-                        combo,
-                        revision.style_id,
-                    )
+        combo = self.style_combo
+        with QSignalBlocker(combo):
+            combo.clear()
+            combo.addItem("No Style", None)
+            for style in document.styles:
+                combo.addItem(style.name, style.id)
+            combo.setCurrentIndex(
+                self._combo_index_for_data(
+                    combo,
+                    revision.style_id,
                 )
+            )
 
-    def _revision_style_changed(self, fields: _ImageAuthoringFields, index: int) -> None:
+    def _revision_style_changed(self, index: int) -> None:
         if self._rendering or index < 0:
             return
         card = self._selected_card()
         if card is None:
             return
-        style_id = fields.style_combo.itemData(index)
+        style_id = self.style_combo.itemData(index)
         if not isinstance(style_id, UUID):
             style_id = None
         if style_id == card.active_revision.style_id:
@@ -2082,7 +2062,7 @@ class Inspector(QWidget):
             )
         except ValidationError as error:
             self.set_hotspot_error(str(error))
-            self.render(self.controller.document, self.selected_card_id)
+            self._render_hotspot_properties(self.controller.document, interaction)
             return
         self._execute(
             SetHotspotConditionsCommand(
@@ -2164,7 +2144,7 @@ class Inspector(QWidget):
             )
         except ValidationError as error:
             self.set_hotspot_error(str(error))
-            self.render(self.controller.document, self.selected_card_id)
+            self._render_hotspot_properties(self.controller.document, interaction)
             return
         self._execute(
             SetHotspotKeyChangesCommand(
@@ -2425,11 +2405,12 @@ class Inspector(QWidget):
             return False
         self._set_error(target_error, "")
         if render_change:
-            self.render(
-                changed,
-                self.selected_card_id,
-                image_source_size=self._image_source_size,
-            )
+            if self._render_on_change:
+                self.render(
+                    changed,
+                    self.selected_card_id,
+                    image_source_size=self._image_source_size,
+                )
             self.document_changed.emit(changed)
         token = self.controller.current_undo_token
         if undo_message is not None and token is not None and token != previous_token:

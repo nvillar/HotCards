@@ -9,7 +9,7 @@ from enum import StrEnum
 from functools import partial
 from math import ceil, isfinite
 from queue import Empty, Queue
-from threading import BoundedSemaphore, Event, Lock, Thread
+from threading import BoundedSemaphore, Event, Lock
 from time import monotonic
 from typing import Any
 from uuid import UUID, uuid4
@@ -21,6 +21,7 @@ from hotcards.generation.errors import (
     ModelLoadError,
     ModelUnavailableError,
 )
+from hotcards.generation.mflux_generator import submit_model_invocation
 from hotcards.generation.stable_audio import StableAudioError, StableAudioFailureKind
 
 logger = logging.getLogger(__name__)
@@ -197,51 +198,36 @@ class _InvocationTask:
 
 
 class _InvocationThread:
-    """Keep thread-affine adapter state on one daemon thread."""
-
-    def __init__(self) -> None:
-        self._tasks: Queue[_InvocationTask] = Queue()
-        self._thread = Thread(
-            target=self._run,
-            name="hotcards-mflux-invocations",
-            daemon=True,
-        )
-        self._thread.start()
+    """Bridge worker lifecycle handling to the shared native-model thread."""
 
     def submit(self, task: _InvocationTask) -> None:
-        self._tasks.put(task)
-
-    def _run(self) -> None:
-        while True:
-            task = self._tasks.get()
-            try:
-                try:
-                    self._invoke(task)
-                except Exception:
-                    logger.exception("MFLUX invocation lifecycle cleanup failed")
-            finally:
-                del task
+        submit_model_invocation(partial(self._invoke, task))
 
     @staticmethod
     def _invoke(task: _InvocationTask) -> None:
+        outcome: _Success | _Error | None = None
         try:
             if task.cancellation.event.is_set():
                 return
             try:
-                outcome: _Success | _Error = _Success(
+                outcome = _Success(
                     task.operation(),
                     task.dispose_result,
                 )
             except Exception as error:
                 outcome = _Error(error)
-            if not isinstance(outcome, _Success) or task.cancellation.offer_success(outcome):
-                task.outcomes.put(outcome)
+            if isinstance(outcome, _Success) and not task.cancellation.offer_success(outcome):
+                outcome = None
         finally:
             try:
                 if task.invocation_finished is not None:
                     task.invocation_finished()
+            except Exception:
+                logger.exception("MFLUX invocation lifecycle cleanup failed")
             finally:
                 task.invocation_slots.release()
+        if outcome is not None:
+            task.outcomes.put(outcome)
 
 
 _PROCESS_MFLUX_INVOCATIONS = _InvocationThread()

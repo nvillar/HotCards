@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Annotated, Any, Literal
 from uuid import UUID, uuid4
@@ -27,7 +26,7 @@ from hotcards.domain.image_dimensions import (
     validate_exact_output_dimensions,
 )
 
-CURRENT_SCHEMA_VERSION = 14
+CURRENT_SCHEMA_VERSION = 15
 
 NonEmptyString = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 NormalizedCoordinate = Annotated[float, Field(ge=0.0, le=1.0)]
@@ -222,7 +221,7 @@ class Interaction(DomainModel):
 
 
 class ImageReferenceSnapshot(DomainModel):
-    """Exact source state used for one historical image generation."""
+    """Exact Reference state captured for one image generation."""
 
     card_id: UUID
     revision_id: UUID
@@ -392,17 +391,6 @@ class ImageSourceSnapshot(DomainModel):
     background_id: UUID
 
 
-class EditPreserveOptions(DomainModel):
-    """Legacy Edit preservation choices retained for stack compatibility."""
-
-    subject_identity: bool = False
-    pose_and_expression: bool = False
-    composition_and_framing: bool = False
-    background: bool = False
-    lighting_and_color: bool = False
-    existing_text_and_logos: bool = False
-
-
 class CurrentSourceSize(DomainModel):
     """Use a source image's exact decoded dimensions for derived output."""
 
@@ -440,10 +428,6 @@ GenerateOutputSize = Annotated[
     PresetOutputSize | ExactOutputSize,
     Field(discriminator="mode"),
 ]
-RefineOutputSize = Annotated[
-    CurrentSourceSize | PresetOutputSize,
-    Field(discriminator="mode"),
-]
 EditOutputSize = Annotated[
     CurrentSourceSize | PresetOutputSize,
     Field(discriminator="mode"),
@@ -451,7 +435,7 @@ EditOutputSize = Annotated[
 
 
 def selected_output_dimensions(
-    output_size: GenerateOutputSize | RefineOutputSize | EditOutputSize,
+    output_size: GenerateOutputSize | EditOutputSize,
     aspect_ratio: AspectRatio,
 ) -> tuple[int, int]:
     """Resolve exact output pixels from one strict size selection."""
@@ -482,26 +466,31 @@ class GenerateInputs(DomainModel):
 class AcceptedEdit(DomainModel):
     """One accepted Edit instruction retained in chronological order."""
 
-    instruction: NonEmptyString
-    preserve: EditPreserveOptions
-    expanded_prompt: NonEmptyString
+    instruction: str
+    expanded_prompt: str
+
+    @field_validator("instruction", "expanded_prompt")
+    @classmethod
+    def require_exact_nonblank_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("accepted Edit text must be nonempty")
+        return value
 
 
 class DerivedImageSourceSnapshot(ImageSourceSnapshot):
-    """Nonrecursive historical source facts, independent of retained assets."""
+    """Nonrecursive source facts, independent of retained assets."""
 
     width: PositiveInt
     height: PositiveInt
     seed: int
-    edit_lineage: tuple[AcceptedEdit, ...]
 
     def require_output_dimensions(
         self,
-        output_size: RefineOutputSize | EditOutputSize,
+        output_size: EditOutputSize,
         width: int,
         height: int,
     ) -> None:
-        """Validate derived output against captured, possibly legacy source pixels."""
+        """Validate derived output against the captured source pixels."""
         if isinstance(output_size, CurrentSourceSize):
             if (output_size.width, output_size.height) != (self.width, self.height):
                 raise ValueError("current-size derived output must match its source dimensions")
@@ -511,160 +500,113 @@ class DerivedImageSourceSnapshot(ImageSourceSnapshot):
             raise ValueError("preset derived output must have more pixels than its source")
 
 
-class RefineTransformation(StrEnum):
-    """Named Refine transformations with fixed production strengths."""
-
-    REIMAGINE = "reimagine"
-    BALANCED = "balanced"
-    PRESERVE = "preserve"
-
-    @property
-    def strength(self) -> float:
-        """Return the fixed MFLUX img2img strength for this transformation."""
-        return {
-            RefineTransformation.REIMAGINE: 0.25,
-            RefineTransformation.BALANCED: 0.50,
-            RefineTransformation.PRESERVE: 0.75,
-        }[self]
-
-
-class DirectGenerateProvenance(DomainModel):
-    """Provenance for current direct Description generation."""
+class GenerateOperation(DomainModel):
+    """The exact authoring choices accepted by Generate."""
 
     operation: Literal["generate"] = "generate"
     inputs: GenerateInputs
-    render_prompt: NonEmptyString
-    settings: ImageOperationSettings
 
 
-class LegacyGenerateProvenance(DomainModel):
-    """Current-schema preservation of an externally patched historical Generate."""
-
-    operation: Literal["legacy_generate"] = "legacy_generate"
-    render_prompt: NonEmptyString
-    references: tuple[ImageReferenceSnapshot, ...] = Field(default_factory=tuple)
-    settings: ImageOperationSettings
-
-
-class RefineProvenance(DomainModel):
-    """Provenance for an accepted Refine with self-contained historical facts."""
-
-    operation: Literal["refine"] = "refine"
-    source: DerivedImageSourceSnapshot
-    description: str
-    style: StyleSnapshot | None = None
-    render_prompt: NonEmptyString
-    output_size: RefineOutputSize
-    transformation: RefineTransformation
-    strength: FiniteFloat = Field(ge=0.0, le=1.0)
-    settings: ImageOperationSettings
-
-    @property
-    def edit_lineage(self) -> tuple[AcceptedEdit, ...]:
-        """Inherit the captured source's accepted edits unchanged."""
-        return self.source.edit_lineage
-
-    @model_validator(mode="after")
-    def require_refine_contract(self) -> RefineProvenance:
-        if self.strength != self.transformation.strength:
-            raise ValueError(
-                f"{self.transformation.value} Refine strength must be "
-                f"{self.transformation.strength:.2f}"
-            )
-        if self.settings.seed != self.source.seed:
-            raise ValueError("Refine must reuse its captured source seed")
-        self.source.require_output_dimensions(
-            self.output_size, self.settings.width, self.settings.height
-        )
-        return self
-
-
-class EditProvenance(DomainModel):
-    """Provenance for an accepted Edit with self-contained historical facts."""
+class EditOperation(DomainModel):
+    """The source and execution choices accepted by Edit."""
 
     operation: Literal["edit"] = "edit"
     source: DerivedImageSourceSnapshot
-    instruction: NonEmptyString
-    preserve: EditPreserveOptions
-    expanded_prompt: NonEmptyString
     output_size: EditOutputSize
     prompt_token_count: PositiveInt
     prompt_token_budget: Literal[512] = 512
-    settings: ImageOperationSettings
-
-    @property
-    def accepted_edit(self) -> AcceptedEdit:
-        """Return the accepted Edit represented by this operation."""
-        return AcceptedEdit(
-            instruction=self.instruction,
-            preserve=self.preserve,
-            expanded_prompt=self.expanded_prompt,
-        )
-
-    @property
-    def edit_lineage(self) -> tuple[AcceptedEdit, ...]:
-        """Append this accepted Edit to the one canonical inherited sequence."""
-        return (*self.source.edit_lineage, self.accepted_edit)
 
     @model_validator(mode="after")
-    def require_edit_contract(self) -> EditProvenance:
+    def require_edit_contract(self) -> EditOperation:
         if self.prompt_token_count > self.prompt_token_budget:
             raise ValueError("Edit prompt token count exceeds its 512-token budget")
-        self.source.require_output_dimensions(
-            self.output_size, self.settings.width, self.settings.height
-        )
         return self
 
 
-OriginalImageProvenance = Annotated[
-    DirectGenerateProvenance | LegacyGenerateProvenance | RefineProvenance | EditProvenance,
+OriginalImageOperation = Annotated[
+    GenerateOperation | EditOperation,
     Field(discriminator="operation"),
 ]
 
 
-class DuplicateProvenance(DomainModel):
+class DuplicateOperation(DomainModel):
     """Independent copy attribution without a live source dependency."""
 
     operation: Literal["duplicate"] = "duplicate"
     source: ImageSourceSnapshot
-    original_provenance: OriginalImageProvenance
-
-    @property
-    def settings(self) -> ImageOperationSettings:
-        """Expose the copied operation settings to provenance consumers."""
-        return self.original_provenance.settings
+    original_authoring: OriginalImageOperation | None
 
 
-ImageProvenance = Annotated[
-    DirectGenerateProvenance
-    | LegacyGenerateProvenance
-    | RefineProvenance
-    | EditProvenance
-    | DuplicateProvenance,
+ImageAuthoring = Annotated[
+    GenerateOperation | EditOperation | DuplicateOperation,
     Field(discriminator="operation"),
 ]
 
 
+class ImageOriginFacts(DomainModel):
+    """Exact image facts, independent of whether an authoring receipt is known."""
+
+    render_prompt: str
+    settings: ImageOperationSettings
+    edit_lineage: tuple[AcceptedEdit, ...] = Field(default_factory=tuple)
+
+    @field_validator("render_prompt")
+    @classmethod
+    def require_exact_nonblank_prompt(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("origin prompt must be nonempty")
+        return value
+
+
+class ImageProvenance(DomainModel):
+    """Shared image facts and an optional, strictly typed authoring receipt."""
+
+    origin: ImageOriginFacts
+    authoring: ImageAuthoring | None = None
+
+    @property
+    def settings(self) -> ImageOperationSettings:
+        """Expose the image's measured execution settings."""
+        return self.origin.settings
+
+    @model_validator(mode="after")
+    def require_consistent_authoring(self) -> ImageProvenance:
+        authoring = (
+            self.authoring.original_authoring
+            if isinstance(self.authoring, DuplicateOperation)
+            else self.authoring
+        )
+        if isinstance(authoring, GenerateOperation):
+            if self.origin.edit_lineage:
+                raise ValueError("Generate must start an empty Edit lineage")
+        elif isinstance(authoring, EditOperation):
+            if not self.origin.edit_lineage:
+                raise ValueError("Edit requires its accepted instruction in the lineage")
+            if self.origin.edit_lineage[-1].expanded_prompt != self.origin.render_prompt:
+                raise ValueError("Edit expanded prompt must match its exact origin prompt")
+            authoring.source.require_output_dimensions(
+                authoring.output_size, self.settings.width, self.settings.height
+            )
+        return self
+
+
 def original_image_provenance(
     provenance: ImageProvenance,
-) -> OriginalImageProvenance:
-    """Flatten duplicate attribution to the exact original image operation."""
-    if isinstance(provenance, DuplicateProvenance):
-        return provenance.original_provenance
+) -> ImageProvenance:
+    """Flatten duplicate attribution without changing the image's origin facts."""
+    if isinstance(provenance.authoring, DuplicateOperation):
+        return provenance.model_copy(update={"authoring": provenance.authoring.original_authoring})
     return provenance
 
 
 def image_edit_lineage(provenance: ImageProvenance) -> tuple[AcceptedEdit, ...]:
-    """Return the accepted Edit lineage inherited by a derived operation."""
-    original = original_image_provenance(provenance)
-    if isinstance(original, (RefineProvenance, EditProvenance)):
-        return original.edit_lineage
-    return ()
+    """Return the one canonical sequence of accepted authored instructions."""
+    return provenance.origin.edit_lineage
 
 
 def image_operation_settings(provenance: ImageProvenance) -> ImageOperationSettings:
     """Return the exact operation settings behind an image, flattening duplicates."""
-    return original_image_provenance(provenance).settings
+    return provenance.origin.settings
 
 
 class HotspotSet(DomainModel):
@@ -692,10 +634,13 @@ class GeneratedBackground(DomainModel):
 
     @model_validator(mode="after")
     def require_independent_source_background(self) -> GeneratedBackground:
-        original = original_image_provenance(self.provenance)
-        if isinstance(original, (RefineProvenance, EditProvenance)):
+        original = original_image_provenance(self.provenance).authoring
+        if isinstance(original, EditOperation):
             if original.source.background_id == self.id:
                 raise ValueError("derived source background identity must differ from its result")
+        if isinstance(self.provenance.authoring, DuplicateOperation):
+            if self.provenance.authoring.source.background_id == self.id:
+                raise ValueError("duplicate source background identity must differ from its result")
         return self
 
 
@@ -731,21 +676,9 @@ class CardRevision(DomainModel):
         return value.model_copy(deep=True) if value is not None else None
 
     @property
-    def image_path(self) -> str | None:
-        """Return the active background path for transitional callers."""
-        return self.background.image_path if self.background is not None else None
-
-    @property
     def provenance(self) -> ImageProvenance | None:
         """Return generated-image provenance when available."""
         return self.background.provenance if self.background is not None else None
-
-    @property
-    def created_at(self) -> datetime:
-        """Return background creation time, or a neutral value for blank revisions."""
-        if self.background is not None:
-            return self.background.created_at
-        return datetime.min.replace(tzinfo=UTC)
 
 
 class Card(DomainModel):
@@ -889,69 +822,49 @@ class Stack(DomainModel):
                         self.aspect_ratio,
                     )
                 provenance = revision.provenance
-                original_provenance = (
-                    original_image_provenance(provenance) if provenance is not None else None
+                authoring = (
+                    original_image_provenance(provenance).authoring
+                    if provenance is not None
+                    else None
                 )
-                if isinstance(original_provenance, DirectGenerateProvenance):
+                if isinstance(authoring, GenerateOperation):
                     if isinstance(
-                        original_provenance.inputs.output_size,
+                        authoring.inputs.output_size,
                         ExactOutputSize,
                     ):
                         validate_exact_output_dimensions(
-                            original_provenance.inputs.output_size.width,
-                            original_provenance.inputs.output_size.height,
+                            authoring.inputs.output_size.width,
+                            authoring.inputs.output_size.height,
                             self.aspect_ratio,
                         )
                     expected_dimensions = selected_output_dimensions(
-                        original_provenance.inputs.output_size,
+                        authoring.inputs.output_size,
                         self.aspect_ratio,
                     )
                     if (
-                        original_provenance.settings.width,
-                        original_provenance.settings.height,
+                        provenance.settings.width,
+                        provenance.settings.height,
                     ) != expected_dimensions:
                         raise ValueError(
                             "direct Generate dimensions must match its selected output size"
                         )
-                elif isinstance(original_provenance, RefineProvenance):
+                elif isinstance(authoring, EditOperation):
                     if isinstance(
-                        original_provenance.output_size,
+                        authoring.output_size,
                         CurrentSourceSize,
                     ):
                         validate_exact_output_dimensions(
-                            original_provenance.output_size.width,
-                            original_provenance.output_size.height,
+                            authoring.output_size.width,
+                            authoring.output_size.height,
                             self.aspect_ratio,
                         )
                     expected_dimensions = selected_output_dimensions(
-                        original_provenance.output_size,
+                        authoring.output_size,
                         self.aspect_ratio,
                     )
                     if (
-                        original_provenance.settings.width,
-                        original_provenance.settings.height,
-                    ) != expected_dimensions:
-                        raise ValueError(
-                            f"{original_provenance.operation.title()} dimensions must match "
-                            "its selected output size"
-                        )
-                elif isinstance(original_provenance, EditProvenance):
-                    if isinstance(
-                        original_provenance.output_size,
-                        CurrentSourceSize,
-                    ):
-                        validate_exact_output_dimensions(
-                            original_provenance.output_size.width,
-                            original_provenance.output_size.height,
-                            self.aspect_ratio,
-                        )
-                    expected_dimensions = selected_output_dimensions(
-                        original_provenance.output_size,
-                        self.aspect_ratio,
-                    )
-                    if (
-                        original_provenance.settings.width,
-                        original_provenance.settings.height,
+                        provenance.settings.width,
+                        provenance.settings.height,
                     ) != expected_dimensions:
                         raise ValueError("Edit dimensions must match its selected output size")
                 resolved_reference_ids: list[UUID] = []

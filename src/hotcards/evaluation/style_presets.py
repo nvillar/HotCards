@@ -36,6 +36,7 @@ from hotcards.evaluation.manifest import (
     default_environment,
 )
 from hotcards.evaluation.reports import create_contact_sheet
+from hotcards.evaluation.results import generation_record
 from hotcards.generation.errors import ImageGenerationError, ModelLoadError
 from hotcards.generation.image_generation import compose_generation_prompt
 from hotcards.generation.mflux_generator import (
@@ -167,22 +168,6 @@ def compose_style_preset_prompt(description: str, prompt_text: str | None) -> st
             ),
         )
     )
-
-
-def _generation_record(
-    generated: MfluxGenerateResult,
-    *,
-    output_dir: Path,
-) -> dict[str, object]:
-    return {
-        "status": "success",
-        "artifact_path": generated.output_path.relative_to(output_dir).as_posix(),
-        "load_duration_seconds": generated.load_duration_seconds,
-        "inference_duration_seconds": generated.generation_duration_seconds,
-        "serialization_duration_seconds": generated.serialization_duration_seconds,
-        "total_duration_seconds": generated.provenance.settings.duration_seconds,
-        "metadata": generated.provenance.model_dump(mode="json"),
-    }
 
 
 def _failure_record(error: BaseException) -> dict[str, object]:
@@ -386,7 +371,7 @@ def _execute_style_preset_evaluation(
                 )
                 try:
                     generated = generator.generate(request)
-                    generation = _generation_record(
+                    generation = generation_record(
                         generated,
                         output_dir=settings.output_dir,
                     )

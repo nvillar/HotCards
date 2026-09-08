@@ -3,21 +3,24 @@
 from __future__ import annotations
 
 import gc
+import logging
 import os
 import shutil
 import tempfile
 from collections.abc import Callable, Mapping
+from concurrent.futures import Future, TimeoutError
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from threading import Event, Lock
+from queue import Queue
+from threading import Event, Lock, Thread, current_thread
 from time import perf_counter
 from typing import Literal, Protocol, cast
 
 from PIL import Image, UnidentifiedImageError
-from pydantic import Field, FiniteFloat, model_validator
+from pydantic import Field, FiniteFloat, field_validator, model_validator
 
 from hotcards.domain.image_dimensions import (
     AspectRatio,
@@ -28,15 +31,16 @@ from hotcards.domain.models import (
     AcceptedEdit,
     CurrentSourceSize,
     DerivedImageSourceSnapshot,
-    DirectGenerateProvenance,
     DomainModel,
+    EditOperation,
     EditOutputSize,
-    EditPreserveOptions,
-    EditProvenance,
     ExactOutputSize,
     GenerateInputs,
+    GenerateOperation,
     GenerateOutputSize,
     ImageOperationSettings,
+    ImageOriginFacts,
+    ImageProvenance,
     NonEmptyString,
     PositiveInt,
     PresetOutputSize,
@@ -47,7 +51,111 @@ from hotcards.generation.errors import (
     ImageGenerationError,
     ModelLoadError,
 )
-from hotcards.generation.image_generation import EDIT_PROMPT_TOKEN_BUDGET
+from hotcards.generation.image_generation import (
+    EDIT_PROMPT_TOKEN_BUDGET,
+    compose_generation_prompt,
+)
+
+logger = logging.getLogger(__name__)
+
+
+class _ModelInvocationThread:
+    """One daemon owns native model loading and inference for app and evaluations."""
+
+    def __init__(self) -> None:
+        self._tasks: Queue[tuple[Callable[[], object], Future[object]]] = Queue()
+        self._state_lock = Lock()
+        self._pending = 0
+        self.thread = Thread(
+            target=self._run,
+            name="hotcards-model-invocations",
+            daemon=True,
+        )
+        self.thread.start()
+
+    def submit[T](self, operation: Callable[[], T]) -> Future[T]:
+        future: Future[T] = Future()
+        with self._state_lock:
+            self._pending += 1
+            self._tasks.put((operation, future))
+        return future
+
+    def release_when_idle(self, operation: Callable[[], None]) -> None:
+        if current_thread() is self.thread:
+            operation()
+            return
+        future: Future[object] = Future()
+        with self._state_lock:
+            was_idle = self._pending == 0
+            self._pending += 1
+            self._tasks.put((operation, future))
+        if was_idle:
+            future.result()
+        else:
+            future.add_done_callback(self._report_release_failure)
+
+    @staticmethod
+    def _report_release_failure(future: Future[object]) -> None:
+        try:
+            future.result()
+        except Exception:
+            logger.exception("Deferred model cache release failed")
+
+    def _run(self) -> None:
+        while True:
+            operation, future = self._tasks.get()
+            try:
+                if future.set_running_or_notify_cancel():
+                    try:
+                        result = operation()
+                    except BaseException as error:
+                        with self._state_lock:
+                            self._pending -= 1
+                        future.set_exception(error)
+                    else:
+                        with self._state_lock:
+                            self._pending -= 1
+                        future.set_result(result)
+                        del result
+                else:
+                    with self._state_lock:
+                        self._pending -= 1
+            finally:
+                del operation, future
+
+
+_MODEL_INVOCATIONS = _ModelInvocationThread()
+
+
+def submit_model_invocation[T](operation: Callable[[], T]) -> Future[T]:
+    """Queue work on the shared, stable native-model thread."""
+    return _MODEL_INVOCATIONS.submit(operation)
+
+
+def run_model_invocation[T](
+    operation: Callable[[], T],
+    *,
+    check_cancelled: Callable[[], None] | None = None,
+) -> T:
+    """Invoke synchronously; nested adapter calls stay on the owning thread."""
+    if check_cancelled is not None:
+        check_cancelled()
+    if current_thread() is _MODEL_INVOCATIONS.thread:
+        return operation()
+    future = submit_model_invocation(operation)
+    while True:
+        try:
+            return future.result(timeout=0.05)
+        except TimeoutError:
+            if future.done():
+                return future.result()
+            if check_cancelled is not None:
+                try:
+                    check_cancelled()
+                except Exception:
+                    if future.cancel():
+                        raise
+                    # Active native work must unwind before its caller can leave.
 
 
 class MfluxCallbackRegistryProtocol(Protocol):
@@ -252,6 +360,7 @@ class MfluxGenerateRequest(_MfluxRequest):
     inputs: GenerateInputs
     render_prompt: NonEmptyString
     seed: int
+    force_reload: bool = False
     reference_image_paths: tuple[Path, ...] = Field(
         default_factory=tuple,
         max_length=2,
@@ -260,6 +369,8 @@ class MfluxGenerateRequest(_MfluxRequest):
     @model_validator(mode="after")
     def require_generate_contract(self) -> MfluxGenerateRequest:
         self.require_dimensions(self.inputs.output_size)
+        if self.render_prompt != compose_generation_prompt(self.inputs):
+            raise ValueError("Generate prompt must match its exact authored inputs")
         if len(self.inputs.references) != len(self.reference_image_paths):
             raise ValueError("reference image paths must match captured reference inputs")
         return self
@@ -272,27 +383,34 @@ class MfluxEditRequest(_MfluxRequest):
     source: DerivedImageSourceSnapshot
     source_image_path: Path
     instruction: NonEmptyString
-    preserve: EditPreserveOptions
-    expanded_prompt: NonEmptyString
+    expanded_prompt: str
+    inherited_edit_lineage: tuple[AcceptedEdit, ...] = Field(default_factory=tuple)
     output_size: EditOutputSize
     seed: int
+
+    @field_validator("expanded_prompt")
+    @classmethod
+    def require_nonblank_expanded_prompt(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("expanded Edit prompt must be nonempty")
+        return value
 
     @property
     def accepted_edit(self) -> AcceptedEdit:
         return AcceptedEdit(
             instruction=self.instruction,
-            preserve=self.preserve,
             expanded_prompt=self.expanded_prompt,
         )
 
     @property
     def edit_lineage(self) -> tuple[AcceptedEdit, ...]:
-        return (*self.source.edit_lineage, self.accepted_edit)
+        return (*self.inherited_edit_lineage, self.accepted_edit)
 
     @model_validator(mode="after")
     def require_edit_contract(self) -> MfluxEditRequest:
         self.require_dimensions(self.output_size)
         self.source.require_output_dimensions(self.output_size, self.width, self.height)
+        _require_authored_edit_prompt(self.accepted_edit)
         return self
 
 
@@ -324,6 +442,7 @@ class _MfluxResult(DomainModel):
 
     output_path: Path
     output_ownership: MfluxOutputOwnership
+    cache_reused: bool = False
     queue_duration_seconds: float = Field(ge=0.0)
     load_duration_seconds: float = Field(ge=0.0)
     generation_duration_seconds: float = Field(ge=0.0)
@@ -341,11 +460,56 @@ class _MfluxResult(DomainModel):
 
 
 class MfluxGenerateResult(_MfluxResult):
-    provenance: DirectGenerateProvenance
+    provenance: ImageProvenance
+
+    @model_validator(mode="after")
+    def require_generate_authoring(self) -> MfluxGenerateResult:
+        authoring = self.provenance.authoring
+        if not isinstance(authoring, GenerateOperation):
+            raise ValueError("MFLUX Generate results require Generate authoring")
+        if self.provenance.origin.render_prompt != compose_generation_prompt(authoring.inputs):
+            raise ValueError("Generate result prompt must match its exact authored inputs")
+        _require_result_dimensions(self.provenance.settings, authoring.inputs.output_size)
+        return self
 
 
 class MfluxEditResult(_MfluxResult):
-    provenance: EditProvenance
+    provenance: ImageProvenance
+
+    @model_validator(mode="after")
+    def require_edit_authoring(self) -> MfluxEditResult:
+        authoring = self.provenance.authoring
+        if not isinstance(authoring, EditOperation):
+            raise ValueError("MFLUX Edit results require Edit authoring")
+        _require_authored_edit_prompt(self.provenance.origin.edit_lineage[-1])
+        _require_result_dimensions(self.provenance.settings, authoring.output_size)
+        return self
+
+
+def _require_authored_edit_prompt(edit: AcceptedEdit) -> None:
+    instruction = edit.instruction.strip()
+    if edit.instruction != instruction:
+        raise ValueError("new Edit instruction must be the exact trimmed authored text")
+    if edit.expanded_prompt != instruction and not (
+        edit.expanded_prompt.startswith(f"{instruction}\n\n")
+        and edit.expanded_prompt[len(instruction) + 2 :].strip()
+    ):
+        raise ValueError("Edit prompt must contain its exact instruction and optional Style text")
+
+
+def _require_result_dimensions(
+    settings: ImageOperationSettings,
+    output_size: GenerateOutputSize | EditOutputSize,
+) -> None:
+    dimensions = (settings.width, settings.height)
+    for aspect_ratio in AspectRatio:
+        try:
+            validate_exact_output_dimensions(*dimensions, aspect_ratio)
+        except ValueError:
+            continue
+        if dimensions == selected_output_dimensions(output_size, aspect_ratio):
+            return
+    raise ValueError("result dimensions must match its selected output size and a supported aspect")
 
 
 type MfluxOperationResult = MfluxGenerateResult | MfluxEditResult
@@ -516,10 +680,17 @@ def _process_deferred_release_requests_locked() -> None:
 
 def _release_process_lock_after_deferred_requests() -> None:
     try:
-        _process_deferred_release_requests_locked()
-    finally:
+        while True:
+            _process_deferred_release_requests_locked()
+            with _RELEASE_REQUEST_LOCK:
+                if _DEFERRED_RELEASES:
+                    continue
+                _PROCESS_EXECUTION_LOCK.release()
+                return
+    except BaseException:
         with _RELEASE_REQUEST_LOCK:
             _PROCESS_EXECUTION_LOCK.release()
+        raise
 
 
 @dataclass(frozen=True, slots=True)
@@ -617,10 +788,16 @@ class MfluxGenerator:
         cancellation: MfluxCancellationToken | None = None,
     ) -> MfluxGenerateResult:
         """Execute plain or Reference-backed Generate."""
-        result = self._execute(
-            request,
-            progress=progress,
-            cancellation=cancellation,
+        token = cancellation or MfluxCancellationToken()
+        started = perf_counter()
+        result = run_model_invocation(
+            lambda: self._execute(
+                request,
+                progress=progress,
+                cancellation=cancellation,
+                request_started=started,
+            ),
+            check_cancelled=lambda: token.raise_if_cancelled(request.operation),
         )
         assert isinstance(result, MfluxGenerateResult)
         return result
@@ -633,28 +810,37 @@ class MfluxGenerator:
         cancellation: MfluxCancellationToken | None = None,
     ) -> MfluxEditResult:
         """Execute one direct Flux2KleinEdit operation."""
-        result = self._execute(
-            request,
-            progress=progress,
-            cancellation=cancellation,
+        token = cancellation or MfluxCancellationToken()
+        started = perf_counter()
+        result = run_model_invocation(
+            lambda: self._execute(
+                request,
+                progress=progress,
+                cancellation=cancellation,
+                request_started=started,
+            ),
+            check_cancelled=lambda: token.raise_if_cancelled(request.operation),
         )
         assert isinstance(result, MfluxEditResult)
         return result
 
     def release(self) -> None:
-        """Release now when idle, or defer without waiting for active MFLUX."""
+        """Release on the owning thread, without waiting for active native work."""
         request = (self._model_factory, self._edit_model_factory)
         with _RELEASE_REQUEST_LOCK:
-            if not _PROCESS_EXECUTION_LOCK.acquire(blocking=False):
-                if not any(
-                    regular is request[0] and edit is request[1]
-                    for regular, edit in _DEFERRED_RELEASES
-                ):
-                    _DEFERRED_RELEASES.append(request)
+            if not any(
+                regular is request[0] and edit is request[1] for regular, edit in _DEFERRED_RELEASES
+            ):
+                _DEFERRED_RELEASES.append(request)
+            if _PROCESS_EXECUTION_LOCK.locked():
                 return
+        _MODEL_INVOCATIONS.release_when_idle(self._release_on_model_thread)
+
+    @staticmethod
+    def _release_on_model_thread() -> None:
+        _PROCESS_EXECUTION_LOCK.acquire()
         try:
             _process_deferred_release_requests_locked()
-            _release_requested_cache_locked((request,))
         finally:
             _release_process_lock_after_deferred_requests()
 
@@ -664,10 +850,10 @@ class MfluxGenerator:
         *,
         progress: MfluxProgressCallback | None,
         cancellation: MfluxCancellationToken | None,
+        request_started: float,
     ) -> MfluxOperationResult:
         operation = request.operation
         token = cancellation or MfluxCancellationToken()
-        request_started = perf_counter()
         token.raise_if_cancelled(operation)
         self._require_request_paths(request)
         while not _PROCESS_EXECUTION_LOCK.acquire(timeout=0.05):
@@ -679,12 +865,15 @@ class MfluxGenerator:
         owned_output: _OwnedOutput | None = None
         output_ownership: MfluxOutputOwnership | None = None
         prompt_token_count: int | None = None
+        result: MfluxOperationResult | None = None
         try:
             _process_deferred_release_requests_locked()
             token.raise_if_cancelled(operation)
             owned_output = _OwnedOutput.create(request.output_path, operation)
             load_started = perf_counter()
-            model, family = self._model_for(request)
+            if isinstance(request, MfluxGenerateRequest) and request.force_reload:
+                _release_cached_model_locked()
+            model, family, cache_reused = self._model_for(request)
             load_duration_seconds = perf_counter() - load_started
             token.raise_if_cancelled(operation)
             if isinstance(request, MfluxEditRequest):
@@ -766,9 +955,10 @@ class MfluxGenerator:
                 generated_at=generated_at,
                 duration_seconds=duration_seconds,
             )
-            return self._result(
+            result = self._result(
                 request,
                 output_ownership=output_ownership,
+                cache_reused=cache_reused,
                 settings=settings,
                 queue_duration_seconds=queue_duration_seconds,
                 load_duration_seconds=load_duration_seconds,
@@ -786,15 +976,27 @@ class MfluxGenerator:
             _release_cached_model_locked()
             raise error from None
         finally:
-            if progress_callback is not None:
-                progress_callback.clear_context()
-            image = None
-            model = None
             try:
-                if owned_output is not None:
-                    owned_output.cleanup(operation)
-            finally:
-                _release_process_lock_after_deferred_requests()
+                try:
+                    if progress_callback is not None:
+                        progress_callback.clear_context()
+                finally:
+                    image = None
+                    model = None
+                    try:
+                        if owned_output is not None:
+                            owned_output.cleanup(operation)
+                    finally:
+                        _release_process_lock_after_deferred_requests()
+            except BaseException:
+                if output_ownership is not None:
+                    output_ownership.dispose()
+                raise
+            # Ownership is not transferred until every fallible finalizer succeeds.
+            if result is None and output_ownership is not None:
+                output_ownership.dispose()
+        assert result is not None
+        return result
 
     def _model_for(
         self,
@@ -802,6 +1004,7 @@ class MfluxGenerator:
     ) -> tuple[
         MfluxRegularModelProtocol | MfluxEditModelProtocol,
         _ModelFamily,
+        bool,
     ]:
         global _CACHED_MODEL
         family = self._family(request)
@@ -839,9 +1042,9 @@ class MfluxGenerator:
                 factory=factory,
                 model=model,
             )
-            return model, family
+            return model, family, False
         assert _CACHED_MODEL is not None
-        return _CACHED_MODEL.model, family
+        return _CACHED_MODEL.model, family, True
 
     @staticmethod
     def _progress_callback_for(
@@ -1012,6 +1215,7 @@ class MfluxGenerator:
         request: MfluxOperationRequest,
         *,
         output_ownership: MfluxOutputOwnership,
+        cache_reused: bool,
         settings: ImageOperationSettings,
         queue_duration_seconds: float,
         load_duration_seconds: float,
@@ -1022,6 +1226,7 @@ class MfluxGenerator:
         timing = {
             "output_path": request.output_path,
             "output_ownership": output_ownership,
+            "cache_reused": cache_reused,
             "queue_duration_seconds": queue_duration_seconds,
             "load_duration_seconds": load_duration_seconds,
             "generation_duration_seconds": generation_duration_seconds,
@@ -1034,23 +1239,28 @@ class MfluxGenerator:
                 )
             return MfluxEditResult(
                 **timing,
-                provenance=EditProvenance(
-                    source=request.source,
-                    instruction=request.instruction,
-                    preserve=request.preserve,
-                    expanded_prompt=request.expanded_prompt,
-                    output_size=request.output_size,
-                    prompt_token_count=prompt_token_count,
-                    prompt_token_budget=EDIT_PROMPT_TOKEN_BUDGET,
-                    settings=settings,
+                provenance=ImageProvenance(
+                    origin=ImageOriginFacts(
+                        settings=settings,
+                        render_prompt=request.expanded_prompt,
+                        edit_lineage=request.edit_lineage,
+                    ),
+                    authoring=EditOperation(
+                        source=request.source,
+                        output_size=request.output_size,
+                        prompt_token_count=prompt_token_count,
+                        prompt_token_budget=EDIT_PROMPT_TOKEN_BUDGET,
+                    ),
                 ),
             )
         return MfluxGenerateResult(
             **timing,
-            provenance=DirectGenerateProvenance(
-                inputs=request.inputs,
-                render_prompt=request.render_prompt,
-                settings=settings,
+            provenance=ImageProvenance(
+                origin=ImageOriginFacts(
+                    settings=settings,
+                    render_prompt=request.render_prompt,
+                ),
+                authoring=GenerateOperation(inputs=request.inputs),
             ),
         )
 
@@ -1076,4 +1286,6 @@ __all__ = [
     "MfluxOperationRequest",
     "MfluxOperationResult",
     "MfluxOutputOwnership",
+    "run_model_invocation",
+    "submit_model_invocation",
 ]
