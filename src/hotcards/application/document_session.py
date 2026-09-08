@@ -252,8 +252,6 @@ class DocumentSession(QObject):
         self.controller.detach_owned_assets()
         self._cleanup_released_assets()
         cleaned = not self._released_assets
-        if not cleaned:
-            self._released_assets.clear()
         self._emit_state()
         return cleaned
 
@@ -264,13 +262,13 @@ class DocumentSession(QObject):
         replace_document: bool,
     ) -> Stack:
         self._timer.stop()
-        self.controller.detach_owned_assets()
-        self._cleanup_released_assets()
-        if self._released_assets:
-            self._released_assets.clear()
-            raise DocumentSessionError(
-                self._error or "duplicate-owned assets could not be cleaned up"
-            )
+        # Binding has been validated. Cleanup cannot undo a history discard, so
+        # complete the binding and retain failed cleanup for a later retry.
+        self._executing_persisted_change = True
+        try:
+            self.controller.detach_owned_assets()
+        finally:
+            self._executing_persisted_change = False
         self._store = candidate.store
         self._pending_snapshot = None
         self._dirty = False
@@ -281,6 +279,7 @@ class DocumentSession(QObject):
             else self.controller.document
         )
         self.controller.register_owned_assets(candidate.owned_assets)
+        self._cleanup_released_assets()
         if replace_document:
             self.document_replaced.emit(document)
         self._emit_state()

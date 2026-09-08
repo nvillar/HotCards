@@ -1305,6 +1305,24 @@ class StackStore:
         duration_seconds: int,
     ) -> StoredSoundAsset:
         """Copy one validated generated WAV into its reserved bundle path."""
+        try:
+            return self._store_sound_asset(
+                source_path,
+                sound_id=sound_id,
+                asset_id=asset_id,
+                duration_seconds=duration_seconds,
+            )
+        except OSError as error:
+            raise StackStoreError(f"could not store sound asset {source_path}: {error}") from error
+
+    def _store_sound_asset(
+        self,
+        source_path: Path,
+        *,
+        sound_id: UUID,
+        asset_id: UUID,
+        duration_seconds: int,
+    ) -> StoredSoundAsset:
         if not 1 <= duration_seconds <= 30:
             raise StackStoreError("sound duration must be between 1 and 30 seconds")
         relative_path = _sound_asset_path(sound_id, asset_id)
@@ -1356,6 +1374,13 @@ class StackStore:
                 ) from error
             descriptors.callback(os.close, destination_fd)
             destination_stat = os.fstat(destination_fd)
+            stored = StoredSoundAsset(
+                relative_path=relative_path.as_posix(),
+                device=destination_stat.st_dev,
+                inode=destination_stat.st_ino,
+                directory_device=sound_directory_stat.st_dev,
+                directory_inode=sound_directory_stat.st_ino,
+            )
             try:
                 with (
                     os.fdopen(os.dup(source_fd), "rb") as source,
@@ -1364,23 +1389,33 @@ class StackStore:
                     shutil.copyfileobj(source, destination)
                     destination.flush()
                     os.fsync(destination.fileno())
+                self._validate_sound_file(
+                    destination_fd,
+                    source_path=relative_path.as_posix(),
+                    duration_seconds=duration_seconds,
+                )
+                current_source = os.fstat(source_fd)
+                if (
+                    source_stat.st_size,
+                    source_stat.st_mtime_ns,
+                ) != (current_source.st_size, current_source.st_mtime_ns):
+                    raise StackStoreError("generated sound changed while being copied")
                 for directory_fd in (sound_fd, sounds_fd, assets_fd, bundle_fd):
                     os.fsync(directory_fd)
-            except Exception:
-                _quarantine_owned_file_at(
-                    sound_fd,
-                    relative_path.name,
-                    device=destination_stat.st_dev,
-                    inode=destination_stat.st_ino,
-                )
+            except (OSError, StackStoreError) as error:
+                try:
+                    _quarantine_owned_file_at(
+                        sound_fd,
+                        relative_path.name,
+                        device=destination_stat.st_dev,
+                        inode=destination_stat.st_ino,
+                    )
+                except StackStoreError as cleanup_error:
+                    raise StackStoreTransactionError(
+                        error, (cleanup_error,), owned_asset=stored
+                    ) from error
                 raise
-            return StoredSoundAsset(
-                relative_path=relative_path.as_posix(),
-                device=destination_stat.st_dev,
-                inode=destination_stat.st_ino,
-                directory_device=sound_directory_stat.st_dev,
-                directory_inode=sound_directory_stat.st_ino,
-            )
+            return stored
 
     def store_sound_asset_and_save(
         self,
@@ -1420,53 +1455,53 @@ class StackStore:
                 asset_id=asset_id,
                 duration_seconds=duration_seconds,
             )
+
+            def require_owned_asset() -> None:
+                if (
+                    store.stored_sound_asset(
+                        asset.relative_path, sound_id=sound_id, asset_id=asset_id
+                    )
+                    != asset
+                ):
+                    raise StackStoreError("sound asset identity changed during the transaction")
+
             try:
-                store.save(changed_stack)
-            except Exception as operation_error:
-                rollback_errors: list[Exception] = []
-                try:
-                    observed_stack = store.load()
-                except Exception as observe_error:
-                    rollback_errors.append(observe_error)
-                    raise StackStoreTransactionError(
-                        operation_error,
-                        tuple(rollback_errors),
-                        persisted_stack=None,
-                        observed_stack=None,
-                        durability_indeterminate=True,
-                        owned_asset=asset,
-                    ) from operation_error
-                if observed_stack == changed_stack:
-                    raise StackStoreTransactionError(
-                        operation_error,
-                        persisted_stack=changed_stack,
-                        observed_stack=changed_stack,
-                        owned_asset=asset,
-                    ) from operation_error
-                if observed_stack != previous_stack:
-                    raise StackStoreTransactionError(
-                        operation_error,
-                        persisted_stack=observed_stack,
-                        observed_stack=observed_stack,
-                        durability_indeterminate=True,
-                        owned_asset=asset,
-                    ) from operation_error
+                store.save_stack_transaction(
+                    previous_stack, changed_stack, validate_assets=require_owned_asset
+                )
+            except StackStoreTransactionError as error:
+                rollback_errors = list(error.rollback_errors)
+                retained_asset: StoredSoundAsset | None = asset
+                if error.persisted_stack == previous_stack and not error.durability_indeterminate:
+                    try:
+                        store.remove_owned_sound_asset_if_unreferenced(
+                            asset,
+                            sound_id=sound_id,
+                            asset_id=asset_id,
+                            stack=previous_stack,
+                        )
+                        retained_asset = None
+                    except StackStoreError as cleanup_error:
+                        rollback_errors.append(cleanup_error)
+                raise StackStoreTransactionError(
+                    error.operation_error,
+                    tuple(rollback_errors),
+                    persisted_stack=error.persisted_stack,
+                    observed_stack=error.observed_stack,
+                    durability_indeterminate=error.durability_indeterminate,
+                    owned_asset=retained_asset,
+                ) from error
+            except StackStoreError as error:
+                # A preparation failure precedes the manifest transaction.
                 try:
                     store.remove_owned_sound_asset_if_unreferenced(
-                        asset,
-                        sound_id=sound_id,
-                        asset_id=asset_id,
-                        stack=previous_stack,
+                        asset, sound_id=sound_id, asset_id=asset_id, stack=previous_stack
                     )
-                except Exception as rollback_error:
-                    rollback_errors.append(rollback_error)
-                raise StackStoreTransactionError(
-                    operation_error,
-                    tuple(rollback_errors),
-                    persisted_stack=previous_stack,
-                    observed_stack=previous_stack,
-                    owned_asset=None if not rollback_errors else asset,
-                ) from operation_error
+                except StackStoreError as cleanup_error:
+                    raise StackStoreTransactionError(
+                        error, (cleanup_error,), owned_asset=asset
+                    ) from error
+                raise
             return asset
 
         return commit(self)
@@ -1479,22 +1514,31 @@ class StackStore:
         duration_seconds: int,
     ) -> None:
         try:
+            os.lseek(descriptor, 0, os.SEEK_SET)
             with os.fdopen(os.dup(descriptor), "rb") as source:
                 with wave.open(source, "rb") as generated:
                     channels = generated.getnchannels()
                     sample_width = generated.getsampwidth()
                     sample_rate = generated.getframerate()
                     frame_count = generated.getnframes()
+                    if (channels, sample_width, sample_rate) != (2, 2, 44_100):
+                        raise StackStoreError(
+                            "generated sound must be 16-bit PCM stereo WAV at 44.1 kHz"
+                        )
+                    if frame_count != duration_seconds * sample_rate:
+                        raise StackStoreError(
+                            f"generated sound must contain exactly {duration_seconds} seconds"
+                        )
+                    remaining = frame_count
+                    while remaining:
+                        count = min(remaining, 16_384)
+                        if len(generated.readframes(count)) != count * channels * sample_width:
+                            raise StackStoreError("generated sound has a truncated PCM payload")
+                        remaining -= count
         except (EOFError, OSError, wave.Error) as error:
             raise StackStoreError(
                 f"could not decode generated sound {source_path}: {error}"
             ) from error
-        if (channels, sample_width, sample_rate) != (2, 2, 44_100):
-            raise StackStoreError("generated sound must be 16-bit PCM stereo WAV at 44.1 kHz")
-        if frame_count != duration_seconds * sample_rate:
-            raise StackStoreError(
-                f"generated sound must contain exactly {duration_seconds} seconds"
-            )
 
     def copy_image_asset_and_save(
         self,
@@ -1965,6 +2009,8 @@ class StackStore:
         self,
         previous_stack: Stack,
         changed_stack: Stack,
+        *,
+        validate_assets: Callable[[], None] | None = None,
     ) -> None:
         """Replace one manifest with durable rollback on any reported failure."""
         changed_payload = changed_stack.model_dump_json(indent=2).encode() + b"\n"
@@ -2014,6 +2060,8 @@ class StackStore:
                 changed_manifest_durable = True
 
             try:
+                if validate_assets is not None:
+                    validate_assets()
                 manifest_temporary_name = _write_manifest_at(
                     bundle_fd,
                     changed_payload,
@@ -2028,6 +2076,8 @@ class StackStore:
                     on_directory_fsynced=mark_changed_manifest_durable,
                 )
                 manifest_temporary_name = None
+                if validate_assets is not None:
+                    validate_assets()
                 if not changed_manifest_durable:
                     raise StackStoreError("duplicate manifest durability was not established")
             except Exception as operation_error:

@@ -3,7 +3,10 @@
 import errno
 import json
 import os
+import subprocess
+import sys
 import wave
+from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -39,7 +42,7 @@ from hotcards.storage.stack_store import (
 
 
 def _write_png(path: Path) -> None:
-    Image.new("RGB", (32, 24), "navy").save(path, format="PNG")
+    Image.new("RGB", (512, 384), "navy").save(path, format="PNG")
 
 
 def _write_wav(path: Path, *, duration_seconds: int = 2, channels: int = 2) -> None:
@@ -215,6 +218,75 @@ def test_sound_storage_rejects_wrong_audio_contract(tmp_path: Path) -> None:
             asset_id=uuid4(),
             duration_seconds=2,
         )
+
+
+def test_sound_storage_rejects_truncated_payload_before_and_after_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "sound.wav"
+    _write_wav(source)
+    store = StackStore(tmp_path / "Sounds.hotcards")
+    store.create(Stack(name="Sounds"))
+    complete = source.read_bytes()
+    source.write_bytes(complete[:-4])
+    with pytest.raises(StackStoreError, match="truncated PCM"):
+        store.store_sound_asset(source, sound_id=uuid4(), asset_id=uuid4(), duration_seconds=2)
+    source.write_bytes(complete)
+
+    def truncate_copy(source_file, destination_file) -> None:
+        destination_file.write(source_file.read()[:-4])
+
+    monkeypatch.setattr(stack_store_module.shutil, "copyfileobj", truncate_copy)
+    with pytest.raises(StackStoreError, match="truncated PCM"):
+        store.store_sound_asset(source, sound_id=uuid4(), asset_id=uuid4(), duration_seconds=2)
+    assert not list(store.bundle_path.rglob("*.wav"))
+
+
+@pytest.mark.parametrize("failures", [1, 3])
+def test_sound_manifest_fsync_failure_is_never_reported_as_committed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failures: int
+) -> None:
+    source = tmp_path / "sound.wav"
+    _write_wav(source)
+    store = StackStore(tmp_path / "Sounds.hotcards")
+    before = Stack(name="Sounds")
+    store.create(before)
+    sound_id, asset_id = uuid4(), uuid4()
+    after = before.model_copy(update={"sounds": (_generated_sound(sound_id, asset_id),)})
+    real_fsync = os.fsync
+    bundle_stat = store.bundle_path.stat()
+    replaced = False
+    failed = 0
+
+    def checkpoint(name: str) -> None:
+        nonlocal replaced
+        if name == "manifest-replaced":
+            replaced = True
+
+    def fail_fsync(descriptor: int) -> None:
+        nonlocal failed
+        current = os.fstat(descriptor)
+        if replaced and current.st_ino == bundle_stat.st_ino and failed < failures:
+            failed += 1
+            raise OSError("manifest fsync interrupted")
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(stack_store_module, "_io_checkpoint", checkpoint)
+    monkeypatch.setattr(stack_store_module.os, "fsync", fail_fsync)
+    with pytest.raises(StackStoreTransactionError) as caught:
+        store.store_sound_asset_and_save(
+            source,
+            sound_id=sound_id,
+            asset_id=asset_id,
+            duration_seconds=2,
+            previous_stack=before,
+            changed_stack=after,
+        )
+    assert failed == failures
+    assert caught.value.persisted_stack != after
+    assert store.load() == before
+    assert caught.value.durability_indeterminate == (failures == 3)
+    assert bool(list(store.bundle_path.rglob("*.wav"))) == (failures == 3)
 
 
 def test_owned_sound_is_removed_only_after_all_references_leave(tmp_path: Path) -> None:
@@ -611,12 +683,34 @@ def test_source_revalidation_rejects_fifo_without_blocking(tmp_path: Path) -> No
     logical_source.unlink()
     os.mkfifo(logical_source)
 
-    with pytest.raises(StackStoreError, match="no longer a regular file"):
-        store.require_image_asset_unchanged(
-            snapshot,
-            card_id=card_id,
-            asset_id=asset_id,
-        )
+    # A lost O_NONBLOCK flag must fail this test instead of hanging pytest.
+    script = """
+import sys
+from pathlib import Path
+from uuid import UUID
+from hotcards.storage.stack_store import StackStore, StackStoreError, StoredImageSnapshot
+snapshot = StoredImageSnapshot(**__import__('json').loads(sys.argv[2]))
+try:
+    StackStore(Path(sys.argv[1])).require_image_asset_unchanged(
+        snapshot, card_id=UUID(sys.argv[3]), asset_id=UUID(sys.argv[4]))
+except StackStoreError as error:
+    assert 'no longer a regular file' in str(error), str(error)
+else:
+    raise AssertionError('FIFO was accepted')
+"""
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            script,
+            str(store.bundle_path),
+            json.dumps(asdict(snapshot), default=str),
+            str(card_id),
+            str(asset_id),
+        ],
+        check=True,
+        timeout=5,
+    )
 
     assert snapshot.dispose()
 
@@ -827,8 +921,9 @@ def test_clone_to_creates_independent_bundle_with_referenced_assets(tmp_path: Pa
     image_path = stack.cards[0].revisions[0].image_path
     assert image_path is not None
     assert copied_store.asset_path(image_path).is_file()
-    copied_store.asset_path(image_path).unlink()
-    assert original.asset_path(image_path).is_file()
+    original_bytes = original.asset_path(image_path).read_bytes()
+    copied_store.asset_path(image_path).write_bytes(b"independent replacement")
+    assert original.asset_path(image_path).read_bytes() == original_bytes
 
 
 def test_external_image_and_manifest_commit_as_one_transaction(

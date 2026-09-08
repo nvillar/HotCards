@@ -1270,7 +1270,8 @@ def test_history_cleanup_refuses_foreign_replacement_at_owned_path(
     assert duplicate_background is not None
     duplicate_path = session.store.asset_path(duplicate_background.image_path)
     assert controller.undo_if_current(change.token)
-    duplicate_path.unlink()
+    owned_backup = duplicate_path.with_suffix(".retained")
+    duplicate_path.rename(owned_backup)
     duplicate_path.write_bytes(b"foreign replacement")
 
     controller.execute(RenameCardCommand(card_id=source.id, name="Renamed"))
@@ -1280,4 +1281,7 @@ def test_history_cleanup_refuses_foreign_replacement_at_owned_path(
     assert duplicate_path.read_bytes() == b"foreign replacement"
     assert source_path.is_file()
     assert not session.close_history()
+    assert not session.close_history()
+    duplicate_path.unlink()
+    owned_backup.rename(duplicate_path)
     assert session.close_history()

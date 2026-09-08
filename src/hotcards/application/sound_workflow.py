@@ -19,10 +19,12 @@ from hotcards.application.document_controller import (
     DocumentController,
     DocumentMutationBlockedError,
     OwnedSoundAsset,
+    UndoToken,
 )
 from hotcards.application.document_session import (
     DocumentSession,
     DocumentSessionError,
+    DocumentSessionState,
 )
 from hotcards.application.workers import AdapterWorkers, WorkerFailure, WorkerOperation
 from hotcards.domain.models import (
@@ -65,6 +67,16 @@ class _SoundTarget:
     generated_asset_id: UUID | None
 
 
+@dataclass(slots=True)
+class _SoundCompletion:
+    store: StackStore
+    document: Stack
+    token: UndoToken | None = None
+
+    def record_history_token(self, token: UndoToken) -> None:
+        self.token = token
+
+
 class SoundWorkflow(QObject):
     """Coordinate one Stable Audio generation and persisted catalog replacement."""
 
@@ -94,6 +106,8 @@ class SoundWorkflow(QObject):
         self._operation: WorkerOperation | None = None
         self._cancellation: StableAudioCancellation | None = None
         self._temporary_path: Path | None = None
+        self._pending_completion: _SoundCompletion | None = None
+        self.session.state_changed.connect(self._session_state_changed)
 
     @property
     def is_active(self) -> bool:
@@ -103,6 +117,10 @@ class SoundWorkflow(QObject):
         """Start one generation from the current persisted Sound authoring fields."""
         if self.is_active:
             raise SoundWorkflowError("another sound generation is already running")
+        if self.controller.mutation_blocked:
+            raise SoundWorkflowError(
+                self.controller.mutation_blocked_reason or "save the stack before generating"
+            )
         store = self.session.store
         if store is None:
             raise SoundWorkflowError("the stack must be saved before generating a Sound")
@@ -229,31 +247,65 @@ class SoundWorkflow(QObject):
                 raise
             owned_assets.append(_owned_sound(store, target.sound_id, asset_id, stored))
 
-        previous_token = self.controller.current_undo_token
-        try:
-            changed = self.session.execute_persisted(
+        completion = _SoundCompletion(store=store, document=command.apply(before))
+
+        def accept() -> None:
+            nonlocal before
+            if not self.session.flush():
+                raise SoundWorkflowError(
+                    self.session.state.error or "the current stack could not be saved"
+                )
+            if request_id != self._request_id or not self._target_is_current(target):
+                raise SoundWorkflowError("the Sound or stack changed before acceptance")
+            before = self.controller.document
+            completion.document = command.apply(before)
+            self.session.execute_persisted(
                 command,
                 persist=persist,
                 owned_assets=owned_assets,
+                on_recorded=completion.record_history_token,
             )
+
+        try:
+            store.run_locked(accept)
         except (
             CommandError,
             DocumentMutationBlockedError,
             DocumentSessionError,
+            SoundWorkflowError,
             StackStoreError,
             ValidationError,
         ) as error:
-            if self.controller.document != before:
+            if completion.token is not None:
+                self._publish_completion(completion)
+            elif self.controller.mutation_blocked:
+                self._pending_completion = completion
                 self.document_changed.emit(self.controller.document)
             self._fail(str(error))
             return
-        current_token = self.controller.current_undo_token
-        self.document_changed.emit(changed)
-        if current_token is not None and current_token != previous_token:
-            self.change_applied.emit("Sound generated", current_token)
-        self._temporary_path = None
-        _dispose_result(result)
+        self._publish_completion(completion)
         self._finish()
+
+    def _session_state_changed(self, state: object) -> None:
+        pending = self._pending_completion
+        if pending is None or not isinstance(state, DocumentSessionState):
+            return
+        if self.session.store is not pending.store:
+            self._pending_completion = None
+        elif pending.token is not None:
+            self._pending_completion = None
+            self._publish_completion(pending)
+
+    def _publish_completion(self, completion: _SoundCompletion) -> None:
+        token = completion.token
+        if (
+            self.session.store is not completion.store
+            or token is None
+            or token not in self.controller.retained_history_tokens
+        ):
+            return
+        self.document_changed.emit(self.controller.document)
+        self.change_applied.emit("Sound generated", token)
 
     def _generation_failed(self, request_id: UUID, failure: object) -> None:
         if request_id != self._request_id:
@@ -298,7 +350,10 @@ class SoundWorkflow(QObject):
         self._cancellation = None
         self._temporary_path = None
         if path is not None:
-            path.unlink(missing_ok=True)
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as error:
+                self.failed.emit(f"could not remove temporary Sound output: {error}")
         if cancelled:
             self.cancelled.emit()
         self.finished.emit()

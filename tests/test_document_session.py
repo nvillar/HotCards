@@ -849,6 +849,42 @@ def test_save_as_clears_history_that_can_reference_uncloned_assets(
     assert not controller.can_redo
 
 
+def test_binding_completes_and_retains_failed_asset_cleanup_for_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, stack, image_path = _owned_bundle(tmp_path, name="Original", operation="generate")
+    controller = DocumentController(Stack(name="Welcome"))
+    session = DocumentSession(controller)
+    session.open(store.bundle_path)
+    card = stack.cards[0]
+    controller.execute(
+        ReplaceRevisionBackgroundCommand(
+            card_id=card.id, revision_id=card.active_revision.id, background=None
+        )
+    )
+    assert session.flush()
+    assert image_path.exists()  # Still reachable through Undo.
+    candidate = Stack(name="Next")
+    candidate_store = StackStore(tmp_path / "Next.hotcards")
+    candidate_store.create(candidate)
+    real_remove = StackStore.remove_owned_image_asset_if_unreferenced
+
+    def fail_cleanup(*_args: object, **_kwargs: object) -> bool:
+        raise StackStoreError("cleanup temporarily unavailable")
+
+    monkeypatch.setattr(StackStore, "remove_owned_image_asset_if_unreferenced", fail_cleanup)
+    assert session.open(candidate_store.bundle_path) == candidate
+    assert controller.document == candidate
+    assert not controller.can_undo
+    assert session.state.bundle_path == candidate_store.bundle_path
+    assert "cleanup temporarily unavailable" in (session.state.error or "")
+    assert image_path.exists()
+    monkeypatch.setattr(StackStore, "remove_owned_image_asset_if_unreferenced", real_remove)
+    assert session.flush()
+    assert not image_path.exists()
+    assert session.state.error is None
+
+
 def test_create_can_recover_empty_bundle_left_by_failed_attempt(tmp_path: Path) -> None:
     controller = DocumentController(Stack(name="Welcome"))
     session = DocumentSession(controller)
