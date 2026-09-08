@@ -5,9 +5,6 @@ import pytest
 from hotcards.domain.geometry import (
     PolygonIssueCode,
     hit_test_interactions,
-    model_coordinate_to_normalized,
-    model_point_to_document,
-    normalized_coordinate_to_model,
     point_in_polygon,
     polygon_signed_area,
     validate_polygon,
@@ -42,27 +39,6 @@ def interaction(label: str, polygon: Polygon) -> Interaction:
 
 def issue_codes(points: tuple[tuple[float, float], ...]) -> set[PolygonIssueCode]:
     return {issue.code for issue in validate_polygon(points)}
-
-
-def test_model_coordinate_conversion_clamps_and_round_trips() -> None:
-    assert model_coordinate_to_normalized(-10) == 0.0
-    assert model_coordinate_to_normalized(500) == 0.5
-    assert model_coordinate_to_normalized(1200) == 1.0
-    assert normalized_coordinate_to_model(-0.5) == 0
-    assert normalized_coordinate_to_model(0.5) == 500
-    assert normalized_coordinate_to_model(1.5) == 1000
-    assert model_point_to_document(250, 750) == Point(x=0.25, y=0.75)
-
-    for model_coordinate in (0, 1, 499, 500, 999, 1000):
-        normalized = model_coordinate_to_normalized(model_coordinate)
-        assert normalized_coordinate_to_model(normalized) == model_coordinate
-
-
-def test_coordinate_conversion_rejects_invalid_extent() -> None:
-    with pytest.raises(ValueError, match="positive"):
-        model_coordinate_to_normalized(1, extent=0)
-    with pytest.raises(ValueError, match="positive"):
-        normalized_coordinate_to_model(0.5, extent=-1)
 
 
 @pytest.mark.parametrize(

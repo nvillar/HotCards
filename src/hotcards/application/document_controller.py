@@ -112,7 +112,7 @@ class DocumentController:
     @property
     def document(self) -> Stack:
         """Return an independently owned snapshot of the current document."""
-        return validated_copy(self._document)
+        return self._document.model_copy(deep=True)
 
     @property
     def can_undo(self) -> bool:
@@ -244,8 +244,9 @@ class DocumentController:
     def replace_document(self, document: Stack) -> Stack:
         """Replace the active document and start a fresh session history."""
         self._require_mutation_allowed()
+        replacement = validated_copy(document)
         self.detach_owned_assets()
-        self._document = validated_copy(document)
+        self._document = replacement
         self._edit_drafts = self._document_edit_drafts(self._document)
         self._draft_undo_stacks.clear()
         self._draft_redo_stacks.clear()

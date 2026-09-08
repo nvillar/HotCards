@@ -103,11 +103,18 @@ def test_edit_prompt_injects_selected_style_after_the_authored_instruction() -> 
 
     result = compose_edit_prompt("Open the garden gate.", style)
 
-    assert result == (
-        "Open the garden gate.\n\n"
-        "Unless the Edit Instruction explicitly changes the visual treatment, "
-        "keep the result consistent with this selected Style:\n\n"
-        "Rendered with bold black ink contours."
+    assert result == ("Open the garden gate.\n\nRendered with bold black ink contours.")
+
+
+def test_edit_prompt_preserves_exact_style_text_without_rewriting() -> None:
+    style = StyleSnapshot(
+        style_id=uuid4(),
+        name="Ink",
+        prompt_text="  Crisp ink\nwith paper grain.  ",
+    )
+
+    assert compose_edit_prompt("  Open the gate  ", style) == (
+        "Open the gate\n\n  Crisp ink\nwith paper grain.  "
     )
 
 

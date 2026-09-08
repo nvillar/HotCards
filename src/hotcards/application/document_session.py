@@ -260,18 +260,17 @@ class DocumentSession(QObject):
         # complete the binding and retain failed cleanup for a later retry.
         self._executing_persisted_change = True
         try:
-            self.controller.detach_owned_assets()
+            if replace_document:
+                document = self.controller.replace_document(candidate.document)
+            else:
+                self.controller.detach_owned_assets()
+                document = self.controller.document
         finally:
             self._executing_persisted_change = False
         self._store = candidate.store
         self._pending_snapshot = None
         self._dirty = False
         self._error = None
-        document = (
-            self.controller.replace_document(candidate.document)
-            if replace_document
-            else self.controller.document
-        )
         self.controller.register_owned_assets(candidate.owned_assets)
         self._cleanup_released_assets()
         if replace_document:
@@ -308,9 +307,7 @@ class DocumentSession(QObject):
         if confirmed.stored_document != candidate.stored_document:
             raise DocumentSessionError("candidate stack document identity changed before binding")
         if confirmed.owned_assets != candidate.owned_assets:
-            raise DocumentSessionError(
-                "candidate duplicate-owned asset identity changed before binding"
-            )
+            raise DocumentSessionError("candidate generated-asset identity changed before binding")
         return confirmed
 
     def _bind_latest(

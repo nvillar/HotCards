@@ -439,6 +439,7 @@ def _quarantine_owned_file_at(
                     )
                     or removed
                 )
+        os.fsync(parent_fd)
         return removed
     except OSError as error:
         raise StackStoreError(f"could not clean up owned asset {name!r}: {error}") from error
@@ -507,7 +508,6 @@ def _remove_owned_file_candidate(
             os.close(quarantine_fd)
         try:
             os.unlink(quarantine_name, dir_fd=parent_fd)
-            os.fsync(parent_fd)
         except OSError as error:
             raise StackStoreError(
                 f"could not remove owned image quarantine {quarantine_name!r}: {error}"
@@ -544,6 +544,7 @@ def _quarantine_owned_directory_if_empty(
                 )
                 or removed
             )
+        os.fsync(parent_fd)
         return removed
     except OSError as error:
         raise StackStoreError(f"could not clean up owned directory {name!r}: {error}") from error
@@ -616,7 +617,6 @@ def _remove_owned_directory_candidate(
             os.close(quarantine_fd)
         try:
             os.rmdir(quarantine_name, dir_fd=parent_fd)
-            os.fsync(parent_fd)
         except OSError as error:
             raise StackStoreError(
                 f"could not remove owned directory quarantine {quarantine_name!r}: {error}"
@@ -1263,14 +1263,10 @@ class StackStore:
         source_path: Path,
         *,
         card_id: UUID,
-        asset_id: UUID | None = None,
-        revision_id: UUID | None = None,
+        asset_id: UUID,
     ) -> str:
         """Copy a validated PNG into its deterministic bundle-owned asset path."""
-        resolved_asset_id = asset_id if asset_id is not None else revision_id
-        if resolved_asset_id is None:
-            raise StackStoreError("an image asset ID is required")
-        relative_path = _image_asset_path(card_id, resolved_asset_id)
+        relative_path = _image_asset_path(card_id, asset_id)
         destination = self._resolved_asset(relative_path)
         if destination.exists():
             raise StackStoreError(f"refusing to overwrite existing image asset: {relative_path}")

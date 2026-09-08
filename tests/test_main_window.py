@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import os
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Event
@@ -11,16 +11,17 @@ from types import SimpleNamespace
 from typing import Any
 from uuid import UUID, uuid4
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-
 import pytest
 from PIL import Image
-from PySide6.QtCore import QObject, QSize, Qt, Signal
+from PySide6.QtCore import QCoreApplication, QEvent, QObject, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QCloseEvent, QColor, QKeySequence, QPixmap
+from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QDialog, QLabel
+from PySide6.QtWidgets import QApplication, QDialog, QLabel, QWidget
+from shiboken6 import isValid
 
 import hotcards.generation.mflux_generator as mflux_module
+import hotcards.storage.stack_store as stack_store_module
 import hotcards.ui.main_window as main_window_module
 from hotcards.application.applied_image_change import (
     AppliedImageChange,
@@ -38,6 +39,7 @@ from hotcards.application.commands import (
     DeleteRevisionCommand,
     DuplicateRevisionCommand,
     RenameCardCommand,
+    ReplaceGeneratedSoundCommand,
     ReplaceRevisionBackgroundCommand,
 )
 from hotcards.application.document_controller import DocumentController
@@ -54,29 +56,29 @@ from hotcards.application.workers import (
 from hotcards.domain.image_dimensions import AspectRatio, ResolutionTier
 from hotcards.domain.models import (
     HYPERCARD_STYLE_ID,
+    AcceptedEdit,
     Card,
     CardRevision,
     CurrentSourceSize,
     DerivedImageSourceSnapshot,
-    DirectGenerateProvenance,
     EditDraft,
-    EditPreserveOptions,
-    EditProvenance,
+    EditOperation,
     GeneratedBackground,
     GeneratedSoundAsset,
     GenerateInputs,
+    GenerateOperation,
     HotspotConditions,
     HotspotKeyChanges,
     HotspotSet,
     ImageOperationSettings,
+    ImageOriginFacts,
+    ImageProvenance,
     Interaction,
     KeyDefinition,
     NavigateAction,
     Point,
     Polygon,
     PresetOutputSize,
-    RefineProvenance,
-    RefineTransformation,
     ResolvedCardReference,
     SoundDefinition,
     SoundGenerationProvenance,
@@ -180,7 +182,6 @@ class FakeBackgroundWorkflow(QObject):
         self.active_operation: str | None = None
         self.generate_calls: list[object] = []
         self.edit_calls: list[tuple[object, EditDraft, object]] = []
-        self.clear_calls: list[object] = []
         self.cancel_calls = 0
         self.closed = False
 
@@ -195,9 +196,6 @@ class FakeBackgroundWorkflow(QObject):
         output_size: object,
     ) -> None:
         self.edit_calls.append((card_id, draft, output_size))
-
-    def clear_background(self, card_id: object) -> None:
-        self.clear_calls.append(card_id)
 
     def activate_revision(self, card_id: object, revision_id: object) -> None:
         changed = self.controller.execute(
@@ -278,8 +276,11 @@ class FakeSoundWorkflow(QObject):
             self.finished.emit()
 
 
-class FakeSoundPlayer:
+class FakeSoundPlayer(QObject):
+    playback_failed = Signal(str)
+
     def __init__(self) -> None:
+        super().__init__()
         self.played: list[Path] = []
         self.stop_calls = 0
 
@@ -290,9 +291,42 @@ class FakeSoundPlayer:
         self.stop_calls += 1
 
 
-@pytest.fixture(scope="module")
-def application() -> QApplication:
-    return QApplication.instance() or QApplication([])
+@pytest.fixture
+def application(
+    qt_application: QApplication, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[QApplication]:
+    resources: list[QObject] = []
+
+    def retain_instances(resource_type: type[QObject]) -> None:
+        initialize = resource_type.__init__
+
+        def initialize_owned(resource: QObject, *args: object, **kwargs: object) -> None:
+            initialize(resource, *args, **kwargs)
+            resources.append(resource)
+
+        monkeypatch.setattr(resource_type, "__init__", initialize_owned)
+
+    for resource_type in (MainWindow, CardSidebar, NewStackDialog, DocumentSession, AdapterWorkers):
+        retain_instances(resource_type)
+    try:
+        yield qt_application
+    finally:
+        for resource in reversed(resources):
+            if not isValid(resource):
+                continue
+            if isinstance(resource, QWidget):
+                if resource.parentWidget() is not None:
+                    continue
+                resource.close()
+            elif isinstance(resource, AdapterWorkers):
+                resource.shutdown(wait_milliseconds=1_000)
+            elif isinstance(resource, DocumentSession):
+                for timer in resource.findChildren(QTimer):
+                    timer.stop()
+                resource.controller.set_autosave_hook(None)
+                resource.controller.set_owned_asset_release_hook(None)
+            resource.deleteLater()
+            QCoreApplication.sendPostedEvents(resource, QEvent.Type.DeferredDelete)
 
 
 def _stack() -> Stack:
@@ -316,20 +350,20 @@ def _generated_background(
     return GeneratedBackground(
         id=asset_id,
         image_path=image_path,
-        provenance=DirectGenerateProvenance(
-            inputs=GenerateInputs(
-                description=description,
-            ),
-            render_prompt=description,
-            settings=ImageOperationSettings(
-                model_identifier="test",
-                mflux_version="test",
-                seed=1,
-                width=512,
-                height=384,
-                step_count=4,
-                generated_at=generated_at,
-                duration_seconds=1,
+        provenance=ImageProvenance(
+            authoring=GenerateOperation(inputs=GenerateInputs(description=description)),
+            origin=ImageOriginFacts(
+                render_prompt=description,
+                settings=ImageOperationSettings(
+                    model_identifier="test",
+                    mflux_version="test",
+                    seed=1,
+                    width=512,
+                    height=384,
+                    step_count=4,
+                    generated_at=generated_at,
+                    duration_seconds=1,
+                ),
             ),
         ),
         created_at=generated_at,
@@ -356,6 +390,13 @@ def _window(
         sound_player=sound_player,
         start_diagnostics=False,
     )
+    window.apply_availability_diagnostic(
+        AvailabilityDiagnostic(
+            adapter=AdapterKind.STABLE_AUDIO,
+            available=True,
+            message="Stable Audio is available.",
+        )
+    )
     return window, controller, workers, background
 
 
@@ -365,26 +406,32 @@ def _edited_background(card: Card, instruction: str) -> GeneratedBackground:
     assert background is not None
     settings = background.provenance.settings
     asset_id = uuid4()
+    expanded_prompt = f"{instruction}\n\nHidden Style addendum"
     return GeneratedBackground(
         id=asset_id,
         image_path=f"assets/cards/{card.id}/image-{asset_id}.png",
         created_at=settings.generated_at,
-        provenance=EditProvenance(
-            source=DerivedImageSourceSnapshot(
-                card_id=card.id,
-                revision_id=revision.id,
-                background_id=background.id,
-                width=settings.width,
-                height=settings.height,
-                seed=settings.seed,
-                edit_lineage=image_edit_lineage(background.provenance),
+        provenance=ImageProvenance(
+            origin=ImageOriginFacts(
+                render_prompt=expanded_prompt,
+                settings=settings.model_copy(update={"seed": settings.seed + 1}),
+                edit_lineage=(
+                    *image_edit_lineage(background.provenance),
+                    AcceptedEdit(instruction=instruction, expanded_prompt=expanded_prompt),
+                ),
             ),
-            instruction=instruction,
-            preserve=EditPreserveOptions(),
-            expanded_prompt=f"{instruction}\n\nHidden Style addendum",
-            output_size=CurrentSourceSize(width=settings.width, height=settings.height),
-            prompt_token_count=20,
-            settings=settings.model_copy(update={"seed": settings.seed + 1}),
+            authoring=EditOperation(
+                source=DerivedImageSourceSnapshot(
+                    card_id=card.id,
+                    revision_id=revision.id,
+                    background_id=background.id,
+                    width=settings.width,
+                    height=settings.height,
+                    seed=settings.seed,
+                ),
+                output_size=CurrentSourceSize(width=settings.width, height=settings.height),
+                prompt_token_count=20,
+            ),
         ),
     )
 
@@ -395,22 +442,27 @@ def _apply_edit_for_test(
     instruction: str,
 ) -> AppliedImageChange:
     card = next(card for card in controller.document.cards if card.id == card_id)
+    if card.active_revision.background is None:
+        asset_id = uuid4()
+        controller.execute(
+            ReplaceRevisionBackgroundCommand(
+                card_id=card.id,
+                revision_id=card.active_revision.id,
+                background=_generated_background(
+                    asset_id=asset_id,
+                    image_path=f"assets/cards/{card.id}/image-{asset_id}.png",
+                ),
+            )
+        )
+        card = next(card for card in controller.document.cards if card.id == card_id)
     submitted = controller.replace_edit_draft(
         card.id,
         card.active_revision.id,
         instruction,
     )
-    previous_revision = controller.document.cards[
-        next(
-            index
-            for index, candidate in enumerate(controller.document.cards)
-            if candidate.id == card.id
-        )
-    ].active_revision
-    background = _generated_background(
-        asset_id=uuid4(),
-        image_path=f"assets/cards/{card.id}/edited.png",
-    )
+    current = next(card for card in controller.document.cards if card.id == card_id)
+    previous_revision = current.active_revision
+    background = _edited_background(current, instruction.strip())
     controller.execute(
         ApplyEditResultCommand(
             card_id=card.id,
@@ -427,6 +479,37 @@ def _apply_edit_for_test(
         card_id=card.id,
         revision_id=previous_revision.id,
         previous_revision=previous_revision,
+    )
+
+
+def _apply_image_for_test(
+    controller: DocumentController,
+    card_id: UUID,
+    operation: ImageOperation | EditImageOperation,
+) -> AppliedImageChange:
+    if isinstance(operation, EditImageOperation):
+        return _apply_edit_for_test(controller, card_id, operation.instruction)
+    card = next(card for card in controller.document.cards if card.id == card_id)
+    asset_id = uuid4()
+    controller.execute(
+        ReplaceRevisionBackgroundCommand(
+            card_id=card.id,
+            revision_id=card.active_revision.id,
+            background=_generated_background(
+                asset_id=asset_id,
+                image_path=f"assets/cards/{card.id}/image-{asset_id}.png",
+                description=card.active_revision.description or "A courtyard",
+            ),
+        )
+    )
+    token = controller.current_undo_token
+    assert token is not None
+    return AppliedImageChange(
+        operation=operation,
+        token=token,
+        card_id=card.id,
+        revision_id=card.active_revision.id,
+        previous_revision=card.active_revision,
     )
 
 
@@ -523,15 +606,22 @@ def test_pending_durability_disables_utility_manager_mutations(
     application: QApplication,
 ) -> None:
     key = KeyDefinition(name="Old")
+    sound = SoundDefinition(name="Knock", prompt="A knock")
     window, controller, _workers, _background = _window(
-        Stack(name="Demo", keys=(key,), cards=(Card(name="Card"),))
+        Stack(name="Demo", keys=(key,), sounds=(sound,), cards=(Card(name="Card"),))
     )
     window._show_style_manager()
     window._show_key_manager()
+    window._show_sound_manager()
     style_manager = window.style_manager_window
     key_manager = window.key_manager_window
+    sound_manager = window.sound_manager_window
     assert style_manager is not None
     assert key_manager is not None
+    assert sound_manager is not None
+    sound_manager.prompt_edit.setPlainText("An unfinished sound prompt")
+    assert sound_manager.generate_button.isEnabled()
+    key_manager.activateWindow()
     key_manager.name_edit.setFocus()
     application.processEvents()
     key_manager.name_edit.setText("Draft")
@@ -560,6 +650,13 @@ def test_pending_durability_disables_utility_manager_mutations(
 
     assert not window.styles_button.isEnabled()
     assert not window.keys_button.isEnabled()
+    assert not window.sounds_button.isEnabled()
+    assert not sound_manager.add_button.isEnabled()
+    assert not sound_manager.name_edit.isEnabled()
+    assert not sound_manager.prompt_edit.isEnabled()
+    assert not sound_manager.duration_spin.isEnabled()
+    assert not sound_manager.generate_button.isEnabled()
+    assert sound_manager.prompt_edit.toPlainText() == "An unfinished sound prompt"
     assert not style_manager.add_button.isEnabled()
     assert not style_manager.name_edit.isEnabled()
     assert not key_manager.add_button.isEnabled()
@@ -569,6 +666,195 @@ def test_pending_durability_disables_utility_manager_mutations(
     window._close_utility_windows(commit_pending=False)
     window.close()
     application.processEvents()
+
+
+@pytest.mark.parametrize("manager_state", ("never-opened", "closed", "reopened"))
+def test_sound_completion_and_failure_are_owned_by_main_window(
+    application: QApplication, manager_state: str
+) -> None:
+    sound = SoundDefinition(name="Knock", prompt="A knock")
+    window, controller, _workers, _background = _window(
+        Stack(name="Sounds", cards=(Card(name="Card"),), sounds=(sound,))
+    )
+    if manager_state != "never-opened":
+        window._show_sound_manager()
+        manager = window.sound_manager_window
+        window._close_utility_windows()
+        QCoreApplication.sendPostedEvents(manager, QEvent.Type.DeferredDelete)
+    if manager_state == "reopened":
+        window._show_sound_manager()
+    asset_id = uuid4()
+    generated = GeneratedSoundAsset(
+        id=asset_id,
+        audio_path=f"assets/sounds/{sound.id}/sound-{asset_id}.wav",
+        provenance=SoundGenerationProvenance(
+            prompt=sound.prompt,
+            duration_seconds=sound.duration_seconds,
+            seed=17,
+            generation_duration_milliseconds=100,
+        ),
+        created_at=datetime.now(UTC),
+    )
+    changed = controller.execute(
+        ReplaceGeneratedSoundCommand(sound_id=sound.id, generated=generated)
+    )
+    token = controller.current_undo_token
+    workflow = window.sound_workflow
+    assert workflow is not None
+    workflow.document_changed.emit(changed)
+    workflow.change_applied.emit("Sound generated", token)
+    assert window._undo_notification_token == token
+    assert window.notification_bar.message_label.text() == "Sound generated"
+    if manager_state == "reopened":
+        assert window.sound_manager_window.preview_button.isEnabled()
+    assert controller.document.sound_by_id(sound.id).generated == generated
+    workflow.failed.emit("Decoder rejected the generated audio")
+    assert window.notification_bar.current_key == "sound-error"
+    assert "Decoder rejected" in window.notification_bar.current_notification.detail
+    assert controller.current_undo_token == token
+
+
+@pytest.mark.parametrize("image_available,sound_available", ((True, False), (False, True)))
+def test_image_and_sound_availability_gate_only_their_own_operations(
+    application: QApplication, image_available: bool, sound_available: bool
+) -> None:
+    window, _controller, _workers, _background = _window(
+        Stack(
+            name="Services",
+            cards=(Card(name="Card", revisions=(CardRevision(description="A scene"),)),),
+            sounds=(SoundDefinition(name="Knock", prompt="A knock"),),
+        )
+    )
+    window._show_sound_manager()
+    for adapter, available in (
+        (AdapterKind.MFLUX, image_available),
+        (AdapterKind.STABLE_AUDIO, sound_available),
+    ):
+        window.apply_availability_diagnostic(
+            AvailabilityDiagnostic(adapter, available, f"{adapter.value}: {available}")
+        )
+    assert window.inspector.generate_background_button.isEnabled() is image_available
+    assert window.sound_manager_window.generate_button.isEnabled() is sound_available
+    message = window.notification_bar.message_label.text()
+    assert message == ("Stable Audio unavailable" if image_available else "MFLUX unavailable")
+
+
+@pytest.mark.parametrize("player_kind", ("fake", "qt"))
+def test_async_sound_playback_errors_reach_global_notifications(
+    application: QApplication, player_kind: str
+) -> None:
+    if player_kind == "fake":
+        window, _controller, _workers, _background = _window()
+        player = window.sound_player
+        assert isinstance(player, FakeSoundPlayer)
+        player.playback_failed.emit("Audio device disconnected")
+    else:
+        window = MainWindow(
+            DocumentController(_stack()), FakeWorkers(), FakeSettings(), start_diagnostics=False
+        )
+        window.sound_player._player.errorOccurred.emit(
+            QMediaPlayer.Error.ResourceError, "Audio device disconnected"
+        )
+    assert window.notification_bar.current_key == "sound-playback"
+    assert window.notification_bar.current_notification.detail == "Audio device disconnected"
+
+
+@pytest.mark.parametrize("utilities_open", (False, True))
+def test_render_uses_one_authoritative_snapshot_and_inspector_change_renders_once(
+    application: QApplication, monkeypatch: pytest.MonkeyPatch, utilities_open: bool
+) -> None:
+    window, controller, _workers, _background = _window(
+        _stack().model_copy(
+            update={
+                "keys": (KeyDefinition(name="Gate key"),),
+                "sounds": (SoundDefinition(name="Knock", prompt="A knock"),),
+            }
+        )
+    )
+    if utilities_open:
+        window._show_style_manager()
+        window._show_key_manager()
+        window._show_sound_manager()
+    stale = controller.document
+    controller.execute(RenameCardCommand(card_id=stale.cards[0].id, name="Current"))
+    document_getter = DocumentController.document.fget
+    snapshots: list[None] = []
+    renders: list[Stack] = []
+    original_render = window.inspector.render
+
+    def counted_document(owner: DocumentController) -> Stack:
+        snapshots.append(None)
+        return document_getter(owner)
+
+    def counted_render(document: Stack, card_id: UUID | None, **kwargs: object) -> None:
+        renders.append(document)
+        original_render(document, card_id, **kwargs)
+
+    monkeypatch.setattr(DocumentController, "document", property(counted_document))
+    monkeypatch.setattr(window.inspector, "render", counted_render)
+    window.render_document(stale)
+    assert len(snapshots) == 1
+    assert len(renders) == 1
+    assert window.canvas_card_name.text() == "Current"
+    renders.clear()
+    window.inspector.description_edit.setPlainText("Updated Description")
+    assert window.inspector.commit_revision_metadata()
+    assert len(renders) == 1
+    assert renders[0].cards[0].active_revision.description == "Updated Description"
+
+
+def test_repeated_render_reuses_decoded_dimensions_but_rechecks_asset_identity(
+    application: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = StackStore(tmp_path / "Dimensions.hotcards")
+    card = Card(name="Card")
+    asset_id = uuid4()
+    source = tmp_path / "source.png"
+    Image.new("RGB", (512, 384), "navy").save(source)
+    image_path = store.store_image_asset(source, card_id=card.id, asset_id=asset_id)
+    revision = CardRevision(
+        description="A courtyard",
+        background=_generated_background(asset_id=asset_id, image_path=image_path),
+    )
+    card = card.model_copy(update={"revisions": (revision,), "active_revision_id": revision.id})
+    store.save(Stack(name="Dimensions", cards=(card,)))
+    controller = DocumentController(Stack(name="Welcome"))
+    session = DocumentSession(controller)
+    session.open(store.bundle_path)
+    decode = stack_store_module._validate_png_fd
+    decodes: list[None] = []
+
+    def counted_decode(fd: int, relative_path: str) -> tuple[int, int]:
+        decodes.append(None)
+        return decode(fd, relative_path)
+
+    monkeypatch.setattr(stack_store_module, "_validate_png_fd", counted_decode)
+    window = MainWindow(
+        controller,
+        FakeWorkers(),
+        FakeSettings(),
+        document_session=session,
+        background_workflow=FakeBackgroundWorkflow(controller),
+        start_diagnostics=False,
+    )
+    assert len(decodes) == 1
+    for _ in range(3):
+        window.render_document()
+    assert len(decodes) == 1
+    replacement = tmp_path / "replacement.png"
+    Image.new("RGB", (768, 576), "green").save(replacement)
+    replacement.replace(store.asset_path(image_path))
+    window.render_document()
+    assert len(decodes) == 2
+    assert window.inspector._image_source_size == (768, 576)
+    store.asset_path(image_path).unlink()
+    (store.bundle_path / image_path).symlink_to(source)
+    window.render_document()
+    assert len(decodes) == 2
+    assert window.inspector._image_source_size is None
+    assert "unavailable" in window.inspector.edit_output_error.text().lower()
+    (store.bundle_path / image_path).unlink()
+    source.replace(store.bundle_path / image_path)
 
 
 def test_key_manager_done_discards_invalid_name_and_notifies(
@@ -1014,81 +1300,6 @@ def test_hotspot_rule_editor_scrolls_without_growing_the_window(
     finally:
         window.close()
         application.processEvents()
-    assert window.revision_combo.width() >= (
-        window.revision_combo.fontMetrics().horizontalAdvance("0000")
-    )
-    assert window.add_revision_button.text() == "+"
-    assert window.delete_revision_button.text() == "−"
-    assert window.card_header.indexOf(window.delete_revision_button) < (
-        window.card_header.indexOf(window.add_revision_button)
-    )
-    assert window.overlay_label.text() == "Hotspots"
-    assert window.toolbar_leading_spacer.width() == 8
-    assert window.toolbar_trailing_spacer.width() == window.toolbar_leading_spacer.width()
-    assert window.mode_button.text() == "Run"
-    assert window.mode_button.toolTip() == "Switch to Run mode"
-    toolbar_actions = window.authoring_toolbar.actions()
-    assert toolbar_actions.index(window.back_button_action) < toolbar_actions.index(
-        window.restart_button_action
-    )
-    assert toolbar_actions.index(window.restart_button_action) < toolbar_actions.index(
-        window.run_overlay_separator
-    )
-    assert toolbar_actions.index(window.run_overlay_separator) < toolbar_actions.index(
-        window.overlay_label_action
-    )
-    assert toolbar_actions.index(window.overlay_label_action) < (
-        toolbar_actions.index(window.overlay_selector_action)
-    )
-    assert toolbar_actions.index(window.overlay_selector_action) < (
-        toolbar_actions.index(window.styles_button_action)
-    )
-    assert toolbar_actions.index(window.mode_button_action) < (
-        toolbar_actions.index(window.author_action_spacer_action)
-    )
-    assert toolbar_actions.index(window.author_action_spacer_action) < (
-        toolbar_actions.index(window.styles_button_action)
-    )
-    assert toolbar_actions.index(window.styles_button_action) < (
-        toolbar_actions.index(window.keys_button_action)
-    )
-    assert toolbar_actions.index(window.keys_button_action) < (
-        toolbar_actions.index(window.toolbar_trailing_spacer_action)
-    )
-    assert window.back_button.font().pointSizeF() == (window.mode_button.font().pointSizeF())
-    assert window.restart_button.font().pointSizeF() == (window.mode_button.font().pointSizeF())
-    assert window.back_button.sizeHint().height() >= (window.mode_button.sizeHint().height())
-    assert window.restart_button.sizeHint().height() >= (window.mode_button.sizeHint().height())
-    assert not window.run_controls_separator.isVisible()
-    assert not window.run_overlay_separator.isVisible()
-    assert not window.overlay_label_action.isVisible()
-    assert not window.overlay_selector_action.isVisible()
-    assert window.styles_button.text() == "Styles"
-    assert window.keys_button.text() == "Keys"
-    assert window.styles_button_action.isVisible()
-    assert window.keys_button_action.isVisible()
-    assert not hasattr(window, "document_status_label")
-    assert window.generation_progress_container.isHidden()
-    margins = window.generation_progress_layout.contentsMargins()
-    assert margins.left() == 8
-    assert margins.right() == 8
-    assert window.generation_progress_layout.indexOf(
-        window.generation_progress_bar
-    ) < window.generation_progress_layout.indexOf(window.cancel_generation_button)
-    cancel_spacing = window.generation_progress_layout.itemAt(
-        window.generation_progress_layout.indexOf(window.cancel_generation_button) - 1
-    ).spacerItem()
-    assert cancel_spacing is not None
-    assert cancel_spacing.sizeHint().width() == 8
-    assert window.cancel_generation_button.text() == "Cancel"
-    central_layout = window.centralWidget().layout()
-    assert central_layout is not None
-    assert central_layout.indexOf(window.pane_splitter) < (
-        central_layout.indexOf(window.notification_bar)
-    )
-    assert window.inspector.inspector_tabs.tabText(0) == "Generate"
-    assert not hasattr(window, "fit_canvas_button")
-    assert not hasattr(window, "clear_background_button")
 
 
 def test_card_browser_uses_thumbnails_and_compact_action_row(
@@ -1812,27 +2023,7 @@ def test_card_delete_keeps_independent_derived_backgrounds(
     )
     source_revision = CardRevision(background=source_background)
     source_card = Card(name="Source", revisions=(source_revision,))
-    derived_background = GeneratedBackground(
-        image_path="assets/cards/derived.png",
-        provenance=RefineProvenance(
-            source=DerivedImageSourceSnapshot(
-                card_id=source_card.id,
-                revision_id=source_revision.id,
-                background_id=source_background.id,
-                width=512,
-                height=384,
-                seed=source_background.provenance.settings.seed,
-                edit_lineage=(),
-            ),
-            description="A refined source image",
-            render_prompt="A refined source image",
-            output_size=CurrentSourceSize(width=512, height=384),
-            transformation=RefineTransformation.BALANCED,
-            strength=0.50,
-            settings=source_background.provenance.settings,
-        ),
-        created_at=datetime.now(UTC),
-    )
+    derived_background = _edited_background(source_card, "Open the door.")
     derived_card = Card(
         name="Derived",
         revisions=(CardRevision(background=derived_background),),
@@ -1847,17 +2038,6 @@ def test_card_delete_keeps_independent_derived_backgrounds(
     assert window.notification_bar.current_key != "card-error"
     controller.undo()
     assert controller.document.cards == (source_card, derived_card)
-
-
-def test_context_change_cancels_background_generation_without_prompt(
-    application: QApplication,
-) -> None:
-    window, _controller, _workers, background = _window()
-    background.busy = True
-
-    window._cancel_background_generation()
-    assert background.cancel_calls == 1
-    assert not background.busy
 
 
 def test_resolution_change_cancels_in_flight_generation(
@@ -1952,10 +2132,13 @@ def test_edit_draft_change_cancels_in_flight_work_without_losing_text(
     window.inspector.edit_instruction_edit.setPlainText("Keep the blue gate.")
 
     assert background.cancel_calls == 1
-    assert controller.edit_draft(
-        card.id,
-        card.active_revision.id,
-    ).instruction == "Keep the blue gate."
+    assert (
+        controller.edit_draft(
+            card.id,
+            card.active_revision.id,
+        ).instruction
+        == "Keep the blue gate."
+    )
 
 
 def test_successful_save_as_cancels_generation_and_expires_undo(
@@ -2002,12 +2185,13 @@ def test_successful_save_as_cancels_generation_and_expires_undo(
     assert window.notification_bar.current_key != "undo"
     assert not controller.can_undo
     assert controller.edit_draft(card.id, card.active_revision.id) == draft
-    assert StackStore(tmp_path / "Original.hotcards").load().cards[
-        0
-    ].active_revision.edit_draft == draft
-    assert StackStore(tmp_path / "Copy.hotcards").load().cards[
-        0
-    ].active_revision.edit_draft == draft
+    assert (
+        StackStore(tmp_path / "Original.hotcards").load().cards[0].active_revision.edit_draft
+        == draft
+    )
+    assert (
+        StackStore(tmp_path / "Copy.hotcards").load().cards[0].active_revision.edit_draft == draft
+    )
 
 
 def test_failed_authoring_commit_blocks_save_and_close(
@@ -2124,10 +2308,13 @@ def test_failed_edit_draft_flush_blocks_run_without_losing_the_draft(
     window.mode_button.click()
 
     assert not window._is_running
-    assert controller.edit_draft(
-        card.id,
-        card.active_revision.id,
-    ).instruction == "Keep this instruction."
+    assert (
+        controller.edit_draft(
+            card.id,
+            card.active_revision.id,
+        ).instruction
+        == "Keep this instruction."
+    )
     assert session.state.dirty
     assert window.notification_bar.message_label.text() == "Could Not Save Stack"
 
@@ -2663,6 +2850,19 @@ def test_completed_edit_clears_only_its_matching_instruction(
 ) -> None:
     window, controller, _workers, background = _window()
     card = controller.document.cards[0]
+    source_id = uuid4()
+    controller.execute(
+        ReplaceRevisionBackgroundCommand(
+            card_id=card.id,
+            revision_id=card.active_revision.id,
+            background=_generated_background(
+                asset_id=source_id,
+                image_path=f"assets/cards/{card.id}/image-{source_id}.png",
+            ),
+        )
+    )
+    card = controller.document.cards[0]
+    window.render_document()
     instruction = "Open the garden gate."
     window.inspector.set_edit_instruction(f"  {instruction}  ")
     window._edit_background(instruction, CurrentSourceSize(width=512, height=384))
@@ -2680,10 +2880,7 @@ def test_completed_edit_clears_only_its_matching_instruction(
         ApplyEditResultCommand(
             card_id=card.id,
             revision_id=current.id,
-            background=_generated_background(
-                asset_id=uuid4(),
-                image_path=f"assets/cards/{card.id}/edited.png",
-            ),
+            background=_edited_background(controller.document.cards[0], instruction),
             submitted_draft_generation_id=submitted.generation_id,
         )
     )
@@ -2789,6 +2986,11 @@ def test_applied_image_can_move_to_a_new_complete_version(
             UnresolvedCardReference(target_name="Former Reference"),
         ),
         generate_output_size=PresetOutputSize(tier=ResolutionTier.LARGE),
+        background=(
+            _generated_background(asset_id=uuid4(), image_path="assets/cards/source.png")
+            if isinstance(operation, EditImageOperation)
+            else None
+        ),
     )
     card = Card(name="Card", revisions=(original,))
     window, controller, _workers, background_workflow = _window(
@@ -2800,6 +3002,7 @@ def test_applied_image_can_move_to_a_new_complete_version(
         description=original.description,
     )
     if isinstance(operation, EditImageOperation):
+        background = _edited_background(card, operation.instruction)
         submitted = controller.replace_edit_draft(
             card.id,
             original.id,
@@ -2845,21 +3048,24 @@ def test_applied_image_can_move_to_a_new_complete_version(
     changed_card = controller.document.cards[0]
     assert len(changed_card.revisions) == 2
     assert changed_card.revisions[0].id == original.id
-    assert changed_card.revisions[0].background is None
+    assert changed_card.revisions[0].background == original.background
     assert changed_card.revisions[0].hotspot_set == original.hotspot_set
     assert changed_card.active_revision.id != original.id
     assert changed_card.active_revision.description == original.description
     assert changed_card.active_revision.hotspot_set == original.hotspot_set
     assert changed_card.active_revision.background == background
-    assert changed_card.revisions[0].model_copy(
-        update={"edit_draft": original.edit_draft}
-    ) == original
-    assert changed_card.active_revision.model_copy(
-        update={
-            "id": original.id,
-            "edit_draft": changed.cards[0].active_revision.edit_draft,
-        }
-    ) == changed.cards[0].active_revision
+    assert (
+        changed_card.revisions[0].model_copy(update={"edit_draft": original.edit_draft}) == original
+    )
+    assert (
+        changed_card.active_revision.model_copy(
+            update={
+                "id": original.id,
+                "edit_draft": changed.cards[0].active_revision.edit_draft,
+            }
+        )
+        == changed.cards[0].active_revision
+    )
     assert changed_card.active_revision.edit_draft.instruction == ""
     assert (
         changed_card.active_revision.edit_draft.generation_id
@@ -2935,10 +3141,13 @@ def test_focused_edit_instruction_routes_global_undo_and_redo_to_draft_history(
         QKeySequence(QKeySequence.StandardKey.Redo),
     )
     assert controller.current_undo_token == token
-    assert controller.edit_draft(
-        card.id,
-        card.active_revision.id,
-    ).instruction == "Open the gate."
+    assert (
+        controller.edit_draft(
+            card.id,
+            card.active_revision.id,
+        ).instruction
+        == "Open the gate."
+    )
     window.close()
     application.processEvents()
 
@@ -3089,10 +3298,7 @@ def test_edit_completion_and_undo_do_not_touch_unrelated_context(
             controller.edit_draft(first.id, unrelated_revision_id).instruction
             == "Other version draft"
         )
-        assert (
-            controller.edit_draft(first.id, first.active_revision.id).instruction
-            == instruction
-        )
+        assert controller.edit_draft(first.id, first.active_revision.id).instruction == instruction
     elif context == "card":
         window.undo()
         assert controller.edit_draft(other.id, other.active_revision.id).instruction == (
@@ -3120,14 +3326,7 @@ def test_image_actions_reject_stale_history_and_run_mode(
 ) -> None:
     window, controller, _workers, background = _window()
     card = controller.document.cards[0]
-    controller.execute(RenameCardCommand(card_id=card.id, name="Applied"))
-    change = AppliedImageChange(
-        token=controller.current_undo_token,
-        card_id=card.id,
-        revision_id=card.active_revision.id,
-        previous_revision=card.active_revision,
-        operation=operation,
-    )
+    change = _apply_image_for_test(controller, card.id, operation)
     background.image_applied.emit(change)
     if stale_reason == "command":
         controller.execute(RenameCardCommand(card_id=card.id, name="Newer"))
@@ -3151,15 +3350,8 @@ def test_version_checkpoint_preserves_card_selection_history(
 ) -> None:
     card, other = Card(name="Result"), Card(name="Selected")
     window, controller, _workers, background = _window(Stack(name="Stack", cards=(card, other)))
-    controller.execute(RenameCardCommand(card_id=card.id, name="Applied"))
     background.image_applied.emit(
-        AppliedImageChange(
-            token=controller.current_undo_token,
-            card_id=card.id,
-            revision_id=card.active_revision.id,
-            previous_revision=card.active_revision,
-            operation=ImageOperation("generate"),
-        )
+        _apply_image_for_test(controller, card.id, ImageOperation("generate"))
     )
     window._selected_card_id = other.id
     window.render_document()
@@ -3184,30 +3376,13 @@ def test_dismissing_image_result_keeps_it_on_current_version(
     original = CardRevision(description="A courtyard")
     card = Card(name="Card", revisions=(original,))
     window, controller, _workers, _background = _window(Stack(name="Demo", cards=(card,)))
-    background = _generated_background(
-        asset_id=uuid4(),
-        image_path=f"assets/cards/{card.id}/generated.png",
-        description=original.description,
-    )
-    changed = controller.execute(
-        ReplaceRevisionBackgroundCommand(
-            card_id=card.id,
-            revision_id=original.id,
-            background=background,
-        )
-    )
+    change = _apply_image_for_test(controller, card.id, operation)
+    changed = controller.document
+    background = changed.cards[0].active_revision.background
     window.render_document(changed)
     token = controller.current_undo_token
     assert token is not None
-    window._image_applied(
-        AppliedImageChange(
-            operation=operation,
-            token=token,
-            card_id=card.id,
-            revision_id=original.id,
-            previous_revision=original,
-        )
-    )
+    window._image_applied(change)
 
     window.notification_bar.dismiss_button.click()
 
@@ -3218,8 +3393,10 @@ def test_dismissing_image_result_keeps_it_on_current_version(
     assert controller.document == changed
     assert window._applied_image_change is None
     window.undo()
-    assert controller.document.cards[0].active_revision == original
-    assert window.inspector.edit_instruction_edit.toPlainText() == ""
+    assert controller.document.cards[0].active_revision == change.previous_revision
+    assert window.inspector.edit_instruction_edit.toPlainText() == (
+        operation.instruction if isinstance(operation, EditImageOperation) else ""
+    )
 
 
 def test_notification_undo_cannot_mutate_document_in_run_mode(
@@ -3453,6 +3630,8 @@ def test_hotspot_editing_is_scoped_to_hotspots_tab(
             image_asset_dimensions=lambda *_args, **_kwargs: (1024, 768),
         ),
         state=DocumentSessionState(bundle_path=None, dirty=False, error=None),
+        flush=lambda: True,
+        close_history=lambda: True,
     )
     window.render_document()
 
@@ -3514,6 +3693,8 @@ def test_image_operation_explicitly_cancels_and_blocks_hotspot_draft(
             image_asset_dimensions=lambda *_args, **_kwargs: (1024, 768),
         ),
         state=DocumentSessionState(bundle_path=None, dirty=False, error=None),
+        flush=lambda: True,
+        close_history=lambda: True,
     )
     window.render_document()
     window.apply_availability_diagnostic(

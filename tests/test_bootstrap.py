@@ -14,10 +14,11 @@ def test_evaluation_parser_uses_expected_program_name() -> None:
     assert build_parser().prog == "hotcards-eval"
 
 
-def test_application_uses_hotcards_identity_and_packaged_icon() -> None:
-    application = QApplication.instance() or QApplication([])
-
-    configure_application(application)
+def test_application_uses_hotcards_identity_and_packaged_icon(
+    qt_application: QApplication,
+) -> None:
+    application = qt_application
+    configure_application(qt_application)
 
     assert application.organizationName() == "HotCards"
     assert application.applicationName() == "HotCards"
@@ -31,7 +32,9 @@ def test_application_uses_hotcards_identity_and_packaged_icon() -> None:
     assert icon.pixelColor(512, 512).alpha() == 255
 
 
-def test_application_icon_pixmap_renders_at_device_resolution() -> None:
+def test_application_icon_pixmap_renders_at_device_resolution(
+    qt_application: QApplication,
+) -> None:
     pixmap = application_icon_pixmap(128, device_pixel_ratio=2.0)
 
     assert pixmap.width() == 256

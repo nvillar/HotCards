@@ -19,12 +19,14 @@ from hotcards.domain.models import (
     CURRENT_SCHEMA_VERSION,
     Card,
     CardRevision,
-    DirectGenerateProvenance,
     GeneratedBackground,
     GeneratedSoundAsset,
     GenerateInputs,
+    GenerateOperation,
     HotspotSet,
     ImageOperationSettings,
+    ImageOriginFacts,
+    ImageProvenance,
     Interaction,
     NavigateAction,
     Point,
@@ -84,21 +86,21 @@ def _generated_background(asset_id: UUID, image_path: str) -> GeneratedBackgroun
     return GeneratedBackground(
         id=asset_id,
         image_path=image_path,
-        provenance=DirectGenerateProvenance(
-            inputs=GenerateInputs(
-                description="A courtyard",
+        provenance=ImageProvenance(
+            origin=ImageOriginFacts(
+                render_prompt="A courtyard",
+                settings=ImageOperationSettings(
+                    model_identifier="test",
+                    mflux_version="test",
+                    seed=1,
+                    width=512,
+                    height=384,
+                    step_count=4,
+                    generated_at=generated_at,
+                    duration_seconds=1,
+                ),
             ),
-            render_prompt="A courtyard",
-            settings=ImageOperationSettings(
-                model_identifier="test",
-                mflux_version="test",
-                seed=1,
-                width=512,
-                height=384,
-                step_count=4,
-                generated_at=generated_at,
-                duration_seconds=1,
-            ),
+            authoring=GenerateOperation(inputs=GenerateInputs(description="A courtyard")),
         ),
         created_at=generated_at,
     )
@@ -111,7 +113,7 @@ def _stack_with_asset(store: StackStore, source: Path) -> Stack:
     image_path = store.store_image_asset(
         source,
         card_id=source_card_id,
-        revision_id=revision_id,
+        asset_id=revision_id,
     )
     interaction = Interaction(
         label="Garden gate",
@@ -162,7 +164,8 @@ def test_bundle_round_trip_preserves_document_and_relative_asset(tmp_path: Path)
     assert payload["aspect_ratio"] == "4:3"
     assert "canvas" not in payload
     assert (
-        payload["cards"][0]["revisions"][0]["background"]["provenance"]["operation"] == "generate"
+        payload["cards"][0]["revisions"][0]["background"]["provenance"]["authoring"]["operation"]
+        == "generate"
     )
 
 
@@ -438,6 +441,39 @@ def test_owned_sound_cleanup_retries_identity_bound_quarantine(
     )
     assert not list(store.bundle_path.rglob("*.tmp"))
     assert not store.asset_path(owned.relative_path).exists()
+
+
+def test_cleanup_retry_fsyncs_an_already_absent_owned_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "owned.png"
+    _write_png(path)
+    identity = path.stat()
+    parent = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    real_fsync = os.fsync
+    fsynced: list[int] = []
+
+    def fail_fsync(_descriptor: int) -> None:
+        raise OSError("directory fsync interrupted")
+
+    def record_fsync(descriptor: int) -> None:
+        fsynced.append(descriptor)
+        real_fsync(descriptor)
+
+    try:
+        monkeypatch.setattr(stack_store_module.os, "fsync", fail_fsync)
+        with pytest.raises(StackStoreError, match="directory fsync interrupted"):
+            stack_store_module._quarantine_owned_file_at(
+                parent, path.name, device=identity.st_dev, inode=identity.st_ino
+            )
+        assert not path.exists()
+        monkeypatch.setattr(stack_store_module.os, "fsync", record_fsync)
+        assert not stack_store_module._quarantine_owned_file_at(
+            parent, path.name, device=identity.st_dev, inode=identity.st_ino
+        )
+        assert fsynced == [parent]
+    finally:
+        os.close(parent)
 
 
 def test_failed_replace_preserves_active_stack_and_removes_temporary_file(
@@ -902,7 +938,7 @@ def test_save_requires_asset_path_to_match_card_and_revision_ids(tmp_path: Path)
     image_path = store.store_image_asset(
         source,
         card_id=wrong_card_id,
-        revision_id=revision_id,
+        asset_id=revision_id,
     )
     stack = Stack(
         name="Mismatch",
@@ -932,15 +968,15 @@ def test_store_image_asset_refuses_overwrite_and_invalid_content(
     card_id = uuid4()
     revision_id = uuid4()
 
-    store.store_image_asset(source, card_id=card_id, revision_id=revision_id)
+    store.store_image_asset(source, card_id=card_id, asset_id=revision_id)
 
     with pytest.raises(StackStoreError, match="overwrite"):
-        store.store_image_asset(source, card_id=card_id, revision_id=revision_id)
+        store.store_image_asset(source, card_id=card_id, asset_id=revision_id)
 
     invalid = tmp_path / "invalid.png"
     invalid.write_bytes(b"not an image")
     with pytest.raises(StackStoreError, match="decode"):
-        store.store_image_asset(invalid, card_id=card_id, revision_id=uuid4())
+        store.store_image_asset(invalid, card_id=card_id, asset_id=uuid4())
 
 
 def test_load_rejects_missing_unsupported_and_future_versions(
@@ -974,7 +1010,7 @@ def test_symlinked_asset_directory_cannot_escape_bundle(tmp_path: Path) -> None:
     _write_png(source)
 
     with pytest.raises(StackStoreError, match="outside"):
-        store.store_image_asset(source, card_id=card_id, revision_id=revision_id)
+        store.store_image_asset(source, card_id=card_id, asset_id=revision_id)
 
 
 def test_clone_to_creates_independent_bundle_with_referenced_assets(tmp_path: Path) -> None:

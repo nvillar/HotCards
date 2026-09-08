@@ -145,9 +145,9 @@ class _ControllerUtilityWindow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.resize(UTILITY_WINDOW_WIDTH, UTILITY_WINDOW_HEIGHT)
 
-    def set_mutation_allowed(self, allowed: bool) -> None:
+    def set_mutation_allowed(self, allowed: bool, document: Stack | None = None) -> None:
         self._mutation_allowed = allowed
-        self._update_enabled_state()
+        self._update_enabled_state(document)
 
     def _execute(
         self,
@@ -213,7 +213,7 @@ class _ControllerUtilityWindow(QWidget):
     def render(self, document: Stack) -> None:
         raise NotImplementedError
 
-    def _update_enabled_state(self) -> None:
+    def _update_enabled_state(self, document: Stack | None = None) -> None:
         raise NotImplementedError
 
 
@@ -350,7 +350,7 @@ class StyleManagerWindow(_ControllerUtilityWindow):
             )
         finally:
             self._rendering = False
-        self._update_enabled_state()
+        self._update_enabled_state(document)
 
     def commit_pending_edits(self, *, render_change: bool) -> bool:
         if self._discard_pending_on_close or self._rendering or self._selected_style_id is None:
@@ -487,7 +487,7 @@ class StyleManagerWindow(_ControllerUtilityWindow):
             undo_message="Style deleted",
         )
 
-    def _update_enabled_state(self) -> None:
+    def _update_enabled_state(self, document: Stack | None = None) -> None:
         selected = self._selected_style_id is not None
         enabled = self._mutation_allowed and selected
         self.style_list.setEnabled(self._mutation_allowed)
@@ -658,7 +658,7 @@ class KeyManagerWindow(_ControllerUtilityWindow):
             )
         finally:
             self._rendering = False
-        self._update_enabled_state()
+        self._update_enabled_state(document)
 
     def commit_pending_edits(self, *, render_change: bool) -> bool:
         if self._discard_pending_on_close or self._rendering or self._selected_key_id is None:
@@ -854,10 +854,9 @@ class KeyManagerWindow(_ControllerUtilityWindow):
             return
         key_id = self._selected_key_id
         key = self.controller.document.key_by_id(key_id)
-        if (
-            self._name_validation_error(key, self.name_edit.text()) is None
-            and not self.commit_pending_edits(render_change=False)
-        ):
+        if self._name_validation_error(
+            key, self.name_edit.text()
+        ) is None and not self.commit_pending_edits(render_change=False):
             return
         self._selected_key_id = None
         self._execute(
@@ -878,11 +877,12 @@ class KeyManagerWindow(_ControllerUtilityWindow):
         ):
             self.hotspot_usage_requested.emit(*value)
 
-    def _update_enabled_state(self) -> None:
+    def _update_enabled_state(self, document: Stack | None = None) -> None:
+        snapshot = document if document is not None else self.controller.document
         selected = self._selected_key_id is not None
         usages = (
             self.key_usages(
-                self.controller.document,
+                snapshot,
                 self._selected_key_id,
             )
             if self._selected_key_id is not None
@@ -922,6 +922,7 @@ class SoundManagerWindow(_ControllerUtilityWindow):
         self._draft_dirty = False
         self._generating_sound_id: UUID | None = None
         self._preview_token: UUID | None = None
+        self._generation_available = False
 
         layout = QVBoxLayout(self)
         self.placeholder = QLabel("No Sounds yet.")
@@ -1029,9 +1030,6 @@ class SoundManagerWindow(_ControllerUtilityWindow):
         self.usage_list.itemDoubleClicked.connect(lambda _item: self._show_usage())
         self.workflow.generation_started.connect(self._generation_started)
         self.workflow.sampling_progress.connect(self._sampling_progress)
-        self.workflow.document_changed.connect(self._workflow_document_changed)
-        self.workflow.change_applied.connect(self.change_applied)
-        self.workflow.failed.connect(lambda message: self._set_error(self.error_label, message))
         self.workflow.finished.connect(self._generation_finished)
         self.render(controller.document)
 
@@ -1096,7 +1094,7 @@ class SoundManagerWindow(_ControllerUtilityWindow):
             self._render_properties(document, sound, draft=draft)
         finally:
             self._rendering = False
-        self._update_enabled_state()
+        self._update_enabled_state(document)
 
     def commit_pending_edits(self, *, render_change: bool) -> bool:
         if (
@@ -1321,10 +1319,9 @@ class SoundManagerWindow(_ControllerUtilityWindow):
             return
         sound_id = self._selected_sound_id
         sound = self.controller.document.sound_by_id(sound_id)
-        if (
-            self._name_validation_error(sound, self.name_edit.text()) is None
-            and not self.commit_pending_edits(render_change=False)
-        ):
+        if self._name_validation_error(
+            sound, self.name_edit.text()
+        ) is None and not self.commit_pending_edits(render_change=False):
             return
         self._selected_sound_id = None
         self._stop_preview()
@@ -1335,7 +1332,11 @@ class SoundManagerWindow(_ControllerUtilityWindow):
         )
 
     def _generate(self) -> None:
-        if self._selected_sound_id is None or not self.commit_pending_edits(render_change=True):
+        if (
+            not self._generation_available
+            or self._selected_sound_id is None
+            or not self.commit_pending_edits(render_change=True)
+        ):
             return
         try:
             self.workflow.generate(self._selected_sound_id)
@@ -1358,11 +1359,6 @@ class SoundManagerWindow(_ControllerUtilityWindow):
         self.progress_bar.setVisible(False)
         self.cancel_button.setVisible(False)
         self.render(self.controller.document)
-
-    def _workflow_document_changed(self, document: object) -> None:
-        if isinstance(document, Stack):
-            self.document_changed.emit(document)
-            self.render(document)
 
     def _toggle_preview(self) -> None:
         if self._preview_token is not None:
@@ -1416,11 +1412,22 @@ class SoundManagerWindow(_ControllerUtilityWindow):
         ):
             self.hotspot_usage_requested.emit(*value)
 
-    def _update_enabled_state(self) -> None:
-        selected = self._selected_sound_id is not None
+    def set_generation_available(
+        self, available: bool, reason: str, document: Stack | None = None
+    ) -> None:
+        self._generation_available = available
+        self.generate_button.setToolTip("Generate Sound" if available else reason)
+        self._update_enabled_state(document)
+
+    def _update_enabled_state(self, document: Stack | None = None) -> None:
+        snapshot = document if document is not None else self.controller.document
+        sound = next(
+            (sound for sound in snapshot.sounds if sound.id == self._selected_sound_id),
+            None,
+        )
+        selected = sound is not None
         generating = self.workflow.is_active
-        sound = self.controller.document.sound_by_id(self._selected_sound_id) if selected else None
-        usages = self.sound_usages(self.controller.document, sound.id) if sound else []
+        usages = self.sound_usages(snapshot, sound.id) if sound else []
         can_edit = self._mutation_allowed and selected and not generating
         self.sound_list.setEnabled(self._mutation_allowed and not generating)
         self.add_button.setEnabled(self._mutation_allowed and not generating)
@@ -1428,7 +1435,9 @@ class SoundManagerWindow(_ControllerUtilityWindow):
         self.name_edit.setEnabled(can_edit)
         self.prompt_edit.setEnabled(can_edit)
         self.duration_spin.setEnabled(can_edit)
-        self.generate_button.setEnabled(can_edit and bool(self.prompt_edit.toPlainText().strip()))
+        self.generate_button.setEnabled(
+            can_edit and self._generation_available and bool(self.prompt_edit.toPlainText().strip())
+        )
         self.preview_button.setEnabled(sound is not None and sound.generated is not None)
         self.cancel_button.setEnabled(generating)
 

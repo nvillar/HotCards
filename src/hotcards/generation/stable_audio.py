@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gc
 import math
+import os
 import secrets
 import wave
 from collections.abc import Callable
@@ -17,6 +18,7 @@ import mlx.core as mx
 import numpy as np
 from huggingface_hub import hf_hub_download
 
+from hotcards.generation.mflux_generator import run_model_invocation
 from hotcards.vendor.stable_audio_3_mlx.dit_mlx import load_dit
 from hotcards.vendor.stable_audio_3_mlx.sa3_pipeline import (
     apply_prompt_padding,
@@ -168,38 +170,74 @@ class StableAudioGenerator:
             self._active_cancellation = cancellation
         started = monotonic()
         try:
-            weights = self._resolve_weights(local_files_only=False)
-            cancellation.raise_if_requested()
-            audio, seed = self._generate_audio(
-                request,
-                weights=weights,
-                cancellation=cancellation,
-                on_sampling_step=on_sampling_step,
+            return run_model_invocation(
+                lambda: self._generate(
+                    request,
+                    output_path,
+                    cancellation=cancellation,
+                    on_sampling_step=on_sampling_step,
+                    started=started,
+                ),
+                check_cancelled=cancellation.raise_if_requested,
             )
-            cancellation.raise_if_requested()
-            self._write_wav(output_path, audio)
-            return StableAudioResult(
-                output_path=output_path,
-                seed=seed,
-                generation_duration_milliseconds=round((monotonic() - started) * 1_000),
-            )
-        except StableAudioError:
-            raise
-        except OSError as error:
-            raise StableAudioError(
-                f"could not write generated sound: {error}",
-                kind=StableAudioFailureKind.OUTPUT,
-                cause=error,
-            ) from error
         finally:
             with self._active_lock:
                 if self._active_cancellation is cancellation:
                     self._active_cancellation = None
 
-    def _resolve_weights(self, *, local_files_only: bool) -> dict[str, Path]:
+    def _generate(
+        self,
+        request: StableAudioRequest,
+        output_path: Path,
+        *,
+        cancellation: StableAudioCancellation,
+        on_sampling_step: Callable[[int, int], None] | None,
+        started: float,
+    ) -> StableAudioResult:
+        cancellation.raise_if_requested()
+        weights = self._resolve_weights(
+            local_files_only=True,
+            cancellation=cancellation,
+        )
+        audio, seed = self._generate_audio(
+            request,
+            weights=weights,
+            cancellation=cancellation,
+            on_sampling_step=on_sampling_step,
+        )
+        cancellation.raise_if_requested()
+        identity: os.stat_result | None = None
+        try:
+            identity = self._write_wav(output_path, audio, cancellation=cancellation)
+            result = StableAudioResult(
+                output_path=output_path,
+                seed=seed,
+                generation_duration_milliseconds=round((monotonic() - started) * 1_000),
+            )
+            cancellation.raise_if_requested()
+            return result
+        except BaseException as error:
+            if identity is not None:
+                _dispose_owned_wav(output_path, identity)
+            if isinstance(error, StableAudioError) or not isinstance(error, Exception):
+                raise
+            raise StableAudioError(
+                f"could not write generated sound: {error}",
+                kind=StableAudioFailureKind.OUTPUT,
+                cause=error,
+            ) from error
+
+    def _resolve_weights(
+        self,
+        *,
+        local_files_only: bool,
+        cancellation: StableAudioCancellation | None = None,
+    ) -> dict[str, Path]:
         resolved: dict[str, Path] = {}
         try:
             for filename in _WEIGHT_FILENAMES:
+                if cancellation is not None:
+                    cancellation.raise_if_requested()
                 resolved[filename] = Path(
                     self._download(
                         repo_id=self._repository,
@@ -207,6 +245,10 @@ class StableAudioGenerator:
                         local_files_only=local_files_only,
                     )
                 )
+                if cancellation is not None:
+                    cancellation.raise_if_requested()
+        except StableAudioCancelled:
+            raise
         except Exception as error:
             raise StableAudioError(
                 "Stable Audio 3 Small-SFX weights are not available",
@@ -229,29 +271,41 @@ class StableAudioGenerator:
             1,
             math.ceil(duration * STABLE_AUDIO_SAMPLE_RATE / _SAMPLES_PER_LATENT),
         )
+        kind = StableAudioFailureKind.MODEL_LOAD
+        failure: StableAudioError | None = None
         try:
+            cancellation.raise_if_requested()
             encoder = T5Gemma.from_npz(str(weights["MLX/t5gemma_f16.npz"]))
+            cancellation.raise_if_requested()
+            kind = StableAudioFailureKind.GENERATION
             embeddings, mask = encoder.encode([request.prompt], max_len=256)
+            cancellation.raise_if_requested()
             mx.eval(embeddings, mask)
             cancellation.raise_if_requested()
 
+            kind = StableAudioFailureKind.MODEL_LOAD
             padding, seconds_embedder = load_conditioner_from_npz(
                 str(weights["MLX/dit_sm-sfx_f16.npz"]),
                 prefix="cond.",
             )
+            cancellation.raise_if_requested()
+            kind = StableAudioFailureKind.GENERATION
             padded = apply_prompt_padding(
                 embeddings.astype(dtype),
                 mask,
                 padding.astype(dtype),
             )
+            cancellation.raise_if_requested()
             seconds = seconds_embedder(duration).astype(dtype)
+            cancellation.raise_if_requested()
             cross_attention = mx.concatenate([padded, seconds], axis=1)
             global_conditioning = seconds[:, 0, :]
             mx.eval(cross_attention, global_conditioning)
-            del encoder, embeddings, mask, padding, padded, seconds, seconds_embedder
+            encoder = embeddings = mask = padding = padded = seconds = seconds_embedder = None
             _free_mlx_memory()
             cancellation.raise_if_requested()
 
+            kind = StableAudioFailureKind.MODEL_LOAD
             model = load_dit(
                 str(weights["MLX/dit_sm-sfx_f16.npz"]),
                 T_lat=latent_length,
@@ -259,23 +313,29 @@ class StableAudioGenerator:
                 compile_=False,
                 num_steps=STABLE_AUDIO_STEPS,
             )
+            cancellation.raise_if_requested()
+            kind = StableAudioFailureKind.GENERATION
             seed = request.seed if request.seed is not None else secrets.randbits(32)
             noise = mx.random.normal(
                 (1, 256, latent_length),
                 dtype=dtype,
                 key=mx.random.key(seed),
             )
+            cancellation.raise_if_requested()
             mx.eval(noise)
+            cancellation.raise_if_requested()
             sigmas = build_pingpong_schedule(
                 STABLE_AUDIO_STEPS,
                 sigma_max=1.0,
                 use_logsnr_shift=True,
             )
+            cancellation.raise_if_requested()
 
             def sampling_step(step: int, total: int) -> None:
                 cancellation.raise_if_requested()
                 if on_sampling_step is not None:
                     on_sampling_step(step, total)
+                cancellation.raise_if_requested()
 
             latents = _sample_latents(
                 model,
@@ -285,56 +345,91 @@ class StableAudioGenerator:
                 sigmas,
                 seed=seed + 1,
                 on_step=sampling_step,
+                cancellation=cancellation,
             )
+            cancellation.raise_if_requested()
             mx.eval(latents)
-            del model, noise, sigmas, cross_attention, global_conditioning
+            model = noise = sigmas = cross_attention = global_conditioning = None
             _free_mlx_memory()
             cancellation.raise_if_requested()
 
+            kind = StableAudioFailureKind.MODEL_LOAD
             decoder = load_same_s_decoder(
                 str(weights["MLX/same_s_decoder_f32.npz"]),
                 dtype=mx.float32,
                 compile_=False,
             )
+            cancellation.raise_if_requested()
+            kind = StableAudioFailureKind.GENERATION
+
+            def decode(latent_chunk: mx.array) -> mx.array:
+                cancellation.raise_if_requested()
+                decoded = decoder(latent_chunk)
+                cancellation.raise_if_requested()
+                mx.eval(decoded)
+                cancellation.raise_if_requested()
+                return decoded
+
             latents = latents.astype(mx.float32)
             if latent_length > 12:
-                patches = decode_chunked(decoder, latents, 8, 2)
+                patches = decode_chunked(decode, latents, 8, 2)
             elif latent_length % 2 == 0:
-                patches = decoder(latents)
+                patches = decode(latents)
             elif latent_length > 6:
-                patches = decode_chunked(decoder, latents, 2, 2)
+                patches = decode_chunked(decode, latents, 2, 2)
             else:
                 even_latents = mx.concatenate([latents, latents[..., -1:]], axis=-1)
-                patches = decoder(even_latents)[..., : latent_length * 16]
+                patches = decode(even_latents)[..., : latent_length * 16]
+            cancellation.raise_if_requested()
             mx.eval(patches)
             cancellation.raise_if_requested()
 
             audio = patched_decode(patches, patch_size=256, channels=STABLE_AUDIO_CHANNELS)
+            cancellation.raise_if_requested()
             mx.eval(audio)
+            cancellation.raise_if_requested()
             audio_array = np.array(audio.astype(mx.float32))[0]
+            cancellation.raise_if_requested()
             sample_count = round(duration * STABLE_AUDIO_SAMPLE_RATE)
             return audio_array[..., :sample_count], seed
-        except StableAudioError:
-            raise
+        except StableAudioError as error:
+            failure = error
+            error.__traceback__ = None
+            raise error from None
         except Exception as error:
-            kind = (
-                StableAudioFailureKind.MODEL_LOAD
-                if "model" not in locals()
-                else StableAudioFailureKind.GENERATION
-            )
-            raise StableAudioError(
+            failure = StableAudioError(
                 f"Stable Audio generation failed: {error}",
                 kind=kind,
                 cause=error,
-            ) from error
+            )
+            raise failure from error
         finally:
-            _free_mlx_memory()
+            encoder = model = decoder = decode = None
+            even_latents = None
+            embeddings = mask = padding = padded = seconds = seconds_embedder = None
+            cross_attention = global_conditioning = noise = sigmas = None
+            latents = patches = audio = None
+            try:
+                _free_mlx_memory()
+            except Exception as error:
+                if failure is None:
+                    raise StableAudioError(
+                        f"could not release Stable Audio memory: {error}",
+                        kind=StableAudioFailureKind.GENERATION,
+                        cause=error,
+                    ) from error
+                failure.add_note(f"could not release Stable Audio memory: {error}")
 
     @staticmethod
-    def _write_wav(path: Path, audio: np.ndarray) -> None:
-        if audio.shape[0] != STABLE_AUDIO_CHANNELS:
+    def _write_wav(
+        path: Path,
+        audio: np.ndarray,
+        *,
+        cancellation: StableAudioCancellation | None = None,
+    ) -> os.stat_result:
+        if audio.ndim != 2 or audio.shape[0] != STABLE_AUDIO_CHANNELS:
             raise StableAudioError(
-                f"generated sound has {audio.shape[0]} channels; expected stereo",
+                "generated sound must contain two channels of samples",
                 kind=StableAudioFailureKind.OUTPUT,
             )
         if not np.isfinite(audio).all():
@@ -343,11 +438,34 @@ class StableAudioGenerator:
                 kind=StableAudioFailureKind.OUTPUT,
             )
         pcm = (np.clip(audio, -1.0, 1.0) * 32_767.0).astype(np.int16).T
-        with wave.open(str(path), "wb") as output:
-            output.setnchannels(STABLE_AUDIO_CHANNELS)
-            output.setsampwidth(STABLE_AUDIO_SAMPLE_WIDTH)
-            output.setframerate(STABLE_AUDIO_SAMPLE_RATE)
-            output.writeframes(pcm.tobytes())
+        if cancellation is not None:
+            cancellation.raise_if_requested()
+        identity: os.stat_result | None = None
+        try:
+            with path.open("xb") as owned:
+                identity = os.fstat(owned.fileno())
+                with wave.open(owned, "wb") as output:
+                    output.setnchannels(STABLE_AUDIO_CHANNELS)
+                    output.setsampwidth(STABLE_AUDIO_SAMPLE_WIDTH)
+                    output.setframerate(STABLE_AUDIO_SAMPLE_RATE)
+                    output.writeframes(pcm.tobytes())
+            if cancellation is not None:
+                cancellation.raise_if_requested()
+        except BaseException:
+            if identity is not None:
+                _dispose_owned_wav(path, identity)
+            raise
+        assert identity is not None
+        return identity
+
+
+def _dispose_owned_wav(path: Path, identity: os.stat_result) -> None:
+    try:
+        current = path.stat(follow_symlinks=False)
+        if (current.st_dev, current.st_ino) == (identity.st_dev, identity.st_ino):
+            path.unlink()
+    except FileNotFoundError:
+        pass
 
 
 def _free_mlx_memory() -> None:
@@ -366,6 +484,7 @@ def _sample_latents(
     *,
     seed: int,
     on_step: Callable[[int, int], None],
+    cancellation: StableAudioCancellation,
 ) -> mx.array:
     def model_function(latents: mx.array, timestep: mx.array) -> mx.array:
         return model(
@@ -382,4 +501,5 @@ def _sample_latents(
         sigmas,
         seed=seed,
         on_step=on_step,
+        before_step=lambda _step: cancellation.raise_if_requested(),
     )

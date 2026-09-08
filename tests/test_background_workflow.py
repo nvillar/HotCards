@@ -2,20 +2,25 @@
 
 from __future__ import annotations
 
+import gc
 import json
 import os
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
+from threading import Event
+from time import monotonic
 from types import SimpleNamespace
 from uuid import UUID, uuid4
-
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+from weakref import ref
 
 import pytest
 from PIL import Image
-from PySide6.QtCore import QObject, QSettings, Qt, Signal
+from pydantic import ValidationError
+from PySide6.QtCore import QCoreApplication, QEvent, QObject, QSettings, Qt, QTimer, Signal
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QWidget
+from shiboken6 import isValid
 
 import hotcards.storage.stack_store as stack_store_module
 from hotcards.application.applied_image_change import (
@@ -52,17 +57,20 @@ from hotcards.domain.image_dimensions import (
 )
 from hotcards.domain.models import (
     CURRENT_SCHEMA_VERSION,
+    AcceptedEdit,
     Card,
     CardRevision,
     CurrentSourceSize,
     DerivedImageSourceSnapshot,
-    DirectGenerateProvenance,
-    DuplicateProvenance,
+    DuplicateOperation,
     EditDraft,
-    EditProvenance,
+    EditOperation,
     ExactOutputSize,
     GeneratedBackground,
+    GenerateOperation,
     HotspotSet,
+    ImageOriginFacts,
+    ImageProvenance,
     ImageReferenceSnapshot,
     ImageSourceSnapshot,
     Interaction,
@@ -70,15 +78,12 @@ from hotcards.domain.models import (
     Point,
     Polygon,
     PresetOutputSize,
-    RefineProvenance,
-    RefineTransformation,
     ResolvedCardReference,
     Stack,
     UnresolvedCardReference,
     image_edit_lineage,
 )
-from hotcards.generation.errors import ImageGenerationCancelled
-from hotcards.generation.mflux_generator import MfluxGenerator
+from hotcards.generation.mflux_generator import MfluxGenerator, run_model_invocation
 from hotcards.storage.stack_store import (
     StackStore,
     StackStoreError,
@@ -89,15 +94,55 @@ from hotcards.ui.main_window import MainWindow
 from hotcards.ui.utility_windows import StyleManagerWindow
 
 
-@pytest.fixture(scope="module")
-def application() -> QApplication:
-    return QApplication.instance() or QApplication([])
+@pytest.fixture(autouse=True)
+def qt_resources(qt_application: QApplication, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    resources: list[QObject] = []
+
+    def retain_instances(resource_type: type[QObject]) -> None:
+        initialize = resource_type.__init__
+
+        def initialize_owned(resource: QObject, *args: object, **kwargs: object) -> None:
+            initialize(resource, *args, **kwargs)
+            resources.append(resource)
+
+        monkeypatch.setattr(resource_type, "__init__", initialize_owned)
+
+    for resource_type in (
+        DocumentSession,
+        BackgroundWorkflow,
+        AdapterWorkers,
+        MainWindow,
+        Inspector,
+    ):
+        retain_instances(resource_type)
+    try:
+        yield
+    finally:
+        for resource in reversed(resources):
+            if not isValid(resource):
+                continue
+            if isinstance(resource, QWidget):
+                if resource.parentWidget() is not None:
+                    continue
+                resource.close()
+            elif isinstance(resource, BackgroundWorkflow):
+                resource.close()
+            elif isinstance(resource, AdapterWorkers):
+                resource.shutdown(wait_milliseconds=1_000)
+            elif isinstance(resource, DocumentSession):
+                for timer in resource.findChildren(QTimer):
+                    timer.stop()
+                resource.controller.set_autosave_hook(None)
+                resource.controller.set_owned_asset_release_hook(None)
+            resource.deleteLater()
+            QCoreApplication.sendPostedEvents(resource, QEvent.Type.DeferredDelete)
 
 
 class FakeOperation(QObject):
     succeeded = Signal(object)
     failed = Signal(object)
     cancelled = Signal()
+    finished = Signal()
 
     def __init__(self, request_cancel: object = None) -> None:
         super().__init__()
@@ -110,11 +155,29 @@ class FakeOperation(QObject):
         return self.finished_state
 
     def cancel(self) -> None:
+        if self.finished_state:
+            return
         self.was_cancelled = True
         self.finished_state = True
         if callable(self.request_cancel):
             self.request_cancel()
         self.cancelled.emit()
+        self.finished.emit()
+
+    def succeed(self, result: object) -> bool:
+        if self.finished_state:
+            return False
+        self.finished_state = True
+        self.succeeded.emit(result)
+        self.finished.emit()
+        return True
+
+    def fail(self, error: object) -> None:
+        if self.finished_state:
+            return
+        self.finished_state = True
+        self.failed.emit(error)
+        self.finished.emit()
 
 
 class FakeWorkers:
@@ -122,6 +185,22 @@ class FakeWorkers:
         self.calls: list[object] = []
         self.operations: list[FakeOperation] = []
         self.disposers: list[object] = []
+
+    def complete(self) -> None:
+        handle = self.operations[-1]
+        if handle.is_finished:
+            return
+        operation = self.calls[-1]
+        disposer = self.disposers[-1]
+        assert callable(operation)
+        try:
+            result = operation()
+        except Exception as error:
+            handle.fail(error)
+            return
+        if not handle.succeed(result):
+            assert callable(disposer)
+            disposer(result)
 
     def run_mflux(
         self,
@@ -189,11 +268,7 @@ class FakeMfluxModel:
 
     def generate_image(self, **kwargs: object) -> FakeMfluxImage:
         self.calls.append(kwargs)
-        image_path = kwargs.get("image_path")
-        image_paths = kwargs.get("image_paths")
-        if image_path is None and isinstance(image_paths, list) and len(image_paths) == 1:
-            image_path = image_paths[0]
-        if isinstance(image_path, Path):
+        for image_path in kwargs.get("image_paths", []):
             with Image.open(image_path) as image:
                 self.consumed_source_pixels.append(image.getpixel((0, 0)))
         config = SimpleNamespace(num_inference_steps=kwargs["num_inference_steps"])
@@ -224,7 +299,8 @@ def _bound_workflow(
     root: Path,
     *,
     aspect_ratio: AspectRatio = AspectRatio.LANDSCAPE,
-    resolution: ResolutionTier = ResolutionTier.MEDIUM,
+    resolution: ResolutionTier = ResolutionTier.SMALL,
+    owned_workspace: bool = False,
 ) -> tuple[
     BackgroundWorkflow,
     DocumentController,
@@ -273,17 +349,13 @@ def _bound_workflow(
             model_factory=lambda *_args: model,
             edit_model_factory=lambda *_args: model,
         ),
-        temporary_directory=root / "temporary",
+        temporary_directory=None if owned_workspace else root / "temporary",
     )
     return workflow, controller, session, workers, model, card
 
 
 def _complete_generation(workers: FakeWorkers) -> None:
-    operation = workers.operations[-1]
-    work = workers.calls[-1]
-    assert callable(work)
-    assert callable(workers.disposers[-1])
-    operation.succeeded.emit(work())
+    workers.complete()
 
 
 def _start_image_operation(workflow: BackgroundWorkflow, card: Card, operation: str) -> None:
@@ -334,9 +406,35 @@ def _create_generated_source(
             value=f"{name} source image",
         )
     )
+    controller.execute(
+        SetRevisionGenerateOutputSizeCommand(
+            card_id=source.id,
+            revision_id=source.active_revision.id,
+            output_size=PresetOutputSize(tier=ResolutionTier.SMALL),
+        )
+    )
     workflow.generate(source.id)
     _complete_generation(workers)
     return next(card for card in controller.document.cards if card.id == source_id)
+
+
+def _assign_two_references(workflow: BackgroundWorkflow, workers: FakeWorkers) -> tuple[Card, ...]:
+    controller = workflow.controller
+    target = controller.document.cards[0]
+    sources = tuple(
+        _create_generated_source(workflow, controller, workers, name=f"Reference {position}")
+        for position in (1, 2)
+    )
+    for position, source in enumerate(sources, start=1):
+        controller.execute(
+            SetRevisionReferenceCommand(
+                card_id=target.id,
+                revision_id=target.active_revision.id,
+                reference=ResolvedCardReference(target_card_id=source.id),
+                position=position,
+            )
+        )
+    return sources
 
 
 def _assert_current_image_controls(window: MainWindow, tier: ResolutionTier) -> None:
@@ -351,7 +449,7 @@ def _assert_current_image_controls(window: MainWindow, tier: ResolutionTier) -> 
 
 
 def test_explicit_image_journey_reopens_without_sources_and_preserves_run_navigation(
-    application: QApplication,
+    qt_application: QApplication,
     tmp_path: Path,
 ) -> None:
     workflow, controller, session, workers, model, card = _bound_workflow(
@@ -417,16 +515,7 @@ def test_explicit_image_journey_reopens_without_sources_and_preserves_run_naviga
         generated = controller.document.cards[0].active_revision
         assert generated.model_copy(update={"background": None}) == before
         assert len(controller.document.cards[0].revisions) == 1
-        assert isinstance(generated.provenance, DirectGenerateProvenance)
-        assert generated.provenance.inputs.description == before.description
-        assert generated.provenance.inputs.style.prompt_text == style.prompt_text
-        assert tuple(
-            snapshot.card_id for snapshot in generated.provenance.inputs.references
-        ) == tuple(reference.id for reference in references)
-        assert model.calls[-1]["image_paths"] == [
-            session.store.asset_path(reference.active_revision.image_path)
-            for reference in references
-        ]
+        assert isinstance(generated.provenance.authoring, GenerateOperation)
         assert image_edit_lineage(generated.provenance) == ()
         _assert_current_image_controls(window, ResolutionTier.SMALL)
         generated_path = session.store.asset_path(generated.image_path)
@@ -454,28 +543,27 @@ def test_explicit_image_journey_reopens_without_sources_and_preserves_run_naviga
         assert submitted.model_copy(update={"edit_draft": generated.edit_draft}) == generated
         _complete_generation(workers)
         edited = controller.document.cards[0].active_revision
-        assert edited.model_copy(
-            update={
-                "background": generated.background,
-                "edit_draft": generated.edit_draft,
-            }
-        ) == generated
+        assert (
+            edited.model_copy(
+                update={
+                    "background": generated.background,
+                    "edit_draft": generated.edit_draft,
+                }
+            )
+            == generated
+        )
         assert len(controller.document.cards[0].revisions) == 1
-        assert isinstance(edited.provenance, EditProvenance)
-        assert edited.provenance.source == DerivedImageSourceSnapshot(
+        assert isinstance(edited.provenance.authoring, EditOperation)
+        assert edited.provenance.authoring.source == DerivedImageSourceSnapshot(
             card_id=card.id,
             revision_id=before.id,
             background_id=generated.background.id,
             width=256,
             height=192,
             seed=generated.provenance.settings.seed,
-            edit_lineage=(),
         )
-        assert edited.provenance.instruction == instruction
-        assert edited.provenance.expanded_prompt.endswith(style.prompt_text)
-        assert model.calls[-1]["prompt"] == edited.provenance.expanded_prompt
-        assert len(model.calls[-1]["image_paths"]) == 1
-        assert not model.calls[-1]["image_paths"][0].exists()
+        assert edited.provenance.origin.edit_lineage[-1].instruction == instruction
+        assert edited.provenance.origin.render_prompt.endswith(style.prompt_text)
         assert inspector.edit_instruction_edit.toPlainText() == ""
         assert inspector.edit_history_list.item(0).text() == instruction
         _assert_current_image_controls(window, ResolutionTier.MEDIUM)
@@ -491,9 +579,10 @@ def test_explicit_image_journey_reopens_without_sources_and_preserves_run_naviga
         window.notification_bar.primary_button.click()
         checkpoint = controller.document.cards[0].active_revision
         assert checkpoint.id != before.id
-        assert checkpoint.model_copy(
-            update={"id": before.id, "edit_draft": edited.edit_draft}
-        ) == edited
+        assert (
+            checkpoint.model_copy(update={"id": before.id, "edit_draft": edited.edit_draft})
+            == edited
+        )
         assert checkpoint.edit_draft.instruction == ""
         assert checkpoint.edit_draft.generation_id != edited.edit_draft.generation_id
         restored_original = controller.document.cards[0].revisions[0]
@@ -523,14 +612,20 @@ def test_explicit_image_journey_reopens_without_sources_and_preserves_run_naviga
         assert manifest["schema_version"] == CURRENT_SCHEMA_VERSION
         persisted_provenance = manifest["cards"][0]["revisions"][0]["background"]["provenance"]
         assert "edit_lineage" not in persisted_provenance
-        assert persisted_provenance["source"] == edited.provenance.source.model_dump(mode="json")
+        assert "edit_lineage" not in persisted_provenance["authoring"]["source"]
+        assert persisted_provenance["authoring"]["source"] == (
+            edited.provenance.authoring.source.model_dump(mode="json")
+        )
+        assert persisted_provenance["origin"]["edit_lineage"] == [
+            entry.model_dump(mode="json") for entry in image_edit_lineage(edited.provenance)
+        ]
         assert session.open(session.store.bundle_path) == saved
         assert controller.document.cards[0].active_revision == checkpoint
         assert not controller.can_undo
         _assert_current_image_controls(window, ResolutionTier.MEDIUM)
         inspector.inspector_tabs.setCurrentIndex(inspector._edit_tab_index)
         window.show()
-        application.processEvents()
+        qt_application.processEvents()
         history = inspector.edit_history_list
         assert history.count() == 1
         draft = controller.edit_draft(card.id, checkpoint.id)
@@ -568,7 +663,6 @@ def test_explicit_image_journey_reopens_without_sources_and_preserves_run_naviga
 
 
 def test_restored_edit_branch_survives_duplication_source_deletion_and_further_edits(
-    application: QApplication,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -598,7 +692,7 @@ def test_restored_edit_branch_survives_duplication_source_deletion_and_further_e
         inspector.inspector_tabs.setCurrentIndex(inspector._edit_tab_index)
         instruction = "Paint a small star on the gate.\nKeep its uneven brush strokes."
         edits: list[CardRevision] = []
-        for tier in (ResolutionTier.LARGE, ResolutionTier.FULL):
+        for tier in (ResolutionTier.MEDIUM, ResolutionTier.LARGE):
             inspector.edit_instruction_edit.setPlainText(instruction)
             inspector.edit_resolution_combo.setCurrentIndex(
                 inspector._combo_index_for_data(
@@ -623,12 +717,12 @@ def test_restored_edit_branch_survives_duplication_source_deletion_and_further_e
         assert restored_first.model_copy(update={"edit_draft": first.edit_draft}) == first
         assert inspector.edit_history_list.count() == 1
         assert inspector.edit_instruction_edit.toPlainText() == instruction
-        _assert_current_image_controls(window, ResolutionTier.LARGE)
+        _assert_current_image_controls(window, ResolutionTier.MEDIUM)
         window.redo()
         assert controller.document.cards[0].active_revision == abandoned
         assert inspector.edit_history_list.count() == 2
         assert inspector.edit_instruction_edit.toPlainText() == ""
-        _assert_current_image_controls(window, ResolutionTier.FULL)
+        _assert_current_image_controls(window, ResolutionTier.LARGE)
         window.undo()
         restored_first = controller.document.cards[0].active_revision
         assert restored_first.model_copy(update={"edit_draft": first.edit_draft}) == first
@@ -649,14 +743,14 @@ def test_restored_edit_branch_survives_duplication_source_deletion_and_further_e
         assert controller.edit_draft(card.id, first.id) == recalled
         restored_first = controller.document.cards[0].active_revision
         assert restored_first.model_copy(update={"edit_draft": first.edit_draft}) == first
-        _assert_current_image_controls(window, ResolutionTier.LARGE)
+        _assert_current_image_controls(window, ResolutionTier.MEDIUM)
         inspector.edit_background_button.click()
         assert workflow.busy
         _complete_generation(workers)
         branch = controller.document.cards[0].active_revision
         assert branch.id == first.id
-        assert branch.provenance.source.background_id == first.background.id
-        assert branch.provenance.source.edit_lineage == image_edit_lineage(first.provenance)
+        assert branch.provenance.authoring.source.background_id == first.background.id
+        assert image_edit_lineage(branch.provenance)[:-1] == image_edit_lineage(first.provenance)
         assert branch.provenance.settings.seed == 303
         assert tuple(edit.instruction for edit in image_edit_lineage(branch.provenance)) == (
             instruction,
@@ -680,14 +774,15 @@ def test_restored_edit_branch_survives_duplication_source_deletion_and_further_e
         duplicate_path = session.store.asset_path(duplicate_revision.image_path)
         assert window._selected_card_id == duplicate.id
         assert duplicate.id != card.id
-        assert duplicate_revision.id != branch.id
-        assert len(duplicate.revisions) == 1
-        assert duplicate_revision.background.id != branch.background.id
         assert duplicate_path != branch_path
         assert duplicate_path.read_bytes() == branch_path.read_bytes()
-        assert isinstance(duplicate_revision.provenance, DuplicateProvenance)
-        assert duplicate_revision.provenance.original_provenance == branch.provenance
-        assert duplicate_revision.provenance.source == ImageSourceSnapshot(
+        assert isinstance(duplicate_revision.provenance.authoring, DuplicateOperation)
+        assert duplicate_revision.provenance.origin == branch.provenance.origin
+        assert (
+            duplicate_revision.provenance.authoring.original_authoring
+            == branch.provenance.authoring
+        )
+        assert duplicate_revision.provenance.authoring.source == ImageSourceSnapshot(
             card_id=card.id,
             revision_id=branch.id,
             background_id=branch.background.id,
@@ -703,15 +798,6 @@ def test_restored_edit_branch_survives_duplication_source_deletion_and_further_e
             )
             == branch
         )
-        assert duplicate_revision.edit_draft.instruction == ""
-        assert (
-            duplicate_revision.edit_draft.generation_id
-            != branch.edit_draft.generation_id
-        )
-        original_hotspot = branch.hotspot_set.interactions[0]
-        copied_hotspot = duplicate_revision.hotspot_set.interactions[0]
-        assert copied_hotspot.id != original_hotspot.id
-        assert copied_hotspot.model_copy(update={"id": original_hotspot.id}) == original_hotspot
         assert image_edit_lineage(duplicate_revision.provenance) == image_edit_lineage(
             branch.provenance
         )
@@ -725,7 +811,7 @@ def test_restored_edit_branch_survives_duplication_source_deletion_and_further_e
         assert duplicate_path.is_file()
         assert session.open(session.store.bundle_path).cards == (duplicate,)
         assert inspector.edit_history_list.count() == 2
-        _assert_current_image_controls(window, ResolutionTier.LARGE)
+        _assert_current_image_controls(window, ResolutionTier.MEDIUM)
 
         inspector.inspector_tabs.setCurrentIndex(inspector._edit_tab_index)
         final_instruction = "Add a blue ribbon beside the stars."
@@ -735,18 +821,21 @@ def test_restored_edit_branch_survives_duplication_source_deletion_and_further_e
         _complete_generation(workers)
         result = controller.document.cards[0].active_revision
         assert len(controller.document.cards[0].revisions) == 1
-        assert result.model_copy(
-            update={
-                "background": duplicate_revision.background,
-                "edit_draft": duplicate_revision.edit_draft,
-            }
-        ) == duplicate_revision
-        assert result.provenance.source.background_id == duplicate_revision.background.id
+        assert (
+            result.model_copy(
+                update={
+                    "background": duplicate_revision.background,
+                    "edit_draft": duplicate_revision.edit_draft,
+                }
+            )
+            == duplicate_revision
+        )
+        assert result.provenance.authoring.source.background_id == duplicate_revision.background.id
         assert result.provenance.settings.seed == 404
         lineage = image_edit_lineage(result.provenance)
         assert lineage == (
             *image_edit_lineage(branch.provenance),
-            result.provenance.accepted_edit,
+            result.provenance.origin.edit_lineage[-1],
         )
         assert tuple(edit.instruction for edit in lineage) == (
             instruction,
@@ -774,7 +863,6 @@ def test_restored_edit_branch_survives_duplication_source_deletion_and_further_e
 
 @pytest.mark.parametrize("outcome", ("success", "committed-error", "observed-after"))
 def test_edit_completion_retains_its_token_across_reentrant_session_changes(
-    application: QApplication,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     outcome: str,
@@ -790,7 +878,10 @@ def test_edit_completion_retains_its_token_across_reentrant_session_changes(
         if (
             not renamed
             and not controller.mutation_blocked
-            and isinstance(controller.document.cards[0].active_revision.provenance, EditProvenance)
+            and isinstance(
+                controller.document.cards[0].active_revision.provenance.authoring,
+                EditOperation,
+            )
         ):
             renamed = True
             controller.execute(RenameCardCommand(card_id=card.id, name="After Edit"))
@@ -928,6 +1019,7 @@ def test_generate_reports_asset_directory_failure_and_disposes_candidate(
 
 
 def test_generate_uses_description_and_preserves_result_lifecycle(
+    qt_application: QApplication,
     tmp_path: Path,
 ) -> None:
     workflow, controller, session, workers, model, card = _bound_workflow(tmp_path)
@@ -940,6 +1032,7 @@ def test_generate_uses_description_and_preserves_result_lifecycle(
 
     workflow.generate(card.id)
     _complete_generation(workers)
+    qt_application.processEvents()
 
     assert progress == [(0, 4), (1, 4), (2, 4), (3, 4), (4, 4), (0, 0)]
     revision = controller.document.cards[0].active_revision
@@ -948,10 +1041,10 @@ def test_generate_uses_description_and_preserves_result_lifecycle(
     assert revision.hotspot_set is not None
     provenance = revision.provenance
     assert provenance is not None
-    assert provenance.operation == "generate"
-    assert provenance.inputs.description == "A garden"
-    assert provenance.render_prompt == "A garden"
-    assert (provenance.settings.width, provenance.settings.height) == (512, 384)
+    assert isinstance(provenance.authoring, GenerateOperation)
+    assert provenance.authoring.inputs.description == "A garden"
+    assert provenance.origin.render_prompt == "A garden"
+    assert (provenance.settings.width, provenance.settings.height) == (256, 192)
     assert model.calls[-1]["prompt"] == "A garden"
     assert not session.state.dirty
     assert session.store.load() == controller.document
@@ -1025,7 +1118,7 @@ def test_edit_uses_only_secure_current_image_and_replaces_complete_version(
     applied: list[AppliedImageChange] = []
     workflow.image_applied.connect(applied.append)
     options = workflow.available_edit_output_sizes(card.id)
-    assert options[0] == CurrentSourceSize(width=512, height=384)
+    assert options[0] == CurrentSourceSize(width=256, height=192)
 
     draft = _edit_draft(workflow, card.id, "  Open the garden gate.  ")
     submitted = controller.document.cards[0].active_revision
@@ -1044,31 +1137,25 @@ def test_edit_uses_only_secure_current_image_and_replaces_complete_version(
     assert edited.generate_output_size == source.generate_output_size
     assert edited.background is not None
     provenance = edited.background.provenance
-    assert isinstance(provenance, EditProvenance)
-    assert provenance.source == DerivedImageSourceSnapshot(
+    assert isinstance(provenance.authoring, EditOperation)
+    assert provenance.authoring.source == DerivedImageSourceSnapshot(
         card_id=card.id,
         revision_id=source.id,
         background_id=source.background.id,
-        width=512,
-        height=384,
+        width=256,
+        height=192,
         seed=source.background.provenance.settings.seed,
-        edit_lineage=(),
     )
-    assert provenance.instruction == "Open the garden gate."
-    assert provenance.output_size == CurrentSourceSize(
-        width=512,
-        height=384,
+    assert provenance.origin.edit_lineage[-1].instruction == "Open the garden gate."
+    assert provenance.authoring.output_size == CurrentSourceSize(
+        width=256,
+        height=192,
     )
-    assert provenance.expanded_prompt == (
-        "Open the garden gate.\n\n"
-        "Unless the Edit Instruction explicitly changes the visual treatment, "
-        "keep the result consistent with this selected Style:\n\n"
-        f"{style.prompt_text}"
-    )
+    assert provenance.origin.render_prompt == f"Open the garden gate.\n\n{style.prompt_text}"
     assert provenance.settings.seed == 8675309
-    assert provenance.prompt_token_count == 24
+    assert provenance.authoring.prompt_token_count == 24
     assert model.calls[-1]["image_paths"] == [snapshot_path]
-    assert model.calls[-1]["prompt"] == provenance.expanded_prompt
+    assert model.calls[-1]["prompt"] == provenance.origin.render_prompt
     assert "image_path" not in model.calls[-1]
     assert "image_strength" not in model.calls[-1]
     assert "description" not in model.calls[-1]
@@ -1132,8 +1219,8 @@ def test_sequential_edits_append_lineage_and_use_fresh_seeds(
         )
 
     provenance = controller.document.cards[0].active_revision.provenance
-    assert isinstance(provenance, EditProvenance)
-    assert tuple(edit.instruction for edit in provenance.edit_lineage) == (
+    assert isinstance(provenance.authoring, EditOperation)
+    assert tuple(edit.instruction for edit in image_edit_lineage(provenance)) == (
         "Open the gate.",
         "Add ivy.",
     )
@@ -1141,31 +1228,52 @@ def test_sequential_edits_append_lineage_and_use_fresh_seeds(
     assert len(controller.document.cards[0].revisions) == 1
 
 
-def test_edit_flattens_duplicate_source_provenance(
+@pytest.mark.parametrize("source_kind", ("duplicate", "origin-only"))
+def test_edit_accepts_duplicate_and_origin_only_sources(
     tmp_path: Path,
+    source_kind: str,
 ) -> None:
     workflow, controller, _session, workers, _model, card = _bound_workflow(tmp_path)
     workflow.generate(card.id)
     _complete_generation(workers)
     source = controller.document.cards[0].active_revision
     assert source.background is not None
-    duplicate_background = source.background.model_copy(
-        update={
-            "provenance": DuplicateProvenance(
+    provenance = (
+        ImageProvenance(
+            origin=source.background.provenance.origin,
+            authoring=DuplicateOperation(
                 source=ImageSourceSnapshot(
                     card_id=uuid4(),
                     revision_id=uuid4(),
                     background_id=uuid4(),
                 ),
-                original_provenance=source.background.provenance,
+                original_authoring=source.background.provenance.authoring,
+            ),
+        )
+        if source_kind == "duplicate"
+        else ImageProvenance(
+            origin=source.background.provenance.origin.model_copy(
+                update={
+                    "edit_lineage": (
+                        AcceptedEdit(
+                            instruction="An earlier instruction.\nKeep its exact text.",
+                            expanded_prompt="An earlier instruction with its original Style.",
+                        ),
+                    )
+                }
             )
+        )
+    )
+    source_background = source.background.model_copy(
+        update={
+            "provenance": provenance,
         }
     )
     controller.execute(
         ReplaceRevisionBackgroundCommand(
             card_id=card.id,
             revision_id=source.id,
-            background=duplicate_background,
+            background=source_background,
         )
     )
 
@@ -1176,11 +1284,21 @@ def test_edit_flattens_duplicate_source_provenance(
     )
     _complete_generation(workers)
     edited = controller.document.cards[0].active_revision
-    assert isinstance(edited.provenance, EditProvenance)
-    assert tuple(edit.instruction for edit in edited.provenance.edit_lineage) == ("Open the gate.",)
+    assert isinstance(edited.provenance.authoring, EditOperation)
+    lineage = image_edit_lineage(edited.provenance)
+    assert lineage[:-1] == image_edit_lineage(provenance)
+    assert lineage[-1].instruction == "Open the gate."
+    assert "edit_lineage" not in edited.provenance.authoring.source.model_dump()
 
-@pytest.mark.parametrize("aspect_ratio", tuple(AspectRatio))
-@pytest.mark.parametrize("resolution", tuple(ResolutionTier))
+
+@pytest.mark.parametrize(
+    ("aspect_ratio", "resolution"),
+    (
+        (AspectRatio.LANDSCAPE, ResolutionTier.SMALL),
+        (AspectRatio.PORTRAIT, ResolutionTier.MEDIUM),
+        (AspectRatio.SQUARE, ResolutionTier.FULL),
+    ),
+)
 def test_edit_output_sizes_include_exact_current_then_only_higher_presets(
     tmp_path: Path,
     aspect_ratio: AspectRatio,
@@ -1226,7 +1344,7 @@ def test_edit_rejects_replaced_source_and_failed_model_without_new_version(
         output_size=workflow.available_edit_output_sizes(card.id)[0],
     )
     snapshot_path = next((tmp_path / "temporary").glob(".image-source-*.png"))
-    Image.new("RGB", (512, 384), "gold").save(source_path, format="PNG")
+    Image.new("RGB", (256, 192), "gold").save(source_path, format="PNG")
     _complete_generation(workers)
 
     assert model.consumed_source_pixels[-1] == (0, 0, 128)
@@ -1242,7 +1360,7 @@ def test_edit_rejects_replaced_source_and_failed_model_without_new_version(
         draft=_edit_draft(workflow, card.id, "Add ivy."),
         output_size=workflow.available_edit_output_sizes(card.id)[0],
     )
-    workers.operations[-1].failed.emit(RuntimeError("model failed"))
+    workers.operations[-1].fail(RuntimeError("model failed"))
     failed_revision = controller.document.cards[0].active_revision
     _assert_same_revision_except_draft(failed_revision, source)
     assert failed_revision.edit_draft.instruction == "Add ivy."
@@ -1340,7 +1458,7 @@ def test_invalid_current_size_keeps_named_workflow_outputs_available(
                 output_size=PresetOutputSize(tier=ResolutionTier.FULL),
             )
         assert not workflow.busy
-        assert not list((tmp_path / "temporary").glob(".edit-source-*.png"))
+        assert not list((tmp_path / "temporary").glob(".image-source-*.png"))
         return
 
     selected_tier = edit_tiers[0]
@@ -1352,12 +1470,12 @@ def test_invalid_current_size_keeps_named_workflow_outputs_available(
     _complete_generation(workers)
 
     assert not workflow.busy
-    assert not list((tmp_path / "temporary").glob(".edit-source-*.png"))
+    assert not list((tmp_path / "temporary").glob(".image-source-*.png"))
     provenance = controller.document.cards[0].active_revision.provenance
-    assert isinstance(provenance, EditProvenance)
-    assert provenance.output_size == PresetOutputSize(tier=selected_tier)
-    assert (provenance.source.width, provenance.source.height) == source_size
-    assert provenance.source.seed == revision.background.provenance.settings.seed
+    assert isinstance(provenance.authoring, EditOperation)
+    assert provenance.authoring.output_size == PresetOutputSize(tier=selected_tier)
+    assert (provenance.authoring.source.width, provenance.authoring.source.height) == source_size
+    assert provenance.authoring.source.seed == revision.background.provenance.settings.seed
 
 
 def test_derived_image_reopens_after_replaced_source_asset_is_reclaimed(
@@ -1371,7 +1489,7 @@ def test_derived_image_reopens_after_replaced_source_asset_is_reclaimed(
     workflow.edit(
         card.id,
         draft=_edit_draft(workflow, card.id, "Open the gate."),
-        output_size=CurrentSourceSize(width=512, height=384),
+        output_size=CurrentSourceSize(width=256, height=192),
     )
     _complete_generation(workers)
     result = controller.document.cards[0].active_revision
@@ -1724,7 +1842,6 @@ def test_image_replacement_save_as_and_history_close_keep_only_reachable_owned_b
 @pytest.mark.parametrize("outcome", ("observed-after", "committed-error"))
 @pytest.mark.parametrize("draft_change", ("unchanged", "new-text", "recalled", "context"))
 def test_durable_edit_completion_updates_actions_and_drafts_once(
-    application: QApplication,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     outcome: str,
@@ -1922,7 +2039,7 @@ def test_derived_source_replacement_during_commit_rolls_back(
     assert source_revision.background is not None
     source_path = session.store.asset_path(source_revision.background.image_path)
     replacement = tmp_path / f"{replacement_checkpoint}.png"
-    Image.new("RGB", (512, 384), "gold").save(replacement, format="PNG")
+    Image.new("RGB", (256, 192), "gold").save(replacement, format="PNG")
     replaced = False
     failures: list[object] = []
     workflow.failed.connect(failures.append)
@@ -1952,7 +2069,7 @@ def test_derived_source_replacement_during_commit_rolls_back(
     assert "changed while Edit was running" in str(failures[-1])
 
 
-def test_generate_can_replace_a_historical_source_with_retained_derived_backgrounds(
+def test_generate_preserves_independent_normalized_origin_backgrounds(
     tmp_path: Path,
 ) -> None:
     workflow, controller, session, workers, _model, _card = _bound_workflow(tmp_path)
@@ -1973,7 +2090,7 @@ def test_generate_can_replace_a_historical_source_with_retained_derived_backgrou
     dependent = next(card for card in controller.document.cards if card.id == dependent_id)
     derived_asset_id = uuid4()
     derived_source = tmp_path / "derived-source.png"
-    Image.new("RGB", (512, 384), "green").save(derived_source)
+    Image.new("RGB", (256, 192), "green").save(derived_source)
     bundle_path = session.state.bundle_path
     assert bundle_path is not None
     store = StackStore(bundle_path)
@@ -1986,22 +2103,11 @@ def test_generate_can_replace_a_historical_source_with_retained_derived_backgrou
     derived_background = GeneratedBackground(
         id=derived_asset_id,
         image_path=derived_path,
-        provenance=RefineProvenance(
-            source=DerivedImageSourceSnapshot(
-                card_id=source.id,
-                revision_id=source_revision.id,
-                background_id=source_background.id,
-                width=512,
-                height=384,
-                seed=source_background.provenance.settings.seed,
-                edit_lineage=(),
+        provenance=ImageProvenance(
+            origin=ImageOriginFacts(
+                render_prompt="A refined source",
+                settings=source_background.provenance.settings,
             ),
-            description="A refined source",
-            render_prompt="A refined source",
-            output_size=CurrentSourceSize(width=512, height=384),
-            transformation=RefineTransformation.BALANCED,
-            strength=0.50,
-            settings=source_background.provenance.settings,
         ),
         created_at=generated_at,
     )
@@ -2053,11 +2159,11 @@ def test_generate_appends_and_captures_selected_style(tmp_path: Path) -> None:
 
     provenance = controller.document.cards[0].active_revision.provenance
     assert provenance is not None
-    assert provenance.operation == "generate"
-    assert provenance.inputs.style is not None
-    assert provenance.inputs.style.style_id == style.id
-    assert provenance.render_prompt == f"A garden.\n\n{style.prompt_text}"
-    assert model.calls[-1]["prompt"] == provenance.render_prompt
+    assert isinstance(provenance.authoring, GenerateOperation)
+    assert provenance.authoring.inputs.style is not None
+    assert provenance.authoring.inputs.style.style_id == style.id
+    assert provenance.origin.render_prompt == f"A garden.\n\n{style.prompt_text}"
+    assert model.calls[-1]["prompt"] == provenance.origin.render_prompt
 
 
 def test_generate_uses_revision_output_size_and_stack_aspect_ratio(
@@ -2077,8 +2183,8 @@ def test_generate_uses_revision_output_size_and_stack_aspect_ratio(
 
     provenance = controller.document.cards[0].active_revision.provenance
     assert provenance is not None
-    assert provenance.operation == "generate"
-    assert provenance.inputs.output_size == PresetOutputSize(tier=ResolutionTier.FULL)
+    assert isinstance(provenance.authoring, GenerateOperation)
+    assert provenance.authoring.inputs.output_size == PresetOutputSize(tier=ResolutionTier.FULL)
     assert (model.calls[-1]["width"], model.calls[-1]["height"]) == (1024, 768)
     assert (provenance.settings.width, provenance.settings.height) == (1024, 768)
 
@@ -2091,14 +2197,14 @@ def test_generate_can_reuse_an_exact_nonstandard_current_image_size(
     _complete_generation(workers)
     revision = controller.document.cards[0].active_revision
     assert revision.background is not None
-    Image.new("RGB", (640, 480), "navy").save(
+    Image.new("RGB", (64, 48), "navy").save(
         session.store.asset_path(revision.background.image_path)
     )
     controller.execute(
         SetRevisionGenerateOutputSizeCommand(
             card_id=card.id,
             revision_id=revision.id,
-            output_size=ExactOutputSize(width=640, height=480),
+            output_size=ExactOutputSize(width=64, height=48),
         )
     )
 
@@ -2106,20 +2212,26 @@ def test_generate_can_reuse_an_exact_nonstandard_current_image_size(
     _complete_generation(workers)
 
     generated = controller.document.cards[0].active_revision
-    assert isinstance(generated.provenance, DirectGenerateProvenance)
-    assert generated.provenance.inputs.output_size == ExactOutputSize(
-        width=640,
-        height=480,
+    assert isinstance(generated.provenance.authoring, GenerateOperation)
+    assert generated.provenance.authoring.inputs.output_size == ExactOutputSize(
+        width=64,
+        height=48,
     )
     assert (model.calls[-1]["width"], model.calls[-1]["height"]) == (
-        640,
-        480,
+        64,
+        48,
     )
 
 
-@pytest.mark.parametrize("aspect_ratio", tuple(AspectRatio))
-@pytest.mark.parametrize("resolution", tuple(ResolutionTier))
-def test_generate_uses_every_supported_ratio_and_tier(
+@pytest.mark.parametrize(
+    ("aspect_ratio", "resolution"),
+    (
+        (AspectRatio.SQUARE, ResolutionTier.SMALL),
+        (AspectRatio.PORTRAIT, ResolutionTier.MEDIUM),
+        (AspectRatio.WIDESCREEN, ResolutionTier.LARGE),
+    ),
+)
+def test_generate_forwards_selected_ratio_and_tier(
     tmp_path: Path,
     aspect_ratio: AspectRatio,
     resolution: ResolutionTier,
@@ -2137,8 +2249,8 @@ def test_generate_uses_every_supported_ratio_and_tier(
     expected_dimensions = output_dimensions(resolution, aspect_ratio)
     provenance = controller.document.cards[0].active_revision.provenance
     assert provenance is not None
-    assert provenance.operation == "generate"
-    assert provenance.inputs.output_size == PresetOutputSize(tier=resolution)
+    assert isinstance(provenance.authoring, GenerateOperation)
+    assert provenance.authoring.inputs.output_size == PresetOutputSize(tier=resolution)
     assert (
         model.calls[-1]["width"],
         model.calls[-1]["height"],
@@ -2149,24 +2261,14 @@ def test_generate_uses_every_supported_ratio_and_tier(
     ) == expected_dimensions
 
 
-def test_description_and_style_changes_suppress_in_flight_generation(
+@pytest.mark.parametrize("change", ("description", "style", "resolution"))
+def test_context_changes_suppress_in_flight_generation(
     tmp_path: Path,
+    change: str,
 ) -> None:
-    workflow, controller, _session, workers, _model, card = _bound_workflow(tmp_path)
-    failures: list[object] = []
-    workflow.failed.connect(failures.append)
-
-    workflow.generate(card.id)
-    controller.execute(
-        EditRevisionDescriptionCommand(
-            card_id=card.id,
-            revision_id=card.active_revision.id,
-            value="Changed while generating",
-        )
+    workflow, controller, _session, workers, _model, card = _bound_workflow(
+        tmp_path, resolution=ResolutionTier.SMALL
     )
-    _complete_generation(workers)
-    assert controller.document.cards[0].active_revision.background is None
-
     style = controller.document.styles[0]
     controller.execute(
         SetRevisionStyleCommand(
@@ -2175,30 +2277,45 @@ def test_description_and_style_changes_suppress_in_flight_generation(
             style_id=style.id,
         )
     )
+    failures: list[object] = []
+    applied: list[AppliedImageChange] = []
+    changes: list[object] = []
+    busy: list[bool] = []
+    workflow.failed.connect(failures.append)
+    workflow.image_applied.connect(applied.append)
+    workflow.document_changed.connect(changes.append)
+    workflow.busy_changed.connect(busy.append)
+
     workflow.generate(card.id)
-    controller.execute(
-        UpdateStyleCommand(
+    commands = {
+        "description": EditRevisionDescriptionCommand(
+            card_id=card.id,
+            revision_id=card.active_revision.id,
+            value="Changed while generating",
+        ),
+        "style": UpdateStyleCommand(
             style_id=style.id,
             name=style.name,
             prompt_text=style.prompt_text + " More contrast.",
-        )
-    )
-    _complete_generation(workers)
-
-    assert controller.document.cards[0].active_revision.background is None
-    workflow.generate(card.id)
-    controller.execute(
-        SetRevisionGenerateOutputSizeCommand(
+        ),
+        "resolution": SetRevisionGenerateOutputSizeCommand(
             card_id=card.id,
             revision_id=card.active_revision.id,
             output_size=PresetOutputSize(tier=ResolutionTier.LARGE),
-        )
-    )
+        ),
+    }
+    controller.execute(commands[change])
+    before = controller.document
+    token = controller.current_undo_token
     _complete_generation(workers)
 
-    assert controller.document.cards[0].active_revision.background is None
-    assert all("changed before generation completed" in str(failure) for failure in failures)
-    assert not list((tmp_path / "temporary").glob("generated-*.png"))
+    assert controller.document == before
+    assert controller.current_undo_token == token
+    assert len(failures) == 1
+    assert "changed before generation completed" in str(failures[0])
+    assert applied == changes == []
+    assert busy == [True, False]
+    assert not list((tmp_path / "temporary").iterdir())
 
 
 @pytest.mark.parametrize(
@@ -2209,7 +2326,7 @@ def test_description_and_style_changes_suppress_in_flight_generation(
     ),
 )
 def test_live_style_draft_cancels_generation_before_commit(
-    application: QApplication,
+    qt_application: QApplication,
     tmp_path: Path,
     field: str,
     value: str,
@@ -2230,11 +2347,10 @@ def test_live_style_draft_cancels_generation_before_commit(
     manager.show()
     editor = manager.name_edit if field == "name" else manager.prompt_edit
     editor.setFocus()
-    application.processEvents()
+    qt_application.processEvents()
 
     workflow.generate(card.id)
     operation = workers.operations[-1]
-    work = workers.calls[-1]
     if field == "name":
         manager.name_edit.setText(value)
     else:
@@ -2243,9 +2359,7 @@ def test_live_style_draft_cancels_generation_before_commit(
     assert operation.was_cancelled
     assert controller.document.style_by_id(style.id) == style
     assert controller.document.cards[0].active_revision.background is None
-    assert callable(work)
-    with pytest.raises(ImageGenerationCancelled, match="cancelled"):
-        work()
+    _complete_generation(workers)
     assert controller.document.cards[0].active_revision.background is None
 
     manager._editing_finished(
@@ -2264,29 +2378,68 @@ def test_live_style_draft_cancels_generation_before_commit(
 
     provenance = controller.document.cards[0].active_revision.provenance
     assert provenance is not None
-    assert provenance.operation == "generate"
-    assert provenance.inputs.style is not None
-    assert provenance.inputs.style.name == expected_name
-    assert provenance.inputs.style.prompt_text == expected_prompt
+    assert isinstance(provenance.authoring, GenerateOperation)
+    assert provenance.authoring.inputs.style is not None
+    assert provenance.authoring.inputs.style.name == expected_name
+    assert provenance.authoring.inputs.style.prompt_text == expected_prompt
     manager.close()
 
 
-def test_cancelled_generation_cannot_publish_or_leave_output(tmp_path: Path) -> None:
+@pytest.mark.parametrize("with_references", (False, True))
+def test_cancelled_queued_generation_never_invokes_the_model(
+    tmp_path: Path,
+    with_references: bool,
+) -> None:
     workflow, controller, _session, workers, _model, card = _bound_workflow(tmp_path)
+    if with_references:
+        _assign_two_references(workflow, workers)
     original = controller.document
+    model_calls = len(_model.calls)
 
     workflow.generate(card.id)
     operation = workers.operations[-1]
-    work = workers.calls[-1]
-    assert callable(work)
+    finished: list[None] = []
+    operation.finished.connect(lambda: finished.append(None))
 
     workflow.cancel()
 
     assert operation.was_cancelled
-    with pytest.raises(ImageGenerationCancelled, match="cancelled"):
-        work()
+    _complete_generation(workers)
     assert controller.document == original
-    assert not list((tmp_path / "temporary").glob("generated-*.png"))
+    assert finished == [None]
+    assert len(_model.calls) == model_calls
+    assert not list((tmp_path / "temporary").iterdir())
+
+
+def test_cancellation_after_native_success_disposes_undelivered_output(tmp_path: Path) -> None:
+    workflow, controller, _session, workers, _model, card = _bound_workflow(tmp_path)
+    original = controller.document
+    applied: list[AppliedImageChange] = []
+    failures: list[object] = []
+    workflow.image_applied.connect(applied.append)
+    workflow.failed.connect(failures.append)
+    operation = workflow.generate(card.id)
+    native_work = workers.calls[-1]
+    assert callable(native_work)
+    output_paths: list[Path] = []
+
+    def cancel_before_delivery() -> object:
+        result = native_work()
+        output_paths.append(result.output_path)
+        assert result.output_path.is_file()
+        workflow.cancel()
+        return result
+
+    workers.calls[-1] = cancel_before_delivery
+    _complete_generation(workers)
+
+    assert operation.is_finished
+    assert operation.was_cancelled
+    assert controller.document == original
+    assert applied == failures == []
+    assert len(output_paths) == 1
+    assert not output_paths[0].exists()
+    assert not list(workflow._temporary_directory.iterdir())
 
 
 def test_generate_requires_nonempty_description(tmp_path: Path) -> None:
@@ -2304,26 +2457,12 @@ def test_generate_requires_nonempty_description(tmp_path: Path) -> None:
     assert workers.calls == []
 
 
-def test_two_references_are_sent_once_in_stable_order(tmp_path: Path) -> None:
+def test_two_references_are_snapshotted_once_in_stable_order(tmp_path: Path) -> None:
     workflow, controller, _session, workers, model, target = _bound_workflow(tmp_path)
-    sources = tuple(
-        _create_generated_source(
-            workflow,
-            controller,
-            workers,
-            name=f"Reference {number}",
-        )
-        for number in (1, 2)
-    )
+    sources = _assign_two_references(workflow, workers)
     for position, source in enumerate(sources, start=1):
-        controller.execute(
-            SetRevisionReferenceCommand(
-                card_id=target.id,
-                revision_id=target.active_revision.id,
-                reference=ResolvedCardReference(target_card_id=source.id),
-                position=position,
-            )
-        )
+        path = workflow.session.store.asset_path(source.active_revision.background.image_path)
+        Image.new("RGB", (32, 32), ("red", "green")[position - 1]).save(path)
     controller.execute(
         EditRevisionDescriptionCommand(
             card_id=target.id,
@@ -2333,12 +2472,15 @@ def test_two_references_are_sent_once_in_stable_order(tmp_path: Path) -> None:
     )
 
     workflow.generate(target.id)
+    snapshots = workflow._source_snapshots
+    assert len(snapshots) == 2
+    assert all(snapshot.snapshot_path.is_file() for snapshot in snapshots)
     _complete_generation(workers)
 
     provenance = controller.document.cards[0].active_revision.provenance
     assert provenance is not None
-    assert provenance.operation == "generate"
-    assert provenance.inputs.references == tuple(
+    assert isinstance(provenance.authoring, GenerateOperation)
+    assert provenance.authoring.inputs.references == tuple(
         ImageReferenceSnapshot(
             card_id=source.id,
             revision_id=source.active_revision.id,
@@ -2347,16 +2489,287 @@ def test_two_references_are_sent_once_in_stable_order(tmp_path: Path) -> None:
         for source in sources
         if source.active_revision.background is not None
     )
-    expected_paths = [
+    live_paths = [
         workflow.session.store.asset_path(source.active_revision.background.image_path)
         for source in sources
         if source.active_revision.background is not None
     ]
+    expected_paths = [snapshot.snapshot_path for snapshot in snapshots]
     assert model.calls[-1]["image_paths"] == expected_paths
+    assert set(expected_paths).isdisjoint(live_paths)
+    assert model.consumed_source_pixels[-2:] == [(255, 0, 0), (0, 128, 0)]
+    assert all(not path.exists() for path in expected_paths)
     assert len(model.calls[-1]["image_paths"]) == len(set(model.calls[-1]["image_paths"]))
     assert model.calls[-1]["prompt"] == (
         "Place the subject from image 1 beside the setting from image 2."
     )
+
+
+@pytest.mark.parametrize(
+    ("checkpoint", "replacement", "source_index"),
+    (
+        ("before-invocation", "file", 0),
+        ("before-invocation", "in-place", 1),
+        ("before-invocation", "symlink", 0),
+        ("manifest-file-fsynced", "file", 1),
+        ("manifest-directory-fsynced", "file", 0),
+    ),
+)
+def test_generate_rejects_reference_asset_replacement_through_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    checkpoint: str,
+    replacement: str,
+    source_index: int,
+) -> None:
+    workflow, controller, session, workers, model, target = _bound_workflow(tmp_path)
+    references = _assign_two_references(workflow, workers)
+    source = references[source_index]
+    source_path = session.store.asset_path(source.active_revision.image_path)
+    foreign = tmp_path / "foreign.png"
+    Image.new("RGB", (256, 192), "gold").save(foreign)
+    failures: list[object] = []
+    applied: list[AppliedImageChange] = []
+    workflow.failed.connect(failures.append)
+    workflow.image_applied.connect(applied.append)
+    assert session.flush()
+    manifest = session.store.stack_path.read_bytes()
+    before = controller.document
+    token = controller.current_undo_token
+    replaced = False
+
+    def replace_reference(name: str) -> None:
+        nonlocal replaced
+        if name != checkpoint or replaced:
+            return
+        replaced = True
+        if replacement == "in-place":
+            source_path.write_bytes(foreign.read_bytes())
+        else:
+            source_path.rename(source_path.with_name("held-source.png"))
+            if replacement == "symlink":
+                source_path.symlink_to(foreign)
+            else:
+                source_path.write_bytes(foreign.read_bytes())
+
+    workflow.generate(target.id)
+    snapshots = workflow._source_snapshots
+    replace_reference("before-invocation")
+    monkeypatch.setattr(stack_store_module, "_io_checkpoint", replace_reference)
+    _complete_generation(workers)
+
+    assert replaced
+    assert model.consumed_source_pixels[-2:] == [(0, 0, 128), (0, 0, 128)]
+    assert len(failures) == 1
+    assert applied == []
+    assert controller.document == before
+    assert controller.current_undo_token == token
+    assert session.store.stack_path.read_bytes() == manifest
+    assert not list((session.store.bundle_path / "assets" / "cards" / str(target.id)).glob("*"))
+    assert not workflow.busy
+    assert not workflow.invocation_active
+    assert all(not snapshot.snapshot_path.exists() for snapshot in snapshots)
+    assert not list(workflow._temporary_directory.iterdir())
+    assert source_path.read_bytes() == foreign.read_bytes()
+    assert source_path.is_symlink() == (replacement == "symlink")
+
+
+@pytest.mark.parametrize("invalid_source", ("missing", "unreadable", "symlink"))
+def test_generate_cleans_prior_snapshots_when_later_reference_is_invalid(
+    tmp_path: Path,
+    invalid_source: str,
+) -> None:
+    workflow, controller, session, workers, _model, target = _bound_workflow(tmp_path)
+    sources = _assign_two_references(workflow, workers)
+    path = session.store.asset_path(sources[1].active_revision.image_path)
+    held = path.with_name("held-source.png")
+    path.rename(held)
+    if invalid_source == "unreadable":
+        path.write_bytes(b"not an image")
+    elif invalid_source == "symlink":
+        path.symlink_to(held)
+    before = controller.document
+    call_count = len(workers.calls)
+
+    with pytest.raises(BackgroundWorkflowError, match="Reference 2.*unavailable or unreadable"):
+        workflow.generate(target.id)
+
+    assert controller.document == before
+    assert len(workers.calls) == call_count
+    assert not workflow.busy
+    assert not workflow.invocation_active
+    assert not list(workflow._temporary_directory.iterdir())
+    assert held.is_file()
+    assert path.is_symlink() == (invalid_source == "symlink")
+
+
+def test_generate_submission_failure_releases_all_reference_snapshots(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow, _controller, _session, workers, _model, target = _bound_workflow(tmp_path)
+    _assign_two_references(workflow, workers)
+
+    def fail_submission(*_args: object, **_kwargs: object) -> None:
+        assert len(workflow._source_snapshots) == 2
+        raise RuntimeError("worker unavailable")
+
+    monkeypatch.setattr(workers, "run_mflux", fail_submission)
+    with pytest.raises(RuntimeError, match="worker unavailable"):
+        workflow.generate(target.id)
+
+    assert not workflow.busy
+    assert not workflow.invocation_active
+    assert workflow._request_id is None
+    assert workflow._source_snapshots == ()
+    assert not list(workflow._temporary_directory.iterdir())
+
+
+@pytest.mark.parametrize("close", (False, True))
+def test_reference_snapshots_live_until_cancelled_invocation_unwinds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    close: bool,
+) -> None:
+    workflow, controller, _session, workers, model, target = _bound_workflow(tmp_path)
+    _assign_two_references(workflow, workers)
+    original_generate = model.generate_image
+    before = controller.document
+    applied: list[AppliedImageChange] = []
+    failed: list[object] = []
+    active: list[bool] = []
+    workflow.image_applied.connect(applied.append)
+    workflow.failed.connect(failed.append)
+    workflow.invocation_active_changed.connect(active.append)
+
+    def cancel_during_inference(**kwargs: object) -> FakeMfluxImage:
+        assert workflow.invocation_active
+        paths = kwargs["image_paths"]
+        assert len(paths) == 2
+        (workflow.close if close else workflow.cancel)()
+        assert workflow.invocation_active
+        assert all(path.is_file() for path in paths)
+        return original_generate(**kwargs)
+
+    monkeypatch.setattr(model, "generate_image", cancel_during_inference)
+    workflow.generate(target.id)
+    _complete_generation(workers)
+
+    assert controller.document == before
+    assert applied == failed == []
+    assert active == [True, False]
+    assert workers.operations[-1].was_cancelled
+    assert not workflow.busy
+    assert not workflow.invocation_active
+    assert workflow._source_snapshots == ()
+    assert not list(workflow._temporary_directory.iterdir())
+
+
+@pytest.mark.parametrize("replacement", ("file", "symlink"))
+def test_reference_snapshot_cleanup_never_removes_replacement_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replacement: str,
+) -> None:
+    monkeypatch.setattr("hotcards.application.background_workflow.tempfile.tempdir", str(tmp_path))
+    workflow, _controller, _session, workers, _model, target = _bound_workflow(
+        tmp_path, owned_workspace=True
+    )
+    _assign_two_references(workflow, workers)
+    workflow.generate(target.id)
+    snapshots = workflow._source_snapshots
+    changed = snapshots[0].snapshot_path
+    held = tmp_path / "held-snapshot.png"
+    changed.rename(held)
+    foreign = tmp_path / "foreign.txt"
+    foreign.write_bytes(b"not owned by the workflow")
+    if replacement == "symlink":
+        changed.symlink_to(foreign)
+    else:
+        changed.write_bytes(foreign.read_bytes())
+
+    workflow.close()
+    _complete_generation(workers)
+
+    assert changed.read_bytes() == foreign.read_bytes()
+    assert held.is_file()
+    assert not snapshots[1].snapshot_path.exists()
+    assert workflow._source_snapshots == (snapshots[0],)
+    assert workflow.invocation_active
+    with pytest.raises(BackgroundWorkflowError, match="could not be cleaned up"):
+        workflow.generate(target.id)
+
+
+def test_real_worker_keeps_references_until_native_unwind_after_close(
+    qt_application: QApplication,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("hotcards.application.background_workflow.tempfile.tempdir", str(tmp_path))
+    workflow, controller, _session, workers, model, target = _bound_workflow(
+        tmp_path, owned_workspace=True
+    )
+    _assign_two_references(workflow, workers)
+    real_workers = AdapterWorkers()
+    workflow.workers = real_workers
+    entered = Event()
+    resume = Event()
+    original_generate = model.generate_image
+    paths: list[Path] = []
+    before = controller.document
+    applied: list[AppliedImageChange] = []
+    failures: list[object] = []
+    workflow.image_applied.connect(applied.append)
+    workflow.failed.connect(failures.append)
+
+    def blocked_generate(**kwargs: object) -> FakeMfluxImage:
+        paths.extend(kwargs["image_paths"])
+        entered.set()
+        assert resume.wait(5)
+        assert all(path.is_file() for path in paths)
+        return original_generate(**kwargs)
+
+    def wait_until(predicate: Callable[[], bool]) -> None:
+        deadline = monotonic() + 5
+        while not predicate() and monotonic() < deadline:
+            qt_application.processEvents()
+            QTest.qWait(1)
+        assert predicate()
+
+    monkeypatch.setattr(model, "generate_image", blocked_generate)
+    try:
+        operation = workflow.generate(target.id)
+        wait_until(entered.is_set)
+        workflow.close()
+        assert operation.is_finished
+        assert workflow.invocation_active
+        assert len(paths) == 2
+        assert all(path.is_file() for path in paths)
+        resume.set()
+        wait_until(lambda: not workflow.invocation_active)
+        assert controller.document == before
+        assert applied == failures == []
+        assert all(not path.exists() for path in paths)
+        wait_until(lambda: not workflow._temporary_directory.exists())
+    finally:
+        resume.set()
+        workflow.close()
+        real_workers.shutdown()
+
+
+def test_timer_resources_remain_owned_during_native_thread_collection(tmp_path: Path) -> None:
+    workflow, controller, session, _workers, _model, card = _bound_workflow(tmp_path)
+    native_workers = AdapterWorkers()
+    native_workers._deadline_timer.start()
+    controller.execute(RenameCardCommand(card_id=card.id, name="Autosave pending"))
+    assert session._timer.isActive()
+    assert native_workers._deadline_timer.isActive()
+    retained = tuple(ref(resource) for resource in (workflow, session, native_workers))
+    del workflow, controller, session, native_workers
+
+    run_model_invocation(gc.collect)
+
+    assert all(resource() is not None and isValid(resource()) for resource in retained)
 
 
 def test_reference_change_suppresses_in_flight_result(tmp_path: Path) -> None:
@@ -2436,3 +2849,51 @@ def test_unbound_stack_rejects_image_changes(tmp_path: Path) -> None:
 
     with pytest.raises(BackgroundWorkflowError, match="save the stack"):
         workflow.generate(card.id)
+
+
+@pytest.mark.parametrize("operation", ["generate", "edit"])
+@pytest.mark.parametrize("corruption", ["receipt", "nested_dimensions"])
+def test_acceptance_revalidates_complete_result_before_persistence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str, corruption: str
+) -> None:
+    workflow, controller, session, workers, _model, card = _bound_workflow(tmp_path)
+    workflow.generate(card.id)
+    workers.complete()
+    failures: list[object] = []
+    applied: list[object] = []
+    outputs: list[Path] = []
+    workflow.failed.connect(failures.append)
+    workflow.image_applied.connect(applied.append)
+    generate = getattr(workflow._mflux_generator, operation)
+
+    def invalid_result(*args, **kwargs):
+        result = generate(*args, **kwargs)
+        outputs.append(result.output_path)
+        provenance = result.provenance
+        if corruption == "receipt":
+            provenance = provenance.model_copy(update={"authoring": None})
+        else:
+            settings = provenance.settings.model_copy(update={"width": 0})
+            origin = provenance.origin.model_copy(update={"settings": settings})
+            provenance = provenance.model_copy(update={"origin": origin})
+        return result.model_copy(update={"provenance": provenance})
+
+    monkeypatch.setattr(workflow._mflux_generator, operation, invalid_result)
+    try:
+        _start_image_operation(workflow, card, operation)
+        assert session.flush()
+        before = controller.document
+        undo_token = controller.current_undo_token
+        workers.complete()
+
+        assert len(failures) == 1 and isinstance(failures[0], ValidationError)
+        assert not applied and not workflow.busy
+        assert controller.document == before
+        assert controller.current_undo_token == undo_token
+        assert session.store.load() == before
+        assert len(outputs) == 1 and not outputs[0].exists()
+    finally:
+        workflow.close()
+        session.close_history()
+        workflow.deleteLater()
+        session.deleteLater()

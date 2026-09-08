@@ -8,7 +8,6 @@ from enum import StrEnum
 
 from hotcards.domain.models import Interaction, Point, Polygon
 
-DEFAULT_MODEL_COORDINATE_EXTENT = 1000
 MIN_NORMALIZED_POLYGON_AREA = 1e-6
 GEOMETRY_EPSILON = 1e-12
 
@@ -37,41 +36,6 @@ def _coordinates(point: PointLike) -> tuple[float, float]:
     if isinstance(point, Point):
         return point.x, point.y
     return point
-
-
-def model_coordinate_to_normalized(
-    coordinate: int,
-    *,
-    extent: int = DEFAULT_MODEL_COORDINATE_EXTENT,
-) -> float:
-    """Convert and clamp a model-space coordinate to normalized document space."""
-    if extent <= 0:
-        raise ValueError("coordinate extent must be positive")
-    return min(max(coordinate / extent, 0.0), 1.0)
-
-
-def normalized_coordinate_to_model(
-    coordinate: float,
-    *,
-    extent: int = DEFAULT_MODEL_COORDINATE_EXTENT,
-) -> int:
-    """Convert and clamp a normalized document coordinate to model space."""
-    if extent <= 0:
-        raise ValueError("coordinate extent must be positive")
-    return round(min(max(coordinate, 0.0), 1.0) * extent)
-
-
-def model_point_to_document(
-    x: int,
-    y: int,
-    *,
-    extent: int = DEFAULT_MODEL_COORDINATE_EXTENT,
-) -> Point:
-    """Convert one model-space point into a validated document point."""
-    return Point(
-        x=model_coordinate_to_normalized(x, extent=extent),
-        y=model_coordinate_to_normalized(y, extent=extent),
-    )
 
 
 def polygon_signed_area(points: Sequence[PointLike]) -> float:

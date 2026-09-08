@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import os
+from collections.abc import Iterator
 from typing import Any
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-
 import pytest
+from PySide6.QtCore import QCoreApplication, QEvent
 from PySide6.QtWidgets import QApplication, QLabel
+from shiboken6 import isValid
 
 from hotcards.ui.settings_dialog import (
     MFLUX_MODEL_KEY,
@@ -32,9 +32,26 @@ class FakeSettings:
         pass
 
 
-@pytest.fixture(scope="module")
-def application() -> QApplication:
-    return QApplication.instance() or QApplication([])
+@pytest.fixture
+def application(
+    qt_application: QApplication, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[QApplication]:
+    dialogs: list[SettingsDialog] = []
+    initialize = SettingsDialog.__init__
+
+    def initialize_owned(dialog: SettingsDialog, *args: object, **kwargs: object) -> None:
+        initialize(dialog, *args, **kwargs)
+        dialogs.append(dialog)
+
+    monkeypatch.setattr(SettingsDialog, "__init__", initialize_owned)
+    try:
+        yield qt_application
+    finally:
+        for dialog in reversed(dialogs):
+            if isValid(dialog):
+                dialog.close()
+                dialog.deleteLater()
+                QCoreApplication.sendPostedEvents(dialog, QEvent.Type.DeferredDelete)
 
 
 def test_legacy_9b_selection_maps_to_9b_kv() -> None:

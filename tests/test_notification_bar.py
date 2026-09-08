@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import os
-
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+from collections.abc import Iterator
 
 import pytest
+from PySide6.QtCore import QCoreApplication, QEvent
 from PySide6.QtWidgets import QApplication
+from shiboken6 import isValid
 
 from hotcards.ui.notification_bar import (
     Notification,
@@ -17,9 +17,26 @@ from hotcards.ui.notification_bar import (
 )
 
 
-@pytest.fixture(scope="module")
-def application() -> QApplication:
-    return QApplication.instance() or QApplication([])
+@pytest.fixture
+def application(
+    qt_application: QApplication, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[QApplication]:
+    bars: list[NotificationBar] = []
+    initialize = NotificationBar.__init__
+
+    def initialize_owned(bar: NotificationBar, *args: object, **kwargs: object) -> None:
+        initialize(bar, *args, **kwargs)
+        bars.append(bar)
+
+    monkeypatch.setattr(NotificationBar, "__init__", initialize_owned)
+    try:
+        yield qt_application
+    finally:
+        for bar in reversed(bars):
+            if isValid(bar):
+                bar.close()
+                bar.deleteLater()
+                QCoreApplication.sendPostedEvents(bar, QEvent.Type.DeferredDelete)
 
 
 def test_notifications_are_prioritized_and_restored_after_dismissal(

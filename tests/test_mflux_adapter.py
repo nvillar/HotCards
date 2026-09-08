@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from pathlib import Path
-from threading import Event, Thread
+from threading import Event, Thread, current_thread
 from time import monotonic
 from types import SimpleNamespace
 from uuid import uuid4
@@ -23,17 +23,22 @@ from hotcards.domain.models import (
     AcceptedEdit,
     CurrentSourceSize,
     DerivedImageSourceSnapshot,
-    EditPreserveOptions,
+    DuplicateOperation,
+    EditOperation,
     ExactOutputSize,
     GenerateInputs,
+    GenerateOperation,
     ImageReferenceSnapshot,
+    ImageSourceSnapshot,
     PresetOutputSize,
+    StyleSnapshot,
 )
 from hotcards.generation.errors import (
     ImageGenerationCancelled,
     ImageGenerationError,
     ModelLoadError,
 )
+from hotcards.generation.image_generation import compose_edit_prompt
 from hotcards.generation.mflux_generator import (
     MfluxCancellationToken,
     MfluxEditRequest,
@@ -45,14 +50,38 @@ from hotcards.generation.mflux_generator import (
 
 
 @pytest.fixture(autouse=True)
-def reset_process_model_cache() -> Iterator[None]:
+def reset_process_model_cache(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    events: list[Event] = []
+    threads: list[Thread] = []
+    event_type, thread_type = Event, Thread
+
+    def event() -> Event:
+        gate = event_type()
+        events.append(gate)
+        return gate
+
+    def thread(**kwargs: object) -> Thread:
+        invocation = thread_type(**kwargs)
+        threads.append(invocation)
+        return invocation
+
+    monkeypatch.setitem(globals(), "Event", event)
+    monkeypatch.setitem(globals(), "Thread", thread)
     mflux_module._CACHED_MODEL = None
     mflux_module._DEFERRED_RELEASES.clear()
     mflux_module._CACHE_RELEASE_PENDING = False
-    yield
-    mflux_module._CACHED_MODEL = None
-    mflux_module._DEFERRED_RELEASES.clear()
-    mflux_module._CACHE_RELEASE_PENDING = False
+    try:
+        yield
+    finally:
+        for gate in events:
+            gate.set()
+        for invocation in threads:
+            invocation.join(3)
+        mflux_module.submit_model_invocation(lambda: None).result(timeout=3)
+        mflux_module._CACHED_MODEL = None
+        mflux_module._DEFERRED_RELEASES.clear()
+        mflux_module._CACHE_RELEASE_PENDING = False
+        assert all(not invocation.is_alive() for invocation in threads)
 
 
 class FakeGeneratedImage:
@@ -115,9 +144,16 @@ class FakeCallbackRegistry:
 class FakeRawTokenizer:
     def __init__(self, token_count: int = 24) -> None:
         self.token_count = token_count
+        self.calls: list[tuple[str, dict[str, object]]] = []
+        self.chat_calls: list[tuple[list[dict[str, str]], dict[str, object]]] = []
 
-    def __call__(self, _prompt: str, **_kwargs: object) -> dict[str, list[int]]:
+    def __call__(self, prompt: str, **kwargs: object) -> dict[str, list[int]]:
+        self.calls.append((prompt, kwargs))
         return {"input_ids": list(range(self.token_count))}
+
+    def apply_chat_template(self, messages: list[dict[str, str]], **kwargs: object) -> str:
+        self.chat_calls.append((messages, kwargs))
+        return f"<user>{messages[0]['content']}</user>"
 
 
 class FakeTokenizerWrapper:
@@ -257,18 +293,13 @@ def source_snapshot() -> DerivedImageSourceSnapshot:
         width=32,
         height=32,
         seed=73,
-        edit_lineage=(),
     )
 
 
 def accepted_edit() -> AcceptedEdit:
     return AcceptedEdit(
         instruction="Open the gate.",
-        preserve=EditPreserveOptions(
-            subject_identity=True,
-            existing_text_and_logos=True,
-        ),
-        expanded_prompt=("Open the gate. Preserve subject identity and existing text and logos."),
+        expanded_prompt="Open the gate.",
     )
 
 
@@ -287,7 +318,6 @@ def edit_request(
         source=source_snapshot(),
         source_image_path=source_path,
         instruction=edit.instruction,
-        preserve=edit.preserve,
         expanded_prompt=edit.expanded_prompt,
         output_size=PresetOutputSize(tier=ResolutionTier.MEDIUM),
         seed=991,
@@ -308,9 +338,124 @@ def run_in_thread(operation: object) -> tuple[Thread, list[object]]:
     return thread, outcomes
 
 
-def test_plain_generate_routes_to_regular_model_without_image_input(
+@pytest.fixture
+def operation_results(tmp_path: Path) -> tuple[MfluxGenerateResult, MfluxEditResult]:
+    source = write_source(tmp_path / "result-source.png")
+    generator = MfluxGenerator(
+        model_factory=lambda *_: FakeMfluxModel(),
+        edit_model_factory=lambda *_: FakeMfluxModel(),
+    )
+    return (
+        generator.generate(generate_request(tmp_path / "result-generate.png")),
+        generator.edit(edit_request(tmp_path / "result-edit.png", source)),
+    )
+
+
+@pytest.mark.parametrize("operation_index", (0, 1), ids=("generate", "edit"))
+@pytest.mark.parametrize("receipt", ("none", "other-operation", "duplicate"))
+def test_new_results_require_the_exact_current_authoring_receipt(
+    operation_results: tuple[MfluxGenerateResult, MfluxEditResult],
+    operation_index: int,
+    receipt: str,
+) -> None:
+    result = operation_results[operation_index]
+    payload = result.model_dump()
+    if receipt == "none":
+        payload["provenance"]["authoring"] = None
+    elif receipt == "other-operation":
+        payload["provenance"] = operation_results[1 - operation_index].provenance.model_dump()
+    else:
+        payload["provenance"]["authoring"] = DuplicateOperation(
+            source=ImageSourceSnapshot(
+                card_id=uuid4(),
+                revision_id=uuid4(),
+                background_id=uuid4(),
+            ),
+            original_authoring=result.provenance.authoring,
+        ).model_dump()
+
+    with pytest.raises(ValueError, match="results require"):
+        type(result).model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "malformation",
+    (
+        "generate-prompt",
+        "generate-size",
+        "edit-prompt",
+        "edit-empty-lineage",
+        "edit-source-size",
+        "edit-output-size",
+        "edit-missing-source",
+        "edit-missing-instruction",
+        "edit-token-budget",
+        "edit-rewritten-instruction",
+    ),
+)
+def test_new_result_receipts_validate_exact_operation_facts(
+    operation_results: tuple[MfluxGenerateResult, MfluxEditResult],
+    malformation: str,
+) -> None:
+    result = operation_results[0 if malformation.startswith("generate") else 1]
+    payload = result.model_dump()
+    origin = payload["provenance"]["origin"]
+    authoring = payload["provenance"]["authoring"]
+    if malformation in {"generate-prompt", "edit-prompt"}:
+        origin["render_prompt"] = "A rewritten prompt."
+    elif malformation == "generate-size":
+        origin["settings"]["width"] = 480
+    elif malformation == "edit-empty-lineage":
+        origin["edit_lineage"] = ()
+    elif malformation == "edit-source-size":
+        authoring["source"]["width"] = origin["settings"]["width"]
+        authoring["source"]["height"] = origin["settings"]["height"]
+    elif malformation == "edit-output-size":
+        authoring["output_size"]["tier"] = ResolutionTier.LARGE
+    elif malformation == "edit-missing-source":
+        del authoring["source"]
+    elif malformation == "edit-missing-instruction":
+        del origin["edit_lineage"][-1]["instruction"]
+    elif malformation == "edit-token-budget":
+        authoring["prompt_token_count"] = 513
+    else:
+        origin["edit_lineage"][-1]["expanded_prompt"] = "Different authored instruction."
+        origin["render_prompt"] = "Different authored instruction."
+
+    with pytest.raises(ValueError):
+        type(result).model_validate(payload)
+
+
+def test_edit_request_preserves_exact_style_bytes_through_inference_and_provenance(
     tmp_path: Path,
 ) -> None:
+    source = write_source(tmp_path / "styled-source.png")
+    style = StyleSnapshot(
+        style_id=uuid4(),
+        name="Exact Style",
+        prompt_text="  Fine ink lines.\nKeep paper grain.  ",
+    )
+    prompt = compose_edit_prompt("  Open the gate.  ", style)
+    payload = edit_request(tmp_path / "styled-edit.png", source).model_dump()
+    payload["expanded_prompt"] = prompt
+    request = MfluxEditRequest.model_validate(payload)
+    model = FakeMfluxModel()
+
+    result = MfluxGenerator(edit_model_factory=lambda *_: model).edit(request)
+
+    assert model.tokenizers["qwen3"].tokenizer.calls[0][0] == prompt
+    assert model.calls[0]["prompt"] == prompt
+    assert result.provenance.origin.render_prompt == prompt
+    assert result.provenance.origin.edit_lineage[-1].expanded_prompt == prompt
+    assert prompt.endswith("  ")
+
+
+def test_plain_generate_routes_to_regular_model_without_image_input(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    versions = {"mflux": "fake-mflux", "mlx": "fake-mlx"}
+    monkeypatch.setattr(mflux_module, "_package_version", versions.__getitem__)
     regular = FakeMfluxModel()
     edit = FakeMfluxModel()
     generator = MfluxGenerator(
@@ -338,10 +483,11 @@ def test_plain_generate_routes_to_regular_model_without_image_input(
         "scheduler": "flow_match_euler_discrete",
     }
     assert progress == [(0, 4), (1, 4), (2, 4), (3, 4), (4, 4), (0, 0)]
-    assert result.provenance.operation == "generate"
-    assert result.provenance.inputs.references == ()
-    assert result.provenance.settings.mflux_version == "0.19.1"
-    assert result.provenance.settings.dependency_versions["mlx"] == "0.32.2"
+    assert isinstance(result.provenance.authoring, GenerateOperation)
+    assert result.provenance.authoring.inputs.references == ()
+    assert result.provenance.origin.render_prompt == call["prompt"]
+    assert result.provenance.settings.mflux_version == versions["mflux"]
+    assert result.provenance.settings.dependency_versions == {"mlx": versions["mlx"]}
     assert not result.provenance.settings.use_kv_cache
     assert result.queue_duration_seconds >= 0
     assert result.load_duration_seconds >= 0
@@ -385,7 +531,7 @@ def test_reference_generate_routes_ordered_images_once_to_edit_model(
     assert edit.calls[0]["use_kv_cache"] is True
     assert edit.calls[0]["image_paths"].count(paths[0]) == 1  # type: ignore[union-attr]
     assert edit.calls[0]["image_paths"].count(paths[1]) == 1  # type: ignore[union-attr]
-    assert result.provenance.inputs.references == snapshots
+    assert result.provenance.authoring.inputs.references == snapshots
     assert result.provenance.settings.use_kv_cache
 
 
@@ -414,12 +560,13 @@ def test_edit_routes_one_source_and_expanded_prompt_with_fresh_seed(
     assert edit.calls[0]["image_paths"] == [source_path]
     assert edit.calls[0]["use_kv_cache"] is True
     assert "image_strength" not in edit.calls[0]
-    assert result.provenance.instruction == request.instruction
-    assert result.provenance.preserve == request.preserve
-    assert result.provenance.edit_lineage == request.edit_lineage
-    assert result.provenance.output_size == request.output_size
-    assert result.provenance.prompt_token_count == 24
-    assert result.provenance.prompt_token_budget == 512
+    assert isinstance(result.provenance.authoring, EditOperation)
+    assert result.provenance.origin.edit_lineage[-1].instruction == request.instruction
+    assert result.provenance.origin.edit_lineage == request.edit_lineage
+    assert result.provenance.origin.render_prompt == request.expanded_prompt
+    assert result.provenance.authoring.output_size == request.output_size
+    assert result.provenance.authoring.prompt_token_count == 24
+    assert result.provenance.authoring.prompt_token_budget == 512
     assert result.provenance.settings.seed == 991
     assert source_path.is_file()
 
@@ -443,7 +590,7 @@ def test_edit_accepts_exact_current_source_dimensions(
 
     assert model.calls[0]["width"] == 1008
     assert model.calls[0]["height"] == 752
-    assert result.provenance.output_size == CurrentSourceSize(
+    assert result.provenance.authoring.output_size == CurrentSourceSize(
         width=1008,
         height=752,
     )
@@ -455,19 +602,19 @@ def test_derived_request_captures_one_inherited_sequence_without_repeating_curre
     source_path = write_source(tmp_path / "source.png")
     payload = edit_request(tmp_path / "result.png", source_path).model_dump(mode="python")
     inherited = accepted_edit().model_copy(
-        update={"instruction": "Add ivy.", "expanded_prompt": "Add ivy. Preserve the text."}
+        update={"instruction": "Add ivy.", "expanded_prompt": "Add ivy."}
     )
-    payload["source"]["edit_lineage"] = (inherited,)
+    payload["inherited_edit_lineage"] = (inherited,)
     request = MfluxEditRequest.model_validate(payload)
     model = FakeMfluxModel()
     generator = MfluxGenerator(model_factory=lambda *_: model, edit_model_factory=lambda *_: model)
 
     result = generator.edit(request)
 
-    assert result.provenance.source == request.source
-    assert result.provenance.source.edit_lineage == (inherited,)
-    assert result.provenance.edit_lineage == (inherited, request.accepted_edit)
-    assert "edit_lineage" not in result.provenance.model_dump()
+    assert result.provenance.authoring.source == request.source
+    assert result.provenance.origin.edit_lineage == (inherited, request.accepted_edit)
+    assert "edit_lineage" not in result.provenance.authoring.model_dump()
+    assert "edit_lineage" not in request.source.model_dump()
     assert "edit_lineage" not in request.model_dump()
     assert "source_seed" not in request.model_dump()
     assert model.calls[0]["seed"] == request.seed
@@ -521,7 +668,10 @@ def test_derived_request_accepts_nonaligned_historical_source_facts(
 
     result = generator.edit(request)
 
-    assert (result.provenance.source.width, result.provenance.source.height) == (33, 31)
+    assert (
+        result.provenance.authoring.source.width,
+        result.provenance.authoring.source.height,
+    ) == (33, 31)
     assert (result.provenance.settings.width, result.provenance.settings.height) == (512, 384)
 
 
@@ -561,28 +711,59 @@ def test_request_boundary_rejects_aspect_incompatible_exact_sizes(
     ("token_count", "succeeds"),
     ((512, True), (513, False)),
 )
+@pytest.mark.parametrize("formatting", ("plain", "template", "chat"))
 def test_edit_enforces_exact_token_budget_before_inference(
     tmp_path: Path,
     token_count: int,
     succeeds: bool,
+    formatting: str,
 ) -> None:
     source_path = write_source(tmp_path / f"source-{token_count}.png")
     model = FakeMfluxModel(token_count=token_count)
     generator = MfluxGenerator(edit_model_factory=lambda *_: model)
+    request = edit_request(tmp_path / f"edit-{token_count}.png", source_path)
+    tokenizer = model.tokenizers["qwen3"]
+    if formatting == "template":
+        tokenizer.template = "<image-edit>{}</image-edit>"
+    elif formatting == "chat":
+        tokenizer.use_chat_template = True
+        tokenizer.chat_template_kwargs = {"enable_thinking": False}
 
     if succeeds:
-        result = generator.edit(edit_request(tmp_path / f"edit-{token_count}.png", source_path))
-        assert result.provenance.prompt_token_count == token_count
+        result = generator.edit(request)
+        assert result.provenance.authoring.prompt_token_count == token_count
         assert len(model.calls) == 1
     else:
         with pytest.raises(ImageGenerationError, match="513 model tokens"):
-            generator.edit(
-                edit_request(
-                    tmp_path / f"edit-{token_count}.png",
-                    source_path,
-                )
-            )
+            generator.edit(request)
         assert model.calls == []
+    expected_prompt = {
+        "plain": request.expanded_prompt,
+        "template": f"<image-edit>{request.expanded_prompt}</image-edit>",
+        "chat": f"<user>{request.expanded_prompt}</user>",
+    }[formatting]
+    assert tokenizer.tokenizer.calls == [
+        (
+            expected_prompt,
+            {
+                "padding": False,
+                "truncation": False,
+                "add_special_tokens": True,
+                "return_attention_mask": False,
+            },
+        )
+    ]
+    if formatting == "chat":
+        assert tokenizer.tokenizer.chat_calls == [
+            (
+                [{"role": "user", "content": request.expanded_prompt}],
+                {
+                    "tokenize": False,
+                    "add_generation_prompt": True,
+                    "enable_thinking": False,
+                },
+            )
+        ]
 
 
 @pytest.mark.parametrize("aspect_ratio", tuple(AspectRatio))
@@ -631,7 +812,6 @@ def test_requests_reject_mismatched_dimensions_and_lineage(
                 "edit_lineage": (
                     AcceptedEdit(
                         instruction="Different.",
-                        preserve=request.preserve,
                         expanded_prompt="Different.",
                     ),
                 ),
@@ -657,6 +837,8 @@ def test_requests_require_exact_existing_source_paths(tmp_path: Path) -> None:
                 reference_paths=(tmp_path / "missing-reference.png",),
             )
         )
+
+
 def test_edit_family_reuses_reference_generate_and_edit_model(
     tmp_path: Path,
 ) -> None:
@@ -692,9 +874,11 @@ def test_edit_family_reuses_reference_generate_and_edit_model(
     assert len(edit.callbacks.registered) == 1
 
 
-def test_incompatible_family_model_or_quantization_evicts_cached_model(
+@pytest.mark.parametrize("change", ("family", "model", "quantization", "factory"))
+def test_each_incompatible_cache_key_evicts_the_cached_model(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    change: str,
 ) -> None:
     source_path = write_source(tmp_path / "source.png")
     snapshot = ImageReferenceSnapshot(
@@ -702,8 +886,7 @@ def test_incompatible_family_model_or_quantization_evicts_cached_model(
         revision_id=uuid4(),
         background_id=uuid4(),
     )
-    regular_loads: list[tuple[str, int | None]] = []
-    edit_loads: list[tuple[str, int | None]] = []
+    loads: list[str] = []
     releases: list[None] = []
     monkeypatch.setattr(
         mflux_module,
@@ -711,37 +894,92 @@ def test_incompatible_family_model_or_quantization_evicts_cached_model(
         lambda: releases.append(None),
     )
     generator = MfluxGenerator(
-        model_factory=lambda model, quantization: (
-            regular_loads.append((model, quantization)) or FakeMfluxModel()
-        ),
-        edit_model_factory=lambda model, quantization: (
-            edit_loads.append((model, quantization)) or FakeMfluxModel()
-        ),
+        model_factory=lambda *_: loads.append("regular") or FakeMfluxModel(),
+        edit_model_factory=lambda *_: loads.append("edit") or FakeMfluxModel(),
     )
 
-    generator.generate(generate_request(tmp_path / "regular.png"))
-    generator.generate(
-        generate_request(
-            tmp_path / "reference.png",
-            references=(snapshot,),
-            reference_paths=(source_path,),
+    initial = generator.generate(generate_request(tmp_path / "regular.png"))
+    if change == "factory":
+        generator = MfluxGenerator(
+            model_factory=lambda *_: loads.append("replacement") or FakeMfluxModel(),
         )
+    request = generate_request(
+        tmp_path / "changed.png",
+        references=(snapshot,) if change == "family" else (),
+        reference_paths=(source_path,) if change == "family" else (),
+        model_identifier="flux2-klein-9b" if change == "model" else "flux2-klein-4b",
+        quantization=8 if change == "quantization" else None,
     )
-    generator.edit(edit_request(tmp_path / "edit.png", source_path))
-    generator.generate(
-        generate_request(
-            tmp_path / "quantized.png",
-            model_identifier="flux2-klein-9b",
-            quantization=8,
-        )
+    changed = generator.generate(request)
+    reused = generator.generate(request.model_copy(update={"output_path": tmp_path / "reused.png"}))
+
+    assert len(loads) == 2
+    assert len(releases) == 1
+    assert not initial.cache_reused
+    assert not changed.cache_reused
+    assert reused.cache_reused
+
+
+@pytest.mark.parametrize("failure_stage", ("load", "inference"))
+def test_retry_reports_actual_cache_reuse_after_a_failed_cold_attempt(
+    tmp_path: Path,
+    failure_stage: str,
+) -> None:
+    model = FakeMfluxModel(
+        fail=RuntimeError("cold inference failed") if failure_stage == "inference" else None
+    )
+    loads: list[None] = []
+
+    def factory(*_args: object) -> FakeMfluxModel:
+        loads.append(None)
+        if failure_stage == "load" and len(loads) == 1:
+            raise OSError("cold model load failed")
+        return model
+
+    generator = MfluxGenerator(model_factory=factory)
+    failure_type = ModelLoadError if failure_stage == "load" else ImageGenerationError
+    with pytest.raises(failure_type):
+        generator.generate(generate_request(tmp_path / "cold.png"))
+    model.fail = None
+
+    retry = generator.generate(generate_request(tmp_path / "retry.png"))
+
+    assert retry.cache_reused is (failure_stage == "inference")
+    assert len(loads) == (2 if failure_stage == "load" else 1)
+    assert not (tmp_path / "cold.png").exists()
+
+
+def test_forced_cold_reload_is_atomic_with_the_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loads: list[object] = []
+    releases: list[object] = []
+
+    def factory(*_args: object) -> FakeMfluxModel:
+        loads.append(current_thread())
+        return FakeMfluxModel()
+
+    monkeypatch.setattr(
+        mflux_module, "_release_model_cache", lambda: releases.append(current_thread())
+    )
+    generator = MfluxGenerator(model_factory=factory)
+    first = generator.generate(generate_request(tmp_path / "existing.png"))
+    cold_request = generate_request(tmp_path / "forced.png").model_copy(
+        update={"force_reload": True}
     )
 
-    assert regular_loads == [
-        ("flux2-klein-4b", None),
-        ("flux2-klein-9b", 8),
-    ]
-    assert edit_loads == [("flux2-klein-4b", None)]
-    assert len(releases) == 2
+    cold = generator.generate(cold_request)
+    warm = generator.generate(generate_request(tmp_path / "warm.png"))
+
+    assert not first.cache_reused
+    assert not cold.cache_reused
+    assert warm.cache_reused
+    assert len(loads) == 2
+    assert releases == [loads[1]]
+    assert loads[0] is loads[1]
+    assert loads[0] is not current_thread()
+    assert "force_reload" not in cold.provenance.model_dump_json()
 
 
 def test_family_switches_destroy_old_model_before_cache_clear_and_replacement(
@@ -953,6 +1191,46 @@ def test_release_defers_without_blocking_until_active_invocation_unwinds(
     mflux_module._PROCESS_EXECUTION_LOCK.release()
 
 
+def test_release_defers_during_other_native_work_and_clears_on_the_owner_thread(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    native_entered = Event()
+    release_native = Event()
+    cleared_on: list[object] = []
+    loaded_on: list[object] = []
+
+    def factory(*_args: object) -> FakeMfluxModel:
+        loaded_on.append(current_thread())
+        return FakeMfluxModel()
+
+    generator = MfluxGenerator(model_factory=factory)
+    generator.generate(generate_request(tmp_path / "generated.png"))
+    monkeypatch.setattr(
+        mflux_module, "_release_model_cache", lambda: cleared_on.append(current_thread())
+    )
+
+    def other_native_work() -> None:
+        native_entered.set()
+        assert release_native.wait(2)
+
+    native = mflux_module.submit_model_invocation(other_native_work)
+    assert native_entered.wait(0.5)
+    started = monotonic()
+    generator.release()
+
+    assert monotonic() - started < 0.25
+    assert cleared_on == []
+    assert mflux_module._CACHED_MODEL is not None
+    release_native.set()
+    native.result(timeout=2)
+    mflux_module.submit_model_invocation(lambda: None).result(timeout=2)
+
+    assert cleared_on == loaded_on
+    assert cleared_on[0] is not current_thread()
+    assert mflux_module._CACHED_MODEL is None
+
+
 def test_deferred_release_failure_unlocks_and_retries_before_later_operation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -985,6 +1263,8 @@ def test_deferred_release_failure_unlocks_and_retries_before_later_operation(
     assert not thread.is_alive()
     assert isinstance(outcomes[0], RuntimeError)
     assert str(outcomes[0]) == "injected cache-clear failure"
+    assert not (tmp_path / "first.png").exists()
+    assert owned_output_scopes(tmp_path) == []
     assert mflux_module._CACHE_RELEASE_PENDING
     assert mflux_module._PROCESS_EXECUTION_LOCK.acquire(blocking=False)
     mflux_module._PROCESS_EXECUTION_LOCK.release()
@@ -1111,6 +1391,94 @@ def test_cancellation_destroys_active_model_before_clearing_mlx_cache(
 
     assert isinstance(outcomes[0], ImageGenerationCancelled)
     assert events == ["destroy", "clear"]
+
+
+def test_release_requested_at_empty_queue_handoff_is_not_stranded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "handoff.png"
+    generator = MfluxGenerator(model_factory=lambda *_: FakeMfluxModel())
+    drain = mflux_module._process_deferred_release_requests_locked
+    requested = False
+    releases: list[None] = []
+
+    def drain_then_request() -> None:
+        nonlocal requested
+        drain()
+        if output.exists() and not requested:
+            requested = True
+            generator.release()
+
+    monkeypatch.setattr(
+        mflux_module, "_process_deferred_release_requests_locked", drain_then_request
+    )
+    monkeypatch.setattr(mflux_module, "_release_model_cache", lambda: releases.append(None))
+
+    result = generator.generate(generate_request(output))
+
+    assert result.output_path == output
+    assert requested
+    assert releases == [None]
+    assert mflux_module._CACHED_MODEL is None
+    assert mflux_module._DEFERRED_RELEASES == []
+
+
+@pytest.mark.parametrize("failure_stage", ("result", "scope", "progress"))
+def test_finalization_failure_disposes_already_published_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_stage: str,
+) -> None:
+    output = tmp_path / "not-returned.png"
+    generator = MfluxGenerator(model_factory=lambda *_: FakeMfluxModel())
+
+    def fail(*_args: object, **_kwargs: object) -> None:
+        assert output.exists()
+        raise RuntimeError("injected finalization failure")
+
+    if failure_stage == "result":
+        monkeypatch.setattr(generator, "_result", fail)
+    elif failure_stage == "scope":
+        cleanup = mflux_module._OwnedOutput.cleanup
+
+        def cleanup_then_fail(scope: object, operation: str) -> None:
+            cleanup(scope, operation)
+            fail()
+
+        monkeypatch.setattr(mflux_module._OwnedOutput, "cleanup", cleanup_then_fail)
+    else:
+        monkeypatch.setattr(mflux_module._MfluxStepProgress, "clear_context", fail)
+
+    with pytest.raises(RuntimeError, match="injected finalization"):
+        generator.generate(generate_request(output), progress=lambda *_: None)
+
+    assert not output.exists()
+    assert owned_output_scopes(tmp_path) == []
+    assert mflux_module._PROCESS_EXECUTION_LOCK.acquire(blocking=False)
+    mflux_module._PROCESS_EXECUTION_LOCK.release()
+
+
+def test_result_construction_failure_preserves_replaced_foreign_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "replaced.png"
+    replacement = tmp_path / "foreign.png"
+    replacement.write_bytes(b"foreign output")
+    generator = MfluxGenerator(model_factory=lambda *_: FakeMfluxModel())
+
+    def replace_then_fail(**_kwargs: object) -> None:
+        replacement.replace(output)
+        raise RuntimeError("result construction failed")
+
+    monkeypatch.setattr(generator, "_result", lambda *_args, **kwargs: replace_then_fail(**kwargs))
+
+    with pytest.raises(RuntimeError, match="result construction"):
+        generator.generate(generate_request(output))
+
+    assert output.read_bytes() == b"foreign output"
+    assert owned_output_scopes(tmp_path) == []
 
 
 def test_success_atomically_publishes_exact_target_and_cleans_owned_scope(

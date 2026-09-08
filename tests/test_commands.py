@@ -1,6 +1,7 @@
 """Focused tests for typed document commands."""
 
 from datetime import UTC, datetime
+from unittest.mock import patch
 from uuid import UUID, uuid4
 
 import pytest
@@ -18,7 +19,6 @@ from hotcards.application.commands import (
     CommandError,
     CreateCardCommand,
     CreateImageRevisionCommand,
-    CreateKeyAndAddHotspotReferenceCommand,
     DeleteCardCommand,
     DeleteInteractionCommand,
     DeleteKeyCommand,
@@ -45,24 +45,29 @@ from hotcards.application.commands import (
     UpdateSoundCommand,
     UpdateStyleCommand,
     next_duplicate_card_name,
+    validated_copy,
 )
 from hotcards.application.document_controller import DocumentController
 from hotcards.domain.image_dimensions import AspectRatio, ResolutionTier
 from hotcards.domain.models import (
+    AcceptedEdit,
     Card,
     CardRevision,
     CurrentSourceSize,
     DerivedImageSourceSnapshot,
-    DirectGenerateProvenance,
-    DuplicateProvenance,
+    DuplicateOperation,
     EditDraft,
+    EditOperation,
     GeneratedBackground,
     GeneratedSoundAsset,
     GenerateInputs,
+    GenerateOperation,
     HotspotConditions,
     HotspotKeyChanges,
     HotspotSet,
     ImageOperationSettings,
+    ImageOriginFacts,
+    ImageProvenance,
     ImageSourceSnapshot,
     Interaction,
     KeyDefinition,
@@ -70,8 +75,6 @@ from hotcards.domain.models import (
     Point,
     Polygon,
     PresetOutputSize,
-    RefineProvenance,
-    RefineTransformation,
     ResolvedCardReference,
     SoundGenerationProvenance,
     Stack,
@@ -132,16 +135,67 @@ def generated_background(description: str = "A card") -> GeneratedBackground:
     return GeneratedBackground(
         id=asset_id,
         image_path=f"assets/cards/card/image-{asset_id}.png",
-        provenance=DirectGenerateProvenance(
-            inputs=GenerateInputs(description=description),
-            render_prompt=description,
-            settings=operation_settings(),
+        provenance=ImageProvenance(
+            origin=ImageOriginFacts(render_prompt=description, settings=operation_settings()),
+            authoring=GenerateOperation(inputs=GenerateInputs(description=description)),
         ),
         created_at=datetime.now(UTC),
     )
 
 
-def refined_background(
+def test_validated_copy_validates_once_and_isolates_nested_metadata() -> None:
+    background = generated_background()
+    original = Stack(
+        name="Stack",
+        cards=(Card(name="Card", revisions=(CardRevision(background=background),)),),
+    )
+    with patch.object(Stack, "model_validate", wraps=Stack.model_validate) as validate:
+        copied = validated_copy(original)
+    assert validate.call_count == 1
+    assert copied == original
+    assert copied.cards[0].active_revision.background is not None
+    copied.cards[0].active_revision.background.provenance.settings.dependency_versions["mlx"] = (
+        "Changed externally"
+    )
+    assert (
+        original.cards[0].active_revision.background.provenance.settings.dependency_versions == {}
+    )
+
+    invalid = background.model_copy(
+        update={
+            "provenance": background.provenance.model_copy(
+                update={
+                    "origin": background.provenance.origin.model_copy(
+                        update={
+                            "settings": background.provenance.settings.model_copy(
+                                update={"width": 0}
+                            )
+                        }
+                    )
+                }
+            )
+        }
+    )
+    invalid_document = original.model_copy(
+        update={
+            "cards": (
+                original.cards[0].model_copy(
+                    update={
+                        "revisions": (
+                            original.cards[0].active_revision.model_copy(
+                                update={"background": invalid}
+                            ),
+                        )
+                    }
+                ),
+            )
+        }
+    )
+    with pytest.raises(ValidationError, match="greater than 0"):
+        validated_copy(invalid_document)
+
+
+def edited_background(
     *,
     source_card_id: UUID,
     source_revision: CardRevision,
@@ -151,22 +205,29 @@ def refined_background(
     return GeneratedBackground(
         id=asset_id,
         image_path=f"assets/cards/card/image-{asset_id}.png",
-        provenance=RefineProvenance(
-            source=DerivedImageSourceSnapshot(
-                card_id=source_card_id,
-                revision_id=source_revision.id,
-                background_id=source_revision.background.id,
-                width=512,
-                height=384,
-                seed=image_operation_settings(source_revision.background.provenance).seed,
-                edit_lineage=image_edit_lineage(source_revision.background.provenance),
+        provenance=ImageProvenance(
+            origin=ImageOriginFacts(
+                render_prompt="Open the window.",
+                settings=operation_settings(),
+                edit_lineage=(
+                    *image_edit_lineage(source_revision.background.provenance),
+                    AcceptedEdit(
+                        instruction="Open the window.", expanded_prompt="Open the window."
+                    ),
+                ),
             ),
-            description="Refined card",
-            render_prompt="Refined card",
-            output_size=CurrentSourceSize(width=512, height=384),
-            transformation=RefineTransformation.BALANCED,
-            strength=0.5,
-            settings=operation_settings(),
+            authoring=EditOperation(
+                source=DerivedImageSourceSnapshot(
+                    card_id=source_card_id,
+                    revision_id=source_revision.id,
+                    background_id=source_revision.background.id,
+                    width=512,
+                    height=384,
+                    seed=image_operation_settings(source_revision.background.provenance).seed,
+                ),
+                output_size=CurrentSourceSize(width=512, height=384),
+                prompt_token_count=4,
+            ),
         ),
         created_at=datetime.now(UTC),
     )
@@ -281,13 +342,17 @@ def test_duplicate_card_copies_only_active_revision_with_independent_ids() -> No
     assert revision.background is not None
     assert revision.background.id == duplicate_background_id
     assert revision.background.id != background.id
-    assert isinstance(revision.background.provenance, DuplicateProvenance)
-    assert revision.background.provenance.source == ImageSourceSnapshot(
+    assert isinstance(revision.background.provenance.authoring, DuplicateOperation)
+    assert revision.background.provenance.authoring.source == ImageSourceSnapshot(
         card_id=source.id,
         revision_id=active.id,
         background_id=background.id,
     )
-    assert revision.background.provenance.original_provenance == background.provenance
+    assert (
+        revision.background.provenance.authoring.original_authoring
+        == background.provenance.authoring
+    )
+    assert revision.background.provenance.origin == background.provenance.origin
 
 
 def test_duplicate_card_name_is_case_insensitively_unique() -> None:
@@ -320,8 +385,8 @@ def test_deleting_blank_duplicate_does_not_change_source() -> None:
 def test_duplicate_card_flattens_provenance_and_survives_source_deletion() -> None:
     source_card_id = uuid4()
     direct = CardRevision(background=generated_background("Direct"))
-    refined = CardRevision(
-        background=refined_background(
+    edited = CardRevision(
+        background=edited_background(
             source_card_id=source_card_id,
             source_revision=direct,
         )
@@ -329,8 +394,8 @@ def test_duplicate_card_flattens_provenance_and_survives_source_deletion() -> No
     source = Card(
         id=source_card_id,
         name="Source",
-        revisions=(direct, refined),
-        active_revision_id=refined.id,
+        revisions=(direct, edited),
+        active_revision_id=edited.id,
     )
     document = Stack(name="Stack", cards=(source,))
     first_card_id, first_revision_id, first_background_id = (
@@ -363,11 +428,15 @@ def test_duplicate_card_flattens_provenance_and_survives_source_deletion() -> No
 
     first_provenance = first_duplicate.active_revision.provenance
     second_provenance = changed.cards[2].active_revision.provenance
-    assert isinstance(first_provenance, DuplicateProvenance)
-    assert isinstance(second_provenance, DuplicateProvenance)
-    assert isinstance(second_provenance.original_provenance, RefineProvenance)
-    assert second_provenance.original_provenance == first_provenance.original_provenance
-    assert second_provenance.source.card_id == first_duplicate.id
+    assert isinstance(first_provenance.authoring, DuplicateOperation)
+    assert isinstance(second_provenance.authoring, DuplicateOperation)
+    assert isinstance(second_provenance.authoring.original_authoring, EditOperation)
+    assert (
+        second_provenance.authoring.original_authoring
+        == first_provenance.authoring.original_authoring
+    )
+    assert second_provenance.authoring.source.card_id == first_duplicate.id
+    assert image_edit_lineage(second_provenance) == image_edit_lineage(edited.provenance)
 
     without_source = DeleteCardCommand(card_id=source.id).apply(changed)
     assert [card.name for card in without_source.cards] == [
@@ -532,26 +601,6 @@ def test_sound_lifecycle_and_hotspot_assignment_are_typed_changes() -> None:
     assert document.sounds == ()
 
 
-def test_create_key_and_hotspot_reference_is_atomic() -> None:
-    interaction = Interaction(polygons=(polygon(),))
-    source, revision = card_with_revision(interaction)
-    document = Stack(name="Stack", cards=(source,))
-    command = CreateKeyAndAddHotspotReferenceCommand(
-        card_id=source.id,
-        revision_id=revision.id,
-        interaction_id=interaction.id,
-        name="Visited castle",
-        role="grant",
-    )
-
-    changed = command.apply(document)
-
-    assert changed.keys == (KeyDefinition(id=command.key_id, name="Visited castle"),)
-    hotspot_set = changed.cards[0].active_revision.hotspot_set
-    assert hotspot_set is not None
-    assert hotspot_set.interactions[0].key_changes.grant == (command.key_id,)
-
-
 def test_revision_generate_output_size_is_typed_and_copied_completely() -> None:
     style = StyleDefinition(name="Ink", prompt_text="Rendered in ink")
     revision = CardRevision(
@@ -654,7 +703,7 @@ def test_create_image_revision_keeps_newer_draft_on_original_and_starts_result_e
 
 
 @pytest.mark.parametrize("hotspot_set", (None, HotspotSet()))
-def test_replace_refined_background_preserves_complete_revision(
+def test_replace_edited_background_preserves_complete_revision(
     hotspot_set: HotspotSet | None,
 ) -> None:
     style = StyleDefinition(name="Ink", prompt_text="Rendered in ink")
@@ -674,7 +723,7 @@ def test_replace_refined_background_preserves_complete_revision(
         new_card_style_id=style.id,
         cards=(card, reference),
     )
-    new_background = refined_background(
+    new_background = edited_background(
         source_card_id=card.id,
         source_revision=source,
     )
@@ -844,7 +893,7 @@ def test_source_revision_deletion_and_replacement_leave_derived_revision_indepen
     source = CardRevision(background=generated_background("Source"))
     card_id = uuid4()
     derived = CardRevision(
-        background=refined_background(
+        background=edited_background(
             source_card_id=card_id,
             source_revision=source,
         )
@@ -876,7 +925,7 @@ def test_whole_card_deletion_leaves_external_derived_backgrounds_independent() -
     source = CardRevision(background=generated_background("Source"))
     source_card_id = uuid4()
     internal = CardRevision(
-        background=refined_background(
+        background=edited_background(
             source_card_id=source_card_id,
             source_revision=source,
         )
@@ -895,7 +944,7 @@ def test_whole_card_deletion_leaves_external_derived_backgrounds_independent() -
         name="Dependent",
         revisions=(
             CardRevision(
-                background=refined_background(
+                background=edited_background(
                     source_card_id=source_card.id,
                     source_revision=source,
                 )
@@ -916,7 +965,7 @@ def test_derived_background_can_replace_its_own_version_and_undo() -> None:
     source = CardRevision(background=generated_background("Source"), description="Source")
     card = Card(name="Card", revisions=(source,))
     controller = DocumentController(Stack(name="Stack", cards=(card,)))
-    background = refined_background(source_card_id=card.id, source_revision=source)
+    background = edited_background(source_card_id=card.id, source_revision=source)
 
     controller.execute(
         ReplaceRevisionBackgroundCommand(
@@ -1094,21 +1143,9 @@ def test_reference_assignment_and_background_replacement_are_guarded() -> None:
     background = GeneratedBackground(
         id=asset_id,
         image_path=f"assets/cards/{card.id}/image-{asset_id}.png",
-        provenance=DirectGenerateProvenance(
-            inputs=GenerateInputs(
-                description="A card",
-            ),
-            render_prompt="A card",
-            settings=ImageOperationSettings(
-                model_identifier="test",
-                mflux_version="test",
-                seed=1,
-                width=512,
-                height=384,
-                step_count=4,
-                generated_at=generated_at,
-                duration_seconds=1,
-            ),
+        provenance=ImageProvenance(
+            origin=ImageOriginFacts(render_prompt="A card", settings=operation_settings()),
+            authoring=GenerateOperation(inputs=GenerateInputs(description="A card")),
         ),
         created_at=generated_at,
     )

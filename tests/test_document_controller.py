@@ -2,14 +2,16 @@
 
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 from uuid import uuid4
 
 import pytest
+from helpers import generated_background
+from pydantic import ValidationError
 
 from hotcards.application.commands import (
     AddInteractionCommand,
     ChangeHotspotDestinationCommand,
-    CreateCardAndResolveCommand,
     CreateCardCommand,
     DeleteCardCommand,
     DeleteSoundCommand,
@@ -93,7 +95,7 @@ def test_owned_sound_is_released_only_after_history_cannot_restore_it() -> None:
         created_at=datetime.now(UTC),
     )
     owned = OwnedSoundAsset(
-        bundle_path=Path("/tmp/Sounds.hotcards"),
+        bundle_path=Path("Sounds.hotcards"),
         relative_path=generated.audio_path,
         sound_id=sound.id,
         asset_id=generated.id,
@@ -120,6 +122,78 @@ def hotspot_target(controller: DocumentController) -> object:
     hotspot_set = controller.document.cards[0].revisions[0].hotspot_set
     assert hotspot_set is not None
     return hotspot_set.interactions[0].action.target
+
+
+@pytest.mark.parametrize("boundary", ("construct", "replace"))
+def test_document_snapshots_isolate_nested_input_and_reader_mutations(
+    boundary: Literal["construct", "replace"],
+) -> None:
+    card_id = uuid4()
+    background = generated_background(card_id)
+    revision = CardRevision(background=background)
+    card = Card(id=card_id, name="Card", revisions=(revision,))
+    document = Stack(name="Stack", cards=(card,))
+    if boundary == "construct":
+        controller = DocumentController(document)
+        first_read = controller.document
+    else:
+        controller = DocumentController(Stack(name="Previous"))
+        first_read = controller.replace_document(document)
+    second_read = controller.document
+
+    input_background = document.cards[0].active_revision.background
+    assert input_background is not None
+    input_background.provenance.settings.dependency_versions["mflux"] = "input mutation"
+    first_background = first_read.cards[0].active_revision.background
+    assert first_background is not None
+    first_background.provenance.settings.dependency_versions["mflux"] = "reader mutation"
+
+    controller.execute(RenameCardCommand(card_id=card.id, name="Renamed"))
+    assert controller.undo()
+    assert controller.redo()
+    for snapshot in (second_read, controller.document):
+        snapshot_background = snapshot.cards[0].active_revision.background
+        assert snapshot_background is not None
+        assert snapshot_background.provenance.settings.dependency_versions == {"mflux": "test"}
+
+
+@pytest.mark.parametrize("boundary", ("construct", "replace", "execute", "persist"))
+def test_document_input_boundaries_reject_invalid_nested_models_without_state_changes(
+    boundary: Literal["construct", "replace", "execute", "persist"],
+) -> None:
+    card = Card(name="Original")
+    signals: list[Stack] = []
+    persisted: list[Stack] = []
+    controller = DocumentController(
+        Stack(name="Stack", cards=(card,)), autosave_hook=signals.append
+    )
+    controller.execute(RenameCardCommand(card_id=card.id, name="Renamed"))
+    before = controller.document
+    token = controller.current_undo_token
+    signals.clear()
+    invalid_card = before.cards[0].model_copy(update={"name": ""})
+    invalid = before.model_copy(update={"cards": (invalid_card,)})
+
+    class InvalidDocumentCommand:
+        def apply(self, _document: Stack) -> Stack:
+            return invalid
+
+    with pytest.raises(ValidationError, match="cards.0.name"):
+        if boundary == "construct":
+            DocumentController(invalid)
+        elif boundary == "replace":
+            controller.replace_document(invalid)
+        elif boundary == "execute":
+            controller.execute(InvalidDocumentCommand())
+        else:
+            controller.execute_persisted(InvalidDocumentCommand(), persisted.append)
+
+    assert controller.document == before
+    assert controller.current_undo_token == token
+    assert signals == []
+    assert persisted == []
+    assert controller.undo()
+    assert controller.document.cards[0].name == "Original"
 
 
 def test_execute_undo_redo_and_new_command_invalidates_redo() -> None:
@@ -301,57 +375,33 @@ def test_deleting_start_destination_is_valid_and_undo_restores_inbound_link() ->
     assert hotspot_target(controller) == ResolvedCardReference(target_card_id=destination.id)
 
 
-def test_create_card_and_resolve_is_atomic_with_explicit_name() -> None:
-    document, source, revision, hotspot = document_with_hotspot()
-    controller = DocumentController(document)
-    command = CreateCardAndResolveCommand(
-        source_card_id=source.id,
-        revision_id=revision.id,
-        interaction_id=hotspot.id,
-        card_name="Explicit destination",
-    )
-
-    controller.execute(command)
-    assert [card.name for card in controller.document.cards] == [
-        "Source",
-        "Explicit destination",
-    ]
-    assert hotspot_target(controller) == ResolvedCardReference(target_card_id=command.new_card_id)
-
-    assert controller.undo()
-    assert [card.name for card in controller.document.cards] == ["Source"]
-    assert hotspot_target(controller) == UnresolvedCardReference(target_name="Retained destination")
-
-    assert controller.redo()
-    assert controller.document.cards[1].id == command.new_card_id
-    assert hotspot_target(controller) == ResolvedCardReference(target_card_id=command.new_card_id)
-
-
-def test_create_card_and_resolve_defaults_to_retained_target_name() -> None:
-    document, source, revision, hotspot = document_with_hotspot()
-    controller = DocumentController(document)
-
-    controller.execute(
-        CreateCardAndResolveCommand(
-            source_card_id=source.id,
-            revision_id=revision.id,
-            interaction_id=hotspot.id,
-        )
-    )
-
-    assert controller.document.cards[1].name == "Retained destination"
-
-
 def test_autosave_hook_signals_execute_undo_and_redo_with_snapshots() -> None:
+    card_id = uuid4()
+    revision = CardRevision(background=generated_background(card_id))
+    card = Card(id=card_id, name="Original", revisions=(revision,))
     signals: list[Stack] = []
-    controller = DocumentController(Stack(name="Stack"), autosave_hook=signals.append)
+    controller = DocumentController(
+        Stack(name="Stack", cards=(card,)),
+        autosave_hook=signals.append,
+    )
 
-    controller.execute(CreateCardCommand(name="Card"))
+    controller.execute(RenameCardCommand(card_id=card.id, name="Renamed"))
     assert controller.undo()
     assert controller.redo()
 
-    assert [len(stack.cards) for stack in signals] == [1, 0, 1]
-    assert signals[-1] is not controller.document
+    assert [stack.cards[0].name for stack in signals] == ["Renamed", "Original", "Renamed"]
+    saved_background = signals[0].cards[0].active_revision.background
+    assert saved_background is not None
+    saved_background.provenance.settings.dependency_versions["mflux"] = "snapshot mutation"
+
+    for document in (*signals[1:], controller.document):
+        background = document.cards[0].active_revision.background
+        assert background is not None
+        assert background.provenance.settings.dependency_versions == {"mflux": "test"}
+    assert controller.undo()
+    restored_background = controller.document.cards[0].active_revision.background
+    assert restored_background is not None
+    assert restored_background.provenance.settings.dependency_versions == {"mflux": "test"}
 
 
 def test_pending_persisted_change_blocks_mutations_until_confirmed() -> None:
@@ -615,7 +665,7 @@ def test_revision_draft_survives_undo_and_redo_of_its_creation() -> None:
     assert restored.edit_draft == draft
 
 
-def test_document_draft_transition_restores_only_an_unchanged_generation() -> None:
+def test_document_draft_transition_distinguishes_same_text_generations() -> None:
     card = Card(name="Original")
     controller = DocumentController(Stack(name="Stack", cards=(card,)))
     submitted = controller.replace_edit_draft(
@@ -628,9 +678,7 @@ def test_document_draft_transition_restores_only_an_unchanged_generation() -> No
     class ConsumeDraftCommand:
         def apply(self, document: Stack) -> Stack:
             current_card = document.cards[0]
-            revision = current_card.active_revision.model_copy(
-                update={"edit_draft": consumed}
-            )
+            revision = current_card.active_revision.model_copy(update={"edit_draft": consumed})
             changed_card = current_card.model_copy(
                 update={"name": "Edited", "revisions": (revision,)}
             )
@@ -647,8 +695,10 @@ def test_document_draft_transition_restores_only_an_unchanged_generation() -> No
     newer = controller.replace_edit_draft(
         card.id,
         card.active_revision.id,
-        "Newer",
+        "Submitted",
     )
+    assert newer.instruction == submitted.instruction
+    assert newer.generation_id != submitted.generation_id
     assert controller.redo()
     assert controller.document.cards[0].name == "Edited"
     assert controller.edit_draft(card.id, card.active_revision.id) == newer

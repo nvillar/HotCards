@@ -2,17 +2,16 @@
 
 from __future__ import annotations
 
-import os
+from collections.abc import Iterator
 from pathlib import Path
-
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PIL import Image, ImageDraw
-from PySide6.QtCore import QPoint, QPointF, Qt
+from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QPointF, Qt
 from PySide6.QtGui import QColor, QWheelEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
+from shiboken6 import isValid
 
 from hotcards.domain.image_dimensions import (
     AspectRatio,
@@ -31,9 +30,26 @@ from hotcards.domain.models import (
 from hotcards.ui.card_canvas import CardCanvas
 
 
-@pytest.fixture(scope="module")
-def application() -> QApplication:
-    return QApplication.instance() or QApplication([])
+@pytest.fixture
+def application(
+    qt_application: QApplication, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[QApplication]:
+    canvases: list[CardCanvas] = []
+    initialize = CardCanvas.__init__
+
+    def initialize_owned(canvas: CardCanvas, *args: object, **kwargs: object) -> None:
+        initialize(canvas, *args, **kwargs)
+        canvases.append(canvas)
+
+    monkeypatch.setattr(CardCanvas, "__init__", initialize_owned)
+    try:
+        yield qt_application
+    finally:
+        for canvas in reversed(canvases):
+            if isValid(canvas):
+                canvas.close()
+                canvas.deleteLater()
+                QCoreApplication.sendPostedEvents(canvas, QEvent.Type.DeferredDelete)
 
 
 def test_canvas_renders_image_and_round_trips_document_coordinates(
