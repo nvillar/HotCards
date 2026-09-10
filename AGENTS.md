@@ -242,7 +242,7 @@ for live MFLUX runs.
   actual image operation and restores its instruction when appropriate.
 - Apply reversible deletions and replacements without confirmation. Report
   outcomes, failures, Run warnings, and Undo actions in the global notification
-  bar; keep field validation beside its input and the status bar passive. Use a
+  bar; keep field validation beside its input and status messages passive. Use a
   blocking decision dialog only when proceeding could lose persisted work and
   Undo cannot recover it.
 - Store each hotspot set under exactly one complete card revision. Replacing a
@@ -274,10 +274,11 @@ for live MFLUX runs.
   Author mode and Author in Run mode. Show standard-size Back, Restart, and
   overlay controls only in Run mode; hide the card name, version authoring
   header there.
-- Keep machine-local model selection under Settings → Models, with Image and
-  Sound selectors persisted through Qt settings. Offer FLUX.2 Klein 4B and
+- Keep machine-local Image and Sound model selectors right-aligned in the bottom
+  status bar alongside rendering progress, with consistent spacing and margins,
+  persisted through Qt settings, and disabled in Run mode. Offer FLUX.2 Klein 4B and
   FLUX.2 Klein 9B KV for Image and Stable Audio 3 Small-SFX for Sound. Keep
-  inference, quantization, seed, credentials, and model selectors out of the
+  inference, quantization, seed, and credentials out of the
   status bar. Changing a model must cancel work using the previous setting.
 - Represent a revision's applied hotspot set as `HotspotSet | None`.
   `None` means no set has been applied; an empty `HotspotSet` means an applied

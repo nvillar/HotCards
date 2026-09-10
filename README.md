@@ -18,8 +18,9 @@ uv sync
 uv run hotcards
 ```
 
-Generation requires locally cached model weights. Select models in
-**Settings → Models**; selections are saved on the machine, not in a stack.
+Generation requires locally cached model weights. Select models using the
+right-aligned **Image** and **Sound** pickers in the bottom bar, alongside rendering
+progress; selections are saved on the machine, not in a stack.
 
 | Purpose | Supported models |
 |---|---|

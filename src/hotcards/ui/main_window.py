@@ -98,7 +98,10 @@ from hotcards.ui.notification_bar import (
 )
 from hotcards.ui.project_paths import bundle_path, default_project_directory
 from hotcards.ui.settings_dialog import (
-    SettingsDialog,
+    MFLUX_MODEL_KEY,
+    MFLUX_MODEL_OPTIONS,
+    STABLE_AUDIO_MODEL_KEY,
+    STABLE_AUDIO_MODEL_OPTIONS,
     SettingsStore,
     load_machine_settings,
 )
@@ -112,7 +115,6 @@ from hotcards.ui.utility_windows import (
 
 AvailabilityChecks = Mapping[AdapterKind, Callable[[], Any]]
 AvailabilityChecksFactory = Callable[[], AvailabilityChecks]
-SettingsDialogFactory = Callable[[SettingsStore, QWidget], QDialog]
 
 
 class MainWindow(QMainWindow):
@@ -130,7 +132,6 @@ class MainWindow(QMainWindow):
         *,
         availability_checks: AvailabilityChecks | None = None,
         availability_checks_factory: AvailabilityChecksFactory | None = None,
-        settings_dialog_factory: SettingsDialogFactory = SettingsDialog,
         document_session: DocumentSession | None = None,
         background_workflow: BackgroundWorkflow | None = None,
         sound_workflow: SoundWorkflow | None = None,
@@ -152,7 +153,6 @@ class MainWindow(QMainWindow):
         self.project_directory = project_directory or default_project_directory()
         self._availability_checks = dict(availability_checks or {})
         self._availability_checks_factory = availability_checks_factory
-        self._settings_dialog_factory = settings_dialog_factory
         self._owns_workers = owns_workers
         document = controller.document
         self._selected_card_id = document.cards[0].id if document.cards else None
@@ -661,7 +661,7 @@ class MainWindow(QMainWindow):
         self.generation_progress_container = QWidget()
         self.generation_progress_container.setObjectName("generationProgressContainer")
         self.generation_progress_layout = QHBoxLayout(self.generation_progress_container)
-        self.generation_progress_layout.setContentsMargins(8, 0, 8, 0)
+        self.generation_progress_layout.setContentsMargins(8, 4, 8, 4)
         self.generation_step_label = QLabel()
         self.generation_step_label.setObjectName("generationStepLabel")
         self.generation_step_label.setAccessibleName("Current generation step")
@@ -680,8 +680,43 @@ class MainWindow(QMainWindow):
         self.generation_progress_layout.addWidget(self.cancel_generation_button)
         self.generation_progress_container.hide()
         self.statusBar().addWidget(self.generation_progress_container, 1)
+        self._build_model_pickers()
         self._service_status_detail = "MFLUX availability check pending"
         self.create_first_card_button.clicked.connect(self._primary_empty_action)
+
+    def _build_model_pickers(self) -> None:
+        self.model_pickers = QWidget()
+        self.model_pickers.setObjectName("modelPickers")
+        layout = QHBoxLayout(self.model_pickers)
+        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setSpacing(8)
+        values = load_machine_settings(self.settings)
+        self.image_model_combo = QComboBox()
+        self.sound_model_combo = QComboBox()
+        for name, combo, options, selected in (
+            ("Image", self.image_model_combo, MFLUX_MODEL_OPTIONS, values.mflux_model),
+            (
+                "Sound",
+                self.sound_model_combo,
+                STABLE_AUDIO_MODEL_OPTIONS,
+                values.stable_audio_model,
+            ),
+        ):
+            if layout.count():
+                layout.addSpacing(16)
+            label = QLabel(name)
+            label.setBuddy(combo)
+            combo.setObjectName(f"{name.lower()}ModelCombo")
+            combo.setAccessibleName(f"{name} model")
+            combo.setToolTip(f"Select the {name.lower()} model for this machine")
+            for text, model in options:
+                combo.addItem(text, model)
+            combo.setCurrentIndex(combo.findData(selected))
+            layout.addWidget(label)
+            layout.addWidget(combo)
+        self.image_model_combo.currentIndexChanged.connect(self._model_selection_changed)
+        self.sound_model_combo.currentIndexChanged.connect(self._model_selection_changed)
+        self.statusBar().addPermanentWidget(self.model_pickers)
 
     def _build_menu(self) -> None:
         file_menu = self.menuBar().addMenu("File")
@@ -718,19 +753,11 @@ class MainWindow(QMainWindow):
         self.redo_action.setShortcut(QKeySequence.StandardKey.Redo)
         self.redo_action.triggered.connect(self.redo)
         edit_menu.addAction(self.redo_action)
-        edit_menu.addSeparator()
         self.duplicate_card_action = QAction("Duplicate Card", self)
         self.duplicate_card_action.setObjectName("duplicateCardAction")
         self.duplicate_card_action.setShortcut(QKeySequence("Ctrl+D"))
         self.duplicate_card_action.triggered.connect(self._duplicate_card)
-        edit_menu.addAction(self.duplicate_card_action)
-
-        self.settings_menu = self.menuBar().addMenu("Settings")
-        self.settings_menu.setObjectName("settingsMenu")
-        self.models_action = QAction("Models…", self)
-        self.models_action.setObjectName("modelsAction")
-        self.models_action.triggered.connect(self.open_model_settings)
-        self.settings_menu.addAction(self.models_action)
+        self.addAction(self.duplicate_card_action)
 
     def render_document(
         self,
@@ -1119,8 +1146,9 @@ class MainWindow(QMainWindow):
             self._undo_notification()
         elif action_id == "create-image-revision" and not self._is_running:
             self._create_image_revision()
-        elif action_id == "open-settings" and not self._is_running:
-            self.open_model_settings()
+        elif action_id == "select-model" and not self._is_running:
+            self.image_model_combo.setFocus()
+            self.image_model_combo.showPopup()
         elif action_id == "check-services" and not self._is_running:
             self.run_availability_checks()
 
@@ -1612,7 +1640,7 @@ class MainWindow(QMainWindow):
             and self._selected_card_id is not None
             and self.card_duplication_workflow is not None
         )
-        self.models_action.setEnabled(not self._is_running)
+        self.model_pickers.setEnabled(not self._is_running)
         self.mode_button.setEnabled(bound)
         self.overlay_selector.setEnabled(mutation_allowed and self._is_running)
         self.card_sidebar.set_document_editable(mutation_allowed and not self._is_running)
@@ -2054,8 +2082,8 @@ class MainWindow(QMainWindow):
                     kind=NotificationKind.WARNING,
                     detail=self._service_status_detail,
                     primary_action=NotificationAction(
-                        "open-settings",
-                        "Settings",
+                        "select-model",
+                        "Select Model",
                     ),
                     secondary_action=NotificationAction(
                         "check-services",
@@ -2524,11 +2552,11 @@ class MainWindow(QMainWindow):
         self._cancel_diagnostics()
         self.run_availability_checks()
 
-    def open_model_settings(self) -> None:
+    def _model_selection_changed(self) -> None:
         previous = load_machine_settings(self.settings)
-        dialog = self._settings_dialog_factory(self.settings, self)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
+        self.settings.setValue(MFLUX_MODEL_KEY, self.image_model_combo.currentData())
+        self.settings.setValue(STABLE_AUDIO_MODEL_KEY, self.sound_model_combo.currentData())
+        self.settings.sync()
         current = load_machine_settings(self.settings)
         if current.mflux_model != previous.mflux_model:
             self._cancel_background_generation()
@@ -2603,5 +2631,4 @@ __all__ = [
     "AvailabilityChecks",
     "AvailabilityChecksFactory",
     "MainWindow",
-    "SettingsDialogFactory",
 ]

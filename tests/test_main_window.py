@@ -17,7 +17,7 @@ from PySide6.QtCore import QCoreApplication, QEvent, QObject, QSize, Qt, QTimer,
 from PySide6.QtGui import QCloseEvent, QColor, QKeySequence, QPixmap
 from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QDialog, QLabel, QWidget
+from PySide6.QtWidgets import QApplication, QLabel, QWidget
 from shiboken6 import isValid
 
 import hotcards.generation.mflux_generator as mflux_module
@@ -2357,8 +2357,8 @@ def test_author_and_run_modes_apply_consistent_read_only_chrome(
     assert not window.overlay_selector.isHidden()
     assert not hasattr(window, "llm_model_label")
     assert not hasattr(window, "llm_model_combo")
-    assert not hasattr(window, "image_model_label")
-    assert not hasattr(window, "image_model_combo")
+    assert not window.image_model_combo.isEnabled()
+    assert not window.sound_model_combo.isEnabled()
     assert window.styles_button.isHidden()
     assert window.keys_button.isHidden()
     assert window.style_manager_window is None
@@ -2386,11 +2386,13 @@ def test_author_and_run_modes_apply_consistent_read_only_chrome(
     assert window.restart_button.isHidden()
     assert not window.overlay_label_action.isVisible()
     assert not window.overlay_selector_action.isVisible()
+    assert window.image_model_combo.isEnabled()
+    assert window.sound_model_combo.isEnabled()
     window.hide()
     application.processEvents()
 
 
-def test_status_bar_is_passive_and_ai_recovery_uses_notification_bar(
+def test_ai_recovery_uses_notification_bar_and_bottom_model_picker(
     application: QApplication,
 ) -> None:
     window, controller, _workers, _background = _window()
@@ -2405,11 +2407,15 @@ def test_status_bar_is_passive_and_ai_recovery_uses_notification_bar(
     assert not hasattr(window, "check_services_button")
     assert not hasattr(window, "review_settings_button")
     assert not hasattr(window, "service_status_label")
-    assert not hasattr(window, "image_model_combo")
+    assert window.statusBar().isAncestorOf(window.image_model_combo)
     assert "MFLUX is unavailable" in window._service_status_detail
     assert window.notification_bar.current_key == "ai-services"
-    assert window.notification_bar.primary_button.text() == "Settings"
+    assert window.notification_bar.primary_button.text() == "Select Model"
     assert window.notification_bar.secondary_button.text() == "Check Again"
+    window.show()
+    window.notification_bar.primary_button.click()
+    assert window.image_model_combo.view().isVisible()
+    window.image_model_combo.hidePopup()
 
     window.notification_bar.dismiss_current()
     window.apply_availability_diagnostic(
@@ -2437,7 +2443,7 @@ def test_status_bar_is_passive_and_ai_recovery_uses_notification_bar(
     assert window.notification_bar.current_key == "undo"
 
 
-def test_settings_models_menu_persists_image_model_and_cancels_active_work(
+def test_bottom_model_pickers_persist_image_model_and_cancel_active_work(
     application: QApplication,
 ) -> None:
     settings = FakeSettings()
@@ -2446,42 +2452,95 @@ def test_settings_models_menu_persists_image_model_and_cancels_active_work(
     background = FakeBackgroundWorkflow(controller)
     sound_workflow = FakeSoundWorkflow()
 
-    class AcceptedModelDialog:
-        def __init__(self, settings_store: FakeSettings, _parent: object) -> None:
-            self.settings_store = settings_store
-
-        def exec(self) -> QDialog.DialogCode:
-            self.settings_store.setValue(
-                "generation/mflux_model",
-                "flux2-klein-9b-kv",
-            )
-            return QDialog.DialogCode.Accepted
-
     window = MainWindow(
         controller,
         workers,  # type: ignore[arg-type]
         settings,
         availability_checks={AdapterKind.MFLUX: lambda: None},
-        settings_dialog_factory=AcceptedModelDialog,  # type: ignore[arg-type]
         background_workflow=background,  # type: ignore[arg-type]
         sound_workflow=sound_workflow,  # type: ignore[arg-type]
         start_diagnostics=False,
     )
 
-    assert window.settings_menu.title() == "Settings"
-    assert [action.text() for action in window.settings_menu.actions()] == ["Models…"]
-    assert not hasattr(window, "image_model_label")
-    assert not hasattr(window, "image_model_combo")
+    assert "Settings" not in [action.text() for action in window.menuBar().actions()]
+    assert window.image_model_combo.currentText() == "FLUX.2 Klein 4B"
+    assert window.sound_model_combo.currentText() == "Stable Audio 3 Small-SFX"
+    assert settings.values == {}
+    assert background.cancel_calls == 0
+    assert not workers.mflux_operations
 
-    window.models_action.trigger()
+    window.image_model_combo.setCurrentIndex(window.image_model_combo.findData("flux2-klein-9b-kv"))
 
     assert settings.values["generation/mflux_model"] == "flux2-klein-9b-kv"
+    assert settings.values["generation/stable_audio_model"] == (
+        "stabilityai/stable-audio-3-small-sfx"
+    )
     assert background.cancel_calls == 1
     assert sound_workflow.cancel_calls == 0
     assert len(workers.mflux_operations) == 1
 
+    reopened = MainWindow(
+        DocumentController(_stack()),
+        FakeWorkers(),  # type: ignore[arg-type]
+        settings,
+        start_diagnostics=False,
+    )
+    assert reopened.image_model_combo.currentText() == "FLUX.2 Klein 9B KV"
+    assert reopened.sound_model_combo.currentText() == "Stable Audio 3 Small-SFX"
+
     window.mode_button.click()
-    assert not window.models_action.isEnabled()
+    assert not window.image_model_combo.isEnabled()
+    assert not window.sound_model_combo.isEnabled()
+
+
+def test_bottom_model_pickers_stay_right_aligned_beside_progress(
+    application: QApplication,
+) -> None:
+    window, _controller, _workers, _background = _window()
+    window.show()
+    application.processEvents()
+
+    layout = window.model_pickers.layout()
+    assert layout is not None
+    assert [label.text() for label in window.model_pickers.findChildren(QLabel)] == [
+        "Image",
+        "Sound",
+    ]
+    assert layout.contentsMargins() == window.generation_progress_layout.contentsMargins()
+    assert layout.contentsMargins().left() == layout.contentsMargins().right() == 8
+    assert layout.spacing() == 8
+    image_label, sound_label = window.model_pickers.findChildren(QLabel)
+    group_gap = sound_label.x() - (window.image_model_combo.x() + window.image_model_combo.width())
+    image_label_gap = window.image_model_combo.x() - (image_label.x() + image_label.width())
+    sound_label_gap = window.sound_model_combo.x() - (sound_label.x() + sound_label.width())
+    assert group_gap >= max(image_label_gap, sound_label_gap) + 8
+    assert window.image_model_combo.geometry().right() < window.sound_model_combo.geometry().left()
+    assert window.statusBar().isAncestorOf(window.model_pickers)
+    assert window.generation_progress_container.isHidden()
+    assert window.model_pickers.isVisible()
+    right_margin = window.statusBar().width() - window.model_pickers.geometry().right()
+    assert 0 <= right_margin <= 40
+
+    window.generation_progress_container.show()
+    window.resize(window.width() + 200, window.height())
+    application.processEvents()
+    assert window.model_pickers.isVisible()
+    assert window.generation_progress_container.geometry().right() < (
+        window.model_pickers.geometry().left()
+    )
+    assert window.statusBar().width() - window.model_pickers.geometry().right() == right_margin
+
+
+def test_edit_menu_has_only_history_actions_and_duplicate_shortcut_is_retained(
+    application: QApplication,
+) -> None:
+    window, _controller, _workers, _background = _window()
+    edit_action = next(action for action in window.menuBar().actions() if action.text() == "Edit")
+    edit_menu = edit_action.menu()
+    assert edit_menu is not None
+    assert edit_menu.actions() == [window.undo_action, window.redo_action]
+    assert window.duplicate_card_action in window.actions()
+    assert window.duplicate_card_action.shortcut() == QKeySequence("Ctrl+D")
 
 
 def test_timed_out_mflux_model_change_and_window_close_never_block_qt_thread(
@@ -2549,22 +2608,10 @@ def test_timed_out_mflux_model_change_and_window_close_never_block_qt_thread(
     temporary_directory = workflow._temporary_directory
     settings = FakeSettings()
 
-    class AcceptedModelDialog:
-        def __init__(self, settings_store: FakeSettings, _parent: object) -> None:
-            self.settings_store = settings_store
-
-        def exec(self) -> QDialog.DialogCode:
-            self.settings_store.setValue(
-                "generation/mflux_model",
-                "flux2-klein-9b-kv",
-            )
-            return QDialog.DialogCode.Accepted
-
     window = MainWindow(
         controller,
         workers,
         settings,
-        settings_dialog_factory=AcceptedModelDialog,  # type: ignore[arg-type]
         document_session=session,
         background_workflow=workflow,
         start_diagnostics=False,
@@ -2582,7 +2629,7 @@ def test_timed_out_mflux_model_change_and_window_close_never_block_qt_thread(
     assert len(failures) == 1
 
     changed_started = monotonic()
-    window.open_model_settings()
+    window.image_model_combo.setCurrentIndex(window.image_model_combo.findData("flux2-klein-9b-kv"))
     assert monotonic() - changed_started < 0.25
 
     close_event = QCloseEvent()
