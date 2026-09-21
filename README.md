@@ -260,3 +260,15 @@ a report is offline. Generated run output is not tracked in Git.
 Image and Sound loading and inference share a serialized, process-local native
 invocation boundary. Application and evaluation calls use the same adapters.
 Contributor constraints and repository workflow are in [AGENTS.md](AGENTS.md).
+
+## License
+
+HotCards source code is available under the [MIT License](LICENSE).
+The vendored Stable Audio MLX components retain Stability AI's
+[MIT license](src/hotcards/vendor/stable_audio_3_mlx/LICENSE) and
+[attribution](src/hotcards/vendor/stable_audio_3_mlx/NOTICE).
+
+Dependencies and model weights are subject to their own licenses. Model weights
+are not included in this repository. In particular, FLUX.2 Klein 9B uses the
+FLUX Non-Commercial License; HotCards' MIT license does not override model
+licenses or terms governing generated output.

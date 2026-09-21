@@ -2,6 +2,12 @@
 name = "hotcards"
 version = "0.1.0"
 description = "Local-first AI-assisted authoring for illustrated interactive card stacks"
+license = "MIT"
+license-files = [
+    "LICENSE",
+    "src/hotcards/vendor/stable_audio_3_mlx/LICENSE",
+    "src/hotcards/vendor/stable_audio_3_mlx/NOTICE",
+]
 authors = [
     { name = "Nicolas Villar" }
 ]
