@@ -43,6 +43,7 @@ class FakeStableAudioGenerator:
             assert self.gate.wait(timeout=2)
         cancellation.raise_if_requested()
         on_sampling_step(8, 8)
+        assert not output_path.exists()
         self.output_path = output_path
         with wave.open(str(output_path), "wb") as output:
             output.setnchannels(2)

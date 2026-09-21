@@ -105,7 +105,7 @@ class SoundWorkflow(QObject):
         self._request_id: UUID | None = None
         self._operation: WorkerOperation | None = None
         self._cancellation: StableAudioCancellation | None = None
-        self._temporary_path: Path | None = None
+        self._temporary_directory: tempfile.TemporaryDirectory[str] | None = None
         self._pending_completion: _SoundCompletion | None = None
         self.session.state_changed.connect(self._session_state_changed)
 
@@ -141,15 +141,13 @@ class SoundWorkflow(QObject):
         )
         request_id = uuid4()
         cancellation = StableAudioCancellation()
-        with tempfile.NamedTemporaryFile(
+        temporary_directory = tempfile.TemporaryDirectory(
             prefix="hotcards-sound-",
-            suffix=".wav",
-            delete=False,
-        ) as temporary:
-            temporary_path = Path(temporary.name)
+        )
+        temporary_path = Path(temporary_directory.name) / "generated.wav"
         self._request_id = request_id
         self._cancellation = cancellation
-        self._temporary_path = temporary_path
+        self._temporary_directory = temporary_directory
         request = StableAudioRequest(
             prompt=target.prompt,
             duration_seconds=target.duration_seconds,
@@ -344,16 +342,16 @@ class SoundWorkflow(QObject):
         self._finish()
 
     def _finish(self, *, cancelled: bool = False) -> None:
-        path = self._temporary_path
+        temporary_directory = self._temporary_directory
         self._request_id = None
         self._operation = None
         self._cancellation = None
-        self._temporary_path = None
-        if path is not None:
+        self._temporary_directory = None
+        if temporary_directory is not None:
             try:
-                path.unlink(missing_ok=True)
+                temporary_directory.cleanup()
             except OSError as error:
-                self.failed.emit(f"could not remove temporary Sound output: {error}")
+                self.failed.emit(f"could not remove temporary Sound directory: {error}")
         if cancelled:
             self.cancelled.emit()
         self.finished.emit()
