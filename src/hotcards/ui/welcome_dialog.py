@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QDialog,
@@ -50,6 +51,8 @@ class WelcomeDialog(QDialog):
         icon = application_icon()
         self.setWindowIcon(icon)
         self.setMinimumSize(560, 500)
+        self.quit_shortcut = QShortcut(QKeySequence("Ctrl+Q"), self)
+        self.quit_shortcut.activated.connect(self.reject)
 
         self.banner = QLabel()
         self.banner.setObjectName("welcomeBanner")

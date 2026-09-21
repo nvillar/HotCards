@@ -6,7 +6,9 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import QCoreApplication, QEvent
+from PySide6.QtCore import QCoreApplication, QEvent, QTimer
+from PySide6.QtGui import QKeySequence
+from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QDialog, QLabel, QMessageBox
 from shiboken6 import isValid
 
@@ -123,6 +125,47 @@ def test_welcome_directory_error_does_not_block_project_creation(
     assert dialog.new_button.isEnabled()
     assert "could not read" in dialog.empty_label.text()
     dialog.close()
+
+
+@pytest.mark.parametrize("focus_widget", ["project_list", "new_button"])
+def test_quit_shortcut_rejects_startup_without_selecting_a_project(
+    application: QApplication,
+    tmp_path: Path,
+    focus_widget: str,
+) -> None:
+    projects = tmp_path / "HotCards"
+    stack = projects / "Garden.hotcards"
+    stack.mkdir(parents=True)
+    dialog = WelcomeDialog(projects)
+    rejected = QSignalSpy(dialog.rejected)
+
+    def press_quit() -> None:
+        dialog.activateWindow()
+        focused = getattr(dialog, focus_widget)
+        focused.setFocus()
+        application.processEvents()
+        QTest.keySequence(focused, QKeySequence("Ctrl+Q"))
+
+    shortcut_timer = QTimer(dialog)
+    shortcut_timer.setSingleShot(True)
+    shortcut_timer.timeout.connect(press_quit)
+    timeout = QTimer(dialog)
+    timeout.setSingleShot(True)
+    timeout.timeout.connect(dialog.accept)
+    shortcut_timer.start(0)
+    timeout.start(1000)
+    try:
+        result = dialog.exec()
+    finally:
+        shortcut_timer.stop()
+        timeout.stop()
+
+    assert result == QDialog.DialogCode.Rejected
+    assert rejected.count() == 1
+    assert not dialog.isVisible()
+    assert dialog.result() == QDialog.DialogCode.Rejected
+    assert dialog.selection is None
+    assert stack.is_dir()
 
 
 def test_welcome_new_project_defaults_save_location(

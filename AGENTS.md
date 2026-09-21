@@ -13,6 +13,7 @@ Use `uv` only; do not add ad hoc `pip` instructions.
 ```sh
 uv sync
 uv run hotcards
+uv run --no-project --python 3.12 python scripts/install_macos_launcher.py
 uv run pytest
 uv run ruff check .
 uv run ruff format .
@@ -26,6 +27,11 @@ uv run hotcards-eval flux-references --stack /path/to/Stack.hotcards
 Ordinary automated tests must not require live model calls. Use recorded
 responses and fakes in `pytest`; use `hotcards-eval` or explicit smoke commands
 for live MFLUX runs.
+
+The local macOS launcher uses a private non-editable installation of a source
+snapshot and locked dependencies, never a temporary worktree at launch time.
+Keep model weights and credentials external. Launcher tests must not install
+dependencies, access real user installations, or invoke live models.
 
 ## Repository layout
 

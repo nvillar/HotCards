@@ -5,9 +5,9 @@ stacks of cards, inspired by HyperCard. Describe a scene, generate its image,
 add polygon hotspots, and connect cards with navigation, sound effects, and
 simple state. Image and sound generation run on-device.
 
-**Platform:** Apple Silicon macOS. HotCards runs from source; there is no
-packaged installer. The authoring interface remains usable when a generation
-model is unavailable.
+**Platform:** Apple Silicon macOS. HotCards runs from source, with an optional
+local macOS app launcher; there is no self-contained distributable installer.
+The authoring interface remains usable when a generation model is unavailable.
 
 ## Setup and run
 
@@ -17,6 +17,40 @@ Install Python 3.12 and [uv](https://docs.astral.sh/uv/), then run:
 uv sync
 uv run hotcards
 ```
+
+### Launch from Finder or the Dock
+
+With `uv` and Apple's Command Line Tools installed (`xcode-select --install`),
+build and install the local launcher from this checkout:
+
+```sh
+uv run --no-project --python 3.12 python scripts/install_macos_launcher.py
+```
+
+Open `~/Applications/HotCards.app` in Finder, or drag it to the Dock. The
+launcher uses the HotCards artwork and opens without a Terminal window.
+Startup failures show a dialog; application output goes to
+`~/Library/Logs/HotCards/launcher.log`.
+
+Installation copies the current source and lockfile to a private directory
+under `~/Library/Application Support/HotCards/Launcher/`, then installs its
+locked production dependencies with `uv`. Launching does not run `uv`, resolve
+dependencies, or depend on the original checkout remaining on disk. The app
+still depends on this private environment and its uv-managed Python; it is
+not portable to another Mac.
+
+The installed snapshot does not automatically follow source edits. To update,
+quit HotCards, move the existing `HotCards.app` aside, and rerun the command.
+Previous private installations remain available for the old launcher.
+The `Contents/Resources/Launcher.plist` inside each app identifies its private
+installation directory; remove that directory only after retiring that launcher.
+To uninstall, remove the app and its corresponding private installation.
+Stacks, model caches, and settings are separate and are not removed.
+
+Models and authentication still use the existing external Hugging Face cache.
+Finder does not read shell startup files: shell-only overrides such as
+`HF_HOME` are not automatically inherited. No model weights or credentials are
+copied into the launcher.
 
 Generation requires locally cached model weights. Select models in
 **Settings → Models**; selections are saved on the machine, not in a stack.
