@@ -1,15 +1,30 @@
 # HotCards
 
-HotCards is a local-first desktop app for creating illustrated, interactive
-stacks of cards, inspired by HyperCard. Describe a scene, generate its image,
-add polygon hotspots, and connect cards with navigation, sound effects, and
-simple state. Image and sound generation run on-device.
+![A monochrome retrofuturist city beneath an oversized moon](docs/images/hotcards-banner.png)
+
+HotCards is a desktop app for creating interactive stories from connected cards,
+inspired by HyperCard. It uses local image and sound generation models on Apple
+Silicon Macs.
+
+Describe a scene to generate its artwork, edit it with written instructions, and
+add sound effects. Link cards through clickable hotspots that move between
+scenes, play sounds, or change what happens next.
+
+Keys let the story remember earlier actions. A hotspot can grant or remove a Key,
+or require one before it works—for example, opening a door only after a switch
+has been pressed. Combine these interactions to create branching stories,
+explorable spaces, and puzzles, then try them in Run mode.
+
+Everything runs locally. Prompts, source images, and generated assets stay on
+your computer. No subscriptions are required.
+
+![The HotCards authoring interface editing a hotspot in the Escape to Earth stack](docs/images/hotcards-interface.png)
+
+## Setup and run
 
 **Platform:** Apple Silicon macOS. HotCards runs from source; there is no
 packaged installer. The authoring interface remains usable when a generation
 model is unavailable.
-
-## Setup and run
 
 Install Python 3.12 and [uv](https://docs.astral.sh/uv/), then run:
 
@@ -147,8 +162,16 @@ Generation uses Pingpong sampling, eight steps, CFG 1.0, and a fresh seed.
 Assets are 44.1 kHz stereo 16-bit PCM WAVs. An existing Sound remains available
 while its replacement is generated.
 
-**Keys** are named binary state used by hotspot conditions and actions.
-Create Keys in the Keys manager, then select them in hotspot rules.
+**Keys** are named binary flags that record what has happened during the
+current Run session. They are either present or absent—there are no values,
+counters, or expressions. Create Keys in the Keys manager, then use a hotspot's
+**When** rules to require a Key to be present or absent and its **Then** rules
+to **Grant** or **Remove** Keys.
+
+For example, a control-panel hotspot can grant `Hatch Open`; a hatch hotspot
+can require `Hatch Open` before navigating through it; and another action can
+remove the Key to close the hatch again. This allows cards to react differently
+as the player explores without storing runtime state in the authored stack.
 Key and Sound names are case-insensitively unique. Renaming preserves references;
 referenced Keys and Sounds cannot be deleted. Their managers list usages and
 can jump to the corresponding hotspot.
