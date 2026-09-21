@@ -22,209 +22,259 @@ your computer. No subscriptions are required.
 
 ## Setup and run
 
-**Platform:** Apple Silicon macOS. HotCards runs from source; there is no
-packaged installer. The authoring interface remains usable when a generation
-model is unavailable.
+You'll need an Apple Silicon Mac. HotCards runs from source; there is no
+packaged installer. You can still work on cards and interactions when a
+generation model is unavailable.
 
-Install Python 3.12 and [uv](https://docs.astral.sh/uv/), then run:
+Install Python 3.12 and [uv](https://docs.astral.sh/uv/), then run these commands
+from the repository folder:
 
 ```sh
 uv sync
 uv run hotcards
 ```
 
-Generation requires locally cached model weights. Select models using the
-right-aligned **Image** and **Sound** pickers in the bottom bar, alongside rendering
-progress; selections are saved on the machine, not in a stack.
+Before generating images or sounds, download the required model files to your
+local Hugging Face cache. Choose your models from the **Image** and **Sound**
+menus at the bottom of the window. HotCards remembers these choices on your
+Mac, not in the story.
 
 | Purpose | Supported models |
 |---|---|
 | Images | FLUX.2 Klein 4B; FLUX.2 Klein 9B KV |
 | Sound effects | Stable Audio 3 Small-SFX, using the optimized MLX weights |
 
-The 9B KV choice requires regular 9B weights for text-only generation and
-9B KV weights for Reference-backed generation and Edit. FLUX.2 Klein 4B uses
-Apache 2.0; the 9B models use the FLUX Non-Commercial License.
+For FLUX.2 Klein 9B KV, you'll need both the regular 9B model for generation
+without References and the 9B KV model for References and editing. FLUX.2 Klein
+4B uses Apache 2.0; the 9B models use the FLUX Non-Commercial License.
 
-For Sound generation, cache the Small-SFX weights from
-`stabilityai/stable-audio-3-optimized`. Accept the model's terms and authenticate
-with Hugging Face outside HotCards. Credentials are not stored in stack bundles
-or application settings.
+For sounds, use the Small-SFX model files from
+`stabilityai/stable-audio-3-optimized`. Accept the model's terms and sign in to
+Hugging Face outside HotCards to access the files. HotCards does not save your
+credentials in stories or application settings.
 
-Sound inference uses an attributed
+Sound generation uses an attributed
 [MIT-licensed subset](src/hotcards/vendor/stable_audio_3_mlx/NOTICE) of Stability
-AI's official MLX implementation. Model weights have separate license terms;
-review them before use.
+AI's official MLX implementation. Review each model's license before using it.
 
-## Cards and revisions
+## Make your first story
 
-Stacks are self-contained `.hotcards` directory bundles containing their
-document and generated assets. The welcome window lists stacks in
-`~/Documents/HotCards` and provides Open, Create, and permanent Delete actions.
-Permanent stack deletion requires confirmation.
+This example uses two cards: a closed hatch and the laboratory behind it.
+You'll connect them, then add a control panel that must be clicked before the
+hatch will work.
 
-Choose a stack format at creation: **Square 1:1**, **Landscape 4:3**,
-**Portrait 3:4**, or **Widescreen 16:9**. Landscape is the default. A stack's
-format is fixed.
+The screenshots are from *Escape to Earth* and show the same tools on several
+scenes. Your card names and generated images will differ.
 
-The Cards sidebar creates a blank card immediately after the selection.
-**Command-D** duplicates the selected card's active revision into an independent
-card, including its image, hotspots, References, Style, and Generate resolution.
-Self-navigation points to the duplicate; other destinations are preserved.
+### Create a stack
 
-Each card has at least one numbered revision. A revision contains its
-Description, Style selection, optional generated background, ordered References,
-Generate resolution, hotspots, and Edit draft. The header above the canvas
-selects, duplicates, and deletes revisions. Duplicating a card or revision starts
-its Edit draft empty.
+Choose **Create New Stack** in the welcome window and give it a name.
+Choose a format for your cards: Square, Landscape, Portrait, or Widescreen.
+Landscape is a good starting point. The format applies to the whole stack and
+cannot be changed later.
 
-## Generate and Edit
+Confirm your choices, then choose where to save the stack. It is saved as a
+`.hotcards` folder that holds the story's cards, images, and sounds.
 
-The inspector has three tabs: **Generate**, **Edit**, and **Hotspots**.
-Generate and Edit work on the selected card revision and replace its background
-in place. Backgrounds are generated in HotCards; image import is not supported.
+### Create the first scene
 
-| | Generate | Edit |
-|---|---|---|
-| Text input | A nonempty Description | A nonempty Edit Instruction |
-| Image input | Up to two optional Reference cards | The current background |
-| Style | Selected Style text follows the Description | Selected Style text follows the instruction unless the instruction explicitly changes the visual treatment |
-| Resolution | Every named tier | Valid current dimensions and named tiers with greater pixel area |
-| Edit History | Starts empty | Appends the accepted instruction |
+Rename the first card `Closed Hatch` using the name field above the image.
+In the **Generate** tab, enter a Description such as:
 
-Prompts are composed deterministically, without a language model rewriting
-them. Edit sends the exact trimmed instruction and applicable Style text, with
-no additional guidance. It never sends the Description or Generate References.
-The effective Edit prompt must fit the model's 512-token budget; it is not
-truncated. Each Edit uses a fresh random seed.
+> A spaceship corridor with a closed circular hatch and a small control panel
+> on the wall beside it. View the hatch and panel straight on.
 
-### References and resolution
+Keep the default HyperCard Style and Medium resolution, then press
+**Generate Image**. When the image is ready, choose **Keep**. If it isn't what
+you wanted, adjust the Description and generate again.
 
-Choose Reference cards in the searchable thumbnail picker. Their order matters:
-refer to them as **`image 1`** and **`image 2`** in the Description. Each
-Reference's active background is sent exactly once, in that order. Card names
-and source-card descriptions are not added to the prompt. Clearing the first
-Reference promotes the second. Self-references and duplicate References are
-not allowed.
+![The City Center card with its Description and Generate controls](docs/images/walkthrough-generate.png)
 
-Resolution tiers name the image's long edge:
+*Describe the scene, choose its Style and resolution, then generate the image.*
 
-| Small | Medium | Large | Full |
-|---|---|---|---|
-| 256 px | 512 px | 768 px | 1024 px |
+### Add another scene
 
-The stack format determines the other edge, rounded to a multiple of 16 pixels.
-For example, Landscape Full is 1024 × 768 and Widescreen Full is 1024 × 576.
-Exact dimensions appear in selector tooltips. New cards default to Medium;
-duplicated cards and revisions retain their source's Generate resolution.
-Edit defaults to the current image's decoded dimensions when they are aligned
-and compatible with the stack format.
+Press `+` below the card list and name the new card `Lab`.
+Under **References** in Generate, choose `Closed Hatch` as the first Reference.
+Then describe the new scene:
 
-Entering a card, revision, or replacement image selects its current size.
-An aligned, format-compatible non-preset image has a **Current** row.
-Ordinary refreshes preserve deliberate resolution choices.
+> A laboratory inside the spaceship shown in image 1, with workbenches,
+> scientific instruments, and a window looking out into space.
 
-### Results, drafts, and history
+Generate the image and choose **Keep**.
 
-Completed Generate and Edit operations offer **Create New Version**, **Undo**,
-and **Keep**. Keep leaves the result on the current revision. Create New Version
-restores the prior complete revision and activates a new revision containing
-the result, without generating another image.
+References help connect the look of your scenes. You can use up to two other
+cards; call them `image 1` and `image 2` in your Description. The model receives
+their images, not their card names or descriptions.
 
-Version creation is a separate Undo step: its first Undo leaves the result on
-the original revision; the next Undo reverses the image operation.
+![Open Hatch with Closed Hatch selected as its first Reference](docs/images/walkthrough-references.png)
 
-Edit drafts autosave per revision and survive navigation, reopening, Save As,
-and mode changes. Text editing has its own context-local Undo/Redo, separate
-from document history. Undoing an accepted Edit restores its instruction in
-that revision unless newer input would be overwritten.
+*Here, Open Hatch uses Closed Hatch as a Reference to create another view of
+the same place.*
 
-Edit History shows the active image's accepted authored instructions, oldest
-first, including repeated instructions and those inherited through duplication.
-Click a row, or select it and press Enter or Space, to recall its exact text
-without changing the image or starting generation.
+### Link the cards
 
-## Styles, Sounds, and Keys
+Return to `Closed Hatch` and open **Hotspots**. Press `+` in the hotspot list,
+then click around the edge of the hatch to outline a clickable area.
+After placing at least three points, click the first point to finish.
+Press Escape if you need to cancel and start again.
 
-The Author toolbar opens stack-global **Styles**, **Sounds**, and **Keys**
-managers. Each is a single modeless window that stays synchronized with the
-document.
+With the hotspot selected, find **Go to card** under **Then** and choose `Lab`.
+Press **Run** and click the hatch: it should take you to the laboratory.
+Press **Author** to return to editing.
 
-**Styles** are editable named prompt texts. New stacks start with HyperCard
-selected and include a library of visual treatments. An explicit Style or
-No Style selection becomes the default for new cards. Deleting a Style clears
-its selections and is undoable.
+![Two outlined hotspots on Factory City, with the selected hotspot linking to Factory Outside](docs/images/walkthrough-hotspots.png)
 
-**Sounds** are named effects with a generation prompt and a duration of
-1–30 seconds, defaulting to two seconds. Generate or replace audio with
-Stable Audio 3 Small-SFX, then preview it in the manager or Sound picker.
-Generation uses Pingpong sampling, eight steps, CFG 1.0, and a fresh seed.
-Assets are 44.1 kHz stereo 16-bit PCM WAVs. An existing Sound remains available
-while its replacement is generated.
+*Outline the part of the picture people should click, then choose its
+destination under Go to card. This scene offers two routes.*
 
-**Keys** are named binary flags that record what has happened during the
-current Run session. They are either present or absent—there are no values,
-counters, or expressions. Create Keys in the Keys manager, then use a hotspot's
-**When** rules to require a Key to be present or absent and its **Then** rules
-to **Grant** or **Remove** Keys.
+### Add a sound
 
-For example, a control-panel hotspot can grant `Hatch Open`; a hatch hotspot
-can require `Hatch Open` before navigating through it; and another action can
-remove the Key to close the hatch again. This allows cards to react differently
-as the player explores without storing runtime state in the authored stack.
-Key and Sound names are case-insensitively unique. Renaming preserves references;
-referenced Keys and Sounds cannot be deleted. Their managers list usages and
-can jump to the corresponding hotspot.
+Open **Sounds** from the toolbar and press `+`. Name the sound `Unlock`,
+set its duration to two seconds, and enter a prompt:
 
-## Hotspots and Run mode
+> A short mechanical click followed by a heavy metal bolt sliding open.
 
-With the Hotspots tab active, click empty canvas or press the inspector's `+`
-to draw a polygon. Click its first vertex to close it after at least three
-vertices. Escape or leaving the tab cancels an unfinished polygon without
-changing the document.
+Press **Generate**, then **Play** to listen. Adjust the prompt and generate
+again if needed. Close the Sounds window when you're happy with it; the sound
+is now available to use on any hotspot in the stack.
 
-Drag polygons or vertices, insert vertices along edges, and delete the selected
-vertex or hotspot. Every saved hotspot has exactly one polygon. Replacing a
-background preserves its hotspots for manual review.
+<img src="docs/images/walkthrough-sounds.png" alt="Sounds window with a two-second Hatch Open effect, its prompt, Play button, and hotspot usage" width="440">
 
-A hotspot's **When** rules require specified Keys to be present or absent.
-Its **Then** rules can remove Keys, grant Keys, navigate to a card, and play
-one Sound. Key-only and Sound-only hotspots are valid. Hotspot labels describe
-their highest-priority action.
+*Describe the effect and use Play to listen. Used By shows which hotspots
+already use the sound.*
 
-Press **Run** to enter the current Author card. Run starts with no Keys.
-Activation checks conditions, removes Keys, grants Keys, navigates, then starts
-the selected Sound. Condition-failing and actionless hotspots are excluded from
-hit testing. Overlapping eligible hotspots follow their ordering.
+### Make the hatch depend on the control panel
 
-**Back** preserves Keys; **Restart** returns to the configured start card and
-clears them. Leaving Run discards its state. New playback replaces the previous
-Sound; navigation, Back, Restart, and leaving Run stop prior playback. A Sound
-started by a hotspot can continue on its destination card.
+Open **Keys** from the toolbar, press `+`, and name the Key `Hatch Unlocked`.
+Close the window. This Key will remember whether the player has used the panel.
 
-The canvas fits and centers the complete image without cropping or stretching.
-Hotspots follow the fitted image bounds; letterbox and pillarbox bars are
-noninteractive. Run provides Back, Restart, and hotspot-overlay controls.
+<img src="docs/images/walkthrough-keys.png" alt="Keys window listing looked out window, got fuel, and plugged wires, with usages for the selected Key" width="440">
 
-## Saving and Undo
+*Give Keys names that describe what the player has done. Select one to see
+which hotspots use it.*
 
-Document changes autosave. Reversible authoring changes apply directly and
-offer Undo; outcomes and failures appear in the notification bar. Field
-validation appears beside its input.
+On `Closed Hatch`, draw a second hotspot around the control panel.
+Under **Then**, add a **Key change**, choose `Hatch Unlocked`, and set it to
+**Gain**. Under **Play sound**, choose `Unlock`. Leave **Go to card** empty
+so clicking the panel keeps the player in the corridor.
 
-Image and Sound replacements coordinate asset storage with the document save.
-If a visible result's durability is uncertain, further mutations and normal
-result actions wait for a successful save retry. Newer Edit drafts are never
-cleared by delayed completion.
+Select the hatch hotspot again. Under **When**, add a **Key condition**,
+choose `Hatch Unlocked`, and set it to **Has**. Keep its destination set to `Lab`.
 
-Generated assets remain available while the document or session Undo/Redo
-history can restore them. Card duplication owns independent image bytes;
-revision duplication can share immutable image bytes. Image origin records
-retain exact prompts, execution settings, dimensions, and accepted Edit
-instructions without depending on source cards remaining in the stack.
-Save As creates an independent bundle.
+The panel now gives the player a Key, and the hatch only works when they have
+it. Use **Lose** to remove a Key or **Lacks** to make a hotspot work only when
+the player does not have it. Keys are simply present or absent; they do not
+hold numbers or other values.
+
+### Test the interaction
+
+Select `Closed Hatch` and press **Run**. Try the hatch before touching the
+panel—it should do nothing. Click the panel to hear the unlock sound, then
+click the hatch to enter the laboratory.
+
+Use **Back** to return to the corridor. The hatch stays unlocked because Back
+keeps your Keys. Use **Restart** to return to the start card with no Keys and
+try the puzzle again. The star in the card list marks the start card.
+
+Run starts on whichever card you're editing, not necessarily the start card.
+You can show hotspot outlines while testing to see where to click. Returning
+to Author and entering Run again also starts with no Keys.
+
+## Refine and expand your story
+
+### Edit an image
+
+Select a card with an image and open **Edit**. Describe a change, such as
+"Make the control panel larger," then press **Edit**.
+This changes the current image rather than starting a new scene from its
+Description. Generate References are not used for Edit.
+
+Choose **Keep** to use the result, **Undo** to go back, or **Create New Version**
+to keep both versions. Switch between versions using the controls above the
+image. Creating a version does not run the model again.
+
+Hotspots stay in place when an image changes. Return to the Hotspots tab and
+drag their shapes or points if they no longer line up with the picture.
+
+Unfinished Edit instructions are saved with each version. To reuse an earlier
+instruction, click it in **Edit History**, adjust the text if needed, and press
+Edit. Selecting a history entry does not start generation.
+
+![The City Center card in Edit, with earlier instructions to remove people and change the moon](docs/images/walkthrough-edit.png)
+
+*Use Edit to make specific changes. Edit History keeps the instructions used
+on this image so you can recall them later.*
+
+### Keep a consistent style
+
+Choose a Style in Generate to set the look of a card. Open **Styles** from the
+toolbar to change a Style's description or create your own, then select it on
+the cards you want to use it.
+
+Generate combines your Description with the selected Style. Edit also uses
+the Style unless your instruction asks for a different visual treatment.
+The last Style you choose becomes the default for new cards; choose
+**No Style** if you want to work without one.
+
+![Styles window with Glazed Ceramic selected and its editable Style Text](docs/images/walkthrough-styles.png)
+
+*Edit a Style's text here, then choose that Style on the cards you want to use it.*
+
+### Choose an image size
+
+Use Medium while trying out scenes, or choose another resolution in Generate.
+Hover over a choice to see the exact dimensions for your stack's format.
+
+| Size | Longer edge |
+|---|---|
+| Small | 256 px |
+| Medium | 512 px |
+| Large | 768 px |
+| Full | 1024 px |
+
+In Edit, keep the current image size or choose one of the larger options.
+HotCards generates its own images; importing images is not supported.
+
+### Add more paths
+
+Use `+` below the card list to add a new scene, or **Command-D** to copy the
+selected card's current version. A copy includes its image and hotspots, so
+review the destinations and conditions before using it as a different scene.
+To try a different version of the same scene instead, use the version controls
+above the image.
+
+Add more hotspots to offer different routes, play sounds, or change Keys.
+A hotspot does not need a destination: it can just play a sound or change what
+the player can do next. If you add several conditions, all must be met.
+
+To show a visible change, such as a door opening, make another card using the
+original as a Reference. Describe what changes in `image 1`, generate it, then
+link to the new card from a hotspot.
+
+![Hangar Open showing open doors, with Hangar Door selected as a Reference](docs/images/walkthrough-card-variation.png)
+
+*Hangar Open uses Hangar Door as a Reference to show the same scene with its
+doors open.*
+
+## Save your work
+
+HotCards saves changes automatically, including generated images and sounds.
+Use **Undo** to reverse an edit or deletion, and **Save As** to make an independent
+copy of the stack.
+
+Watch the notification bar for save or generation errors. If HotCards cannot
+confirm a result was saved, it pauses further changes until saving succeeds.
+Your unfinished Edit instructions are saved too, so you can return to them
+after closing the stack.
+
+To reopen a story, choose it in the welcome window or use Open to find its
+`.hotcards` folder. The welcome window lists stacks in `~/Documents/HotCards`.
+Keep the whole folder together when copying or moving a story.
 
 ## Development and evaluation
+
+Run the tests and code checks with:
 
 ```sh
 uv run pytest
@@ -232,8 +282,8 @@ uv run ruff check .
 uv run ruff format .
 ```
 
-Automated tests use fakes and do not invoke or download models. Live evaluations
-are explicit:
+Automated tests use fakes and do not run or download models. To check generation
+with real models, run an evaluation:
 
 ```sh
 uv run hotcards-eval smoke
@@ -243,23 +293,23 @@ uv run hotcards-eval style-presets
 uv run hotcards-eval flux-references --stack /path/to/Stack.hotcards
 ```
 
-Evaluation cases live in `evals/cases/`. Each live run writes an immutable
-directory under `evals/runs/` with a checkpointed manifest and retained
-artifacts. Reports summarize prompts, outputs, timing, and failures; rendering
-a report is offline. Generated run output is not tracked in Git.
+Evaluation cases are in `evals/cases/`. Each run saves its inputs, progress, and
+results in a new folder under `evals/runs/`. Reports show prompts, outputs,
+timings, and failures, and can be built offline. Run output is not tracked in
+Git. `style-presets --validate-only` checks the cases without running a model.
 
 | Package | Responsibility |
 |---|---|
-| `domain/` | Strict document models, geometry, and validation |
-| `storage/` | Bundle persistence and identity-bound asset ownership |
-| `application/` | Authoritative document, commands, Undo/Redo, workflows, and workers |
-| `generation/` | Prompt composition and local image/audio adapters |
+| `domain/` | Story data, geometry, and validation |
+| `storage/` | Saving stacks and safely managing their files |
+| `application/` | Document state, commands, Undo/Redo, and background work |
+| `generation/` | Preparing prompts and running local models |
 | `ui/` | PySide6 Author and Run interface |
-| `evaluation/` | Live evaluations using production schemas and adapters |
+| `evaluation/` | Evaluating models through the same code used by the app |
 
-Image and Sound loading and inference share a serialized, process-local native
-invocation boundary. Application and evaluation calls use the same adapters.
-Contributor constraints and repository workflow are in [AGENTS.md](AGENTS.md).
+Image and sound models load and run one at a time on a shared thread.
+The app and evaluations use the same model adapters.
+See [AGENTS.md](AGENTS.md) for contributor guidance.
 
 ## License
 
